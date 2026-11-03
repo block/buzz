@@ -605,7 +605,9 @@ pub async fn get_canvas(
     Ok(row.try_get("canvas")?)
 }
 
-/// Sets or clears the canvas content for a channel.
+/// Sets or clears the canvas content for a channel. Test-only: it takes no
+/// write gate, and production writes a canvas as a kind:40100 event.
+#[cfg(test)]
 pub async fn set_canvas(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1058,6 +1060,9 @@ pub(crate) struct ChannelSettingsWriter<'tx> {
     ttl: TtlLock,
     previous_visibility: String,
     archived: bool,
+    /// Whether the channel's gate is held EXCLUSIVE. Only a writer that
+    /// holds it may change archive state.
+    archive_gate: bool,
     listed: bool,
 }
 
@@ -1133,7 +1138,27 @@ pub(crate) async fn lock_channel_for_settings_write<'tx>(
     } else {
         TtlLock::Shared
     };
-    lock_channel_row(tx, channel_id, updates.changes_admission(), ttl).await
+    lock_channel_row(tx, channel_id, updates.changes_admission(), ttl, false).await
+}
+
+/// Like [`lock_channel_for_settings_write`], for a write that changes the
+/// channel's archive state. It first takes the channel's gate EXCLUSIVE
+/// (`lifecycle::lock_gates`). A write that [`crate::ArchiveGate::Refuse`]
+/// guards holds the gate shared, so it either commits before this write or
+/// waits and then reads the new archive state. Only a writer made here may
+/// call `set_archived_on`.
+pub(crate) async fn lock_channel_for_archive_write<'tx>(
+    tx: &'tx mut crate::AdmittedTx,
+    channel_id: Uuid,
+    updates: &ChannelUpdate,
+) -> Result<ChannelSettingsWriter<'tx>> {
+    crate::lifecycle::lock_gates(tx, &std::collections::BTreeSet::from([channel_id])).await?;
+    let ttl = if updates.ttl_seconds.is_some() {
+        TtlLock::Exclusive
+    } else {
+        TtlLock::Shared
+    };
+    lock_channel_row(tx, channel_id, updates.changes_admission(), ttl, true).await
 }
 
 /// Takes the locks that deleting `channel_id` needs, in the same order as
@@ -1145,7 +1170,7 @@ async fn lock_channel_for_delete(
     tx: &mut crate::AdmittedTx,
     channel_id: Uuid,
 ) -> Result<ChannelSettingsWriter<'_>> {
-    lock_channel_row(tx, channel_id, true, TtlLock::Shared).await
+    lock_channel_row(tx, channel_id, true, TtlLock::Shared, false).await
 }
 
 async fn lock_channel_row(
@@ -1153,6 +1178,7 @@ async fn lock_channel_row(
     channel_id: Uuid,
     admission: bool,
     ttl: TtlLock,
+    archive_gate: bool,
 ) -> Result<ChannelSettingsWriter<'_>> {
     let community_id = tx.community();
     if admission {
@@ -1184,6 +1210,7 @@ async fn lock_channel_row(
         ttl,
         previous_visibility,
         archived,
+        archive_gate,
         listed,
     })
 }
@@ -1420,7 +1447,7 @@ pub async fn archive_channel(
     )
     .await?;
     let mut locked =
-        lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+        lock_channel_for_archive_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
     if crate::lifecycle::is_task_channel(locked.tx(), channel_id).await? {
         tx.rollback().await?;
         return Ok(false);
@@ -1446,7 +1473,7 @@ pub async fn unarchive_channel(
     )
     .await?;
     let mut locked =
-        lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+        lock_channel_for_archive_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
     refuse_task_channel(&mut locked).await?;
     set_archived_on(&mut locked, false).await?;
     tx.commit().await?;
@@ -1465,8 +1492,15 @@ async fn refuse_task_channel(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
 
 /// Archives (`archive = true`) or restores the channel on `tx`. Refuses with
 /// `AccessDenied` when the channel is already in that state. Restoring an
-/// ephemeral channel restarts its TTL deadline.
+/// ephemeral channel restarts its TTL deadline. Fails closed with
+/// `InvalidData` unless the writer holds the channel's gate exclusive
+/// ([`lock_channel_for_archive_write`]).
 async fn set_archived_on(w: &mut ChannelSettingsWriter<'_>, archive: bool) -> Result<()> {
+    if !w.archive_gate {
+        return Err(DbError::InvalidData(
+            "archive state write is not covered by its gate".into(),
+        ));
+    }
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
     let community_id = tx.community();
@@ -1564,8 +1598,14 @@ pub(crate) async fn apply_channel_metadata_event(
     tx.set_push_enqueue(push_enqueue);
 
     // The row lock also orders two copies of the same event: the second
-    // waits, then sees the first stored.
-    let mut locked = lock_channel_for_settings_write(&mut tx, channel_id, &edit.columns).await?;
+    // waits, then sees the first stored. An edit that changes archive state
+    // takes the gate exclusive first. A settings-only edit takes no gate: it
+    // is refused below, under the row lock, once the channel is archived.
+    let mut locked = if edit.archived.is_some() {
+        lock_channel_for_archive_write(&mut tx, channel_id, &edit.columns).await?
+    } else {
+        lock_channel_for_settings_write(&mut tx, channel_id, &edit.columns).await?
+    };
     let previous_visibility = locked.previous_visibility().to_owned();
 
     // The same writes as `Db::insert_event_with_thread_metadata`.
@@ -1720,12 +1760,16 @@ pub struct ChannelDeleteWrite {
 /// decided under the channel's locks (a task that has child tasks) stores
 /// nothing. An event for a channel that is already gone is still stored, so
 /// a resend of it is a duplicate.
+///
+/// `gate` decides whether an archived channel refuses the delete (see
+/// [`crate::ArchiveGate`]); the gate comes before the channel's locks.
 pub(crate) async fn delete_channel_with_event(
     pool: &PgPool,
     push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
     community_id: CommunityId,
     channel_id: Uuid,
     event: &nostr::Event,
+    gate: crate::ArchiveGate,
 ) -> Result<ChannelDeleteWrite> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
@@ -1734,6 +1778,7 @@ pub(crate) async fn delete_channel_with_event(
     )
     .await?;
     tx.set_push_enqueue(push_enqueue);
+    crate::lifecycle::lock_write_gates(&mut tx, gate, &[channel_id]).await?;
     // The locks also order two copies of the same event: the second waits,
     // then sees the first stored.
     let write = match lock_channel_for_delete(&mut tx, channel_id).await {
@@ -1814,12 +1859,24 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Archive ephemeral channels whose TTL deadline has passed.
+/// Archive ephemeral channels whose TTL deadline has passed: at most `limit`
+/// per community per call, in one transaction per community.
+///
+/// Each channel costs one gate lock, so one transaction holds at most `limit`
+/// gates. It does not loop over batches: every community commits once, and
+/// its gates are released at that commit. A backlog drains at `limit` per
+/// community per call. A later community's failure keeps the results that
+/// earlier communities committed (see `sweep_admitted_communities`).
 ///
 /// Returns the `(community_id, host, channel_id)` list that was archived. Idempotent — the
 /// `archived_at IS NULL` guard prevents double-archiving even if called
 /// concurrently from multiple relay pods.
-pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<ReapedEphemeralChannel>> {
+pub async fn reap_expired_ephemeral_channels(
+    pool: &PgPool,
+    limit: usize,
+) -> Result<Vec<ReapedEphemeralChannel>> {
+    let limit = i64::try_from(limit)
+        .map_err(|_| DbError::InvalidData(format!("reaper limit {limit} is out of range")))?;
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Maintenance,
@@ -1844,16 +1901,23 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
         crate::observability::WriterOperation::Maintenance,
         "ephemeral_channel_reap",
         |id, mut tx| async move {
-            // This archive takes no advisory lock, unlike
-            // `lock_channel_for_settings_write`. It does not need one: it is
-            // a single UPDATE whose WHERE clause holds every condition for
-            // the archive. The UPDATE waits for the row lock of any writer
-            // that holds the row (a TTL refresh, a settings write, a huddle
-            // join). Under READ COMMITTED, PostgreSQL then checks the WHERE
-            // clause again against the version that writer committed. So a
-            // refresh that moved the deadline wins, a channel archived or
-            // deleted meanwhile is skipped, and a join that held the row
-            // commits first. Do not split this into a read and a write.
+            // An archive writer: it takes the gates of the channels it may
+            // archive EXCLUSIVE, sorted, before any row lock, like every
+            // other archive writer. A refused write holds its channel's gate
+            // shared until it commits, and that commit refreshes the TTL
+            // deadline. So the UPDATE below, a new statement after the
+            // gates, sees the refreshed deadline and skips the channel.
+            //
+            // The candidate read takes no lock and uses the UPDATE's
+            // predicates, so `LIMIT` never fills with channels the UPDATE
+            // skips. The UPDATE still holds every condition for the archive
+            // in its WHERE clause and waits for
+            // the row lock of any writer that holds the row (a TTL refresh,
+            // a settings write, a huddle join). Under READ COMMITTED,
+            // PostgreSQL then checks the WHERE clause again against the
+            // version that writer committed. So a refresh that moved the
+            // deadline wins, a channel archived or deleted meanwhile is
+            // skipped, and a join that held the row commits first.
             //
             // Task channels never have a TTL: a task record refuses a TTL
             // channel and a TTL change refuses a task channel, both under
@@ -1862,10 +1926,32 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
             // One fresh token serves the whole statement: tokens are only
             // compared per channel, so equal values on two channels are
             // harmless.
+            let candidates: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT ch.id FROM channels AS ch \
+                 JOIN communities AS c ON ch.community_id = c.id \
+                 WHERE ch.community_id = $1 \
+                   AND ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < NOW() \
+                   AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
+                   AND c.archived_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM artifact_parents AS ap \
+                       WHERE ap.community_id = ch.community_id \
+                         AND (ap.child_channel_id = ch.id OR ap.parent_channel_id = ch.id)) \
+                 ORDER BY ch.id LIMIT $2",
+            )
+            .bind(id)
+            .bind(limit)
+            .fetch_all(tx.conn())
+            .await?;
+            if candidates.is_empty() {
+                tx.commit().await?;
+                return Ok(Vec::new());
+            }
+            crate::lifecycle::lock_gates(&mut tx, &candidates.iter().copied().collect()).await?;
             let rows = sqlx::query(
                 "UPDATE channels AS ch SET archived_at = NOW(), lifecycle_token = $2 \
                  FROM communities AS c \
                  WHERE ch.community_id = $1 AND ch.community_id = c.id \
+                   AND ch.id = ANY($3) \
                    AND ch.ttl_seconds IS NOT NULL AND ch.ttl_deadline < NOW() \
                    AND ch.archived_at IS NULL AND ch.deleted_at IS NULL \
                    AND c.archived_at IS NULL \
@@ -1876,6 +1962,7 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
             )
             .bind(id)
             .bind(crate::lifecycle::new_token())
+            .bind(&candidates)
             .fetch_all(tx.conn())
             .await?;
             let parsed = rows
@@ -2076,8 +2163,9 @@ impl Db {
         get_canvas(&self.pool, community_id, channel_id).await
     }
 
-    /// Sets or clears the canvas content for a channel.
-    #[datastore_span(name = "set_canvas", system = "postgresql")]
+    /// Sets or clears the canvas content for a channel. Test-only (see
+    /// [`set_canvas`]).
+    #[cfg(test)]
     pub async fn set_canvas(
         &self,
         community_id: CommunityId,
@@ -2209,6 +2297,7 @@ impl Db {
         community_id: CommunityId,
         channel_id: Uuid,
         event: &nostr::Event,
+        gate: crate::ArchiveGate,
     ) -> Result<ChannelDeleteWrite> {
         delete_channel_with_event(
             &self.pool,
@@ -2216,14 +2305,19 @@ impl Db {
             community_id,
             channel_id,
             event,
+            gate,
         )
         .await
     }
 
-    /// Archive ephemeral channels whose TTL deadline has passed.
+    /// Archive ephemeral channels whose TTL deadline has passed, at most
+    /// `limit` per community. See [`reap_expired_ephemeral_channels`].
     #[datastore_span(name = "reap_expired_ephemeral_channels", system = "postgresql")]
-    pub async fn reap_expired_ephemeral_channels(&self) -> Result<Vec<ReapedEphemeralChannel>> {
-        reap_expired_ephemeral_channels(&self.pool).await
+    pub async fn reap_expired_ephemeral_channels(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ReapedEphemeralChannel>> {
+        reap_expired_ephemeral_channels(&self.pool, limit).await
     }
 }
 
@@ -2658,7 +2752,7 @@ mod postgres_tests {
             "unarchive should renew ttl_deadline into the future"
         );
 
-        let reaped = reap_expired_ephemeral_channels(&pool)
+        let reaped = reap_expired_ephemeral_channels(&pool, 1000)
             .await
             .expect("run reaper");
         assert!(
@@ -2707,7 +2801,7 @@ mod postgres_tests {
         .await
         .expect("expire channel");
 
-        let reaped = reap_expired_ephemeral_channels(&pool)
+        let reaped = reap_expired_ephemeral_channels(&pool, 1000)
             .await
             .expect("run reaper");
         assert!(
@@ -2718,6 +2812,124 @@ mod postgres_tests {
             }),
             "reaper should carry the archived row's community id and host"
         );
+    }
+
+    /// One call archives at most `limit` channels per community, so one
+    /// transaction holds at most `limit` gates; a backlog drains over later
+    /// calls. The candidate read skips what the UPDATE skips (channels with
+    /// a task projection row), so those can never fill the batch and starve
+    /// an eligible channel.
+    /// Mutations: dropping `LIMIT` archives all three backlog channels in
+    /// the first call; dropping the backstop from the candidate read makes
+    /// the first starvation call archive nothing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reap_expired_ephemeral_channels_drains_a_backlog_in_batches() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, community, &owner_pk)
+            .await
+            .expect("ensure owner");
+        let mut expired = Vec::new();
+        for _ in 0..6 {
+            let channel = create_test_channel(
+                &pool,
+                community_id,
+                &format!("test-reaper-batch-{}", Uuid::new_v4()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner_pk,
+                Some(60),
+            )
+            .await
+            .expect("create ephemeral channel");
+            expired.push(channel.id);
+        }
+        // The last three wait for the starvation step. Sorted, so the two
+        // that get a projection row come first in the reaper's id order.
+        let (backlog, rest) = expired.split_at(3);
+        let mut rest = rest.to_vec();
+        rest.sort();
+        let (excluded, eligible) = (&rest[..2], rest[2]);
+        let expire = |ids: Vec<Uuid>| {
+            sqlx::query(
+                "UPDATE channels SET ttl_deadline = NOW() - interval '1 second' \
+                 WHERE community_id = $1 AND id = ANY($2)",
+            )
+            .bind(community_id)
+            .bind(ids)
+            .execute(&pool)
+        };
+        let reaped = |limit: usize| {
+            let pool = pool.clone();
+            async move {
+                reap_expired_ephemeral_channels(&pool, limit)
+                    .await
+                    .expect("run reaper")
+                    .into_iter()
+                    .filter(|row| row.community_id == community)
+                    .map(|row| row.channel_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+            }
+        };
+        let archived = |id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                get_channel(&pool, community, id)
+                    .await
+                    .expect("reload channel")
+                    .archived_at
+                    .is_some()
+            }
+        };
+
+        // Backlog: 3 expired channels, 2 per call.
+        expire(backlog.to_vec()).await.expect("expire backlog");
+        let first = reaped(2).await;
+        assert_eq!(first.len(), 2, "the first call archives exactly limit");
+        assert!(first.iter().all(|id| backlog.contains(id)));
+        for id in backlog {
+            assert_eq!(
+                archived(*id).await,
+                first.contains(id),
+                "returned = archived"
+            );
+        }
+        let second = reaped(2).await;
+        assert_eq!(second.len(), 1, "the second call archives the rest");
+        assert!(second.is_disjoint(&first));
+        assert!(
+            reaped(2).await.is_empty(),
+            "the third call has nothing left"
+        );
+
+        // Starvation: two expired channels the UPDATE excludes, and one
+        // eligible channel, with room for only two candidates.
+        for child in excluded {
+            sqlx::query(
+                "INSERT INTO artifact_parents \
+                 (community_id, child_channel_id, parent_channel_id, artifact_id) \
+                 VALUES ($1, $2, NULL, $3)",
+            )
+            .bind(community_id)
+            .bind(child)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .expect("insert projection row");
+        }
+        expire(rest.to_vec()).await.expect("expire the rest");
+        assert_eq!(
+            reaped(2).await,
+            std::collections::BTreeSet::from([eligible]),
+            "excluded channels never fill the batch"
+        );
+        for id in excluded {
+            assert!(!archived(*id).await, "a task channel is never reaped");
+        }
     }
 
     fn create_event(creator: &Keys, channel_id: Uuid) -> nostr::Event {

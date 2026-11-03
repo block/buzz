@@ -437,7 +437,7 @@ mod tests {
 
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         sqlx::PgPool::connect(&url).await.ok()
     }
 
@@ -729,7 +729,12 @@ mod tests {
         let live_profile = profile_event(&target_keys, auth_tag(&owner_keys, &target_pubkey), now);
         state
             .db
-            .replace_addressable_event(tenant.community(), &live_profile, None)
+            .replace_addressable_event(
+                tenant.community(),
+                &live_profile,
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .expect("insert initial target kind:0");
 
@@ -754,7 +759,12 @@ mod tests {
         );
         state
             .db
-            .replace_addressable_event(tenant.community(), &revoked_profile, None)
+            .replace_addressable_event(
+                tenant.community(),
+                &revoked_profile,
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .expect("replace target kind:0");
 

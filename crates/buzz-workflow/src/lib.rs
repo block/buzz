@@ -47,7 +47,7 @@ use std::sync::OnceLock;
 use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
-use buzz_db::Db;
+use buzz_db::{ArchiveGate, Db};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
@@ -459,10 +459,15 @@ impl WorkflowEngine {
                     workflow.id,
                     Some(&trigger_event_id_bytes),
                     Some(&trigger_ctx_json),
+                    ArchiveGate::Refuse,
                 )
                 .await
             {
                 Ok(id) => id,
+                Err(e) if is_admission_refusal(&e) => {
+                    tracing::debug!(workflow_id = %workflow.id, "Run refused: {e}");
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(workflow_id = %workflow.id, "Failed to create run: {e}");
                     continue;
@@ -675,10 +680,24 @@ impl WorkflowEngine {
             // community claims independently.
             match self
                 .db
-                .claim_scheduled_workflow_fire(community_id, workflow.id, scheduled_for)
+                .claim_scheduled_workflow_fire(
+                    community_id,
+                    workflow.id,
+                    scheduled_for,
+                    ArchiveGate::Refuse,
+                )
                 .await
             {
                 Ok(Some(_)) => {}
+                Err(e) if is_admission_refusal(&e) => {
+                    // Nothing is claimed, so the instant is not used up while
+                    // the channel is archived. Advance the clock as below.
+                    tracing::debug!(workflow_id = %workflow.id, "Cron tick: claim refused: {e}");
+                    if trigger_type == "interval" {
+                        self.last_fired.insert((community_id, workflow.id), now);
+                    }
+                    continue;
+                }
                 Ok(None) => {
                     // Another pod (or an earlier tick this pod) already
                     // claimed this instant. Still advance the in-memory
@@ -723,10 +742,16 @@ impl WorkflowEngine {
                     workflow.id,
                     None, // no trigger event for cron
                     trigger_ctx_json.as_ref(),
+                    ArchiveGate::Refuse,
                 )
                 .await
             {
                 Ok(id) => id,
+                // The claim keeps its NULL run, as below.
+                Err(e) if is_admission_refusal(&e) => {
+                    tracing::debug!(workflow_id = %workflow.id, "Cron tick: run refused: {e}");
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(
                         workflow_id = %workflow.id,
@@ -857,6 +882,18 @@ fn cron_fire_instant(
             );
             None
         }
+    }
+}
+
+/// Whether run admission refused `error`: the workflow's channel is archived,
+/// the workflow has no channel, or its binding changed under the gate.
+fn is_admission_refusal(error: &buzz_db::DbError) -> bool {
+    match error {
+        buzz_db::DbError::AccessDenied(reason) => {
+            reason == buzz_db::lifecycle::CHANNEL_ARCHIVED
+                || reason == buzz_db::workflow::WORKFLOW_UNBOUND
+        }
+        error => matches!(error, buzz_db::DbError::LifecycleConflict),
     }
 }
 
@@ -2485,11 +2522,215 @@ steps:
             .await
             .expect("on_event with healthy lookup");
         assert_eq!(run_count().await, 1, "a readable, unbanned owner fires");
+        db.archive_channel(community, channel_id)
+            .await
+            .expect("archive the channel");
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("on_event in an archived channel");
+        assert_eq!(run_count().await, 1, "an archived channel refuses the run");
 
         failing_pool.close().await;
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
             .execute(db.pool())
             .await
             .expect("drop failing restriction schema");
+    }
+
+    fn interval_def(name: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "trigger": {"on": "schedule", "interval": "1h"},
+            "steps": [{"id": "s1", "action": "send_message", "text": "tick"}],
+            "enabled": true,
+        })
+        .to_string()
+    }
+
+    /// Poll the boolean `sql`, with `$1 = key`, until it is true.
+    async fn until(db: &buzz_db::Db, what: &str, sql: &'static str, key: &str) {
+        let reached = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let done: bool = sqlx::query_scalar(sql)
+                    .bind(key)
+                    .fetch_one(db.pool())
+                    .await
+                    .expect("inspect locks");
+                if done {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(reached.is_ok(), "never reached: {what}");
+    }
+
+    /// An archived channel refuses a schedule's claim, so no instant is used
+    /// up and the anchor does not move: a cron schedule claims nothing while
+    /// archived and fires again after the restore. An interval schedule's
+    /// refused claim advances only its in-memory clock, as a lost claim does,
+    /// so it fires once, within one interval of the restore. Mutations: claim
+    /// under Exempt and the archived tick claims; drop the clock advance and
+    /// the interval fires on the first tick after the restore.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cron_tick_claims_nothing_in_an_archived_channel() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel) = setup_channel(&db, &creator, &member).await;
+        let mut workflows = Vec::new();
+        for (name, def, secret) in [
+            ("cron-archived", schedule_def("cron-archived"), [4u8; 32]),
+            (
+                "interval-archived",
+                interval_def("interval-archived"),
+                [5u8; 32],
+            ),
+        ] {
+            let created =
+                db.create_workflow(community, Some(channel), &creator, name, &def, &secret);
+            workflows.push(created.await.expect("create workflow"));
+        }
+        let [cron, interval] = <[Uuid; 2]>::try_from(workflows).expect("two workflows");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        let runs = |id| {
+            let db = db.clone();
+            async move {
+                db.list_workflow_runs(community, id, 10)
+                    .await
+                    .expect("runs")
+                    .len()
+            }
+        };
+        let anchor = |id| {
+            let db = db.clone();
+            async move {
+                db.latest_scheduled_workflow_fire(community, id)
+                    .await
+                    .expect("anchor")
+            }
+        };
+        let hour = chrono::Duration::hours(1);
+        let minute = chrono::Duration::minutes(1);
+
+        // Cron fires; the interval seeds its clock.
+        let start = Utc::now();
+        engine.cron_tick(start).await;
+        let fired = anchor(cron).await;
+        assert!(fired.is_some());
+
+        assert!(db
+            .archive_channel(community, channel)
+            .await
+            .expect("archive"));
+        engine.cron_tick(start + hour).await;
+        assert_eq!(
+            anchor(cron).await,
+            fired,
+            "the archived tick claims nothing"
+        );
+        assert_eq!(anchor(interval).await, None);
+        assert_eq!((runs(cron).await, runs(interval).await), (1, 0));
+        let clock = engine.last_fired.get(&(community, interval)).map(|t| *t);
+        assert_eq!(clock, Some(start + hour), "the refusal advances the clock");
+
+        db.unarchive_channel(community, channel)
+            .await
+            .expect("restore");
+        engine.cron_tick(start + hour + minute).await;
+        assert_eq!((runs(cron).await, runs(interval).await), (2, 0));
+        engine.cron_tick(start + hour * 2).await;
+        engine.cron_tick(start + hour * 2 + minute).await;
+        assert_eq!(
+            runs(interval).await,
+            1,
+            "once, within one interval of the restore"
+        );
+    }
+
+    /// An archive that commits between a won claim and its run refuses the
+    /// run, and the claim keeps its NULL run, so the instant never fires
+    /// twice. A holder stops the claim at its insert, after its gate; the
+    /// archive queues on the gate, so it commits before the run takes the
+    /// gate. Mutation: create the cron run under Exempt and the run is created.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_archive_between_claim_and_run_leaves_the_orphan_claim() {
+        let db = setup_db().await;
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel) = setup_channel(&db, &creator, &member).await;
+        let def = schedule_def("cron-orphan");
+        let workflow = db.create_workflow(
+            community,
+            Some(channel),
+            &creator,
+            "cron-orphan",
+            &def,
+            &[6; 32],
+        );
+        let workflow = workflow.await.expect("create workflow");
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+
+        let mut holder = db.pool().begin().await.expect("begin holder");
+        sqlx::query("LOCK TABLE scheduled_workflow_fires IN SHARE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("pause claims");
+        let tick = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move { engine.cron_tick(Utc::now()).await })
+        };
+        until(
+            &db,
+            "the claim waits at its insert",
+            "SELECT EXISTS (SELECT 1 FROM pg_locks \
+             WHERE locktype = 'relation' AND NOT granted AND relation = $1::regclass)",
+            "scheduled_workflow_fires",
+        )
+        .await;
+        let archive = {
+            let db = db.clone();
+            tokio::spawn(async move { db.archive_channel(community, channel).await })
+        };
+        until(
+            &db,
+            "the archive queues on the gate",
+            "SELECT EXISTS (SELECT 1 FROM pg_locks \
+             WHERE locktype = 'advisory' AND NOT granted AND mode = 'ExclusiveLock' \
+               AND objsubid = 1 \
+               AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0))",
+            &format!("buzz_channel_gate:{}:{channel}", community.as_uuid()),
+        )
+        .await;
+        holder.commit().await.expect("release the claims");
+
+        let wait = std::time::Duration::from_secs(10);
+        tokio::time::timeout(wait, tick)
+            .await
+            .expect("the tick returns")
+            .expect("tick");
+        let archived = tokio::time::timeout(wait, archive)
+            .await
+            .expect("the archive returns");
+        assert!(archived.expect("archive task").expect("archive"));
+        let claim: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT workflow_run_id FROM scheduled_workflow_fires \
+             WHERE community_id = $1 AND workflow_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow)
+        .fetch_optional(db.pool())
+        .await
+        .expect("read the claim");
+        assert_eq!(claim, Some(None), "the claim stays, with no run");
+        let runs = db
+            .list_workflow_runs(community, workflow, 10)
+            .await
+            .expect("runs");
+        assert!(runs.is_empty(), "the archived channel refuses the run");
     }
 }

@@ -51,7 +51,12 @@ impl Fixture {
         let root = event(&keys, channel, 9, "root", None, Timestamp::now().as_secs());
         state
             .db
-            .insert_event(community, &root, Some(channel))
+            .insert_event(
+                community,
+                &root,
+                Some(channel),
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
@@ -124,6 +129,7 @@ impl Fixture {
                     depth: 1,
                     broadcast: false,
                 }),
+                buzz_db::ArchiveGate::Exempt,
             )
             .await
             .unwrap();
@@ -140,7 +146,7 @@ impl Fixture {
         );
         self.state
             .db
-            .insert_event(self.community, &aux, channel)
+            .insert_event(self.community, &aux, channel, buzz_db::ArchiveGate::Exempt)
             .await
             .unwrap();
         aux
@@ -477,7 +483,12 @@ async fn thread_window_scope_roots_and_aggregate_budgets() {
         );
         f.state
             .db
-            .insert_event(f.community, &root, Some(channel))
+            .insert_event(
+                f.community,
+                &root,
+                Some(channel),
+                buzz_db::ArchiveGate::Exempt,
+            )
             .await
             .unwrap();
         f.aux(40003, &root, Some(f.channel)).await;
@@ -570,7 +581,7 @@ async fn private_deletions_reach_only_their_signer_through_windows_and_id_reads(
     ] {
         f.state
             .db
-            .insert_event(f.community, event, None)
+            .insert_event(f.community, event, None, buzz_db::ArchiveGate::Exempt)
             .await
             .unwrap();
     }

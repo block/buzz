@@ -97,7 +97,15 @@ impl Fixture {
     async fn accept(&self, e: &Event, source: Option<Uuid>) -> ArtifactOutcome {
         let env = artifact::validate(e).unwrap();
         self.db
-            .accept_artifact(self.community, e, &env, source, &self.relay, false)
+            .accept_artifact(
+                self.community,
+                e,
+                &env,
+                source,
+                &self.relay,
+                false,
+                crate::ArchiveGate::Exempt,
+            )
             .await
             .unwrap()
     }
@@ -470,7 +478,7 @@ async fn root_anchor_and_tenant_boundaries() {
         .tags([Tag::parse(["h", &f.a.to_string()]).unwrap()])
         .sign_with_keys(&f.owner)
         .unwrap();
-    f.db.insert_event(f.community, &anchor, Some(f.a))
+    f.db.insert_event(f.community, &anchor, Some(f.a), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     let root = || vec![vec!["root".to_string(), anchor.id.to_hex()]];
@@ -563,7 +571,15 @@ async fn quiescing_community_rejects_artifact_at_admission_before_coordinate_loc
         .unwrap();
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        f.db.accept_artifact(f.community, &create, &env, None, &f.relay, false),
+        f.db.accept_artifact(
+            f.community,
+            &create,
+            &env,
+            None,
+            &f.relay,
+            false,
+            crate::ArchiveGate::Exempt,
+        ),
     )
     .await
     .expect("admission must reject before waiting on the coordinate lock")

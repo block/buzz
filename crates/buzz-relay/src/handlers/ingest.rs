@@ -977,6 +977,63 @@ pub(crate) fn non_member_may_post(visibility: &str, join_role: &str) -> bool {
     visibility == "open" && ChannelJoinRole::parse_fail_closed(join_role) == ChannelJoinRole::Member
 }
 
+/// Whether `error` is a write refused under its channel's write gate because
+/// the channel is archived (see [`buzz_db::lifecycle::lock_write_gates`]).
+pub(crate) fn is_archived_refusal(error: &buzz_db::DbError) -> bool {
+    matches!(error, buzz_db::DbError::AccessDenied(reason)
+        if reason == buzz_db::lifecycle::CHANNEL_ARCHIVED)
+}
+
+/// The reply to a write refused because its channel is archived: the same
+/// text as the unlocked archived check.
+pub(crate) fn archived_rejection() -> IngestError {
+    IngestError::Rejected(format!("invalid: {}", buzz_db::lifecycle::CHANNEL_ARCHIVED))
+}
+
+/// The reply to a failed gated write: an archived channel keeps the text of
+/// the unlocked archived check, a lifecycle race is a 409, and anything else
+/// is ours, as `error: {context}{error}`.
+pub(crate) fn gated_write_error(error: buzz_db::DbError, context: &str) -> IngestError {
+    match error {
+        error if is_archived_refusal(&error) => archived_rejection(),
+        buzz_db::DbError::LifecycleConflict => {
+            IngestError::CanvasConflict("conflict: lifecycle changed".into())
+        }
+        error => IngestError::Internal(format!("error: {context}{error}")),
+    }
+}
+
+/// Store `event`, whose kind stores and applies itself in one transaction,
+/// and apply it: a kind:9001 that removes another member, kind:9021,
+/// kind:9005 or kind:5. Live effects run after the commit.
+async fn persist_applied_event(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    kind: u32,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> Result<(buzz_core::StoredEvent, bool), buzz_db::DbError> {
+    use crate::handlers::side_effects as effects;
+    match kind {
+        KIND_NIP29_REMOVE_USER => {
+            effects::persist_remove_user(tenant, event, state, thread_meta).await
+        }
+        KIND_NIP29_JOIN_REQUEST => {
+            effects::persist_join_request(tenant, event, state, thread_meta).await
+        }
+        KIND_NIP29_DELETE_EVENT => {
+            effects::persist_delete_event(tenant, event, state, thread_meta).await
+        }
+        KIND_DELETION => {
+            effects::persist_standard_deletion(tenant, event, state, channel_id, thread_meta).await
+        }
+        other => Err(buzz_db::DbError::InvalidData(format!(
+            "kind:{other} is not applied in its own write"
+        ))),
+    }
+}
+
 /// The kind-9 channel write gates (token scope, membership or open channel,
 /// not archived) for a channel other than the event's own `h`.
 pub(crate) async fn check_channel_write(
@@ -3472,10 +3529,16 @@ async fn ingest_event_inner(
                 &target_id,
                 &actor_bytes,
                 emoji,
+                buzz_db::ArchiveGate::Refuse,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| {
+                // The target's channel was archived after the unlocked check.
+                if is_archived_refusal(&e) {
+                    return target_denied(REACTION_TARGET_NOT_FOUND);
+                }
+                IngestError::Internal(format!("error: {e}"))
+            })? {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
                     "invalid: {REACTION_TARGET_NOT_FOUND}"
@@ -3548,6 +3611,22 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let self_departure = crate::handlers::side_effects::is_self_departure(&event);
+    // These kinds store the event and apply it in one transaction, gated
+    // against a concurrent archive (see the dispatch below).
+    let applies_in_write = match kind_u32 {
+        KIND_NIP29_REMOVE_USER => !self_departure,
+        KIND_NIP29_JOIN_REQUEST | KIND_NIP29_DELETE_EVENT | KIND_DELETION => true,
+        _ => false,
+    };
+    // Every client write into an archived channel is refused under the
+    // channel's write gate, except a member leaving by themselves.
+    // kind:9002 decides the archive state in its own write.
+    let archive_gate = if self_departure {
+        buzz_db::ArchiveGate::Exempt
+    } else {
+        buzz_db::ArchiveGate::Refuse
+    };
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
@@ -3602,7 +3681,15 @@ async fn ingest_event_inner(
         // divide insertion and repair ownership between two relay workers.
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(error) if is_archived_refusal(error) => {
+                    target_denied(crate::handlers::side_effects::DELETION_TARGET_DENIED)
+                }
+                Some(buzz_db::DbError::LifecycleConflict) => {
+                    IngestError::CanvasConflict("conflict: lifecycle changed".into())
+                }
+                _ => IngestError::Internal(format!("error: workflow deletion failed: {e}")),
+            })?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3657,14 +3744,39 @@ async fn ingest_event_inner(
                 }
                 other => IngestError::Internal(format!("error: channel delete failed: {other}")),
             })?
+    } else if applies_in_write {
+        // One commit stores the event and applies it (a removal, a join or a
+        // deletion); live effects run after it. A refusal decided under the
+        // locks stores nothing and is the client's error; anything else is
+        // ours.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        persist_applied_event(tenant, &event, state, kind_u32, channel_id, thread_params)
+            .await
+            .map_err(|e| match e {
+                e if kind_u32 == KIND_DELETION && is_archived_refusal(&e) => {
+                    target_denied(crate::handlers::side_effects::DELETION_TARGET_DENIED)
+                }
+                buzz_db::DbError::AccessDenied(reason)
+                    if reason == buzz_db::channel_members::CHANNEL_PRIVATE =>
+                {
+                    IngestError::Rejected("restricted: channel is private".into())
+                }
+                buzz_db::DbError::AccessDenied(reason) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                buzz_db::DbError::LifecycleConflict => {
+                    IngestError::CanvasConflict("conflict: lifecycle changed".into())
+                }
+                other => IngestError::Internal(format!("error: database error: {other}")),
+            })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
             .db
-            .replace_addressable_event(tenant.community(), &event, channel_id)
+            .replace_addressable_event(tenant.community(), &event, channel_id, archive_gate)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|error| gated_write_error(error, ""))?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3677,9 +3789,15 @@ async fn ingest_event_inner(
         }
         state
             .db
-            .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+            .replace_parameterized_event(
+                tenant.community(),
+                &event,
+                &d_tag,
+                channel_id,
+                archive_gate,
+            )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|error| gated_write_error(error, ""))?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3694,9 +3812,15 @@ async fn ingest_event_inner(
         };
         let (stored_event, status) = state
             .db
-            .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
+            .insert_canvas_head_checked(
+                tenant.community(),
+                &event,
+                channel,
+                precondition,
+                archive_gate,
+            )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(|error| gated_write_error(error, ""))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3725,6 +3849,7 @@ async fn ingest_event_inner(
                 &event,
                 channel_id,
                 thread_params,
+                archive_gate,
             )
             .await
         {
@@ -3734,6 +3859,7 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
+                    e if is_archived_refusal(&e) => archived_rejection(),
                     other => IngestError::Internal(format!("error: database error: {other}")),
                 });
             }
@@ -3748,9 +3874,11 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
-    // insert's own transaction above.
+    // Workflow deletion, kind:9000, kind:9002 and the kinds of
+    // `applies_in_write` applied their changes in the insert's own
+    // transaction above.
     let persisted_atomically = workflow_deletion
+        || applies_in_write
         || kind_u32 == KIND_NIP29_PUT_USER
         || kind_u32 == KIND_NIP29_EDIT_METADATA;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
@@ -6846,6 +6974,7 @@ mod postgres_tests {
                     None,
                     &healthy.relay_keypair,
                     false,
+                    buzz_db::ArchiveGate::Exempt,
                 )
                 .await
                 .map_err(db_err)?;

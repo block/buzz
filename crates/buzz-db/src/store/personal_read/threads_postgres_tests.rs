@@ -32,7 +32,7 @@ async fn post_as(
         .custom_created_at(nostr::Timestamp::from(at))
         .sign_with_keys(author)
         .unwrap();
-    db.insert_event(community, &event, Some(channel))
+    db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     event
@@ -138,9 +138,14 @@ async fn mark_through_rejects_unresolved_missing_auxiliary_and_malformed_anchors
     let reaction = EventBuilder::new(Kind::Custom(7), "+")
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &reaction, Some(channel))
-        .await
-        .unwrap();
+    db.insert_event(
+        community,
+        &reaction,
+        Some(channel),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .unwrap();
     for (anchor, outcome) in [
         ("cd".repeat(32), IntentOutcome::Blocked),
         (reaction.id.to_hex(), IntentOutcome::Blocked),
@@ -314,7 +319,7 @@ async fn thread_on_a_never_unread_root_is_selectable_and_readable_by_itself() {
         .custom_created_at(nostr::Timestamp::from(base + 1))
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &diff, Some(channel))
+    db.insert_event(community, &diff, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     let on_diff = reply(&db, &pool, community, channel, &diff, base + 10, mention()).await;

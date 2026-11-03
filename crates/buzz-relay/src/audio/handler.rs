@@ -3316,6 +3316,23 @@ async fn commit_participant_join(
         .begin_event_write_transaction(tenant.community())
         .await?;
 
+    // 2a. The write gates of the huddle and its lifecycle parent come first
+    //     (see `buzz_db::lifecycle`): an archive of either commits before
+    //     this check, which then refuses the join, or after this join.
+    let gated = [channel_id, parent_channel_id];
+    match buzz_db::lifecycle::lock_write_gates(&mut tx, buzz_db::ArchiveGate::Refuse, &gated).await
+    {
+        Ok(_) => {}
+        Err(error) if crate::handlers::ingest::is_archived_refusal(&error) => {
+            retire_shadow();
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::before_join_refusal_rollback(tenant.community()).await;
+            let _ = tx.rollback().await;
+            return Err(JoinCommitError::Archived);
+        }
+        Err(error) => return Err(error.into()),
+    }
+
     // 3. Lock order. Every writer that takes more than one of a channel's
     //    locks takes them as: membership lock, then TTL lock, then the
     //    channel row (see `buzz_db::channel::update_channel`). This join
@@ -3791,7 +3808,13 @@ async fn emit_participant_event(
     //    for the duration of the Redis pub/sub delivery and are lost forever.
     let stored = match state
         .db
-        .insert_event(tenant.community(), &event, Some(parent_channel_id))
+        .insert_event(
+            tenant.community(),
+            &event,
+            Some(parent_channel_id),
+            // A relay huddle notice: it records state that already changed.
+            buzz_db::ArchiveGate::Exempt,
+        )
         .await
     {
         Ok((stored, true)) => stored,

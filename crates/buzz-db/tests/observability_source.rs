@@ -490,7 +490,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     }
 
     let channel_reaper = channel
-        .split_once("pub async fn reap_expired_ephemeral_channels(pool:")
+        .split_once("pub async fn reap_expired_ephemeral_channels(\n    pool:")
         .expect("channel store must expose ephemeral reaper")
         .1
         .split_once("\nimpl Db {")

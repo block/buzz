@@ -2766,11 +2766,29 @@ pub async fn workflow_webhook(
         .await
         .map_err(|_| not_found("workflow not found"))?;
 
+    // Archived or unbound answers the same 404 as the lookups above.
     let run_id = state
         .db
-        .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())
+        .create_workflow_run(
+            community_id,
+            id,
+            None,
+            trigger_ctx_json.as_ref(),
+            buzz_db::ArchiveGate::Refuse,
+        )
         .await
-        .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
+        .map_err(|e| match e {
+            buzz_db::DbError::AccessDenied(reason)
+                if reason == buzz_db::lifecycle::CHANNEL_ARCHIVED
+                    || reason == buzz_db::workflow::WORKFLOW_UNBOUND =>
+            {
+                not_found("workflow not found")
+            }
+            buzz_db::DbError::LifecycleConflict => {
+                api_error(StatusCode::CONFLICT, "conflict: lifecycle changed")
+            }
+            e => super::internal_error(&format!("db error: {e}")),
+        })?;
 
     // Spawn workflow execution asynchronously.
     let engine = Arc::clone(&state.workflow_engine);
@@ -6210,8 +6228,13 @@ pub(crate) mod postgres_tests {
             let event = nostr::EventBuilder::new(nostr::Kind::Metadata, content)
                 .sign_with_keys(&Keys::generate())
                 .expect("sign profile");
-            rt.block_on(state.db.replace_addressable_event(community, &event, None))
-                .expect("store profile");
+            rt.block_on(state.db.replace_addressable_event(
+                community,
+                &event,
+                None,
+                buzz_db::ArchiveGate::Exempt,
+            ))
+            .expect("store profile");
             event
         };
         let named = store(r#"{"name":"wes","display_name":"Wes Anderson"}"#);
@@ -8862,6 +8885,7 @@ pub(crate) mod postgres_tests {
                 CommunityId::from_uuid(community),
                 &canvas_ev,
                 Some(channel_id),
+                buzz_db::ArchiveGate::Exempt,
             )
             .await
             .expect("insert canvas event on writer");
@@ -9084,7 +9108,7 @@ pub(crate) mod postgres_tests {
             .await
             .expect("create channel");
             buzz_db::Db::from_pool(pool.clone())
-                .insert_event(cid, &root, Some(channel))
+                .insert_event(cid, &root, Some(channel), buzz_db::ArchiveGate::Exempt)
                 .await
                 .expect("insert root");
             pools.push(pool);

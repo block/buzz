@@ -321,12 +321,24 @@ mod postgres_tests {
             .sign_with_keys(&keys_b)
             .expect("sign B");
 
-        insert_event(&pool, community_a, &event_a, None)
-            .await
-            .expect("insert A");
-        insert_event(&pool, community_b, &event_b, None)
-            .await
-            .expect("insert B");
+        insert_event(
+            &pool,
+            community_a,
+            &event_a,
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert A");
+        insert_event(
+            &pool,
+            community_b,
+            &event_b,
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert B");
 
         let due = query_due_reminders(&pool, Utc::now().timestamp(), 100)
             .await
@@ -358,7 +370,7 @@ mod postgres_tests {
             ])
             .sign_with_keys(&keys)
             .expect("sign reminder");
-        insert_event(&pool, community, &event, None)
+        insert_event(&pool, community, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert reminder");
 
@@ -400,7 +412,7 @@ mod postgres_tests {
             ])
             .sign_with_keys(&keys)
             .expect("sign reminder");
-        insert_event(&pool, community, &event, None)
+        insert_event(&pool, community, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert reminder");
 
@@ -472,10 +484,10 @@ mod postgres_tests {
             ])
             .sign_with_keys(&keys)
             .expect("sign reminder");
-        insert_event(&pool, community_a, &event, None)
+        insert_event(&pool, community_a, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert A/X");
-        insert_event(&pool, community_b, &event, None)
+        insert_event(&pool, community_b, &event, None, crate::ArchiveGate::Exempt)
             .await
             .expect("insert B/X");
 

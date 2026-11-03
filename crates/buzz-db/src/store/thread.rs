@@ -173,6 +173,10 @@ pub struct ThreadMetadataRecord {
 /// The INSERT and all counter UPDATEs are wrapped in a single transaction so a
 /// crash between them cannot leave reply_count / descendant_count inconsistent
 /// with the actual number of reply rows (F9).
+///
+/// Test-only: it takes no write gate. Production writes thread metadata with
+/// its event ([`crate::Db::insert_event_with_thread_metadata`]).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_thread_metadata(
     pool: &PgPool,
@@ -822,9 +826,9 @@ pub async fn get_thread_metadata_by_event(
 // -- Db API -------------------------------------------------------------------
 
 impl Db {
-    /// Insert thread metadata.
+    /// Insert thread metadata. Test-only (see [`insert_thread_metadata`]).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "insert_thread_metadata", system = "postgresql")]
     pub async fn insert_thread_metadata(
         &self,
         community_id: CommunityId,
@@ -1300,6 +1304,7 @@ mod postgres_tests {
                         depth: i32::from(parent.is_some()),
                         broadcast: false,
                     }),
+                    crate::ArchiveGate::Exempt,
                 )
                 .await
                 .expect("thread event");
@@ -1391,6 +1396,7 @@ mod postgres_tests {
                 depth: 0,
                 broadcast: true,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert community A metadata");
@@ -1410,6 +1416,7 @@ mod postgres_tests {
                 depth: 3,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert community B metadata");
@@ -1448,9 +1455,16 @@ mod postgres_tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
-            .await
-            .expect("insert root event");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &root,
+            Some(channel.id),
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert root event");
 
         let reply = make_stream_event(&author, "reply");
         let reply_created_at = event_created_at(&reply);
@@ -1471,6 +1485,7 @@ mod postgres_tests {
                 depth: 1,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert reply event and metadata");
@@ -1513,9 +1528,16 @@ mod postgres_tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
-            .await
-            .expect("insert root event");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &root,
+            Some(channel.id),
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert root event");
 
         // Pin every reply to the SAME second so pagination must lean entirely on
         // the event_id tiebreak. Distinct content keeps the ids distinct.
@@ -1545,6 +1567,7 @@ mod postgres_tests {
                     depth: 1,
                     broadcast: false,
                 }),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect("insert tied reply");
@@ -1628,9 +1651,16 @@ mod postgres_tests {
         // Root (no metadata row on first insert — a depth-0 message).
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
-            .await
-            .expect("insert root event");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &root,
+            Some(channel.id),
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert root event");
 
         // Depth-1 direct reply to the root (parent == root).
         let child = make_stream_event(&author, "child");
@@ -1651,6 +1681,7 @@ mod postgres_tests {
                 depth: 1,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert depth-1 child");
@@ -1675,6 +1706,7 @@ mod postgres_tests {
                 depth: 2,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert depth-2 grandchild");
@@ -1737,9 +1769,16 @@ mod postgres_tests {
         let child = make_stream_event(&author, "child");
         let grandchild = make_stream_event(&author, "grandchild");
         for ev in [&root, &child, &grandchild] {
-            insert_event_with_thread_metadata(&pool, community, ev, Some(channel.id), None)
-                .await
-                .expect("insert event");
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                ev,
+                Some(channel.id),
+                None,
+                crate::ArchiveGate::Exempt,
+            )
+            .await
+            .expect("insert event");
         }
 
         // Depth-2 reply where root_id != parent_id. Before the fix this errored
@@ -1795,9 +1834,16 @@ mod postgres_tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
-            .await
-            .expect("insert root event");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &root,
+            Some(channel.id),
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert root event");
 
         // Two replies under the same root: one stays valid, one we corrupt.
         let good = EventBuilder::new(Kind::Custom(9), "good")
@@ -1822,6 +1868,7 @@ mod postgres_tests {
                 depth: 1,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert good reply");
@@ -1847,6 +1894,7 @@ mod postgres_tests {
                 depth: 1,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert bad reply");
@@ -1893,6 +1941,7 @@ mod postgres_tests {
                 depth: 1,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert tail");
@@ -1957,9 +2006,16 @@ mod postgres_tests {
         .await
         .expect("channel");
         let root = make_stream_event(&author, "root");
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
-            .await
-            .expect("root");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &root,
+            Some(channel.id),
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("root");
         let mut corrupt_ids = Vec::new();
         for index in 0..65 {
             let reply = EventBuilder::new(Kind::Custom(9), format!("reply-{index}"))
@@ -1984,6 +2040,7 @@ mod postgres_tests {
                     depth: 1,
                     broadcast: false,
                 }),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect("reply metadata");
@@ -2047,6 +2104,7 @@ mod postgres_tests {
                 depth: 0,
                 broadcast: true,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert top-level event");
@@ -2077,6 +2135,7 @@ mod postgres_tests {
                 depth: 1,
                 broadcast,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .expect("insert reply event");
@@ -2109,9 +2168,16 @@ mod postgres_tests {
 
         // No thread metadata at all — the legacy-ingest shape. Top-level.
         let bare = make_stream_event(&author, "bare");
-        insert_event_with_thread_metadata(&pool, community, &bare, Some(channel.id), None)
-            .await
-            .expect("insert bare event");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &bare,
+            Some(channel.id),
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert bare event");
 
         let broadcast_reply = make_stream_event(&author, "broadcast reply");
         insert_reply(&pool, community, channel.id, &root, &broadcast_reply, true).await;

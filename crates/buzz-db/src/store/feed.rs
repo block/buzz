@@ -648,9 +648,15 @@ mod postgres_tests {
             .tags(tags)
             .sign_with_keys(&keys)
             .expect("sign event");
-        crate::event::insert_event(pool, community, &event, channel_id)
-            .await
-            .expect("insert feed event");
+        crate::event::insert_event(
+            pool,
+            community,
+            &event,
+            channel_id,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert feed event");
         crate::insert_mentions(pool, community, &event, channel_id)
             .await
             .expect("insert mentions");

@@ -30,7 +30,7 @@ async fn fixture() -> (Db, CommunityId, Uuid, Keys, nostr::Event) {
     .await
     .unwrap();
     let root = make_event(&keys, channel, 9, "root", None, Timestamp::now().as_secs());
-    db.insert_event(community, &root, Some(channel))
+    db.insert_event(community, &root, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     (db, community, channel, keys, root)
@@ -169,7 +169,9 @@ async fn cardinalities() {
             None,
             root.created_at.as_secs(),
         );
-        db.insert_event(cid, &root, Some(ch)).await.unwrap();
+        db.insert_event(cid, &root, Some(ch), crate::ArchiveGate::Exempt)
+            .await
+            .unwrap();
         let expected = replies(&db, cid, ch, &keys, &root, count).await;
         assert_pages(&db, cid, request(ch, &root, 50), &expected).await;
         let (head, _) = db
@@ -244,7 +246,9 @@ async fn thread_window_predicates_corruption_and_legacy() {
     .await
     .unwrap();
     let dense_root = make_event(&keys, ch, 9, "dense root", None, root.created_at.as_secs());
-    db.insert_event(cid, &dense_root, Some(ch)).await.unwrap();
+    db.insert_event(cid, &dense_root, Some(ch), crate::ArchiveGate::Exempt)
+        .await
+        .unwrap();
     let rows = replies(&db, cid, ch, &keys, &dense_root, 651).await;
     for (class, sql) in [
         "UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=ANY($2)",
@@ -416,7 +420,7 @@ async fn thread_aux_byte_budget_stops_consumption_and_survives_retry() {
             Some(&root),
             root.created_at.as_secs() + n,
         );
-        db.insert_event(community, &edit, Some(channel))
+        db.insert_event(community, &edit, Some(channel), crate::ArchiveGate::Exempt)
             .await
             .unwrap();
     }
@@ -484,6 +488,7 @@ async fn thread_reply_byte_budget_stops_before_collecting_page() {
                 depth: 1,
                 broadcast: false,
             }),
+            crate::ArchiveGate::Exempt,
         )
         .await
         .unwrap();

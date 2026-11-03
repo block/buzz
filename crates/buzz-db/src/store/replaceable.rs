@@ -3,10 +3,11 @@
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::observability::{self, LockType, TransactionOperation};
-use crate::AdmittedTx;
+use crate::{AdmittedTx, ArchiveGate, WriteGates};
 use crate::{Db, DbError, Result};
 
 /// Result category for a parameterized-replaceable event write.
@@ -96,18 +97,102 @@ pub(crate) fn event_replacement_lock_key(
     hash as i64
 }
 
+/// The channels of the live versions of the coordinate `(kind, pubkey,
+/// d_tag)`, optionally only those created at or before `created_at_or_before`.
+/// This read takes no lock: a caller gates the result, then re-checks it under
+/// the coordinate lock.
+pub(crate) async fn live_version_channels(
+    tx: &mut AdmittedTx,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+    created_at_or_before: Option<DateTime<Utc>>,
+) -> Result<BTreeSet<Uuid>> {
+    let channels: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT channel_id FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+           AND deleted_at IS NULL AND channel_id IS NOT NULL \
+           AND ($5::timestamptz IS NULL OR created_at <= $5)",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .bind(created_at_or_before)
+    .fetch_all(tx.conn())
+    .await?;
+    Ok(channels.into_iter().collect())
+}
+
+/// Take the write gates a parameterized replacement of `event` needs: its
+/// own `channels` (its channel, and any other channel the write must gate)
+/// and the channel of every live version it would supersede.
+///
+/// A replacement supersedes the coordinate in every channel, so an
+/// [`ArchiveGate::Refuse`] write is refused when any of those channels is
+/// archived. The versions are read before the gates; the replacement checks
+/// them again under its coordinate lock and fails with
+/// [`DbError::LifecycleConflict`] if one moved to an ungated channel.
+pub async fn lock_parameterized_write_gates(
+    tx: &mut AdmittedTx,
+    gate: ArchiveGate,
+    event: &nostr::Event,
+    d_tag: &str,
+    channels: &[Uuid],
+) -> Result<WriteGates> {
+    lock_coordinate_write_gates(
+        tx,
+        gate,
+        buzz_core::kind::event_kind_i32(event),
+        event.pubkey.to_bytes().as_slice(),
+        d_tag,
+        None,
+        channels,
+    )
+    .await
+}
+
+/// Take the write gates of a write to the coordinate `(kind, pubkey, d_tag)`:
+/// its own `channels` and the channel of every live version, optionally only
+/// those created at or before `created_at_or_before`. This is the one
+/// definition of the channels a coordinate write touches. Each caller
+/// re-checks its own versions under the coordinate lock.
+pub(crate) async fn lock_coordinate_write_gates(
+    tx: &mut AdmittedTx,
+    gate: ArchiveGate,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+    created_at_or_before: Option<DateTime<Utc>>,
+    channels: &[Uuid],
+) -> Result<WriteGates> {
+    if gate == ArchiveGate::Exempt {
+        return Ok(WriteGates::exempt());
+    }
+    let mut gated = live_version_channels(tx, kind, pubkey, d_tag, created_at_or_before).await?;
+    gated.extend(channels);
+    let gated: Vec<Uuid> = gated.into_iter().collect();
+    crate::lifecycle::lock_write_gates(tx, gate, &gated).await
+}
+
 /// Replace a parameterized event in a caller-owned transaction.
 ///
 /// This function acquires a transaction-scoped advisory lock but never commits
 /// or rolls back the outer transaction. The typed precondition can require the
 /// current live head to have an exact event ID or restrict the operation to an
 /// idempotent replay.
+///
+/// `gates` are the write gates the caller took (see
+/// [`lock_parameterized_write_gates`]). A replacement that would write or
+/// supersede a version in a channel they do not cover fails with
+/// [`DbError::LifecycleConflict`] and writes nothing.
 async fn replace_parameterized_event_in_transaction_impl(
     tx: &mut AdmittedTx,
     event: &nostr::Event,
     d_tag: &str,
     channel_id: Option<Uuid>,
     precondition: ParameterizedReplacePrecondition<'_>,
+    gates: &WriteGates,
 ) -> Result<ParameterizedReplaceResult> {
     let community_id = tx.community();
     let kind_i32 = buzz_core::kind::event_kind_i32(event);
@@ -249,6 +334,20 @@ async fn replace_parameterized_event_in_transaction_impl(
             channel_id,
             ParameterizedReplaceStatus::Superseded,
         ));
+    }
+
+    // Under the coordinate lock no version can appear in another channel.
+    // Every channel this write touches must hold its gate.
+    if !gates.is_exempt() {
+        let mut touched = if existing.is_some() {
+            live_version_channels(tx, kind_i32, pubkey_bytes.as_slice(), d_tag, None).await?
+        } else {
+            BTreeSet::new()
+        };
+        touched.extend(channel_id);
+        if !touched.into_iter().all(|channel| gates.covers(channel)) {
+            return Err(DbError::LifecycleConflict);
+        }
     }
 
     // Everything from the supersede through the mention index runs under one
@@ -404,11 +503,15 @@ impl Db {
     /// Returns `(event, false)` for stale writes and duplicate IDs — callers should
     /// skip fan-out/dispatch when `was_inserted` is false.
     #[datastore_span(name = "replace_addressable_event", system = "postgresql")]
+    ///
+    /// `gate` decides whether an archived `channel_id` refuses the write (see
+    /// [`ArchiveGate`]); the gate comes before the replacement lock.
     pub async fn replace_addressable_event(
         &self,
         community_id: CommunityId,
         event: &nostr::Event,
         channel_id: Option<Uuid>,
+        gate: ArchiveGate,
     ) -> Result<(StoredEvent, bool)> {
         let kind_i32 = buzz_core::kind::event_kind_i32(event);
         let pubkey_bytes = event.pubkey.to_bytes();
@@ -431,6 +534,7 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
+        crate::lifecycle::lock_write_gates(&mut tx, gate, channel_id.as_slice()).await?;
         let transaction_timer = observability::TransactionTimer::start(
             observability::TransactionOperation::ReplaceAddressableEvent,
         );
@@ -580,6 +684,11 @@ impl Db {
     /// savepoint and the caller's transaction stays usable. This future is not
     /// cancel-safe: if it is dropped before completing, drop the transaction
     /// too rather than continuing to write on it.
+    ///
+    /// `gates` are the write gates the caller took first, from
+    /// [`lock_parameterized_write_gates`] (or [`WriteGates::exempt`]). A
+    /// version in a channel they do not cover fails with
+    /// [`DbError::LifecycleConflict`].
     pub async fn replace_parameterized_event_in_transaction(
         &self,
         tx: &mut AdmittedTx,
@@ -587,15 +696,29 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
         precondition: ParameterizedReplacePrecondition<'_>,
+        gates: &WriteGates,
     ) -> Result<ParameterizedReplaceResult> {
-        replace_parameterized_event_in_transaction_impl(tx, event, d_tag, channel_id, precondition)
-            .await
+        replace_parameterized_event_in_transaction_impl(
+            tx,
+            event,
+            d_tag,
+            channel_id,
+            precondition,
+            gates,
+        )
+        .await
     }
 
     /// Atomically replace a NIP-33 parameterized replaceable event.
     ///
     /// Replacement keys on `(kind, pubkey, d_tag)` across channels. The
     /// highest timestamp wins; same-second ties use the lowest event ID.
+    ///
+    /// `gate` decides whether an archived channel refuses the write (see
+    /// [`ArchiveGate`]): the event's own channel or the channel of any live
+    /// version it supersedes. A version that moves to an ungated channel
+    /// between the gate read and the coordinate lock is retried once, then
+    /// fails with [`DbError::LifecycleConflict`].
     #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
     pub async fn replace_parameterized_event(
         &self,
@@ -603,6 +726,27 @@ impl Db {
         event: &nostr::Event,
         d_tag: &str,
         channel_id: Option<Uuid>,
+        gate: ArchiveGate,
+    ) -> Result<(StoredEvent, bool)> {
+        match self
+            .replace_parameterized_event_once(community_id, event, d_tag, channel_id, gate)
+            .await
+        {
+            Err(DbError::LifecycleConflict) => {
+                self.replace_parameterized_event_once(community_id, event, d_tag, channel_id, gate)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn replace_parameterized_event_once(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+        gate: ArchiveGate,
     ) -> Result<(StoredEvent, bool)> {
         let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
             &self.pool,
@@ -615,6 +759,14 @@ impl Db {
             observability::TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
         transaction_timer
             .observe(async {
+                let gates = lock_parameterized_write_gates(
+                    &mut tx,
+                    gate,
+                    event,
+                    d_tag,
+                    channel_id.as_slice(),
+                )
+                .await?;
                 let result = self
                     .replace_parameterized_event_in_transaction(
                         &mut tx,
@@ -622,6 +774,7 @@ impl Db {
                         d_tag,
                         channel_id,
                         ParameterizedReplacePrecondition::Unconditional,
+                        &gates,
                     )
                     .await?;
                 let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
@@ -733,7 +886,7 @@ mod postgres_tests {
             .custom_created_at(Timestamp::from(base))
             .sign_with_keys(&keys)
             .expect("sign old");
-        db.replace_addressable_event(community, &old, Some(channel))
+        db.replace_addressable_event(community, &old, Some(channel), crate::ArchiveGate::Exempt)
             .await
             .expect("insert old roster");
 
@@ -759,7 +912,7 @@ mod postgres_tests {
             .sign_with_keys(&keys)
             .expect("sign new");
         let error = db
-            .replace_addressable_event(community, &new, Some(channel))
+            .replace_addressable_event(community, &new, Some(channel), crate::ArchiveGate::Exempt)
             .await
             .expect_err("mention failure must fail replacement");
         assert!(error.to_string().contains("injected mention failure"));
@@ -977,16 +1130,28 @@ mod postgres_tests {
             .expect("sign new");
 
         assert!(
-            db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("insert old")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &old,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert old")
+            .1
         );
         assert!(
-            db.replace_parameterized_event(community, &new, &d_tag, None)
-                .await
-                .expect("replace with new")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &new,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("replace with new")
+            .1
         );
 
         let rows: i64 = sqlx::query_scalar(
@@ -1011,10 +1176,16 @@ mod postgres_tests {
         .expect("simulate NIP-09 coordinate deletion");
 
         assert!(
-            !db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("replay old")
-                .1
+            !db.replace_parameterized_event(
+                community,
+                &old,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("replay old")
+            .1
         );
         let live: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
@@ -1111,7 +1282,7 @@ mod postgres_tests {
             .sign_with_keys(&keys)
             .expect("sign addressable event");
         let addressable_error = db
-            .replace_addressable_event(community, &addressable, None)
+            .replace_addressable_event(community, &addressable, None, crate::ArchiveGate::Exempt)
             .await
             .expect_err("fenced community must reject addressable replacement");
         assert!(
@@ -1129,7 +1300,13 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign parameterized event");
         let parameterized_error = db
-            .replace_parameterized_event(community, &parameterized, &d_tag, None)
+            .replace_parameterized_event(
+                community,
+                &parameterized,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt,
+            )
             .await
             .expect_err("fenced community must reject parameterized replacement");
         assert!(
@@ -1167,16 +1344,28 @@ mod postgres_tests {
         let victim = event(&victim_d_tag, "victim", base);
 
         assert!(
-            db.replace_parameterized_event(community, &old, &replace_d_tag, None)
-                .await
-                .expect("insert old head")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &old,
+                &replace_d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert old head")
+            .1
         );
         assert!(
-            db.replace_parameterized_event(community, &victim, &victim_d_tag, None)
-                .await
-                .expect("insert victim head")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &victim,
+                &victim_d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert victim head")
+            .1
         );
 
         let mut tx = db
@@ -1190,6 +1379,7 @@ mod postgres_tests {
                 &replace_d_tag,
                 None,
                 replaceable::ParameterizedReplacePrecondition::Unconditional,
+                &crate::WriteGates::exempt(),
             )
             .await
             .expect("replace inside caller transaction");
@@ -1243,10 +1433,16 @@ mod postgres_tests {
         let new = event("new", base + 1);
 
         assert!(
-            db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("insert old head")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &old,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert old head")
+            .1
         );
 
         let mut tx = db
@@ -1262,6 +1458,7 @@ mod postgres_tests {
                 replaceable::ParameterizedReplacePrecondition::ExpectedRevision(
                     old.id.as_bytes().as_slice(),
                 ),
+                &crate::WriteGates::exempt(),
             )
             .await
             .expect("replace inside caller transaction");
@@ -1297,6 +1494,7 @@ mod postgres_tests {
                 replaceable::ParameterizedReplacePrecondition::ExpectedRevision(
                     [0x42; 32].as_slice(),
                 ),
+                &crate::WriteGates::exempt(),
             )
             .await
             .expect("evaluate stale revision");
@@ -1330,6 +1528,7 @@ mod postgres_tests {
                 replaceable::ParameterizedReplacePrecondition::ExpectedRevision(
                     [0x24; 32].as_slice(),
                 ),
+                &crate::WriteGates::exempt(),
             )
             .await
             .expect("evaluate missing revision");
@@ -1371,10 +1570,16 @@ mod postgres_tests {
             .expect("sign new project");
 
         assert!(
-            db.replace_parameterized_event(community, &old, &d_tag, None)
-                .await
-                .expect("insert old project")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &old,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert old project")
+            .1
         );
         sqlx::query(
             "CREATE FUNCTION reject_test_mention() RETURNS trigger AS $$ \
@@ -1403,6 +1608,7 @@ mod postgres_tests {
                 &d_tag,
                 None,
                 replaceable::ParameterizedReplacePrecondition::Unconditional,
+                &crate::WriteGates::exempt(),
             )
             .await
             .expect_err("mention failure must fail replacement");
@@ -1458,10 +1664,16 @@ mod postgres_tests {
         let duplicate = event("soft-deleted-duplicate", base + 1);
 
         assert!(
-            db.replace_parameterized_event(community, &duplicate, &d_tag, None)
-                .await
-                .expect("insert future duplicate")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &duplicate,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert future duplicate")
+            .1
         );
         sqlx::query("UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND id=$2")
             .bind(community.as_uuid())
@@ -1491,6 +1703,7 @@ mod postgres_tests {
                 &d_tag,
                 None,
                 replaceable::ParameterizedReplacePrecondition::Unconditional,
+                &crate::WriteGates::exempt(),
             )
             .await
             .expect("evaluate soft-deleted duplicate");
@@ -1540,8 +1753,20 @@ mod postgres_tests {
         };
 
         let (first_result, second_result) = tokio::join!(
-            db.replace_parameterized_event(community, &first, &d_tag, None),
-            db.replace_parameterized_event(community, &second, &d_tag, None),
+            db.replace_parameterized_event(
+                community,
+                &first,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            ),
+            db.replace_parameterized_event(
+                community,
+                &second,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            ),
         );
         let first_inserted = first_result.expect("first concurrent writer").1;
         let second_inserted = second_result.expect("second concurrent writer").1;
@@ -1564,18 +1789,30 @@ mod postgres_tests {
         assert_eq!(live_ids, vec![expected.id.as_bytes().to_vec()]);
 
         assert!(
-            !db.replace_parameterized_event(community, expected, &d_tag, None)
-                .await
-                .expect("replay winning event")
-                .1,
+            !db.replace_parameterized_event(
+                community,
+                expected,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("replay winning event")
+            .1,
             "replaying the live event must be idempotent",
         );
         let stale = event("stale", created_at.saturating_sub(1));
         assert!(
-            !db.replace_parameterized_event(community, &stale, &d_tag, None)
-                .await
-                .expect("submit stale event")
-                .1,
+            !db.replace_parameterized_event(
+                community,
+                &stale,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("submit stale event")
+            .1,
             "an older event must not replace the live head",
         );
     }
@@ -1604,10 +1841,16 @@ mod postgres_tests {
             .sign_with_keys(&keys)
             .expect("sign mesh status");
             assert!(
-                db.replace_parameterized_event(community, &event, d_tag, None)
-                    .await
-                    .expect("replace mesh status")
-                    .1
+                db.replace_parameterized_event(
+                    community,
+                    &event,
+                    d_tag,
+                    None,
+                    crate::ArchiveGate::Exempt
+                )
+                .await
+                .expect("replace mesh status")
+                .1
             );
         }
 
@@ -1705,16 +1948,28 @@ mod postgres_tests {
             .expect("sign new event");
 
             assert!(
-                db.replace_parameterized_event(community, &old, &d_tag, None)
-                    .await
-                    .expect("insert old event")
-                    .1
+                db.replace_parameterized_event(
+                    community,
+                    &old,
+                    &d_tag,
+                    None,
+                    crate::ArchiveGate::Exempt
+                )
+                .await
+                .expect("insert old event")
+                .1
             );
             assert!(
-                db.replace_parameterized_event(community, &new, &d_tag, None)
-                    .await
-                    .expect("replace with new event")
-                    .1
+                db.replace_parameterized_event(
+                    community,
+                    &new,
+                    &d_tag,
+                    None,
+                    crate::ArchiveGate::Exempt
+                )
+                .await
+                .expect("replace with new event")
+                .1
             );
 
             let (rows, live): (i64, i64) = sqlx::query_as(
@@ -1766,10 +2021,16 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign conforming event");
         assert!(
-            db.replace_parameterized_event(community, &conforming, &conforming_d, None)
-                .await
-                .expect("insert conforming event")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &conforming,
+                &conforming_d,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert conforming event")
+            .1
         );
         sqlx::query(
             "INSERT INTO event_mentions \
@@ -1823,10 +2084,16 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign nonconforming event");
         assert!(
-            db.replace_parameterized_event(community, &nonconforming, &nonconforming_d, None,)
-                .await
-                .expect("insert nonconforming event")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &nonconforming,
+                &nonconforming_d,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert nonconforming event")
+            .1
         );
         let rejected_nonconforming = sqlx::query(
             "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
@@ -1848,10 +2115,16 @@ mod postgres_tests {
             .sign_with_keys(&keys)
             .expect("sign unrelated event");
         assert!(
-            db.replace_parameterized_event(community, &unrelated, &unrelated_d, None)
-                .await
-                .expect("insert unrelated event")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &unrelated,
+                &unrelated_d,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("insert unrelated event")
+            .1
         );
         let unrelated_delete = sqlx::query(
             "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
@@ -2074,10 +2347,16 @@ mod postgres_tests {
                     .sign_with_keys(&keys)
                     .expect("sign event");
                 assert!(
-                    db.replace_parameterized_event(community, &event, &d_tag, None)
-                        .await
-                        .expect("store event")
-                        .1,
+                    db.replace_parameterized_event(
+                        community,
+                        &event,
+                        &d_tag,
+                        None,
+                        crate::ArchiveGate::Exempt
+                    )
+                    .await
+                    .expect("store event")
+                    .1,
                     "{label}: event must be stored"
                 );
                 let id = event.id.as_bytes().to_vec();
@@ -2263,10 +2542,16 @@ mod postgres_tests {
         .sign_with_keys(&keys)
         .expect("sign old head");
         assert!(
-            db.replace_parameterized_event(community, &old_head, &d_tag, None)
-                .await
-                .expect("store old head")
-                .1
+            db.replace_parameterized_event(
+                community,
+                &old_head,
+                &d_tag,
+                None,
+                crate::ArchiveGate::Exempt
+            )
+            .await
+            .expect("store old head")
+            .1
         );
         let old_id = old_head.id.as_bytes().to_vec();
         let new_id = vec![0x5a_u8; 32];

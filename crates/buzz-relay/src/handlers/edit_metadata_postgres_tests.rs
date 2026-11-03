@@ -733,8 +733,9 @@ async fn resend_validated_after_the_first_commit_is_a_duplicate() {
 }
 
 /// Two copies of one restore, sent at the same time, change the channel
-/// once. Both are held at the channel's TTL lock until both wait there, so
-/// both pass validation before either commits. One applies the restore; the
+/// once. A held TTL lock stops both inside their write: one waits on the
+/// TTL lock, the other on the archive gate behind it. So both pass
+/// validation before either commits. One applies the restore; the
 /// other is reported as a duplicate, with no second notice. The case
 /// where a copy validates after the other commits is covered by
 /// `resend_validated_after_the_first_commit_is_a_duplicate`.
@@ -781,17 +782,27 @@ async fn concurrent_copies_of_a_restore_apply_once() {
         })
         .collect();
 
+    // A restore takes the channel's archive gate (exclusive) before its TTL
+    // lock, so the first copy holds the gate and waits on the TTL lock, and
+    // the second copy waits on the gate.
+    let gate_key = format!(
+        "buzz_channel_gate:{}:{channel_id}",
+        tenant.community().as_uuid()
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let waiting: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
-             AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0)",
+        let (ttl_waiters, gate_waiters): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE key = hashtextextended($1, 0)), \
+                    count(*) FILTER (WHERE key = hashtextextended($2, 0)) \
+             FROM (SELECT (classid::bigint << 32) | objid::bigint AS key FROM pg_locks \
+                   WHERE locktype = 'advisory' AND NOT granted) AS waiting",
         )
         .bind(&lock_key)
+        .bind(&gate_key)
         .fetch_one(&pool)
         .await
         .expect("read lock waiters");
-        if waiting == 2 {
+        if (ttl_waiters, gate_waiters) == (1, 1) {
             break;
         }
         assert!(
@@ -800,7 +811,7 @@ async fn concurrent_copies_of_a_restore_apply_once() {
         );
         assert!(
             std::time::Instant::now() < deadline,
-            "both copies never waited for the TTL lock"
+            "both copies never queued: {ttl_waiters} TTL-lock and {gate_waiters} gate waiters"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

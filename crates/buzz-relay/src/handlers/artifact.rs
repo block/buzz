@@ -45,9 +45,16 @@ pub(crate) async fn accept(
             source,
             &state.relay_keypair,
             state.config.lifecycle_guard_enabled,
+            buzz_db::ArchiveGate::Refuse,
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
+        .map_err(|e| {
+            // The home channel was archived after ingest's unlocked check.
+            if super::ingest::is_archived_refusal(&e) {
+                return super::ingest::archived_rejection();
+            }
+            IngestError::Internal(format!("artifact storage: {e}"))
+        })?;
     match outcome {
         ArtifactOutcome::Accepted(events) => {
             for stored in &events {

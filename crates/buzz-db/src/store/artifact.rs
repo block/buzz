@@ -4,12 +4,13 @@
 //! before this transaction; here the relay only serializes each identity and
 //! compares the expected head.
 use crate::lifecycle::EdgeChange;
-use crate::{Db, DbError, Result};
+use crate::{ArchiveGate, Db, DbError, Result};
 use buzz_core::artifact::{ArtifactEnvelope, ArtifactOp};
 use buzz_core::lifecycle::{task_edge, TaskEdge, TASK_ARTIFACT_TYPE};
 use buzz_core::{CommunityId, StoredEvent};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use sqlx::Row;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 /// Acceptance outcome. Only a stale-`prev` conflict carries the current head,
@@ -101,6 +102,14 @@ impl Db {
     /// transaction, under its family locks. With `lifecycle_guard` off, a
     /// `parent` tag is refused unless the channel already has that projected
     /// parent, and a channel without a projection row keeps today's behavior.
+    ///
+    /// `gate` decides whether an archived channel refuses the revision (see
+    /// [`ArchiveGate`]). Under [`ArchiveGate::Refuse`] the revision takes the
+    /// gates of its home and, for a move, of `authorized_source`, after the
+    /// family locks of a task. An archived home fails with
+    /// [`DbError::AccessDenied`]; an archived move source answers like a
+    /// missing head.
+    #[allow(clippy::too_many_arguments)]
     pub async fn accept_artifact(
         &self,
         community: CommunityId,
@@ -109,6 +118,7 @@ impl Db {
         authorized_source: Option<Uuid>,
         relay_keys: &Keys,
         lifecycle_guard: bool,
+        gate: ArchiveGate,
     ) -> Result<ArtifactOutcome> {
         // A family root that moves before its lock is taken is retried once.
         for _ in 0..2 {
@@ -120,6 +130,7 @@ impl Db {
                     authorized_source,
                     relay_keys,
                     lifecycle_guard,
+                    gate,
                 )
                 .await?
             {
@@ -129,6 +140,7 @@ impl Db {
         Ok(ArtifactOutcome::Conflict("task family changed"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn accept_artifact_once(
         &self,
         community: CommunityId,
@@ -137,11 +149,20 @@ impl Db {
         authorized_source: Option<Uuid>,
         relay_keys: &Keys,
         lifecycle_guard: bool,
+        gate: ArchiveGate,
     ) -> Result<Option<ArtifactOutcome>> {
         let mut tx = self.begin_event_write_transaction(community).await?;
         sqlx::query("SET LOCAL statement_timeout='5s'")
             .execute(tx.conn())
             .await?;
+        // The channels this revision writes: its home and a move's source.
+        let mut gated = BTreeSet::new();
+        if gate == ArchiveGate::Refuse {
+            gated.insert(env.home);
+            if env.op == ArtifactOp::Move {
+                gated.extend(authorized_source);
+            }
+        }
         let is_task = env.artifact_type == TASK_ARTIFACT_TYPE;
         // A task channel, or any task revision once the guard is on, takes
         // the hierarchy path; the read is re-checked under the family lock.
@@ -154,15 +175,31 @@ impl Db {
                 Err(message) => return Ok(Some(ArtifactOutcome::Rejected(message))),
             };
             let author = event.pubkey.to_bytes();
-            match crate::lifecycle::lock_task_edge(&mut tx, edge.channel, edge.parent, &author)
-                .await?
+            match crate::lifecycle::lock_task_edge(
+                &mut tx,
+                edge.channel,
+                edge.parent,
+                &author,
+                &gated,
+            )
+            .await?
             {
                 Some(locks) => Some((edge, locks)),
                 None => return Ok(None),
             }
         } else {
+            crate::lifecycle::lock_shared_gates(&mut tx, &gated).await?;
             None
         };
+        let archived = crate::lifecycle::archived_among(&mut tx, &gated).await?;
+        if archived.contains(&env.home) {
+            return Err(DbError::AccessDenied(
+                crate::lifecycle::CHANNEL_ARCHIVED.into(),
+            ));
+        }
+        if !archived.is_empty() {
+            return Ok(Some(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE)));
+        }
         // A coordinate lock handles the missing-row create race as well as edits.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!("artifact:{}:{}", community.as_uuid(), env.id))

@@ -38,7 +38,7 @@ async fn post(
         .custom_created_at(nostr::Timestamp::from(authored))
         .sign_with_keys(&Keys::generate())
         .unwrap();
-    db.insert_event(community, &event, Some(channel))
+    db.insert_event(community, &event, Some(channel), crate::ArchiveGate::Exempt)
         .await
         .unwrap();
     arrive(pool, community, &event, arrived).await;
@@ -254,9 +254,14 @@ async fn mark_as_read_behind_fillers(fillers: u64) -> (bool, u32) {
             .custom_created_at(nostr::Timestamp::from(now - 500 + i))
             .sign_with_keys(&Keys::generate())
             .unwrap();
-        db.insert_event(community, &filler, Some(channel))
-            .await
-            .unwrap();
+        db.insert_event(
+            community,
+            &filler,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .unwrap();
         arrive(&pool, community, &filler, now - 50).await;
     }
     post(&db, &pool, community, channel, &actor, now - 600, now - 10).await;
@@ -306,9 +311,14 @@ async fn latest_message_behind_a_full_probe_of_reactions_is_found() {
             .custom_created_at(nostr::Timestamp::from(now - 500 + i))
             .sign_with_keys(&Keys::generate())
             .unwrap();
-        db.insert_event(community, &filler, Some(channel))
-            .await
-            .unwrap();
+        db.insert_event(
+            community,
+            &filler,
+            Some(channel),
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .unwrap();
         arrive(&pool, community, &filler, now - 50).await;
     }
 

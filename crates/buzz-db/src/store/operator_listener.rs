@@ -595,10 +595,15 @@ mod postgres_tests {
             .tag(Tag::public_key(target.public_key()))
             .sign_with_keys(&Keys::generate())
             .expect("sign test event");
-        let (_, inserted) =
-            crate::event::insert_event(&pool, CommunityId::from_uuid(community_id), &event, None)
-                .await
-                .expect("insert event");
+        let (_, inserted) = crate::event::insert_event(
+            &pool,
+            CommunityId::from_uuid(community_id),
+            &event,
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert event");
         assert!(inserted);
 
         let outbox_count: i64 = sqlx::query_scalar(
@@ -685,10 +690,16 @@ mod postgres_tests {
             .sign_with_keys(&Keys::generate())
             .expect("sign test event");
         let community = CommunityId::from_uuid(community_id);
-        let (_, inserted) =
-            crate::event::insert_event_with_thread_metadata(&pool, community, &event, None, None)
-                .await
-                .expect("insert event through thread-metadata path");
+        let (_, inserted) = crate::event::insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &event,
+            None,
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("insert event through thread-metadata path");
         assert!(inserted);
 
         let delivered_listeners: Vec<Vec<u8>> = sqlx::query_scalar(
@@ -706,10 +717,16 @@ mod postgres_tests {
         expected_listeners.sort();
         assert_eq!(delivered_listeners, expected_listeners);
 
-        let (_, duplicate_inserted) =
-            crate::event::insert_event_with_thread_metadata(&pool, community, &event, None, None)
-                .await
-                .expect("retry duplicate event through thread-metadata path");
+        let (_, duplicate_inserted) = crate::event::insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &event,
+            None,
+            None,
+            crate::ArchiveGate::Exempt,
+        )
+        .await
+        .expect("retry duplicate event through thread-metadata path");
         assert!(!duplicate_inserted);
         let outbox_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM operator_listener_outbox WHERE community_id = $1 AND event_id = $2",
@@ -1223,9 +1240,15 @@ mod postgres_tests {
                 .tag(Tag::public_key(target.public_key()))
                 .sign_with_keys(&author)
                 .expect("sign test event");
-            crate::event::insert_event(&pool, community, &event, channel)
-                .await
-                .expect("insert event");
+            crate::event::insert_event(
+                &pool,
+                community,
+                &event,
+                channel,
+                crate::ArchiveGate::Exempt,
+            )
+            .await
+            .expect("insert event");
             deliveries.insert(
                 channel,
                 ClaimedDelivery {

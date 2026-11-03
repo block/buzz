@@ -318,9 +318,16 @@ async fn workflow_writers_require_application_admission() {
             .expect_err("workflow create must reject"),
         );
         assert_fenced(
-            super::workflow::create_workflow_run(&db.pool, *community, Uuid::new_v4(), None, None)
-                .await
-                .expect_err("workflow run create must reject"),
+            super::workflow::create_workflow_run(
+                &db.pool,
+                *community,
+                Uuid::new_v4(),
+                None,
+                None,
+                crate::ArchiveGate::Exempt,
+            )
+            .await
+            .expect_err("workflow run create must reject"),
         );
         assert_fenced(
             super::workflow::claim_scheduled_workflow_fire(
@@ -328,6 +335,7 @@ async fn workflow_writers_require_application_admission() {
                 *community,
                 Uuid::new_v4(),
                 chrono::Utc::now(),
+                crate::ArchiveGate::Exempt,
             )
             .await
             .expect_err("schedule claim must reject"),
@@ -644,9 +652,14 @@ async fn personal_read_writer_requires_application_admission() {
     let event = EventBuilder::new(Kind::Custom(9), "read")
         .sign_with_keys(&Keys::generate())
         .expect("sign event");
-    db.insert_event(communities[0], &event, Some(channel.id))
-        .await
-        .expect("insert active event");
+    db.insert_event(
+        communities[0],
+        &event,
+        Some(channel.id),
+        crate::ArchiveGate::Exempt,
+    )
+    .await
+    .expect("insert active event");
     let intent = super::personal_read::ReadIntent::MarkThrough {
         target: super::personal_read::ReadTarget {
             channel_id: channel.id,
@@ -903,7 +916,7 @@ async fn channel_reap_admits_active_tenant_and_skips_quiescing_tenant() {
         .await
         .expect("seed channel");
     }
-    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool)
+    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool, 1000)
         .await
         .unwrap();
     assert_eq!(reaped.len(), 1);
@@ -1000,7 +1013,7 @@ async fn channel_reap_returns_committed_rows_after_earlier_tenant_error() {
         .await
         .expect("seed expired channel");
     }
-    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool)
+    let reaped = super::channel::reap_expired_ephemeral_channels(&db.pool, 1000)
         .await
         .expect("tenant failure must not stop the fleet sweep");
     assert_eq!(reaped.len(), 1);
@@ -1021,7 +1034,7 @@ async fn channel_reap_returns_committed_rows_after_earlier_tenant_error() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let retried = super::channel::reap_expired_ephemeral_channels(&db.pool)
+    let retried = super::channel::reap_expired_ephemeral_channels(&db.pool, 1000)
         .await
         .unwrap();
     assert_eq!(retried.len(), 1);
@@ -1181,7 +1194,7 @@ async fn channel_reap_rechecks_admission_after_candidate_read() {
     .unwrap();
     let pool = db.pool.clone();
     let reaped = crate::test_support::fence_while_sweep_waits(community, async move {
-        super::channel::reap_expired_ephemeral_channels(&pool).await
+        super::channel::reap_expired_ephemeral_channels(&pool, 1000).await
     })
     .await
     .unwrap();
