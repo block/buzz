@@ -1,0 +1,53 @@
+# Short run of desktop clients in private channels against a local relay
+# (`just relay`). Ticks, backstops and renewals are seconds apart instead of
+# minutes, so every desktop request type shows up within the ramp. Set
+# `desktop.mode = "legacy"` to compare the client before its volume fixes.
+#   cargo run -p buzz-test-client --bin buzz-loadgen -- seed perf/scenarios/local-desktop.toml
+#   cargo run -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios/local-desktop.toml
+run_id = "local-desktop"
+
+[target]
+ws_url = "ws://localhost:3000"
+http_url = "http://localhost:3000"
+
+[shape]
+communities = 1
+channels_per_community = 30
+history_messages_per_channel = 20
+thread_roots_per_channel = 1
+thread_depth = 5
+# Members are added to each channel with kind:9000; the first two channels
+# are joined by half of the humans on top of their own.
+private_channels = true
+wide_channels = 2
+
+[population]
+humans = 40
+agents = 4
+channels_per_member = 5
+connect_rate_per_sec = 20.0
+wide_member_fraction = 0.5
+# Members of the wide channels send a fifth of their own traffic there.
+wide_activity_share = 0.2
+# A quarter of the humans are in 15 channels instead of 5, so their
+# subscriptions batch past ten channels.
+tiers = [{ fraction = 0.25, channels = 15 }]
+
+[human]
+presence_interval_secs = 10.0
+typing_per_hour = 120.0
+messages_per_hour = 60.0
+reactions_per_hour = 30.0
+
+[desktop]
+fraction = 0.5
+mode = "current"
+windows = 3
+threads = 1
+tick_secs = 5.0
+backstop_secs = 15.0
+renewal_secs = 20.0
+
+[[ramp]]
+users = 1.0
+hold_secs = 60

@@ -131,6 +131,18 @@ impl Net {
         Ok((status, response.text().await?))
     }
 
+    /// `GET {base}/` for the relay's NIP-11 information document.
+    pub async fn relay_info(&self, base: &str) -> anyhow::Result<(reqwest::StatusCode, String)> {
+        let response = self
+            .http
+            .get(self.transport_url(&format!("{base}/")))
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await?;
+        let status = response.status();
+        Ok((status, response.text().await?))
+    }
+
     /// Submits `event` through HTTP `/events`; errors unless the relay accepted it.
     pub async fn submit(
         &self,

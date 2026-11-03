@@ -11,6 +11,7 @@
 //! scenario's `run_id`, so independent shards (`--shard i/n`) agree on the
 //! fixture without sharing state.
 
+pub mod desktop;
 pub mod identity;
 pub mod net;
 pub mod run;

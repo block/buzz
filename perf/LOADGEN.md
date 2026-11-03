@@ -23,6 +23,10 @@ cargo run --release -p buzz-test-client --bin buzz-loadgen -- teardown perf/scen
 | Humans / agents | `population.humans`, `population.agents`, multiplied by each `[[ramp]]` step's `users` |
 | Throughput per client | `[human]` and `[agent]` rates |
 | Reconnect churn | `human.mean_session_secs`, `population.connect_rate_per_sec` |
+| Private membership | `shape.private_channels` |
+| Large channels | `shape.wide_channels`, `population.wide_member_fraction`, `population.wide_activity_share` |
+| Uneven membership | `population.tiers` |
+| Desktop clients | `[desktop]`: `fraction`, `mode`, `windows`, `threads`, `tick_secs`, `backstop_secs`, `renewal_secs` |
 
 `shape.thread_depth` seeds each thread as a chain: reply `k` replies to reply
 `k-1`, so the thread's deepest reply sits at depth `thread_depth`. The relay
@@ -42,6 +46,27 @@ agents) reply to that root and read its newest 100 replies over HTTP. Their
 replies are timed, so humans subscribed to that channel record delivery.
 Leave `seed_replies` and `authors` at 0 to disable it.
 
+Members are assigned deterministically by global index, so every shard and
+`seed` agree on them without coordination:
+
+- `shape.wide_channels` reserves the first K channels of each community as
+  wide channels. Each human joins them with probability
+  `population.wide_member_fraction`, on top of its own channels. Agents never
+  do.
+- `population.wide_activity_share`, when set, is the share of its typing,
+  messages and reactions a member of the wide channels sends into them; the
+  rest goes to its regular channels. Unset, typing and messages pick any of
+  a member's channels equally, so a member of three wide and three regular
+  channels sends half of them into the wide ones, and reactions go to the
+  latest message the member saw. It has no effect on members outside the wide
+  channels.
+- `population.tiers` is a list of `{ fraction, channels }`. That fraction of
+  humans joins `channels` channels instead of `channels_per_member`. Fractions
+  sum to at most 1; the rest keep `channels_per_member`.
+- A member's own channels are a run of consecutive channels after the wide
+  ones, starting at its index. With no wide channels and no tiers this is the
+  assignment of earlier versions.
+
 ## What each client does
 
 - **Human**: authenticates over WebSocket and subscribes to its channels'
@@ -52,6 +77,10 @@ Leave `seed_replies` and `authors` at 0 to disable it.
 - **Agent**: authenticates with a NIP-OA tag from its owner, polls HTTP
   `/query` (channel window plus mentions), posts messages through HTTP
   `/events`, and sends encrypted kind:24200 observer frames to its owner.
+- **Desktop human**: the `desktop.fraction` of humans that model the desktop
+  app instead of the basic human above. They keep the basic human's presence,
+  typing, messages and reactions; the subscriptions and HTTP reads are the
+  app's, described under [Desktop clients](#desktop-clients).
 - **Hot-thread author**: finds the seeded hot root, then posts replies to it
   through HTTP `/events` (`hot_reply`) and reads the thread through HTTP
   `/query` (`thread_fetch`). Until the root is found every attempt counts as
@@ -80,8 +109,100 @@ relay checks against its own relay URL. Without a host template, the
 generator connects to `ws_url` and `http_url` as written and `connect_addr`
 has no effect.
 
-Seeded identities do not join communities or channels. A relay that requires
-membership rejects both `seed` and `run`.
+By default channels are open and seeded identities join nothing, so a relay
+that requires membership rejects both `seed` and `run`. With
+`shape.private_channels = true`, `seed` creates the channels private and adds
+every member: the humans and agents assigned to each channel up to the
+largest ramp step, and the hot-thread root and authors in its channel. It
+sends kind:9000 events of up to 100 members, `seed_concurrency` at a time,
+signed by the community owner, before posting any history. A rerun adds
+nobody new, and any member the relay refuses fails the seed. Seeded history
+in a private channel is posted by its own members.
+
+## Desktop clients
+
+A desktop client models the subscriptions and reads the desktop app makes,
+in two modes: `legacy`, the app before its client volume fixes, and
+`current` (default), after them. Each request type is its own operation in
+the report.
+
+On a **cold start** it:
+
+1. reads the relay's NIP-11 document (`desktop_nip11`);
+2. opens its profile and membership subscriptions, and its channel
+   subscriptions (`desktop_live_eose`). With up to ten channels both modes
+   open one per-channel batch that replays the newest 500 events. With more,
+   `legacy` opens one such batch per ten channels; `current` opens one
+   live-only subscription per 2048 channels and replays the channels ten at a
+   time in separate subscriptions it closes at EOSE (`desktop_replay_eose`).
+   At most four are set up at once, each with a 10 s EOSE timeout;
+3. reads over HTTP, at most six at a time with a 30 s timeout: its roster
+   (`desktop_roster`, paged), channel names (`desktop_metadata`), sidebar
+   preferences (`desktop_sidebar`), co-member profiles (`desktop_profiles`)
+   and statuses (`desktop_statuses`), the custom emoji set
+   (`desktop_emoji`), read state (`desktop_read_state`), unread repair in
+   chunks of 128 channels (`desktop_unread`), reminders
+   (`desktop_reminders`), and for each of `windows` open channels a window
+   catch-up (`desktop_window`) and its notices (`desktop_notices`), and for
+   each of `threads` open threads a seeded root lookup and its first thread
+   page (`desktop_thread_root`, `desktop_thread_window`). A window catch-up
+   reads the head page, then follows the cursor in the relay's window
+   bounds (kind 39006) for up to five older pages, until the bounds say
+   history is exhausted.
+
+`legacy` makes all of these reads as it connects. `current` reads only
+NIP-11, names and sidebar preferences then, and the rest as each
+subscription reaches its EOSE ("establishes"): profiles, statuses and emoji
+with the profile subscription; roster, read state, unread repair and
+reminders with the membership subscription; windows and threads with the
+channel subscriptions.
+
+A subscription's replay is cut when it replays 500 events, or, for the
+live-only subscription, always: it replays nothing itself. A subscription
+that misses its EOSE deadline counts as cut, and so does one the previous
+connection never caught up. Only an EOSE catches a subscription up: one
+that missed its deadline is recovered, but the next connection cannot
+resume or carry it. When a `current` client reconnects, a profile or
+membership subscription whose replay was not cut resumed every change, so
+it skips its full read: profiles read nothing unless an earlier read is
+still owed, and membership only repairs unreads, without the read-state
+snapshot, unless a snapshot read failed since, which a full repair retries.
+A cut one reads as on a cold start. The channel subscriptions always
+recover the windows and threads.
+
+Every `tick_secs` the client runs a recovery tick, on its own clock across
+connections. In `legacy` each tick replaces its channel subscriptions and
+rereads roster, read state and unread. In `current` each of the three waits
+`backstop_secs` since it last ran: since the batches were last replaced,
+since the roster was last read in full, and since a full unread repair (with
+its read-state snapshot) was last asked for. A failed roster read, unread
+repair or read-state snapshot is owed and runs again on the next tick; a
+repair without the snapshot does not settle an owed snapshot. An owed
+profile read runs again when the profile subscription next establishes. A
+replacement is live-only and is opened before the subscription it replaces
+is closed. A replacement that misses its EOSE deadline is closed, the
+subscription it would have replaced stays, and the next tick tries again.
+
+Every `renewal_secs` (0 disables it; the first is jittered) the client renews
+its identity and reconnects. In `legacy` that is an ordinary reconnect, which
+rereads everything but channel names and sidebar preferences. In `current`
+the subscriptions are carried over: none establishes while their replays
+keep continuity, so nothing is read. Once any replay is cut, every
+subscription establishes as on a reconnect. With more than ten channels the
+live-only subscription is always cut, so the replays, windows, threads and
+an unread repair run again. A human's session end
+(`human.mean_session_secs`) is an ordinary reconnect in both modes. Resumed
+subscriptions start 960 s before the previous session ended, but not before
+300 s before the client started.
+
+Each client runs its reads in one task, at most six at a time. A read that
+comes due while the same read is running or queued is not added again, so a
+slow relay does not pile reads up behind it. A read leaves the running set
+as soon as it settles, so a failed one can retry while a slow one is still
+under way.
+
+The app also establishes the channel subscriptions when a tick's replacement
+reaches its EOSE; the generator does not model that.
 
 ## Sharding
 
