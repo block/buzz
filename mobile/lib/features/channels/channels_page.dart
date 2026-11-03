@@ -47,6 +47,9 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../onboarding_app_entry.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
+import '../agents/create_agent_page.dart';
+import '../agents/first_agent.dart';
+import '../../shared/agents/remote_agents.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_detail_page.dart';
 import 'channel_management_provider.dart';
@@ -73,6 +76,7 @@ part 'channels_page/community.dart';
 part 'channels_page/community_switcher.dart';
 part 'channels_page/community_switcher_action.dart';
 part 'channels_page/header_actions.dart';
+part 'channels_page/first_agent_row.dart';
 
 enum _QuickAction { createChannel, newDm }
 

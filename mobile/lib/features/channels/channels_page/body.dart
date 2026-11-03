@@ -513,6 +513,9 @@ class _SliverChannelsList extends HookConsumerWidget {
               sortMode: sortState.sortModeFor('dms'),
               onSortModeChange: (mode) => setSortMode('dms', mode),
               onSelectChannel: onSelectChannel,
+              leading: ref.watch(showFirstAgentProvider)
+                  ? const _FirstAgentRow()
+                  : null,
             ),
           ],
         ],

@@ -332,6 +332,9 @@ class _ChannelSection extends StatelessWidget {
   final ValueChanged<ChannelSortMode>? onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
 
+  /// Shown above the channels, replacing [emptyLabel] when there are none.
+  final Widget? leading;
+
   const _ChannelSection({
     required this.title,
     required this.expanded,
@@ -345,6 +348,7 @@ class _ChannelSection extends StatelessWidget {
     this.sortMode,
     this.onSortModeChange,
     required this.onSelectChannel,
+    this.leading,
   });
 
   @override
@@ -364,7 +368,8 @@ class _ChannelSection extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (channels.isEmpty)
+              ?leading,
+              if (channels.isEmpty && leading == null)
                 Padding(
                   padding: const EdgeInsets.only(
                     left: _kChannelLabelInset,

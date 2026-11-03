@@ -57,6 +57,10 @@ import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
+import 'package:buzz/features/agents/create_agent_page.dart';
+import 'package:buzz/features/agents/first_agent.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
+import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -65,6 +69,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
+import '../../helpers/remote_agents_fixture.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
@@ -3554,6 +3559,56 @@ void main() {
 
     expect(readState.seededContexts, {'1': 20});
     expect(readState.markedContexts, isEmpty);
+  });
+
+  testWidgets('DMs leads with "Create your first agent" until one exists', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final registry = FakeRegistry(signedIn: false);
+    final controller = RelayFakeController(registry);
+    addTearDown(() {
+      controller.dispose();
+      controller.relayAuth.dispose();
+      registry.dispose();
+    });
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([testChannels.first]),
+          ),
+          savedPrefsProvider.overrideWithValue(prefs),
+          showFirstAgentProvider.overrideWithValue(true),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+          activeCommunityProvider.overrideWith(
+            (ref) async => Community.create(
+              name: 'Test',
+              relayUrl: 'wss://test.${HostedEnvironment.communitySuffix}',
+              pubkey: fakeOwner.public,
+              nsec: fakeOwner.nsec,
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Create your first agent'), findsOneWidget);
+    // The row takes the empty DM list's place.
+    expect(find.text('No direct messages yet'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('first-agent-row')));
+    await tester.pumpAndSettle();
+    // Name and avatar only: the model and instructions are fixed.
+    expect(find.byType(CreateAgentPage), findsOneWidget);
+    expect(find.byKey(const Key('agent-model')), findsNothing);
+    expect(find.text('Instructions'), findsNothing);
+    expect(find.byTooltip('Not now'), findsOneWidget);
+    await tester.tap(find.byTooltip('Not now'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CreateAgentPage), findsNothing);
+    expect(find.text('Create your first agent'), findsOneWidget);
   });
 }
 

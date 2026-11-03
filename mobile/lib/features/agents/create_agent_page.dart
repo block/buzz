@@ -22,6 +22,9 @@ import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import 'agent_avatar_editor_page.dart';
 import '../../shared/widgets/sheet_action_section.dart';
+import '../channels/channel.dart';
+import '../channels/channel_detail_page.dart';
+import 'first_agent.dart';
 
 /// Collects agent details, an avatar, and a service-supported model.
 class CreateAgentPage extends HookConsumerWidget {
@@ -30,8 +33,14 @@ class CreateAgentPage extends HookConsumerWidget {
     required this.community,
     required this.onCreated,
     this.initialDraft,
+    this.starter = false,
     super.key,
   });
+
+  /// The first-run setup from DMs: name and avatar only, with a fixed model
+  /// and starter instructions. Setup continues if the view is closed, and the
+  /// view becomes the new agent's DM when it finishes.
+  final bool starter;
 
   /// Pre-fills a fresh setup (for example from a link). Ignored when an
   /// unfinished setup is pending: that must be resumed as saved.
@@ -50,6 +59,22 @@ class CreateAgentPage extends HookConsumerWidget {
       }
     });
     final (catalog, retryCatalog) = useAgentModelCatalog(controller);
+    final setup = starter ? ref.watch(firstAgentSetupProvider) : null;
+    // The view becomes the new agent's DM, unless something covers it.
+    void openReady(Channel? channel) {
+      if (!starter || channel == null || !context.mounted) return;
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute<void>(
+          builder: (_) => ChannelDetailPage(channel: channel),
+        ),
+      );
+    }
+
+    ref.listen(
+      firstAgentSetupProvider.select((state) => state.ready),
+      (_, channel) => openReady(channel),
+    );
     final openingSubject = useMemoized(
       () => controller.account.account?.subject,
       const [],
@@ -80,7 +105,11 @@ class CreateAgentPage extends HookConsumerWidget {
       return null;
     }, [catalog.connectionState]);
     final name = useTextEditingController(
-      text: controller.pending?['name'] as String? ?? draft?.name ?? '',
+      text:
+          controller.pending?['name'] as String? ??
+          draft?.name ??
+          setup?.name ??
+          '',
     );
     final instructions = useTextEditingController(
       text:
@@ -96,12 +125,27 @@ class CreateAgentPage extends HookConsumerWidget {
       draft?.avatar ??
           AgentAvatarSelection.url(
             controller.pending?['picture'] as String? ??
+                setup?.picture ??
                 agentAvatarCatalog[Random().nextInt(agentAvatarCatalog.length)]
                     .url,
           ),
     );
     final preparing = useState(false);
-    final busy = controller.busy || preparing.value;
+    final busy =
+        controller.busy || preparing.value || (setup?.working ?? false);
+    // First-run picks survive closing the view. Uploaded images do not.
+    void savePicks() {
+      if (starter) {
+        ref
+            .read(firstAgentSetupProvider.notifier)
+            .pick(name: name.text, picture: avatar.value.url);
+      }
+    }
+
+    useEffect(() {
+      name.addListener(savePicks);
+      return () => name.removeListener(savePicks);
+    }, [avatar.value]);
     final active = ref.watch(activeCommunityProvider).asData?.value;
     final sameCommunity = active?.id == community.id;
     final pending = controller.pending != null;
@@ -111,7 +155,8 @@ class CreateAgentPage extends HookConsumerWidget {
         !busy &&
         sameCommunity &&
         name.text.trim().isNotEmpty &&
-        validAgentModelSelection(catalog, model.value, effort.value);
+        (starter ||
+            validAgentModelSelection(catalog, model.value, effort.value));
     InputDecoration fieldDecoration(String label, {String? hint}) =>
         InputDecoration(
           hintText: hint,
@@ -152,6 +197,15 @@ class CreateAgentPage extends HookConsumerWidget {
         final service = ref.read(mediaUploadServiceProvider);
         final picture = pending ? null : await avatar.value.prepare(service);
         if (!context.mounted) return;
+        if (starter) {
+          final setup = ref.read(firstAgentSetupProvider.notifier);
+          setup.pick(name: name.text, picture: picture);
+          await setup.start(community);
+          if (context.mounted) {
+            openReady(ref.read(firstAgentSetupProvider).ready);
+          }
+          return;
+        }
         if (ref.read(activeCommunityProvider).asData?.value?.id !=
                 community.id ||
             controller.account.account?.subject != subject) {
@@ -183,36 +237,44 @@ class CreateAgentPage extends HookConsumerWidget {
       }
     }
 
+    final failure = setup?.error ?? error.value;
+    final cancelLabel = starter ? 'Not now' : 'Cancel';
+    final submitLabel = starter
+        ? (setup?.error != null ? 'Retry' : 'Create')
+        : pending
+        ? 'Resume'
+        : 'Create';
     return PopScope(
-      canPop: !busy,
+      // First-run setup carries on without this view, so it never traps you.
+      canPop: starter || !busy,
       child: FrostedScaffold(
         appBar: FrostedAppBar(
           // Keep the full-screen UIKit navigation layer out of the Hero's
           // overlay until the editor's reverse transition has completed.
           nativeViewSuppressed: editingAvatar,
-          nativeTitle: 'Create agent',
-          title: const Text('Create agent'),
+          nativeTitle: starter ? 'Create your first agent' : 'Create agent',
+          title: Text(starter ? 'Create your first agent' : 'Create agent'),
           automaticallyImplyLeading: false,
           nativeLeading: IosNavigationAction(
-            label: 'Cancel',
+            label: cancelLabel,
             symbol: 'xmark',
-            onPressed: busy ? null : () => Navigator.pop(context),
+            onPressed: busy && !starter ? null : () => Navigator.pop(context),
           ),
           nativeActions: [
             IosNavigationAction(
-              label: pending ? 'Resume' : 'Create',
+              label: submitLabel,
               symbol: 'checkmark',
               onPressed: canCreate ? create : null,
             ),
           ],
           leading: IconButton(
-            tooltip: 'Cancel',
-            onPressed: busy ? null : () => Navigator.pop(context),
+            tooltip: cancelLabel,
+            onPressed: busy && !starter ? null : () => Navigator.pop(context),
             icon: const Icon(Icons.close),
           ),
           actions: [
             IconButton(
-              tooltip: pending ? 'Resume' : 'Create',
+              tooltip: submitLabel,
               onPressed: canCreate ? create : null,
               icon: const Icon(Icons.check),
             ),
@@ -340,6 +402,7 @@ class CreateAgentPage extends HookConsumerWidget {
 
                                     if (context.mounted && result != null) {
                                       avatar.value = result;
+                                      savePicks();
                                     }
                                     await route.completed;
                                   } finally {
@@ -369,51 +432,57 @@ class CreateAgentPage extends HookConsumerWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: Grid.sm),
-                AgentModelPicker(
-                  controller: controller,
-                  catalog: catalog,
-                  onRetry: retryCatalog,
-                  modelId: model.value,
-                  effort: effort.value,
-                  onChanged: (id, value) {
-                    model.value = id;
-                    effort.value = value;
-                  },
-                ),
-                const SizedBox(height: Grid.sm),
-                SheetActionSection(
-                  label: 'Instructions',
-                  children: [
-                    Semantics(
-                      label: 'Instructions',
-                      child: TextField(
-                        controller: instructions,
-                        enabled: !busy && (!pending || instructionsMissing),
-                        minLines: 4,
-                        maxLines: 6,
-                        textCapitalization: TextCapitalization.sentences,
-                        textInputAction: TextInputAction.newline,
-                        decoration: fieldDecoration(
-                          'Instructions',
-                          hint:
-                              'Describe what this agent should do (optional).',
+                if (!starter) ...[
+                  const SizedBox(height: Grid.sm),
+                  AgentModelPicker(
+                    controller: controller,
+                    catalog: catalog,
+                    onRetry: retryCatalog,
+                    modelId: model.value,
+                    effort: effort.value,
+                    onChanged: (id, value) {
+                      model.value = id;
+                      effort.value = value;
+                    },
+                  ),
+                  const SizedBox(height: Grid.sm),
+                  SheetActionSection(
+                    label: 'Instructions',
+                    children: [
+                      Semantics(
+                        label: 'Instructions',
+                        child: TextField(
+                          controller: instructions,
+                          enabled: !busy && (!pending || instructionsMissing),
+                          minLines: 4,
+                          maxLines: 6,
+                          textCapitalization: TextCapitalization.sentences,
+                          textInputAction: TextInputAction.newline,
+                          decoration: fieldDecoration(
+                            'Instructions',
+                            hint:
+                                'Describe what this agent should do (optional).',
+                          ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: Grid.sm),
                 if (busy) ...[
                   const SizedBox(height: Grid.xs),
                   const LinearProgressIndicator(),
+                  if (starter) ...[
+                    const SizedBox(height: Grid.xs),
+                    Text(
+                      'Getting ready…',
+                      style: TextStyle(color: context.colors.onSurfaceVariant),
+                    ),
+                  ],
                 ],
-                if (error.value != null) ...[
+                if (failure != null && failure.isNotEmpty) ...[
                   const SizedBox(height: Grid.xs),
-                  Text(
-                    error.value!,
-                    style: TextStyle(color: context.colors.error),
-                  ),
+                  Text(failure, style: TextStyle(color: context.colors.error)),
                 ],
                 if (controller.canDiscardPending && !busy)
                   TextButton(

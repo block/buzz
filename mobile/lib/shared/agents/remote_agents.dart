@@ -226,6 +226,7 @@ class RemoteAgentController extends ChangeNotifier {
     pending = null;
     deletedAgents = {};
     listingFailed = false;
+    listingLoaded = false;
     _scope = null;
   }
 
@@ -294,10 +295,15 @@ class RemoteAgentController extends ChangeNotifier {
   /// an empty registry.
   bool listingFailed = false;
 
+  /// Whether the signed-in account's registry listing has loaded, so an empty
+  /// [agents] means the account has no agents rather than not yet known.
+  bool listingLoaded = false;
+
   Future<void> refresh() async {
     try {
       await _refresh();
       listingFailed = false;
+      listingLoaded = account.account != null;
     } catch (_) {
       listingFailed = true;
       rethrow;
@@ -666,10 +672,14 @@ class RemoteAgentController extends ChangeNotifier {
       throw StateError('Could not clear the finished setup. Retry.');
     }
     pending = null;
+    createdAgent = pubkey;
     await accountSecureStorage.delete(
       key: '$scope:instructions:${setup['request']}',
     );
   });
+
+  /// The agent the last successful [create] finished setting up.
+  String? createdAgent;
 
   /// Whether [pending] provably has no server identity: registration was never
   /// sent, or the server explicitly rejected it.
