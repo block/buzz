@@ -11507,8 +11507,8 @@ void main() {
           avatarShape(isAgent: true, side: (shape as OutlinedBorder).side),
         );
       }
-      // As on desktop, the reply branch waits for a reply.
-      expect(connector, findsNothing);
+      // Working activity already belongs to the thread.
+      expect(connector, findsOneWidget);
       expect(
         find.descendant(of: row, matching: find.text('+1')),
         findsOneWidget,
