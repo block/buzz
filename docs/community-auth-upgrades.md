@@ -224,3 +224,55 @@ capability from mandatory evidence.
 This is admission enforcement only. Existing requests and sockets may predate the
 new policy. Only BUZZ-512's application and drain evidence may establish completed
 activation; the operator receipt remains pending until that evidence is recorded.
+
+### Staging and containment
+
+This changes every serving host, including free hosts: protected routes and
+discovery now require a primary policy read. Unmapped discovery previously could
+return a generic document; it now returns 404. Policy failures return 503.
+Database-source startup loads its binding snapshot even in Off and fails startup
+if that load fails. The local dependency gauge
+`buzz_nip_fi_required_admission_ready` must be 1 before accepting any upgrade;
+it covers verifier, deny map and finite lifetime, not fleet baseline verification.
+Binding and JWKS readiness must also be verified through a signed request.
+
+Keep `BUZZ_NIP_FI_UPGRADES_ENABLED=false` during the initial staging rollout.
+Start with zero required rows and record a 30-minute baseline using representative
+free signed/unsigned HTTP, root/audio WS and discovery traffic. Compare identical
+traffic before and after this change. Record request rate, policy-read p95/p99,
+writer pool acquisition p99 (`buzz_db_pool_acquire_duration_seconds`,
+`pool_role=writer`, `operation=authorization`), policy timeout/error count, HTTP
+503 rate and startup/restart success. A local PostgreSQL 16 probe measured 100
+serial reads in 13.36 ms; that is not a production capacity result.
+
+Initial staging abort criteria (validate before increasing traffic): any policy
+timeout, policy-induced 503, unexpected free-admission denial or startup failure;
+policy-read p99 above 50 ms; writer acquisition p99 above 20 ms or more than twice
+its pre-change baseline; total 503 rate more than 0.1 percentage point above
+baseline over five minutes. These are conservative rollout limits, not measured
+production guarantees. Do not expand until the full 30-minute run stays within
+them and the operator has reviewed measured results. Verify unknown-host 404 and
+dependency-failure 503 with no-store explicitly.
+
+Then test a disposable required community with complete FI dependencies, in both
+Off and Shadow: unsigned/missing evidence denies, signed valid FI succeeds,
+root/audio upgrades agree, discovery agrees, and a pending deletion request does
+not weaken the requirement. Before production acceptance, complete BUZZ-512's
+session application/drain and the production baseline-verifier gate. No such
+production verification is established by this PR.
+
+Before any required row exists, an operator may stop the rollout and restore the
+previous binary after verifying the primary contains zero required rows. Once a
+requirement has been accepted, a pre-511 binary is unsafe: it ignores that row.
+Stop new upgrade calls, retain policy and receipt records, and keep an enforcing
+binary while repairing dependencies. If admission cannot be restored, contain the
+affected serving hosts with an operator-approved repair-mode/traffic action;
+never change them to Off as a bypass or clear accepted policy. No automatic fleet
+drain or deployment is prescribed here. Existing receipt recovery remains usable
+while new acceptances are disabled.
+
+Required sessions admitted under global Shadow are real enforced FI sessions.
+The existing global-Shadow admin disconnect path still only observes would-close;
+BUZZ-512 must close these enforced sessions independently of global rollout mode,
+while preserving the separate optional-shadow registry. Do not enable production
+upgrades until this activation/control gap is verified closed.
