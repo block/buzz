@@ -48,7 +48,8 @@ async fn authorize_workflow_read(
     path: &str,
     raw_query: Option<&str>,
     workflow_id: Uuid,
-) -> Result<TenantContext, Response> {
+    method: &'static str,
+) -> Result<(TenantContext, Vec<u8>), Response> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
         .ok_or_else(|| {
@@ -73,7 +74,7 @@ async fn authorize_workflow_read(
         headers,
         bridge::make_nip98_closure_for_admission(
             headers.clone(),
-            "GET",
+            method,
             url,
             None,
             require_auth,
@@ -143,7 +144,7 @@ async fn authorize_workflow_read(
         return Err(not_found());
     }
 
-    Ok(tenant)
+    Ok((tenant, pubkey_bytes))
 }
 
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
@@ -170,8 +171,8 @@ async fn workflow_runs_inner(
     // over request-validation errors. [FI-TRACE-HTTP-INGRESS]
     // Raw query is preserved here; parsing happens after admission.
     let path = format!("/workflows/{workflow_id}/runs");
-    let tenant =
-        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id).await?;
+    let (tenant, _) =
+        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id, "GET").await?;
 
     // Parse query string after admission so malformed params (e.g. ?limit=abc)
     // cannot 400 before the NIP-FI gate fires.  A parse failure after
@@ -244,7 +245,7 @@ async fn run_approvals_inner(
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals");
-    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id).await?;
+    let (tenant, _) = authorize_workflow_read(&state, &headers, &path, None, workflow_id, "GET").await?;
 
     let run = state
         .db
@@ -302,6 +303,250 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
     })
 }
 
+/// Body for the approval decide endpoint.
+#[derive(Debug, Deserialize)]
+pub struct DecideApprovalBody {
+    /// `granted` or `denied`.
+    decision: String,
+    /// Optional note recorded on the approval.
+    note: Option<String>,
+}
+
+/// `POST /workflows/{workflow_id}/runs/{run_id}/approvals/{approval_ref}/decide`
+///
+/// Grants or denies a pending approval gate (WF-08). On grant the run
+/// resumes after the gate step; on deny the run fails. `approval_ref` is the
+/// hex-encoded stored token hash from the approvals listing.
+pub async fn decide_approval(
+    State(state): State<Arc<AppState>>,
+    Path((workflow_id, run_id, approval_ref)): Path<(Uuid, Uuid, String)>,
+    headers: HeaderMap,
+    axum::extract::Json(body): axum::extract::Json<DecideApprovalBody>,
+) -> Response {
+    decide_approval_inner(state, workflow_id, run_id, approval_ref, headers, body)
+        .await
+        .into_response()
+}
+
+async fn decide_approval_inner(
+    state: Arc<AppState>,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    approval_ref: String,
+    headers: HeaderMap,
+    body: DecideApprovalBody,
+) -> Result<Json<Value>, Response> {
+    let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals/{approval_ref}/decide");
+    let (tenant, pubkey_bytes) =
+        authorize_workflow_read(&state, &headers, &path, None, workflow_id, "POST").await?;
+    let community = tenant.community();
+
+    let granted = match body.decision.as_str() {
+        "granted" => true,
+        "denied" => false,
+        _ => {
+            return Err(
+                api_error(StatusCode::BAD_REQUEST, "decision must be granted or denied")
+                    .into_response(),
+            )
+        }
+    };
+
+    let token_hash = hex::decode(approval_ref.trim()).map_err(|_| {
+        api_error(StatusCode::BAD_REQUEST, "approval_ref is not hex").into_response()
+    })?;
+    if token_hash.len() != 32 {
+        return Err(
+            api_error(StatusCode::BAD_REQUEST, "approval_ref must be a 32-byte hash").into_response(),
+        );
+    }
+
+    let run = state.db.get_workflow_run(community, run_id).await.map_err(|error| match error {
+        buzz_db::error::DbError::NotFound(_) => {
+            api_error(StatusCode::NOT_FOUND, "workflow run not found").into_response()
+        }
+        other => internal_error(&format!("get workflow run for decide: {other}")).into_response(),
+    })?;
+    if run.workflow_id != workflow_id {
+        return Err(api_error(StatusCode::NOT_FOUND, "workflow run not found").into_response());
+    }
+
+    let approval = state
+        .db
+        .get_approval_by_stored_hash(community, &token_hash)
+        .await
+        .map_err(|error| match error {
+            buzz_db::error::DbError::NotFound(_) => {
+                api_error(StatusCode::NOT_FOUND, "approval not found").into_response()
+            }
+            other => internal_error(&format!("get approval for decide: {other}")).into_response(),
+        })?;
+    if approval.run_id != run_id || approval.workflow_id != workflow_id {
+        return Err(api_error(StatusCode::NOT_FOUND, "approval not found").into_response());
+    }
+    if !matches!(
+        approval.status,
+        buzz_db::workflow::ApprovalStatus::Pending
+    ) {
+        return Err(api_error(StatusCode::CONFLICT, "approval is already decided").into_response());
+    }
+    if !matches!(run.status, buzz_db::workflow::RunStatus::WaitingApproval) {
+        return Err(api_error(StatusCode::CONFLICT, "run is not waiting for approval").into_response());
+    }
+    if approval.expires_at <= Utc::now() {
+        let _ = state
+            .db
+            .update_approval_by_stored_hash(
+                community,
+                &token_hash,
+                buzz_db::workflow::ApprovalStatus::Expired,
+                None,
+                None,
+            )
+            .await;
+        let _ = state
+            .db
+            .update_workflow_run(
+                community,
+                run_id,
+                buzz_db::workflow::RunStatus::Failed,
+                approval.step_index,
+                &run.execution_trace,
+                Some(buzz_db::workflow::WorkflowRunFailure {
+                    code: "approval_expired",
+                    message: "approval window elapsed without a decision",
+                }),
+            )
+            .await;
+        return Err(api_error(StatusCode::GONE, "approval window has expired").into_response());
+    }
+
+    if !approver_spec_satisfied(&approval.approver_spec, &hex::encode(&pubkey_bytes)) {
+        return Err(
+            api_error(StatusCode::FORBIDDEN, "approver is not authorized for this gate")
+                .into_response(),
+        );
+    }
+
+    let new_status = if granted {
+        buzz_db::workflow::ApprovalStatus::Granted
+    } else {
+        buzz_db::workflow::ApprovalStatus::Denied
+    };
+    let updated = state
+        .db
+        .update_approval_by_stored_hash(
+            community,
+            &token_hash,
+            new_status,
+            Some(&pubkey_bytes),
+            body.note.as_deref(),
+        )
+        .await
+        .map_err(|error| internal_error(&format!("update approval: {error}")).into_response())?;
+    if !updated {
+        return Err(api_error(StatusCode::CONFLICT, "approval is already decided").into_response());
+    }
+
+    if !granted {
+        state
+            .db
+            .update_workflow_run(
+                community,
+                run_id,
+                buzz_db::workflow::RunStatus::Failed,
+                approval.step_index,
+                &run.execution_trace,
+                Some(buzz_db::workflow::WorkflowRunFailure {
+                    code: "approval_denied",
+                    message: body.note.as_deref().unwrap_or("approval denied"),
+                }),
+            )
+            .await
+            .map_err(|error| internal_error(&format!("fail denied run: {error}")).into_response())?;
+        return Ok(Json(serde_json::json!({
+            "status": "denied",
+            "run_id": run_id,
+            "step_index": approval.step_index,
+        })));
+    }
+
+    // Granted: resume after the gate step with pre-approval outputs restored.
+    let workflow = state.db.get_workflow(community, workflow_id).await.map_err(|error| {
+        internal_error(&format!("get workflow for resume: {error}")).into_response()
+    })?;
+    let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
+        .map_err(|error| internal_error(&format!("parse workflow definition: {error}")).into_response())?;
+    let trigger_ctx: buzz_workflow::executor::TriggerContext = match run.trigger_context.clone() {
+        Some(value) => serde_json::from_value(value)
+            .map_err(|error| internal_error(&format!("parse trigger context: {error}")).into_response())?,
+        None => buzz_workflow::executor::TriggerContext::default(),
+    };
+    let mut outputs = step_outputs_from_trace(&run.execution_trace);
+    outputs.insert(
+        approval.step_id.clone(),
+        serde_json::json!({
+            "approved": true,
+            "approver": hex::encode(&pubkey_bytes),
+            "note": body.note,
+        }),
+    );
+    let existing_trace: Vec<Value> = run.execution_trace.as_array().cloned().unwrap_or_default();
+    let resume_from = (approval.step_index + 1).max(0) as usize;
+
+    let engine = Arc::clone(&state.workflow_engine);
+    tokio::spawn(async move {
+        let result = buzz_workflow::executor::execute_from_step(
+            &engine,
+            community,
+            run_id,
+            &def,
+            &trigger_ctx,
+            resume_from,
+            Some(outputs),
+        )
+        .await;
+        engine.finalize_run(community, run_id, result, Some(existing_trace)).await;
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "resumed",
+        "run_id": run_id,
+        "resume_from_step": resume_from,
+    })))
+}
+
+/// True when `proven_pubkey_hex` may act on a gate with this approver spec.
+///
+/// A 64-hex-char spec (optionally `@`-prefixed) names one pubkey and must
+/// match exactly. Anything else is a role spec with no resolver yet, so any
+/// admitted community reader may decide. Follow-up: resolve roles to pubkeys.
+fn approver_spec_satisfied(spec: &str, proven_pubkey_hex: &str) -> bool {
+    let trimmed = spec.strip_prefix('@').unwrap_or(spec).trim();
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return trimmed.eq_ignore_ascii_case(proven_pubkey_hex);
+    }
+    true
+}
+
+/// Rebuild pre-gate step outputs from the persisted execution trace.
+///
+/// Trace entries written by the executor carry `step_id`, `status`, and
+/// `output`; only completed steps contribute outputs for `{{steps.*}}`.
+fn step_outputs_from_trace(trace: &Value) -> std::collections::HashMap<String, Value> {
+    let mut outputs = std::collections::HashMap::new();
+    for entry in trace.as_array().cloned().unwrap_or_default() {
+        let step_id = entry.get("step_id").and_then(Value::as_str);
+        let status = entry.get("status").and_then(Value::as_str);
+        if let (Some(id), Some("completed")) = (step_id, status) {
+            if let Some(output) = entry.get("output").cloned() {
+                outputs.insert(id.to_string(), output);
+            }
+        }
+    }
+    outputs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +581,35 @@ mod tests {
         let wire = approval_json(&approval);
         assert!(wire.get("token").is_none());
         assert_eq!(wire["approval_ref"], hex::encode([0xab; 32]));
+    }
+
+    #[test]
+    fn approver_spec_pubkey_must_match_exactly() {
+        let key = "ab".repeat(32);
+        assert!(approver_spec_satisfied(&key, &key));
+        assert!(approver_spec_satisfied(&format!("@{key}"), &key));
+        assert!(approver_spec_satisfied(&key.to_uppercase(), &key));
+        assert!(!approver_spec_satisfied(&"cd".repeat(32), &key));
+    }
+
+    #[test]
+    fn approver_role_spec_falls_back_to_membership() {
+        // No role resolver yet: any admitted reader may decide.
+        assert!(approver_spec_satisfied("@release-manager", &"ab".repeat(32)));
+        assert!(approver_spec_satisfied("any", &"ab".repeat(32)));
+    }
+
+    #[test]
+    fn trace_outputs_rebuild_only_completed_steps() {
+        let trace = serde_json::json!([
+            {"step_id": "a", "status": "completed", "output": {"x": 1}},
+            {"step_id": "b", "status": "skipped"},
+            {"step_id": "c", "status": "completed", "output": [1, 2]},
+        ]);
+        let outputs = step_outputs_from_trace(&trace);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs["a"], serde_json::json!({"x": 1}));
+        assert_eq!(outputs["c"], serde_json::json!([1, 2]));
+        assert!(step_outputs_from_trace(&serde_json::json!({})).is_empty());
     }
 }
