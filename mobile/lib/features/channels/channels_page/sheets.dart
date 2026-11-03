@@ -84,7 +84,9 @@ class _CreateChannelSheet extends HookConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _CreateChannelFieldLabel(label: 'Name'),
+                const ExcludeSemantics(
+                  child: _CreateChannelFieldLabel(label: 'Name'),
+                ),
                 const SizedBox(height: Grid.xxs),
                 _CreateChannelFieldShell(
                   label: 'Name',
@@ -115,9 +117,11 @@ class _CreateChannelSheet extends HookConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: Grid.xs),
-                const _CreateChannelFieldLabel(
-                  label: 'Description',
-                  optional: true,
+                const ExcludeSemantics(
+                  child: _CreateChannelFieldLabel(
+                    label: 'Description',
+                    optional: true,
+                  ),
                 ),
                 const SizedBox(height: Grid.xxs),
                 _CreateChannelFieldShell(

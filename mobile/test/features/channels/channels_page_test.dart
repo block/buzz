@@ -2766,6 +2766,8 @@ void main() {
   testWidgets(
     'create channel sheet uses checked menus and a validated header action',
     (tester) async {
+      final semantics = tester.ensureSemantics();
+      addTearDown(semantics.dispose);
       tester.view.physicalSize = const Size(390, 800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -2811,6 +2813,25 @@ void main() {
       expect(find.byTooltip('Close'), findsOneWidget);
       expect(find.text('Name'), findsOneWidget);
       expect(find.text('Description  Optional'), findsOneWidget);
+      void expectSingleFieldLabels() {
+        final nodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          nodes.add(node);
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
+
+        collect(tester.getSemantics(find.byType(BottomSheet).last));
+        for (final label in ['Name', 'Description']) {
+          final matches = nodes.where((node) => node.label.contains(label));
+          expect(matches, hasLength(1));
+          expect(matches.single.flagsCollection.isTextField, isTrue);
+        }
+      }
+
+      expectSingleFieldLabels();
       expect(find.text('Channel type'), findsOneWidget);
       expect(find.text('Ongoing'), findsOneWidget);
       expect(find.text('Temporary'), findsNothing);
@@ -2835,6 +2856,7 @@ void main() {
         'ttl': null,
       });
       expect(find.text('Bad state: Try again'), findsOneWidget);
+      expectSingleFieldLabels();
 
       final nameField = tester.widget<TextField>(
         find.byKey(const Key('create-channel-name')),

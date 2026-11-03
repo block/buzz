@@ -190,6 +190,11 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 2 ? (temporary ? 3 : 2) : 1 }
   override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? { section == 0 ? "Name" : section == 1 ? "Description · Optional" : nil }
 
+  override func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
+    // The editable field owns the label; its visual heading is decorative.
+    if section < 2 { view.accessibilityElementsHidden = true }
+  }
+
   override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
     let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
     cell.backgroundColor = rowColor
