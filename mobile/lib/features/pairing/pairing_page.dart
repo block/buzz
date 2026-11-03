@@ -459,7 +459,12 @@ class PairingPage extends HookConsumerWidget {
                 child: Material(
                   color: Colors.transparent,
                   child: TextButton(
-                    onPressed: () => ref.read(pairingProvider.notifier).reset(),
+                    onPressed: () {
+                      ref.read(pairingProvider.notifier).reset();
+                      if (identityRecoveryOnly) {
+                        Navigator.of(context).pop();
+                      }
+                    },
                     child: const Text('Cancel'),
                   ),
                 ),
