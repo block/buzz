@@ -539,6 +539,26 @@ fn check_deletion_privacy_k_tag(event: &Event, target_kind: u32) -> anyhow::Resu
     Ok(())
 }
 
+/// True when `actor` may change a channel's privileged metadata: a channel
+/// owner or admin, or the owning human of an active owner-role agent in the
+/// channel, even when that human is not a member (this diverges from
+/// kind:9001 intentionally).
+async fn actor_has_channel_authority(
+    state: &Arc<AppState>,
+    community_id: buzz_core::CommunityId,
+    channel_id: Uuid,
+    actor_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    let members = state.db.get_members(community_id, channel_id).await?;
+    if members
+        .iter()
+        .any(|m| m.pubkey == actor_bytes && (m.role == "owner" || m.role == "admin"))
+    {
+        return Ok(true);
+    }
+    actor_owns_any_owner_agent(state, community_id, &members, actor_bytes).await
+}
+
 /// Returns `true` if `actor_bytes` is the NIP-OA owner of **any** active owner-role
 /// member in `members`. Used by kind:9002 and kind:9008 to authorize the owning
 /// human of a channel's agent-owner(s) even when the human is not a channel member.
@@ -654,23 +674,10 @@ pub async fn validate_admin_event(
         }
         9002 => {
             // EDIT_METADATA: require at least one recognized metadata tag.
-            const RECOGNIZED_TAGS: &[&str] = &[
-                "name",
-                "about",
-                "archived",
-                "topic",
-                "purpose",
-                "visibility",
-                "ttl",
-                "t",
-                "join_role",
-                "unlisted",
-                "auto_join",
-            ];
             let has_recognized = event
                 .tags
                 .iter()
-                .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
+                .any(|t| is_metadata_tag(&t.kind().to_string()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
                     "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join)"
@@ -824,45 +831,32 @@ pub async fn validate_admin_event(
             // require owner/admin; topic/purpose allow any member who may
             // post; auto_join was decided above by relay role, so an event
             // carrying only that tag needs neither.
-            let has_member_tag = event.tags.iter().any(|t| {
-                let k = t.kind().to_string();
-                k == "topic" || k == "purpose"
-            });
-            let has_privileged_tag = event.tags.iter().any(|t| {
-                let k = t.kind().to_string();
-                k == "name"
-                    || k == "about"
-                    || k == "archived"
-                    || k == "visibility"
-                    || k == "ttl"
-                    || k == "t"
-                    || k == "join_role"
-                    || k == "unlisted"
-            });
+            let has_member_tag = event
+                .tags
+                .iter()
+                .any(|t| MEMBER_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
+            let has_privileged_tag = event
+                .tags
+                .iter()
+                .any(|t| PRIVILEGED_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
             if has_privileged_tag {
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    _ => {
-                        // Allow the owning human of any active owner-role agent in the
-                        // channel, even when the human is not a channel member —
-                        // diverges from kind:9001 intentionally.
-                        if actor_owns_any_owner_agent(
-                            state,
-                            tenant.community(),
-                            &members,
-                            &actor_bytes,
-                        )
-                        .await?
-                        {
-                            return Ok(());
-                        }
-                        Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
-                        ))
-                    }
+                if actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes)
+                    .await?
+                {
+                    return Ok(());
                 }
+                // A relay operator may rename a listed channel, so that
+                // duplicate names can be repaired through this path
+                // (scripts/maintenance/rename_duplicate_listed_channel_names.sh).
+                // Every other privileged change still needs a channel owner
+                // or admin. The store checks "listed" again under the row
+                // lock (`ChannelMetadataEdit::operator_rename`).
+                if operator_may_rename(state, event, &channel).await? {
+                    return Ok(());
+                }
+                Err(anyhow::anyhow!(
+                    "actor not authorized for name/about/archived/visibility/ttl/label/join_role/unlisted changes"
+                ))
             } else if has_member_tag {
                 // topic/purpose: any member whose role may post (never a
                 // guest).
@@ -894,7 +888,7 @@ pub async fn validate_admin_event(
                 Ok(())
             } else {
                 // Every recognized tag must be authorized by one of the arms
-                // above; a tag added to `RECOGNIZED_TAGS` but to neither list
+                // above; a tag added to `is_metadata_tag` but to no rule
                 // is refused rather than accepted with no authorization.
                 Err(anyhow::anyhow!(
                     "kind:9002 metadata tag has no authorization rule"
@@ -1295,6 +1289,71 @@ async fn emit_typed_membership_notification(
         "membership notification emitted"
     );
     Ok(())
+}
+
+/// kind:9002 tags that only a channel owner or admin may change.
+const PRIVILEGED_METADATA_TAGS: &[&str] = &[
+    "name",
+    "about",
+    "archived",
+    "visibility",
+    "ttl",
+    "t",
+    "join_role",
+    "unlisted",
+];
+
+/// kind:9002 tags that any member who may post may change.
+const MEMBER_METADATA_TAGS: &[&str] = &["topic", "purpose"];
+
+/// kind:9002 tags that a relay owner or admin may change, whatever their
+/// channel role.
+const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join"];
+
+/// True when `kind` is a kind:9002 tag that changes channel metadata.
+fn is_metadata_tag(kind: &str) -> bool {
+    PRIVILEGED_METADATA_TAGS.contains(&kind)
+        || MEMBER_METADATA_TAGS.contains(&kind)
+        || RELAY_ROLE_METADATA_TAGS.contains(&kind)
+}
+
+/// True when a relay operator sends `event` and it only renames `channel`, a
+/// listed channel: open, not unlisted, a stream or forum, and not deleted.
+/// Those are the channels whose names must be unique, so this is the repair
+/// path for a duplicate name and grants nothing else.
+async fn operator_may_rename(
+    state: &crate::state::AppState,
+    event: &Event,
+    channel: &buzz_db::channel::ChannelRecord,
+) -> anyhow::Result<bool> {
+    let listed = channel.visibility == "open"
+        && !channel.unlisted
+        && matches!(channel.channel_type.as_str(), "stream" | "forum")
+        && channel.deleted_at.is_none();
+    Ok(listed
+        && is_rename_only(event)
+        && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?)
+}
+
+/// True when the only metadata a kind:9002 changes is the channel name.
+fn is_rename_only(event: &Event) -> bool {
+    let mut changes = event
+        .tags
+        .iter()
+        .map(|t| t.kind().to_string())
+        .filter(|kind| is_metadata_tag(kind));
+    changes.all(|kind| kind == "name") && event.tags.iter().any(|t| t.kind().to_string() == "name")
+}
+
+/// True when `pubkey` holds the relay operator role. A roster lookup failure
+/// is an error, never "not an operator".
+async fn actor_is_relay_operator(
+    state: &crate::state::AppState,
+    pubkey: [u8; 32],
+) -> anyhow::Result<bool> {
+    crate::api::admin::is_relay_operator(state, pubkey)
+        .await
+        .map_err(|e| anyhow::anyhow!("relay staff lookup failed: {}", e.message))
 }
 
 /// Sign, store (replacing previous), and fan-out a single addressable discovery event.
@@ -2174,6 +2233,16 @@ pub(crate) async fn persist_edit_metadata(
     if let Some(labels) = channel_labels_from_tags(event) {
         edit.columns.labels = Some(labels.map_err(|e| anyhow::anyhow!("{e}"))?);
     }
+    // A relay operator may rename a listed channel, archived ones included,
+    // whatever the operator's channel role, so that duplicate names can be
+    // repaired. Without channel authority the rename applies only to a
+    // listed channel. The store decides both under the channel row lock, so
+    // an owner who makes the channel private or unlisted meanwhile is seen.
+    // Channel authority is looked up only for an operator's rename.
+    edit.operator_rename =
+        is_rename_only(event) && actor_is_relay_operator(state, event.pubkey.to_bytes()).await?;
+    edit.channel_authority = edit.operator_rename
+        && actor_has_channel_authority(state, tenant.community(), channel_id, &actor_bytes).await?;
 
     let now = chrono::Utc::now();
     let mut notices = Vec::new();
@@ -2508,17 +2577,14 @@ async fn handle_create_group(
         .unwrap_or_default();
     let unlisted = create_unlisted_from_tags(event)?;
 
-    // If the event has an h-tag UUID, ingest_event() already created the channel
-    // via create_channel_with_id(). Fetch it rather than creating a duplicate.
-    // If no h-tag, fall back to the original auto-UUID creation path.
+    // Ingest already created the channel named by the h tag, in the same
+    // commit as this event. Fetch it rather than creating a duplicate.
     //
-    // Double-count analysis (C5): the counter increments below do NOT
-    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
-    // was_created=true and this handler only reaches create_channel() on a DB
-    // lookup Err — an error recovery path where ingest's channel is
-    // inaccessible, so the counter correctly records a new creation. For the
-    // no-h-tag path, ingest never creates the channel, so this is the sole
-    // increment.
+    // Double-count analysis (C5): the counter increment below does NOT
+    // double-count vs. ingest.rs. Ingest increments on was_created=true and
+    // this handler only reaches create_channel() on a DB lookup Err — an
+    // error recovery path where ingest's channel is inaccessible, so the
+    // counter correctly records a new creation.
     // `members_added`: ingest's create also added the event's `p` tags.
     let (channel, members_added) = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state
@@ -2554,27 +2620,8 @@ async fn handle_create_group(
             }
         }
     } else {
-        let ch = state
-            .db
-            .create_labeled_channel(
-                tenant.community(),
-                &name,
-                channel_type,
-                visibility,
-                description.as_deref(),
-                &actor_bytes,
-                ttl_seconds,
-                &labels,
-                unlisted,
-            )
-            .await?;
-        metrics::counter!(
-            "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
-            "type" => channel_type.to_string()
-        )
-        .increment(1);
-        (ch, false)
+        // Ingest refuses a kind:9007 without an `h` tag before storing it.
+        anyhow::bail!("missing or invalid h tag");
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.

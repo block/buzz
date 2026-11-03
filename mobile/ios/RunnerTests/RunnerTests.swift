@@ -9,6 +9,39 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testRejectedCommunityEntryPresentationCompletesAndAllowsRetry() throws {
+    let messenger = NavigationTestMessenger()
+    let presenter = RejectedCommunityEntryPresenter()
+    let window = UIWindow(frame: UIScreen.main.bounds)
+    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    window.rootViewController = presenter
+    window.makeKeyAndVisible()
+    defer { window.isHidden = true }
+    let coordinator = NativeCommunityEntryCoordinator(messenger: messenger)
+    for session in [1, 2] {
+      var reply: Any?
+      messenger.invoke("present", arguments: ["session": session, "name": "Local test", "invite": true]) { reply = $0 }
+      XCTAssertEqual((reply as? FlutterError)?.code, "presentation_failed")
+      XCTAssertEqual(presenter.attempts, session)
+    }
+    let root = UIViewController()
+    window.rootViewController = root
+    window.makeKeyAndVisible()
+    let temporary = UIViewController()
+    let presented = expectation(description: "Temporary native modal appeared")
+    root.present(temporary, animated: false) { presented.fulfill() }
+    wait(for: [presented], timeout: 2)
+    XCTAssertTrue(root.presentedViewController === temporary)
+    XCTAssertNotNil(temporary.view.window)
+    var reply: Any?
+    messenger.invoke("present", arguments: ["session": 3, "name": "Local test", "invite": true]) { reply = $0 }
+    XCTAssertEqual((reply as? FlutterError)?.code, "presentation_failed")
+    XCTAssertNil(temporary.presentedViewController)
+    root.dismiss(animated: false)
+    withExtendedLifetime(coordinator) {}
+  }
+
+  @MainActor
   func testCustomFlutterHeaderUsesDecorativeSoftEdge() throws {
     guard #available(iOS 27.0, *) else { return }
     let messenger = NavigationTestMessenger()
@@ -2083,5 +2116,13 @@ private final class NavigationTestMessenger: NSObject, FlutterBinaryMessenger {
       FlutterMethodCall(methodName: "scroll", arguments: offset)
     )
     handler?(message) { _ in }
+  }
+}
+
+private final class RejectedCommunityEntryPresenter: UIViewController {
+  var attempts = 0
+  override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
+    // Reproduce UIKit declining a presentation during a scene transition.
+    attempts += 1
   }
 }

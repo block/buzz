@@ -7,17 +7,17 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
-import '../../shared/custom_emoji/custom_emoji.dart';
-import '../../shared/custom_emoji/custom_emoji_provider.dart';
-import '../../shared/custom_emoji/custom_emoji_render.dart';
-import '../../shared/emoji/emoji_data.dart';
-import '../../shared/emoji/emoji_data_provider.dart';
-import '../../shared/emoji/emoji_search.dart';
-import '../../shared/emoji/native_emoji_glyph.dart';
-import '../../shared/relay/relay.dart';
-import '../../shared/theme/theme.dart';
-import '../../shared/widgets/buzz_sheet_header.dart';
-import '../../shared/widgets/modal_presentation.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
+import '../emoji/emoji_data.dart';
+import '../emoji/emoji_data_provider.dart';
+import '../emoji/emoji_search.dart';
+import '../emoji/native_emoji_glyph.dart';
+import '../relay/relay.dart';
+import '../theme/theme.dart';
+import '../widgets/buzz_sheet_header.dart';
+import '../widgets/modal_presentation.dart';
 import 'recent_emoji_provider.dart';
 
 part 'emoji_picker/search_field.dart';
@@ -30,6 +30,7 @@ part 'emoji_picker/ios_native_picker.dart';
 const _sheetHeightFactor = 0.62;
 
 /// Opens the full emoji picker as a modal bottom sheet.
+/// [nativeEmojiOnly] excludes community images for text-based avatar artwork.
 ///
 /// [onSelect] receives a single string, normalized the same way desktop's
 /// `EmojiPicker` normalizes its selection: a standard emoji emits its glyph, a
@@ -39,6 +40,7 @@ void showEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
+  bool nativeEmojiOnly = false,
 }) {
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     unawaited(
@@ -46,6 +48,7 @@ void showEmojiPicker({
         context: context,
         onSelect: onSelect,
         onDismiss: onDismiss,
+        nativeEmojiOnly: nativeEmojiOnly,
       ),
     );
     return;
@@ -55,6 +58,7 @@ void showEmojiPicker({
     context: context,
     onSelect: onSelect,
     onDismiss: onDismiss,
+    nativeEmojiOnly: nativeEmojiOnly,
   );
 }
 
@@ -62,12 +66,14 @@ void _showFlutterEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
+  bool nativeEmojiOnly = false,
 }) {
   showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showCloseButton: false,
     builder: (sheetContext) => EmojiPickerSheet(
+      nativeEmojiOnly: nativeEmojiOnly,
       onSelect: (emoji) {
         Navigator.of(sheetContext).pop();
         onSelect(emoji);
@@ -79,26 +85,40 @@ void _showFlutterEmojiPicker({
 class EmojiPickerSheet extends HookConsumerWidget {
   final void Function(String emoji) onSelect;
 
-  const EmojiPickerSheet({super.key, required this.onSelect});
+  const EmojiPickerSheet({
+    super.key,
+    required this.onSelect,
+    this.nativeEmojiOnly = false,
+  });
+  final bool nativeEmojiOnly;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SizedBox(
       height: MediaQuery.sizeOf(context).height * _sheetHeightFactor,
-      child: _EmojiPickerContent(onSelect: onSelect),
+      child: _EmojiPickerContent(
+        onSelect: onSelect,
+        nativeEmojiOnly: nativeEmojiOnly,
+      ),
     );
   }
 }
 
 class _EmojiPickerContent extends HookConsumerWidget {
-  const _EmojiPickerContent({required this.onSelect});
+  const _EmojiPickerContent({
+    required this.onSelect,
+    required this.nativeEmojiOnly,
+  });
+  final bool nativeEmojiOnly;
 
   final void Function(String emoji) onSelect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final dataset = ref.watch(emojiDatasetOrEmptyProvider);
-    final customEmoji = ref.watch(customEmojiListProvider);
+    final customEmoji = nativeEmojiOnly
+        ? const <CustomEmoji>[]
+        : ref.watch(customEmojiListProvider);
     final recent = ref.watch(recentEmojiProvider);
     final prefs = ref.read(savedPrefsProvider);
     final skinTone = useState(
@@ -132,13 +152,14 @@ class _EmojiPickerContent extends HookConsumerWidget {
 
     final sections = useMemoized(
       () => _buildSections(
+        large: nativeEmojiOnly,
         dataset: visibleDataset,
         sourceDataset: dataset,
         customEmoji: customEmoji,
         recent: recent,
         onSelect: select,
       ),
-      [visibleDataset, dataset, customEmoji, recent],
+      [visibleDataset, dataset, customEmoji, recent, nativeEmojiOnly],
     );
     final offsets = useMemoized(() => _sectionOffsets(sections), [sections]);
     final scrollController = useScrollController();
@@ -208,48 +229,51 @@ class _EmojiPickerContent extends HookConsumerWidget {
       [trimmedQuery, customEmoji],
     );
 
-    return Column(
-      children: [
-        LayoutBuilder(
-          builder: (context, constraints) => BuzzSheetHeader(
-            showDragHandle: true,
-            leading: SizedBox(
-              width: constraints.maxWidth - Grid.gutter * 2 - 44 - Grid.xxs,
-              child: _EmojiSearchField(
-                controller: searchController,
-                padding: EdgeInsets.zero,
+    return _EmojiGridSizing(
+      large: nativeEmojiOnly,
+      child: Column(
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) => BuzzSheetHeader(
+              showDragHandle: true,
+              leading: SizedBox(
+                width: constraints.maxWidth - Grid.gutter * 2 - 44 - Grid.xxs,
+                child: _EmojiSearchField(
+                  controller: searchController,
+                  padding: EdgeInsets.zero,
+                ),
               ),
             ),
           ),
-        ),
-        if (!isSearching && sections.isNotEmpty)
-          ValueListenableBuilder<int>(
-            valueListenable: activeSection,
-            builder: (context, active, _) => _CategoryRail(
-              sections: sections,
-              activeIndex: active,
-              onSelect: jumpToSection,
-              skinTone: skinTone.value,
-              onSkinToneChanged: selectSkinTone,
+          if (!isSearching && sections.isNotEmpty)
+            ValueListenableBuilder<int>(
+              valueListenable: activeSection,
+              builder: (context, active, _) => _CategoryRail(
+                sections: sections,
+                activeIndex: active,
+                onSelect: jumpToSection,
+                skinTone: skinTone.value,
+                onSkinToneChanged: selectSkinTone,
+              ),
             ),
+          Divider(height: 1, color: context.colors.outlineVariant),
+          Expanded(
+            child: dataset.isEmpty && customEmoji.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : isSearching
+                ? _EmojiSearchResults(
+                    entries: results,
+                    customEmoji: customResults,
+                    onSelect: select,
+                    controller: scrollController,
+                  )
+                : _ContinuousEmojiGrid(
+                    sections: sections,
+                    controller: scrollController,
+                  ),
           ),
-        Divider(height: 1, color: context.colors.outlineVariant),
-        Expanded(
-          child: dataset.isEmpty && customEmoji.isEmpty
-              ? const Center(child: CircularProgressIndicator())
-              : isSearching
-              ? _EmojiSearchResults(
-                  entries: results,
-                  customEmoji: customResults,
-                  onSelect: select,
-                  controller: scrollController,
-                )
-              : _ContinuousEmojiGrid(
-                  sections: sections,
-                  controller: scrollController,
-                ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -261,6 +285,7 @@ class _EmojiPickerContent extends HookConsumerWidget {
 /// empty section is a gap with a label on it, and the rail entry would lead
 /// nowhere.
 List<_EmojiSection> _buildSections({
+  bool large = false,
   required EmojiDataset dataset,
   required EmojiDataset sourceDataset,
   required List<CustomEmoji> customEmoji,
@@ -279,6 +304,7 @@ List<_EmojiSection> _buildSections({
   if (recentTiles.isNotEmpty) {
     sections.add(
       _EmojiSection(
+        large: large,
         id: 'frequent',
         label: 'Frequently used',
         icon: BuzzIcons.clock,
@@ -291,6 +317,7 @@ List<_EmojiSection> _buildSections({
   for (final category in dataset.categories) {
     sections.add(
       _EmojiSection(
+        large: large,
         id: category.id,
         label: category.label,
         icon: _categoryIcon(category.id),
@@ -306,6 +333,7 @@ List<_EmojiSection> _buildSections({
   if (customEmoji.isNotEmpty) {
     sections.add(
       _EmojiSection(
+        large: large,
         id: 'custom',
         label: 'Custom',
         icon: BuzzIcons.sparkles,

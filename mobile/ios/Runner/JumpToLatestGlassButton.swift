@@ -46,6 +46,13 @@ final class NavigationGlassButton: UIButton {
   var menuVisibilityChanged: ((Bool) -> Void)?
   var animateMenu: ((Bool, UIContextMenuInteractionAnimating?) -> Void)?
   weak var glassPreview: UIView?
+  var onHighlightChanged: ((Bool) -> Void)?
+
+  override var isHighlighted: Bool {
+    didSet {
+      if oldValue != isHighlighted { onHighlightChanged?(isHighlighted) }
+    }
+  }
 
   override func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
@@ -266,6 +273,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     if arguments?["plain"] as? Bool == true || arguments?["mergingNavigation"] as? Bool == true { configuration = .plain() }
     configuration.cornerStyle = .capsule
     button.configuration = configuration
+    button.onHighlightChanged = { [weak self] highlighted in
+      self?.channel.invokeMethod("highlighted", arguments: highlighted)
+    }
     applyContent(from: arguments)
     button.titleLabel?.numberOfLines = 1
     button.titleLabel?.lineBreakMode = .byClipping
@@ -275,6 +285,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       bottom: max(0, (hitTargetHeight - controlSize) / 2),
       right: max(0, hitTargetWidth - buttonCenterX - controlWidth / 2)
     )
+    containerView.accessibilityElementsHidden = arguments?["accessibilityHidden"] as? Bool ?? false
     button.accessibilityLabel = arguments?["accessibilityLabel"] as? String ?? "Back"
     button.translatesAutoresizingMaskIntoConstraints = false
     button.addAction(
@@ -311,6 +322,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     applyAppearance(from: args)
     channel.setMethodCallHandler { [weak self] call, result in
+      if call.method == "setArtworkPressed" {
+        self?.button.isHighlighted = call.arguments as? Bool ?? false
+        result(nil)
+        return
+      }
       if call.method == "setContent" {
         self?.setContent(from: call.arguments)
         result(nil)
@@ -426,10 +442,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
-    button.isSelected = selected
+    button.isSelected = selected && (arguments?["tintsSelection"] as? Bool ?? true)
     // Resolve label contrast explicitly on the first selected frame as well as
     // later selections; UIKit may retain the initial glass title foreground.
-    labelForegroundColor = selected
+    labelForegroundColor = button.isSelected
       ? (interfaceStyle == .dark ? .black : .white)
       : foregroundColor
     isBusy = busy

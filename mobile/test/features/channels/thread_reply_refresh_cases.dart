@@ -195,4 +195,69 @@ void threadReplyRefreshTests() {
     expect(find.text('Loading replies…'), findsNothing);
     expect(find.text('Couldn’t load replies'), findsNothing);
   });
+  testWidgets('thread loads an edit made to a reply before it opened', (
+    tester,
+  ) async {
+    // The real thread query runs; the relay session is faked. It sends the
+    // reply's earlier edit only to a query that asks for aux events.
+    final edit = NostrEvent(
+      id: 'cached-reply-edit',
+      pubkey: 'bob',
+      createdAt: 1002,
+      kind: EventKind.streamMessageEdit,
+      tags: [
+        const ['h', _channelId],
+        ['e', reply.id],
+      ],
+      content: 'Fixed reply',
+      sig: '',
+    );
+    final session = _ThreadAuxRelaySession([reply], [edit]);
+    await tester.pumpWidget(
+      _buildTestable(messages: [root], relaySessionNotifier: session),
+    );
+    await tester.pumpAndSettle();
+    open(Navigator.of(tester.element(find.byType(ChannelDetailPage))));
+    await tester.pumpAndSettle();
+    final thread = find.byType(ThreadDetailPage);
+    expect(
+      find.descendant(of: thread, matching: find.text('Fixed reply')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: thread, matching: find.text('Cached reply')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: thread, matching: find.text('(edited)')),
+      findsOneWidget,
+    );
+  });
+}
+
+class _ThreadAuxRelaySession extends RelaySessionNotifier {
+  _ThreadAuxRelaySession(this.replies, this.aux);
+  final List<NostrEvent> replies;
+  final List<NostrEvent> aux;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [
+    for (final filter in filters)
+      if (filter.extensions.containsKey('depth_limit')) ...[
+        ...replies,
+        if (filter.extensions['include_aux'] == true) ...aux,
+      ],
+  ];
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
 }
