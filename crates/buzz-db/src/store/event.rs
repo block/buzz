@@ -1511,6 +1511,18 @@ async fn purge_retention_free_events(
     Ok(purged as u64)
 }
 
+/// An event a NIP-09 (kind 5) or NIP-29 (kind 9005) deletion soft-deletes in
+/// the deletion's own insert transaction, with the thread it belongs to.
+#[derive(Clone, Copy, Debug)]
+pub struct DeletionTarget<'a> {
+    /// The event to soft-delete.
+    pub event_id: &'a [u8],
+    /// Its direct parent, whose `reply_count` drops when it is deleted.
+    pub parent_event_id: Option<&'a [u8]>,
+    /// Its thread root, whose `descendant_count` drops when it is deleted.
+    pub root_event_id: Option<&'a [u8]>,
+}
+
 /// Atomically soft-delete an event and decrement thread reply counters.
 ///
 /// Wraps the delete + counter update in a single transaction so a crash between
@@ -2891,6 +2903,57 @@ impl Db {
         }
         tx.commit().await?;
         Ok(result)
+    }
+
+    /// Store a kind 5 / 9005 deletion and soft-delete its `targets` in one
+    /// transaction, so an accepted deletion never leaves its target live.
+    ///
+    /// The targets are soft-deleted even when the deletion is a duplicate, so
+    /// resending a deletion repairs a target an earlier write left live. Ingest
+    /// accepts the resend only within its timestamp window, so this does not
+    /// repair older rows.
+    /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
+    /// tells whether `targets[i]` was soft-deleted by this call.
+    #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
+    pub async fn insert_deletion_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+        targets: &[crate::event::DeletionTarget<'_>],
+    ) -> Result<(StoredEvent, bool, Vec<bool>)> {
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            channel_id,
+            thread_meta,
+        )
+        .await?;
+        if inserted {
+            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
+        }
+        let mut deleted = Vec::with_capacity(targets.len());
+        for target in targets {
+            deleted.push(
+                crate::event::soft_delete_event_and_update_thread_in_tx(
+                    &mut tx,
+                    target.event_id,
+                    target.parent_event_id,
+                    target.root_event_id,
+                )
+                .await?,
+            );
+        }
+        tx.commit().await?;
+        Ok((stored, inserted, deleted))
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
@@ -5718,6 +5781,157 @@ mod postgres_tests {
             thread_meta_count, 0,
             "thread metadata must not persist when mention indexing fails atomically"
         );
+    }
+
+    async fn target_deleted_at(pool: &PgPool, community: Uuid, id: &[u8]) -> Option<DateTime<Utc>> {
+        sqlx::query_scalar("SELECT deleted_at FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read target deleted_at")
+    }
+
+    async fn event_count(pool: &PgPool, community: Uuid, id: &[u8]) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count event rows")
+    }
+
+    fn deletion_of(target: &nostr::Event) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(5), "")
+            .tags(vec![Tag::parse(["e", &target.id.to_hex()]).expect("e tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign deletion")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_deletion_event_target_failure_stores_nothing_and_resend_applies() {
+        let (pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "deletion_target_rollback",
+        )
+        .await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let reaction = make_event_with_kind_and_tags(7, vec![]);
+        db.insert_event(community, &reaction, Some(channel))
+            .await
+            .expect("insert reaction");
+        let deletion = deletion_of(&reaction);
+        let targets = [DeletionTarget {
+            event_id: reaction.id.as_bytes(),
+            parent_event_id: None,
+            root_event_id: None,
+        }];
+
+        sqlx::query(
+            "CREATE FUNCTION reject_test_soft_delete() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected soft-delete failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_soft_delete BEFORE UPDATE ON events \
+             FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) \
+             EXECUTE FUNCTION reject_test_soft_delete()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure injection");
+
+        let error = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect_err("a failed target soft-delete must fail the deletion");
+        assert!(
+            error.to_string().contains("injected soft-delete failure"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            event_count(&pool, community_uuid, deletion.id.as_bytes()).await,
+            0,
+            "the deletion must not be stored while its target stays live"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_none(),
+            "the failed transaction must leave the target as it was"
+        );
+
+        sqlx::query("DROP TRIGGER reject_test_soft_delete ON events")
+            .execute(&pool)
+            .await
+            .expect("remove failure injection");
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend after the failure clears");
+        assert!(inserted, "the resend stores the deletion");
+        assert_eq!(deleted, vec![true]);
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_deletion_event_resend_repairs_a_live_target() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let reaction = make_event_with_kind_and_tags(7, vec![]);
+        db.insert_event(community, &reaction, Some(channel))
+            .await
+            .expect("insert reaction");
+        // A deletion stored by a write that never soft-deleted its target.
+        let deletion = deletion_of(&reaction);
+        db.insert_event(community, &deletion, Some(channel))
+            .await
+            .expect("insert torn deletion");
+        let targets = [DeletionTarget {
+            event_id: reaction.id.as_bytes(),
+            parent_event_id: None,
+            root_event_id: None,
+        }];
+
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend the deletion");
+        assert!(!inserted, "the deletion was already stored");
+        assert_eq!(
+            deleted,
+            vec![true],
+            "the resend soft-deletes the live target"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
+
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend again");
+        assert!(!inserted);
+        assert_eq!(deleted, vec![false], "an applied deletion changes nothing");
     }
 
     #[tokio::test]
