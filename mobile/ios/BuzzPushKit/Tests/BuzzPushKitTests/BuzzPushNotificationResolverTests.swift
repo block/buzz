@@ -440,7 +440,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertNil(push())
   }
 
-  func testOneCommunitysHistoryBoundsTheOthersAndFutureMessagesStayShown() throws {
+  func testShownMessagesStayShownAcrossCommunitiesFailuresAndBursts() throws {
     let a = community(id: "community-a", relayUrl: "https://a.example")
     let b = community(id: "community-b", relayUrl: "https://b.example")
     let snapshot = try snapshotData([a, b])
@@ -457,32 +457,82 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
         now: now))?.body
     }
     var relayEvents: [String: [VerifiedNostrEvent]] = [:]
+    var failingHosts: Set<String> = []
     URLProtocolStub.handler = { request in
-      Self.response(request, status: 200,
-        data: try JSONEncoder().encode(relayEvents[request.url?.host ?? ""] ?? []))
+      let host = request.url?.host ?? ""
+      return Self.response(request, status: failingHosts.contains(host) ? 500 : 200,
+        data: try JSONEncoder().encode(relayEvents[host] ?? []))
     }
     func message(_ content: String, createdAt: Int) throws -> VerifiedNostrEvent {
       try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: createdAt,
         kind: 9, tags: [["h", Self.channelID]], content: content)
     }
 
-    // B has shown nothing yet, but A's shown message still marks B's last week as history.
-    relayEvents["a.example"] = [try message("A", createdAt: clock - 60)]
+    // B has shown nothing yet, but A's shown message still marks B's last week as
+    // history, even when A's query fails.
+    let mention = try message("A mention", createdAt: clock - 60)
+    relayEvents["a.example"] = [mention]
     relayEvents["b.example"] = [try message("B last week", createdAt: clock - 7 * 24 * 3600)]
-    XCTAssertEqual(push(), "A")
+    XCTAssertEqual(push(), "A mention")
     XCTAssertNil(push(), "an old message in another community is not new")
+    failingHosts = ["a.example"]
+    XCTAssertNil(push(), "a failed query doesn't drop its community's history")
+    failingHosts = []
+
+    // A burst of newer messages doesn't evict one the relay still returns.
+    var newest = mention
+    for index in 0..<100 {
+      clock += 1
+      newest = try message("Burst \(index)", createdAt: clock)
+      relayEvents["a.example"] = [newest, mention]
+      XCTAssertEqual(push(), "Burst \(index)")
+    }
+    XCTAssertNil(push(), "a shown message is not shown again after a burst")
+
+    // A store that can't be written still remembers what it already shows.
+    let directory = root.appendingPathComponent(scopes[0].directoryName, isDirectory: true)
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: directory.path)
+    addTeardownBlock {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+    }
+    XCTAssertNil(push(), "a read-only store does not repeat a shown message")
+    relayEvents["a.example"] = [try message("Unrecorded", createdAt: clock), newest, mention]
+    XCTAssertEqual(push(), "Unrecorded", "an unwritable store never hides a new message")
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
 
     // A future-dated message stays remembered while the relay keeps returning it first,
-    // even after more than the retention limit of messages is shown after it.
+    // even after later messages push its capped time out of the window.
     let future = try message("Future", createdAt: clock + 3600)
     relayEvents["a.example"] = [future]
     XCTAssertEqual(push(), "Future")
-    for index in 0..<BuzzNotificationCache.maximumPresentedMessages {
-      clock += 10
-      relayEvents["a.example"] = [future, try message("Message \(index)", createdAt: clock)]
-      XCTAssertEqual(push(), "Message \(index)")
+    for index in 0..<40 {
+      clock += 30
+      relayEvents["a.example"] = [future, try message("Later \(index)", createdAt: clock)]
+      XCTAssertEqual(push(), "Later \(index)")
     }
     XCTAssertNil(push(), "a future-dated message is not shown again")
+  }
+
+  func testFutureDatedEntriesDoNotEvictAClaimedMessage() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let cache = BuzzNotificationCache(
+      directory: root, now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
+      isCurrent: { $0 == scope })
+    func claim(_ event: VerifiedNostrEvent) throws -> Bool {
+      try cache.claimFirstUnpresented([(event: event, scope: scope)], scopes: [scope]) == 0
+    }
+    for index in 0..<(BuzzNotificationCache.maximumPresentedMessages + 1) {
+      let ahead = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+        createdAt: Self.now + 600 + index, kind: 9, tags: [["h", Self.channelID]],
+        content: "Ahead \(index)")
+      XCTAssertTrue(try claim(ahead))
+    }
+    let current = try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: Self.now,
+      kind: 9, tags: [["h", Self.channelID]], content: "Current")
+    XCTAssertTrue(try claim(current))
+    XCTAssertFalse(try claim(current), "a claimed message survives retention")
   }
 
   func testFreshVerifiedCacheResolvesSenderAvatarAndChannelWithoutRefresh() throws {

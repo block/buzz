@@ -119,7 +119,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       let newestFirst = candidates.sorted {
         $0.0.createdAt == $1.0.createdAt ? $0.0.id < $1.0.id : $0.0.createdAt > $1.0.createdAt
       }
-      guard let newest = self.firstUnpresented(newestFirst) else {
+      guard let newest = self.firstUnpresented(newestFirst, communities: communities) else {
         completion(nil)
         return
       }
@@ -133,27 +133,24 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   /// push shows the generic text and the message isn't offered again, which is better
   /// than repeating a message in later notifications.
   private func firstUnpresented(
-    _ newestFirst: [(VerifiedNostrEvent, PushLeaseCommunity)]
+    _ newestFirst: [(VerifiedNostrEvent, PushLeaseCommunity)],
+    communities: [PushLeaseCommunity]
   ) -> (VerifiedNostrEvent, PushLeaseCommunity)? {
     guard let notificationCache else { return newestFirst.first }
-    // Candidates span communities, so one community's history bounds them all.
-    // Otherwise a community with nothing shown yet would surface its old messages.
-    var seen = Set<String>()
-    let scopes = newestFirst.compactMap { BuzzNotificationCacheScope(community: $0.1) }
-      .filter { seen.insert($0.directoryName).inserted }
-    let newestShown = scopes.compactMap { try? notificationCache.newestPresentation(scope: $0) }.max()
-    return newestFirst.first { event, community in
-      guard let scope = BuzzNotificationCacheScope(community: community) else { return false }
-      do {
-        return try notificationCache.claimPresentation(
-          of: event, scope: scope, newestShownElsewhere: newestShown)
-      } catch BuzzNotificationCacheError.revoked {
-        return false
-      } catch {
-        // Unreadable storage must not hide new messages; it can only fail to dedupe them.
-        NSLog("Notification dedupe unavailable: %@", String(describing: error))
-        return true
-      }
+    let candidates = newestFirst.compactMap { event, community in
+      BuzzNotificationCacheScope(community: community).map { (candidate: (event, community), scope: $0) }
+    }
+    do {
+      // Every community's history bounds the others, even one whose query failed, so a
+      // community with nothing shown yet can't surface its old messages.
+      return try notificationCache.claimFirstUnpresented(
+        candidates.map { (event: $0.candidate.0, scope: $0.scope) },
+        scopes: communities.compactMap(BuzzNotificationCacheScope.init(community:))
+      ).map { candidates[$0].candidate }
+    } catch {
+      // Unusable storage must not hide new messages; it can only fail to dedupe them.
+      NSLog("Notification dedupe unavailable: %@", String(describing: error))
+      return candidates.first?.candidate
     }
   }
 
