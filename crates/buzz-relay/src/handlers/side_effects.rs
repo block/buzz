@@ -1911,6 +1911,9 @@ fn put_user_targets(event: &Event) -> anyhow::Result<Vec<PutUserTarget>> {
 /// refused, if they were. At least one was not.
 pub(crate) struct PutUserPlan {
     channel_id: Uuid,
+    /// Whether the channel is an announce channel when validated; see
+    /// [`join_posts_notice`].
+    announce: bool,
     targets: Vec<(PutUserTarget, Option<String>)>,
 }
 
@@ -2018,6 +2021,7 @@ pub(crate) async fn validate_put_user(
     }
     Ok(PutUserPlan {
         channel_id,
+        announce: channel.is_announce(),
         targets: checked,
     })
 }
@@ -2071,6 +2075,42 @@ impl PutUserReport {
     }
 }
 
+/// Whether a new member's join posts a `member_joined` kind:40099.
+///
+/// `announce` is whether the channel is an announce channel (open, with
+/// `join_role = guest`; see [`buzz_db::channel::ChannelRecord::is_announce`]).
+/// A person who lands there as a guest posts no notice: large default channels
+/// would otherwise carry one per community member. A join that lands as any
+/// other role, or in any other channel, posts as always. The membership
+/// cache, discovery events and the joiner's kind:44100 do not depend on this.
+fn join_posts_notice(announce: bool, landed_role: &str) -> bool {
+    !(announce && landed_role == MemberRole::Guest.as_str())
+}
+
+/// Whether `pubkey`, an active member in `members` read before they left,
+/// leaves an announce channel as a guest: that leave posts no
+/// `member_left`. Reads the channel only for a guest, the one role the rule
+/// can apply to.
+async fn is_guest_leaving_announce_channel(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    members: &[MemberRecord],
+    pubkey: &[u8],
+) -> anyhow::Result<bool> {
+    let is_guest = members
+        .iter()
+        .any(|member| member.pubkey == pubkey && member.role == MemberRole::Guest.as_str());
+    if !is_guest {
+        return Ok(false);
+    }
+    let channel = state
+        .db
+        .get_channel_for_event_write(tenant.community(), channel_id)
+        .await?;
+    Ok(channel.is_announce())
+}
+
 /// Store a validated kind:9000 and apply it, returning the stored event,
 /// whether it was new, and its OK message.
 ///
@@ -2093,6 +2133,7 @@ pub(crate) async fn persist_put_user(
     thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
 ) -> anyhow::Result<(buzz_core::StoredEvent, bool, String)> {
     let channel_id = plan.channel_id;
+    let announce = plan.announce;
     let batch = plan.targets.len() > 1;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
     let actor_hex = hex::encode(&actor_bytes);
@@ -2173,20 +2214,25 @@ pub(crate) async fn persist_put_user(
             // missed the first one.
             Some(prior) if prior == put.member.role => report.already_member.push(target_hex),
             prior => {
-                if let Err(e) = emit_system_message(
-                    tenant,
-                    state,
-                    channel_id,
-                    serde_json::json!({
-                        "type": "member_joined",
-                        "actor": actor_hex,
-                        "target": target_hex,
-                    }),
-                    chrono::Utc::now(),
-                )
-                .await
-                {
-                    warn!(channel = %channel_id, error = %e, "member_joined system message failed");
+                // A new person who lands as a guest in an announce channel
+                // gets no notice; a role change is not a join, so a
+                // promotion (or any other change) posts as before.
+                if prior.is_some() || join_posts_notice(announce, &put.member.role) {
+                    if let Err(e) = emit_system_message(
+                        tenant,
+                        state,
+                        channel_id,
+                        serde_json::json!({
+                            "type": "member_joined",
+                            "actor": actor_hex,
+                            "target": target_hex,
+                        }),
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    {
+                        warn!(channel = %channel_id, error = %e, "member_joined system message failed");
+                    }
                 }
                 match prior {
                     Some(_) => report.updated.push(target_hex),
@@ -2254,7 +2300,7 @@ async fn handle_remove_user(
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
     // Guard: prevent last-owner orphaning on self-removal (kind 9001).
-    if target_pubkey == actor_bytes {
+    let leaver_roster = if target_pubkey == actor_bytes {
         let members = state
             .db
             .get_members_for_event_write(tenant.community(), channel_id)
@@ -2262,7 +2308,19 @@ async fn handle_remove_user(
         if channel_authz::is_sole_owner(&members, &actor_bytes) {
             return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
         }
-    }
+        Some(members)
+    } else {
+        None
+    };
+    // A guest leaving an announce channel posts no `member_left`. Decided
+    // before the removal, from the roster the guard above read.
+    let quiet_leave = match &leaver_roster {
+        Some(members) => {
+            is_guest_leaving_announce_channel(tenant, state, channel_id, members, &actor_bytes)
+                .await?
+        }
+        None => false,
+    };
 
     state
         .db
@@ -2279,18 +2337,20 @@ async fn handle_remove_user(
     } else {
         "member_removed"
     };
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": msg_type,
-            "actor": actor_hex,
-            "target": target_hex,
-        }),
-        chrono::Utc::now(),
-    )
-    .await?;
+    if !quiet_leave {
+        emit_system_message(
+            tenant,
+            state,
+            channel_id,
+            serde_json::json!({
+                "type": msg_type,
+                "actor": actor_hex,
+                "target": target_hex,
+            }),
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
 
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
@@ -2980,38 +3040,48 @@ pub(crate) async fn join_channel_as_self(
     // also decides visibility and archive state again under its locks, so a
     // channel made private or archived since the checks above is refused
     // here, with no side effects.
-    state
+    let member = state
         .db
         .put_member(tenant.community(), channel_id, pubkey, None, None)
         .await?;
-    announce_self_join(tenant, state, channel_id, pubkey).await?;
+    announce_self_join(tenant, state, channel_id, &member).await?;
     Ok(SelfJoinOutcome::Joined)
 }
 
 /// The side effects of a committed self-join: the membership cache, the
 /// `member_joined` kind:40099, kind:39000/39002 and kind:44100. Only the
 /// system message is fatal, as for kind:9021.
+///
+/// `member` is the row the join wrote. A self-join asks for no role, so the
+/// channel's `join_role` decides it, and `put_member` admits it only to an
+/// open channel: a guest landing is therefore always a join to an announce
+/// channel, as read under the membership lock, and posts no kind:40099
+/// ([`join_posts_notice`]). Everything else still happens, so rosters and the
+/// joiner's channel list update.
 async fn announce_self_join(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
-    pubkey: &[u8],
+    member: &MemberRecord,
 ) -> anyhow::Result<()> {
+    let pubkey = member.pubkey.as_slice();
     state.invalidate_membership(tenant, channel_id, pubkey);
 
-    let actor_hex = hex::encode(pubkey);
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "member_joined",
-            "actor": actor_hex,
-            "target": actor_hex,
-        }),
-        chrono::Utc::now(),
-    )
-    .await?;
+    if join_posts_notice(true, &member.role) {
+        let actor_hex = hex::encode(pubkey);
+        emit_system_message(
+            tenant,
+            state,
+            channel_id,
+            serde_json::json!({
+                "type": "member_joined",
+                "actor": actor_hex,
+                "target": actor_hex,
+            }),
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
 
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
@@ -3168,7 +3238,7 @@ async fn join_never_joined_channels(
             .await
         {
             Ok(None) => continue,
-            Ok(Some(_)) => announce_self_join(tenant, state, channel_id, pubkey).await,
+            Ok(Some(member)) => announce_self_join(tenant, state, channel_id, &member).await,
             Err(e) => Err(e.into()),
         };
         match joined {
@@ -3220,6 +3290,10 @@ async fn handle_leave_request(
     if channel_authz::is_sole_owner(&members, &actor_bytes) {
         return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
     }
+    // A guest leaving an announce channel posts no `member_left`.
+    let quiet_leave =
+        is_guest_leaving_announce_channel(tenant, state, channel_id, &members, &actor_bytes)
+            .await?;
 
     state
         .db
@@ -3230,17 +3304,19 @@ async fn handle_leave_request(
     disable_departed_member_workflows(tenant, state, channel_id, &actor_bytes).await;
 
     let actor_hex = hex::encode(&actor_bytes);
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "member_left",
-            "actor": actor_hex,
-        }),
-        chrono::Utc::now(),
-    )
-    .await?;
+    if !quiet_leave {
+        emit_system_message(
+            tenant,
+            state,
+            channel_id,
+            serde_json::json!({
+                "type": "member_left",
+                "actor": actor_hex,
+            }),
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
 
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");

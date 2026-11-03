@@ -104,6 +104,14 @@ impl ChannelRecord {
             created_by: self.created_by.clone(),
         }
     }
+
+    /// Whether this is an **announce channel**: open, with `join_role =
+    /// guest`. An unknown stored `join_role` fails closed to `guest`, as it
+    /// does for admission.
+    pub fn is_announce(&self) -> bool {
+        self.visibility == ChannelVisibility::Open.as_str()
+            && ChannelJoinRole::parse_fail_closed(&self.join_role) == ChannelJoinRole::Guest
+    }
 }
 
 /// Creates a new channel, bootstraps the creator as owner, and returns the record.
@@ -2190,6 +2198,25 @@ mod group_metadata_tag_tests {
             assert_eq!(
                 flags(&channel(visibility, join_role)),
                 *expected,
+                "{visibility}/{join_role}"
+            );
+        }
+    }
+
+    /// An announce channel is open with `join_role = guest`; an unknown
+    /// stored value fails closed to `guest`, as for admission.
+    #[test]
+    fn announce_channels_are_open_with_guest_join_role() {
+        for (visibility, join_role, expected) in [
+            ("open", "guest", true),
+            ("open", "bogus", true),
+            ("open", "member", false),
+            ("private", "guest", false),
+            ("private", "member", false),
+        ] {
+            assert_eq!(
+                channel(visibility, join_role).is_announce(),
+                expected,
                 "{visibility}/{join_role}"
             );
         }

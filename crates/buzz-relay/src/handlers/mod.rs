@@ -1,6 +1,8 @@
 /// NIP-42 authentication handler.
 pub mod admin_action_worker;
 pub mod admin_outbox_worker;
+#[cfg(test)]
+mod announce_quiet_joins_postgres_tests;
 /// NIP-AR Sync subscriptions.
 pub mod artifact_sync;
 #[cfg(test)]

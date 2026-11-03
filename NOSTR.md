@@ -51,12 +51,12 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Deletions (kind:5)** | ✅ | Standard NIP-09; self-authored only. `#h` optional, `#e` required |
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
-| **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. |
-| **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
+| **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. A new person who lands as a guest in an [announce channel](#announce-channels) gets no `member_joined` either. |
+| **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. A guest removing themselves from an [announce channel](#announce-channels) posts no `member_left`. |
 | **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
-| **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
+| **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. A guest leaving an [announce channel](#announce-channels) posts no `member_left` kind:40099. |
 | **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel |
 | **Unlisted channels** | ✅ | kind:9002 `["unlisted", "true"\|"false"]`, owner/admin, or at creation on kind:9007. An unlisted open channel is left out of every read that does not name it, for non-members: channel lists, kind:39000 without `#d`, messages, COUNT, NIP-50 search and artifact queries. Naming it by `#h` (or `#d` on 39000–39003) reads it, and kind:9021 joins it, as for any open channel. See [Unlisted channels](#unlisted-channels). |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
@@ -72,7 +72,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
-| **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. The same body joins new community members to [default channels](#default-channels). |
+| **Join request (kind:9021)** | ✅ | Open channels only. Adds the joiner with the channel's `join_role` (`member` by default), emits a `member_joined` kind:40099 system message (none when the joiner becomes a guest in an [announce channel](#announce-channels)) + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. The same body joins new community members to [default channels](#default-channels). |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 | **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 
@@ -146,6 +146,17 @@ Other rules:
   can still write after a change to `guest`, and existing guests stay
   read-only after a change to `member`. A stored value the relay does not
   know is treated as `guest`.
+- A person who joins an announce channel as a guest posts no `member_joined`
+  kind:40099, and a guest who leaves posts no `member_left`. This covers a
+  kind:9021 join, a kind:9000 self-add or add with no role, and the relay's
+  [default-channel](#default-channels) joins. A default channel can
+  otherwise gather one relay-signed notice per community member, which
+  clients replay on reconnect. Everything else about a join still happens:
+  kind:39000/39002 and the joiner's kind:44100, so rosters and the joiner's
+  channel list update. Joins that land as member, bot, admin or owner, a
+  promotion from guest to member, removals (`member_removed`), and
+  everything in a channel that is not an announce channel, including an
+  explicit guest add to one, still post.
 
 kind:39000 publishes the NIP-29 access flags from these settings, and an
 explicit `["join_role", ...]` tag so clients can tell what joining gives:
@@ -223,7 +234,8 @@ message in the channel.
 When someone becomes a community member (an invite claim or a kind:9030 add)
 the relay joins them to every effective default channel as a self-join: the
 body of kind:9021, so the channel's `join_role` applies and the channel gets
-its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
+its `member_joined` kind:40099 (none when the join lands as a guest, see
+[Announce channels](#announce-channels)), kind:39002 and kind:44100. There is no cap on
 how many channels that is: whatever carries the kind:39000 tag is joined, and
 the work a new member costs grows with the number of channels an owner or
 admin flags. On a community that requires relay membership, the relay does
