@@ -16,6 +16,7 @@ class _MessageList extends HookConsumerWidget {
   final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
   final String channelId;
+  final String? welcomeAgent;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
   final String? currentPubkey;
@@ -40,6 +41,7 @@ class _MessageList extends HookConsumerWidget {
     required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
     required this.channelId,
+    this.welcomeAgent,
     required this.notifier,
     required this.isDm,
     required this.currentPubkey,
@@ -806,6 +808,7 @@ class _MessageList extends HookConsumerWidget {
     );
 
     if (entries.isEmpty &&
+        welcomeAgent == null &&
         (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
       return Align(
         alignment: Alignment.bottomCenter,
@@ -826,7 +829,34 @@ class _MessageList extends HookConsumerWidget {
         ),
       );
     }
-    if (entries.isEmpty) return const _EmptyMessages();
+    if (entries.isEmpty) {
+      if (welcomeAgent != null) {
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ) +
+                Grid.md,
+            Grid.gutter,
+            composerBottomInset + Grid.md,
+          ),
+          child: Column(
+            children: [
+              BestieWelcome(agent: welcomeAgent!),
+              if (displayedTyping.isNotEmpty)
+                InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                  knownAgents: workingAgents,
+                ),
+            ],
+          ),
+        );
+      }
+      return const _EmptyMessages();
+    }
 
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
 
@@ -965,6 +995,16 @@ class _MessageList extends HookConsumerWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (chronIdx == 0 &&
+                            notifier.reachedOldest &&
+                            welcomeAgent != null)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              top: Grid.md,
+                              bottom: Grid.md,
+                            ),
+                            child: BestieWelcome(agent: welcomeAgent!),
+                          ),
                         if (showDayDivider)
                           DayDivider(
                             label: formatDayHeading(message.createdAt),

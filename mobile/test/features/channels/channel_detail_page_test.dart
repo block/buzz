@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/bestie_welcome.dart';
+import 'package:buzz/features/channels/bestie_welcome_storage.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -9,12 +11,15 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
+
 import 'dart:async';
+
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -734,6 +739,82 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+  }
+  for (final hasHistory in [true, false]) {
+    testWidgets('a saved Bestie welcome stays at the start of its chat: '
+        'history=$hasHistory', (tester) async {
+      final dm = Channel(
+        id: _channelId,
+        name: 'Bestie',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          personalChat: true,
+          signingPubkey: 'self',
+          bestie: 'agent',
+          organization: Stream.value(const MeGroups()),
+          channel: dm,
+          messages: [
+            if (hasHistory)
+              _textMsg(id: threadIdRoot, pubkey: 'agent', content: 'Hello!'),
+          ],
+          home: const Scaffold(
+            body: DefaultAgentLauncher(onChooseAgent: _noAgentChoice),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DefaultAgentLauncher)),
+      );
+      // Creating a first agent saves this before opening its chat.
+      await saveBestieWelcome(
+        container.read(savedPrefsProvider),
+        container.read(meSyncProvider),
+        _channelId,
+        'agent',
+      );
+      await tester.tap(find.byType(IconButton));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+      expect(find.byType(BestieWelcome), findsOneWidget);
+      expect(find.text('Hello!'), hasHistory ? findsOneWidget : findsNothing);
+      if (!hasHistory) {
+        final messages =
+            container.read(channelMessagesProvider(_channelId).notifier)
+                as _FakeMessagesNotifier;
+        messages.setMessages([
+          _textMsg(
+            id: threadIdRoot,
+            pubkey: 'self',
+            content: 'My first message',
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(find.byType(BestieWelcome), findsOneWidget);
+        expect(find.text('My first message'), findsOneWidget);
+        tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(DefaultAgentLauncher),
+            matching: find.byType(IconButton),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BestieWelcome), findsOneWidget);
+        expect(find.text('My first message'), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
   }
   testWidgets(
     'refresh replaces stale Solo details before opening and sending',
@@ -19002,3 +19083,5 @@ class _SoloMetadataRelaySession extends RelaySessionNotifier {
     void Function(String)? onClosed,
   }) async => () {};
 }
+
+void _noAgentChoice() {}
