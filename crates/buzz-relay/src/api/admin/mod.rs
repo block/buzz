@@ -478,7 +478,7 @@ async fn resolve_report(
 
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let body: ResolveReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_e| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -698,7 +698,7 @@ async fn reopen_report(
 
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let body: ReopenReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -776,7 +776,7 @@ async fn cancel_report(
 ) -> Result<axum::http::Response<axum::body::Body>, ApiError> {
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let body: CancelReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -846,7 +846,7 @@ async fn update_feedback_status(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let _principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -900,7 +900,7 @@ async fn list_operators(
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
     authorize_read(&state, &slot, &headers, &method, &uri)
         .await?
-        .operator()?;
+        .operator(&slot)?;
 
     let config = state
         .config
@@ -978,7 +978,7 @@ async fn upsert_operator(
 ) -> Result<Json<OperatorEntry>, ApiError> {
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .operator()?;
+        .operator(&slot)?;
 
     // Canonicalize the path param once: validate it decodes to 32 bytes, then
     // lowercase it. Config-backed pubkeys are lowercased at parse, so the 409
@@ -1049,7 +1049,7 @@ async fn delete_operator(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
-        .operator()?;
+        .operator(&slot)?;
 
     // Canonicalize the path param once (validate + lowercase) so the 409 check
     // and the DB delete use the same form config-backed pubkeys are stored in;
@@ -1276,7 +1276,7 @@ async fn unban_member(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;
@@ -1318,7 +1318,7 @@ async fn untimeout_member(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
     let community = community_for_host(&state, &query.community_host).await?;

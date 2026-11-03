@@ -928,6 +928,7 @@ async fn run_active_audio_connection(
             Some(&denial),
             nip_fi_assertion.as_ref(),
         );
+        auth_line.finish(AuthResult::from_outcome(denial.outcome));
         shadow_attempt.refused();
         warn!(channel_id = %channel_id, pubkey = %pubkey_hex, reason = denial.reason, "audio: denied at ban check");
         exit_authorization_refusal(
@@ -16064,6 +16065,53 @@ mod tests {
                 nip_fi_audio_frames_with_ban_at_final_admission(true).await,
                 nip_fi_audio_denial_frames()
             );
+        }
+
+        /// A banned delegated NIP-FI agent refused at the early ban check logs
+        /// one `denied`/`banned` auth line, not `aborted`.
+        /// Mutation: drop the early `auth_line.finish` → `aborted` → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn nip_fi_agent_banned_at_early_check_logs_denied() {
+            let state = audio_test_state_real_db().await.expect(
+                "PostgreSQL must be available — set BUZZ_TEST_DATABASE_URL or start local postgres",
+            );
+            let (tenant, channel_id, _member) = seed_audio_fixture(state.db.pool()).await;
+            let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+            add_channel_member(state.db.pool(), &tenant, channel_id, &agent).await;
+            state
+                .db
+                .ban_community_member(
+                    tenant.community(),
+                    &agent.public_key().to_bytes(),
+                    &nostr::Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("seed ban");
+            let assertion = buzz_auth::VerifiedAssertion::for_test(
+                Some(agent.public_key()),
+                vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+            )
+            .with_owner_for_test(owner.public_key());
+
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let (mut client, server) =
+                start_audio_auth(&state, tenant, channel_id, &agent, None, Some(assertion)).await;
+            audio_frames_until_close(&mut client).await;
+            server.abort();
+            let _ = server.await;
+            drop(guard);
+
+            let lines: Vec<_> = out
+                .lines()
+                .into_iter()
+                .filter(|l| l["event"] == "auth")
+                .collect();
+            assert_eq!(lines.len(), 1, "exactly one auth line: {lines:?}");
+            assert_eq!(lines[0]["outcome"], "denied", "{}", lines[0]);
+            assert_eq!(lines[0]["reason"], "banned", "{}", lines[0]);
         }
 
         /// A delegated NIP-FI agent whose session expires just before its

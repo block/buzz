@@ -330,7 +330,10 @@ run_unit_tests() {
       connection::tests::read_refused_by_a_full_handler_semaphore_logs_one_denial \
       connection::tests::read_refused_by_unavailable_admission_logs_one_denial \
       handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial \
-      nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line
+      nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line \
+      api::bridge::moderation_refusal_tests::moderation_lookup_failure_is_unavailable \
+      api::admin::auth::tests::admin_role_refusal_logs_denied \
+      api::admin::auth::tests::admin_duplicate_authorization_logs_duplicate
 
   # Infra-free bridge search extension parser tests, by exact name: the rest of
   # api::bridge::postgres_tests needs a database.

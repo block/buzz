@@ -38,7 +38,7 @@
 //! [`AdminAccess::operator`] refuse with 403; an anonymous caller is never given
 //! a principal.
 
-use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthResult};
+use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthReason, AuthResult};
 use axum::http::{header, HeaderMap, Method, Uri};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -478,22 +478,26 @@ pub enum AdminAccess {
 
 impl AdminAccess {
     /// The act check: a write needs a signed staff member. Role-specific
-    /// checks run on the returned principal.
-    pub fn act(self) -> Result<AdminPrincipal, ApiError> {
+    /// checks run on the returned principal. A refusal is recorded on `slot`.
+    pub fn act(self, slot: &AccessSlot) -> Result<AdminPrincipal, ApiError> {
         match self {
             Self::Staff(principal) => Ok(principal),
-            Self::NetworkTrusted => Err(ApiError::forbidden_with_message(
-                "this endpoint requires BUZZ_ADMIN_AUTH=nip98",
-            )),
+            Self::NetworkTrusted => {
+                slot.finish(AuthResult::Denied(AuthReason::NotStaff));
+                Err(ApiError::forbidden_with_message(
+                    "this endpoint requires BUZZ_ADMIN_AUTH=nip98",
+                ))
+            }
         }
     }
 
     /// The operator check: roster routes need a signed Operator.
-    pub fn operator(self) -> Result<AdminPrincipal, ApiError> {
-        let principal = self.act()?;
+    pub fn operator(self, slot: &AccessSlot) -> Result<AdminPrincipal, ApiError> {
+        let principal = self.act(slot)?;
         if principal.role == AdminRole::Operator {
             Ok(principal)
         } else {
+            slot.finish(AuthResult::Denied(AuthReason::NotOperator));
             Err(ApiError::forbidden_with_message(
                 "staffing endpoints require operator role",
             ))
@@ -526,7 +530,12 @@ async fn authorize_nip98(
     // 1. Extract exactly one Authorization: Nostr header.
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let (Some(value), None) = (values.next(), values.next()) else {
-        return Err((ApiError::unauthorized(), "nip98_missing"));
+        let reason = if headers.contains_key(header::AUTHORIZATION) {
+            "duplicate_authorization"
+        } else {
+            "nip98_missing"
+        };
+        return Err((ApiError::unauthorized(), reason));
     };
     let auth_str = value
         .to_str()
@@ -634,8 +643,9 @@ fn origin_matches_host(origin: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_api_origin, authorize, canonical_url, header, host_matches, method_has_body,
-        nostr_credential, origin_matches_host, ADMIN_API_PREFIX, BASE64,
+        admin_api_origin, authorize, authorize_nip98, canonical_url, header, host_matches,
+        method_has_body, nostr_credential, origin_matches_host, AccessSlot, AdminAccess,
+        AdminPrincipal, AdminRole, AdminSource, AuthResult, ADMIN_API_PREFIX, BASE64,
     };
 
     #[test]
@@ -996,5 +1006,51 @@ mod tests {
             );
             assert!(line.get("pubkey").is_none(), "{line}");
         }
+    }
+
+    // A role check that refuses after `authorize` admitted logs `denied`
+    // with its fixed reason, not the earlier `success`.
+    #[test]
+    fn admin_role_refusal_logs_denied() {
+        let moderator = AdminAccess::Staff(AdminPrincipal {
+            pubkey: [7; 32],
+            role: AdminRole::Moderator,
+            source: AdminSource::Config,
+        });
+        for (access, operator, reason) in [
+            (AdminAccess::NetworkTrusted, false, "not_staff"),
+            (moderator, true, "not_operator"),
+        ] {
+            let slot = AccessSlot::default();
+            slot.finish(AuthResult::Success);
+            let (guard, out) = crate::access::tests::capture_scoped();
+            let refused = if operator {
+                access.operator(&slot)
+            } else {
+                access.act(&slot)
+            };
+            slot.emit("/api/admin/users", 403);
+            drop(guard);
+            assert!(refused.is_err());
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["outcome"], "denied", "{reason}");
+            assert_eq!(lines[0]["reason"], reason);
+        }
+    }
+
+    // Two Authorization headers are a duplicate, not a missing credential.
+    #[tokio::test(flavor = "current_thread")]
+    async fn admin_duplicate_authorization_logs_duplicate() {
+        let config = crate::config::AdminConfig {
+            host: "admin.example.com".into(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(header::AUTHORIZATION, "Nostr a".parse().unwrap());
+        headers.append(header::AUTHORIZATION, "Nostr b".parse().unwrap());
+        let refused = authorize_nip98(&config, &headers, "/users", "GET", None).await;
+        assert_eq!(refused.unwrap_err().1, "duplicate_authorization");
     }
 }

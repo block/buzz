@@ -24,7 +24,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::access::AccessSlot;
+use crate::access::{AccessSlot, AuthReason, AuthResult};
 use crate::handlers::side_effects::{
     auto_join_default_channels, fan_out_nip43_membership_list, publish_nip43_member_added,
 };
@@ -319,7 +319,10 @@ async fn mint_invite_checked(
         caller.token_owner,
     )
     .await;
-    if let Err(e) = caller.admit_member(membership) {
+    if let Err(e) = caller.check(
+        membership,
+        super::relay_members::MembershipRefusal::auth_result,
+    ) {
         return e.into_response();
     }
 
@@ -331,9 +334,11 @@ async fn mint_invite_checked(
         match super::relay_members::link_agent_owner(&state, &tenant, &pubkey, &owner).await {
             super::relay_members::OwnerLink::Linked => {}
             super::relay_members::OwnerLink::Conflict => {
+                slot.finish(AuthResult::Denied(AuthReason::OwnerMismatch));
                 return api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch").into_response();
             }
             super::relay_members::OwnerLink::Unavailable => {
+                slot.finish(AuthResult::Denied(AuthReason::NipOaOwnerUnlinked));
                 return api_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     crate::handlers::auth::OWNER_LINK_ERROR,
@@ -344,7 +349,7 @@ async fn mint_invite_checked(
     }
 
     // The request's access line carries the minted invite.
-    match mint_invite_inner(&state, body, tenant, pubkey).await {
+    match mint_invite_inner(&state, &mut caller, body, tenant, pubkey).await {
         Ok((json, minted)) => {
             slot.detail(minted);
             json.into_response()
@@ -355,24 +360,39 @@ async fn mint_invite_checked(
 
 async fn mint_invite_inner(
     state: &AppState,
+    caller: &mut bridge::ProvenCaller,
     body: axum::body::Bytes,
     tenant: buzz_core::TenantContext,
     pubkey: nostr::PublicKey,
 ) -> Result<(Json<Value>, crate::access::Detail), (StatusCode, Json<Value>)> {
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
-    let member = state
-        .db
-        .get_relay_member(tenant.community(), &sender_hex)
-        .await
+    let member = caller
+        .check(
+            state
+                .db
+                .get_relay_member(tenant.community(), &sender_hex)
+                .await,
+            |_| AuthResult::Denied(AuthReason::AuthorizationUnavailable),
+        )
         .map_err(|e| internal_error(&format!("invite mint role lookup: {e}")))?;
+    // The role gate is the route's last admission step.
     let role = member.map(|m| m.role).unwrap_or_default();
-    if role != "owner" && role != "admin" {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "only relay owners and admins can create invites",
-        ));
-    }
+    caller
+        .admit(
+            if role == "owner" || role == "admin" {
+                Ok(())
+            } else {
+                Err(())
+            },
+            |()| AuthResult::Denied(AuthReason::NotRelayAdmin),
+        )
+        .map_err(|()| {
+            api_error(
+                StatusCode::FORBIDDEN,
+                "only relay owners and admins can create invites",
+            )
+        })?;
 
     let request: MintInviteRequest = if body.is_empty() {
         MintInviteRequest::default()
@@ -439,7 +459,7 @@ pub async fn claim_invite(
     let (tenant, pubkey, verified_owner) =
         authenticate(&state, &slot, &headers, "/api/invites/claim", &body).await?;
     // The request's access line carries whether the claim joined.
-    let claimed = claim_invite_authed(&state, tenant, pubkey, verified_owner, &body).await;
+    let claimed = claim_invite_authed(&state, &slot, tenant, pubkey, verified_owner, &body).await;
     if let Ok(Json(json)) = &claimed {
         slot.detail(crate::access::Detail {
             joined: Some(json["status"] == "joined"),
@@ -451,6 +471,7 @@ pub async fn claim_invite(
 
 async fn claim_invite_authed(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     tenant: buzz_core::TenantContext,
     pubkey: nostr::PublicKey,
     verified_owner: Option<nostr::PublicKey>,
@@ -547,6 +568,7 @@ async fn claim_invite_authed(
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
             }
             buzz_db::relay_invite::ClaimOutcome::Restricted => {
+                slot.finish(AuthResult::Denied(AuthReason::Banned));
                 Err(api_error(StatusCode::FORBIDDEN, "invite_restricted"))
             }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
@@ -1817,6 +1839,69 @@ mod postgres_tests {
             "invite code logged: {}",
             out.raw()
         );
+    }
+
+    /// A member who is not an owner or admin is refused a mint, and a banned
+    /// claimer is refused a claim: each logs `denied` with its reason, never
+    /// the membership admission's `success`.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn invite_refusals_after_membership_log_denied() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let (owner, member, banned) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let state = invite_test_state(&host).await.expect("local Postgres");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists")
+            .id;
+        for (key, role) in [(&owner, "owner"), (&member, "member")] {
+            let _ = state
+                .db
+                .add_relay_member(
+                    community,
+                    &key.public_key().to_hex(),
+                    role,
+                    None,
+                    &Keys::generate(),
+                )
+                .await
+                .expect("seed member");
+        }
+        let code = mint_code(state.clone(), &host, &owner, serde_json::json!({})).await;
+        state
+            .db
+            .ban_community_member(
+                community,
+                banned.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                None,
+                None,
+            )
+            .await
+            .expect("seed ban");
+
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let mint = post_json(state.clone(), &host, "/api/invites", &member, "{}".into()).await;
+        assert_eq!(mint.status(), StatusCode::FORBIDDEN);
+        let claim = post_json(
+            state,
+            &host,
+            "/api/invites/claim",
+            &banned,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::FORBIDDEN);
+        assert_eq!(read_json(claim).await["error"], "invite_restricted");
+        let lines = out.lines();
+        assert_eq!(lines.len(), 2, "one line per request: {lines:?}");
+        for (line, reason) in lines.iter().zip(["not_relay_admin", "banned"]) {
+            assert_eq!(line["outcome"], "denied", "{line}");
+            assert_eq!(line["reason"], reason, "{line}");
+        }
     }
 
     #[tokio::test]

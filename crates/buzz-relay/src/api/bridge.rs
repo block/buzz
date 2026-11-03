@@ -3203,19 +3203,25 @@ async fn authorize_moderation_read(
         crate::handlers::moderation_authz::ModerationAction::ViewQueue,
     )
     .await;
-    caller
-        .admit(moderator, |_| {
-            AuthResult::Denied(crate::access::AuthReason::NotModerator)
-        })
-        .map_err(|_| {
-            api_error(
-                StatusCode::FORBIDDEN,
-                "restricted: moderator access required",
-            )
-            .into_response()
-        })?;
+    caller.admit(moderator, moderation_refusal).map_err(|_| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: moderator access required",
+        )
+        .into_response()
+    })?;
 
     Ok(tenant)
+}
+
+/// A moderation authority refusal: a failed role lookup is unavailable,
+/// anything else is a real role refusal.
+fn moderation_refusal(e: &anyhow::Error) -> AuthResult {
+    AuthResult::Denied(if e.is::<buzz_db::DbError>() {
+        crate::access::AuthReason::AuthorizationUnavailable
+    } else {
+        crate::access::AuthReason::NotModerator
+    })
 }
 
 /// Cap on rows returned by a single moderation read.
@@ -3387,6 +3393,26 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
         "actor_pubkey": hex::encode(&b.actor_pubkey),
         "updated_at": b.updated_at,
     })
+}
+
+#[cfg(test)]
+mod moderation_refusal_tests {
+    // A failed role lookup logs `authorization_unavailable`; a real role
+    // refusal logs `not_moderator`.
+    #[test]
+    fn moderation_lookup_failure_is_unavailable() {
+        use crate::access::{AuthReason, AuthResult};
+        let lookup = anyhow::Error::from(buzz_db::DbError::NotFound("pool".into()));
+        assert_eq!(
+            super::moderation_refusal(&lookup),
+            AuthResult::Denied(AuthReason::AuthorizationUnavailable)
+        );
+        let refused = anyhow::anyhow!("moderator access required");
+        assert_eq!(
+            super::moderation_refusal(&refused),
+            AuthResult::Denied(AuthReason::NotModerator)
+        );
+    }
 }
 
 #[cfg(test)]

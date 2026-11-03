@@ -152,7 +152,7 @@ async fn direct_action(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
     let body: DirectBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
     let target = decode_hex_pubkey(&target_hex)?;
