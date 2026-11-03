@@ -371,6 +371,11 @@ pub async fn match_event(
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
 ) -> Option<MatchedRule> {
+    // NIP-CI imported history is past conversation; it never triggers an agent.
+    if buzz_core::import::is_import_event(event) {
+        return None;
+    }
+
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
     for (index, rule) in rules.iter().enumerate() {
@@ -575,6 +580,36 @@ mod tests {
             .await
             .unwrap();
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_match_event_skips_imported_history() {
+        let agent = Keys::generate().public_key().to_hex();
+        let rules = vec![make_rule(
+            "mentions",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+        let live = make_event_with_p_tag(9, "hello", &agent);
+        assert!(match_event(&live, any_channel(), &rules, &agent)
+            .await
+            .is_some());
+
+        let tags = [
+            Tag::parse(["p", agent.as_str()]).expect("tag parse"),
+            Tag::parse(["import", &"ab".repeat(32)]).expect("tag parse"),
+            Tag::parse(["source", "test", "1"]).expect("tag parse"),
+        ];
+        let imported = EventBuilder::new(Kind::Custom(9), "hello")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(match_event(&imported, any_channel(), &rules, &agent)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

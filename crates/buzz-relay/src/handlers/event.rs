@@ -133,6 +133,43 @@ struct FanoutAccess {
     unverified: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 }
 
+/// Drop matches whose connection is authenticated as an agent (a user with an
+/// `agent_owner_pubkey`). A failed lookup drops every match.
+async fn exclude_agent_connections(
+    state: &AppState,
+    community_id: CommunityId,
+    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    let with_pubkeys: Vec<_> = matches
+        .into_iter()
+        .filter_map(|(conn_id, sub_id)| {
+            state
+                .conn_manager
+                .pubkey_for_conn(conn_id)
+                .map(|pk| (conn_id, sub_id, pk))
+        })
+        .collect();
+    let mut pubkeys: Vec<Vec<u8>> = with_pubkeys.iter().map(|(_, _, pk)| pk.clone()).collect();
+    pubkeys.sort();
+    pubkeys.dedup();
+    let policies = match state
+        .db
+        .get_agent_channel_policies(community_id, &pubkeys)
+        .await
+    {
+        Ok(policies) => policies,
+        Err(e) => {
+            warn!("fan-out import gate: agent lookup failed: {e}");
+            return Vec::new();
+        }
+    };
+    with_pubkeys
+        .into_iter()
+        .filter(|(_, _, pk)| !super::conversation_import::is_agent(policies.get(pk)))
+        .map(|(conn_id, sub_id, _)| (conn_id, sub_id))
+        .collect()
+}
+
 /// `filter_fanout_by_access`, also reporting the recipients it dropped
 /// only because a lookup failed.
 async fn check_fanout_access(
@@ -222,6 +259,16 @@ async fn check_fanout_access(
                     })
             })
             .collect()
+    } else {
+        matches
+    };
+
+    // NIP-CI imported history is consented to by human participants only, so
+    // it never streams to an agent connection. Fails closed: if the agent
+    // lookup errors, no connection receives the event live; history reads
+    // still serve it to members.
+    let matches = if buzz_core::import::is_import_event(&stored_event.event) {
+        exclude_agent_connections(state, community_id, matches).await
     } else {
         matches
     };
@@ -567,6 +614,7 @@ async fn dispatch_persistent_event_inner(
         && !buzz_core::kind::is_command_kind(kind_u32)
         && !is_relay_workflow_msg
         && kind_u32 != KIND_GIFT_WRAP
+        && !buzz_core::import::is_import_event(&stored_event.event)
     {
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();
@@ -3105,6 +3153,18 @@ mod tests {
         }
 
         fn register_conn(state: &AppState, pubkey: Option<Vec<u8>>) -> Uuid {
+            register_conn_in(
+                state,
+                pubkey,
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            )
+        }
+
+        fn register_conn_in(
+            state: &AppState,
+            pubkey: Option<Vec<u8>>,
+            community_id: buzz_core::tenant::CommunityId,
+        ) -> Uuid {
             let conn_id = Uuid::new_v4();
             let (tx, _rx) = mpsc::channel(1);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
@@ -3115,7 +3175,7 @@ mod tests {
                 tokio::sync::mpsc::channel(1).0,
                 None,
                 CancellationToken::new(),
-                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                community_id,
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
@@ -3208,6 +3268,70 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        /// Imported history streams to human connections only; a live event
+        /// in the same channel still reaches the agent.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn imported_events_skip_agent_connections() {
+            let state = test_state().await;
+            let pool = sqlx::PgPool::connect(&test_config().database_url)
+                .await
+                .expect("connect");
+            let community = Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("{community}.import-fanout.test"))
+                .execute(&pool)
+                .await
+                .expect("community");
+            let (human, agent) = (vec![1u8; 32], vec![2u8; 32]);
+            for (pubkey, owner) in [(&human, None), (&agent, Some(&human))] {
+                sqlx::query(
+                    "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) \
+                     VALUES ($1, $2, $3)",
+                )
+                .bind(community)
+                .bind(pubkey)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .expect("user");
+            }
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(community);
+            let channel_id = Uuid::new_v4();
+            state
+                .channel_visibility_cache
+                .insert((community_id, channel_id), "open".to_string());
+            let human_conn = register_conn_in(&state, Some(human), community_id);
+            let agent_conn = register_conn_in(&state, Some(agent), community_id);
+            let matches = vec![(human_conn, "s".to_string()), (agent_conn, "s".to_string())];
+            let imported = EventBuilder::new(Kind::Custom(9), "old")
+                .tags([
+                    nostr::Tag::parse(["import", &"ab".repeat(32)]).expect("import"),
+                    nostr::Tag::parse(["source", "test", "1"]).expect("source"),
+                ])
+                .sign_with_keys(&Keys::generate())
+                .expect("sign");
+            let out = filter_fanout_by_access(
+                &state,
+                community_id,
+                &StoredEvent::new(imported, Some(channel_id)),
+                matches.clone(),
+                None,
+            )
+            .await;
+            assert_eq!(out, vec![(human_conn, "s".to_string())]);
+            let live = filter_fanout_by_access(
+                &state,
+                community_id,
+                &channel_event(Some(channel_id)),
+                matches.clone(),
+                None,
+            )
+            .await;
+            assert_eq!(live, matches);
         }
 
         #[tokio::test]

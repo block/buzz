@@ -14,13 +14,13 @@ use super::group_state_postgres_tests::{create_channel, edit_channel, http_auth,
 use crate::handlers::ingest::ingest_event;
 use crate::state::AppState;
 
-struct Fixture {
-    state: Arc<AppState>,
-    tenant: TenantContext,
+pub(super) struct Fixture {
+    pub(super) state: Arc<AppState>,
+    pub(super) tenant: TenantContext,
     host: String,
 }
 
-async fn fixture() -> Fixture {
+pub(super) async fn fixture() -> Fixture {
     let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
         .await
         .expect("local Postgres and Redis");
@@ -78,7 +78,7 @@ async fn group_state_id(f: &Fixture, channel: Uuid, kind: i32) -> String {
 
 /// Run one historical REQ and return the event IDs sent before EOSE. A
 /// CLOSED reply counts as no events.
-async fn req(f: &Fixture, reader: &Keys, filter: Value) -> Vec<String> {
+pub(super) async fn req(f: &Fixture, reader: &Keys, filter: Value) -> Vec<String> {
     req_all(f, reader, json!([filter])).await
 }
 
@@ -129,7 +129,12 @@ async fn count_all(f: &Fixture, reader: &Keys, filters: Value) -> u64 {
 
 /// POST `filters` to an HTTP bridge route as `reader`. Returns the JSON body
 /// of a 200, or `None` for a refusal.
-async fn bridge(f: &Fixture, reader: &Keys, path: &str, filters: Value) -> Option<Value> {
+pub(super) async fn bridge(
+    f: &Fixture,
+    reader: &Keys,
+    path: &str,
+    filters: Value,
+) -> Option<Value> {
     use axum::body::Body;
     use axum::http::{header, Request};
     use tower::ServiceExt;
@@ -163,7 +168,7 @@ async fn bridge(f: &Fixture, reader: &Keys, path: &str, filters: Value) -> Optio
     }
 }
 
-fn bridge_ids(body: Option<Value>) -> Vec<String> {
+pub(super) fn bridge_ids(body: Option<Value>) -> Vec<String> {
     let Some(body) = body else {
         return Vec::new();
     };

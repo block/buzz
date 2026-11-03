@@ -88,6 +88,25 @@ pub(crate) async fn enforce_ws_admission(
         return false;
     }
 
+    // NIP-CI imported history is charged to its own budget, never `Messages`.
+    if let ClientMessage::Event(event) = msg {
+        if buzz_core::import::is_import_event(event) {
+            let result = crate::admission::check_principal(
+                state.admission_rate_limiter.as_ref(),
+                &conn.tenant,
+                &pubkey,
+                LimitType::ImportEvents,
+                60,
+                limits.import_events_per_min,
+            )
+            .await;
+            return send_admission_verdict(conn, state, result, msg, "import_events", |_| {
+                buzz_core::import::reason::RATE_LIMITED.to_owned()
+            })
+            .await;
+        }
+    }
+
     if matches!(msg, ClientMessage::Event(event) if !buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32))
     {
         let message_limit = if is_agent {
@@ -128,12 +147,24 @@ async fn send_admission_result(
     msg: &ClientMessage,
     bucket: &'static str,
 ) -> bool {
+    send_admission_verdict(conn, state, result, msg, bucket, |reset_in_secs| {
+        format!("rate-limited: quota exceeded; retry in {reset_in_secs}s")
+    })
+    .await
+}
+
+/// [`send_admission_result`] with a caller-chosen quota-exceeded reason.
+async fn send_admission_verdict(
+    conn: &ConnectionState,
+    state: &AppState,
+    result: Result<(), AdmissionError>,
+    msg: &ClientMessage,
+    bucket: &'static str,
+    exceeded: impl FnOnce(u64) -> String,
+) -> bool {
     let (reason, label) = match result {
         Ok(()) => return true,
-        Err(AdmissionError::Exceeded { reset_in_secs }) => (
-            format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
-            "quota",
-        ),
+        Err(AdmissionError::Exceeded { reset_in_secs }) => (exceeded(reset_in_secs), "quota"),
         Err(AdmissionError::Unavailable) => (
             "rate-limited: shared admission unavailable".to_owned(),
             "unavailable",

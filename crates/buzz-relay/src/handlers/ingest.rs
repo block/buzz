@@ -546,6 +546,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     match kind {
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
+        // NIP-CI session control events are member writes into the channel.
+        k if buzz_core::kind::is_import_control_kind(k) => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
         | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
@@ -852,6 +854,11 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            // NIP-CI session control events
+            | buzz_core::kind::KIND_IMPORT_PROPOSAL
+            | buzz_core::kind::KIND_IMPORT_CONSENT
+            | buzz_core::kind::KIND_IMPORT_WITHDRAW
+            | buzz_core::kind::KIND_IMPORT_COMPLETE
     )
 }
 
@@ -2424,6 +2431,164 @@ pub(crate) async fn enforce_cached_write_restriction(
     write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
 }
 
+/// NIP-CI rules 2 to 6 against a read of the session. The event's `h` must
+/// name the channel the gates above resolved (for a reaction, the target's
+/// channel) and the session's channel.
+async fn check_import_preflight(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    tags: &buzz_core::import::ImportTags,
+    channel_id: Option<Uuid>,
+) -> Result<(), IngestError> {
+    use buzz_core::import::reason;
+    let reject = |reason: &str| IngestError::Rejected(reason.into());
+    let h_channel = extract_channel_id(event);
+    let Some(ch_id) = channel_id.filter(|ch| h_channel == Some(*ch)) else {
+        return Err(reject(reason::CHANNEL_MISMATCH));
+    };
+    let preflight = state
+        .db
+        .import_preflight(tenant.community(), &tags.proposal_bytes, event)
+        .await
+        .map_err(super::conversation_import::read_failed)?
+        .ok_or_else(|| reject(reason::PROPOSAL_NOT_FOUND))?;
+    if preflight.channel_id != ch_id {
+        return Err(reject(reason::CHANNEL_MISMATCH));
+    }
+    if tags.source_type != preflight.source_type {
+        return Err(reject(reason::SOURCE_TYPE_MISMATCH));
+    }
+    if preflight.already_stored {
+        return Ok(());
+    }
+    buzz_core::import::evaluate_import_rules(
+        preflight.status,
+        preflight.range,
+        preflight.author.as_ref(),
+        u32::from(event.kind.as_u16()),
+        event.created_at.as_secs() as i64,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(reject)
+}
+
+/// The ±15 minute drift check, and NIP-CI rule 1. A well-formed imported
+/// kind:9 or kind:7 skips the drift check and its parsed tags are returned;
+/// rules 2 to 7 then decide it before and inside its storage transaction, so
+/// a backdated event is stored only when every rule holds.
+fn check_timestamp_drift(
+    event: &Event,
+    now: i64,
+) -> Result<Option<buzz_core::import::ImportTags>, IngestError> {
+    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900;
+    let import_tags = buzz_core::import::parse_import_tags(event)
+        .map_err(|reason| IngestError::Rejected(reason.into()))?;
+    let event_ts = event.created_at.as_secs() as i64;
+    if import_tags.is_none() && (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+        return Err(IngestError::Rejected(
+            "invalid: event timestamp too far from server time".into(),
+        ));
+    }
+    Ok(import_tags)
+}
+
+/// Store one imported kind:9 or kind:7 under its session and deliver it.
+///
+/// Delivery is live fan-out, audit and search only: the import store skips
+/// mention rows, the listener outbox, push and unread evidence, and
+/// [`dispatch_persistent_event`] skips workflow triggers for import events.
+#[allow(clippy::too_many_arguments)]
+async fn store_import_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+    event: &Event,
+    tags: &buzz_core::import::ImportTags,
+    channel_id: Uuid,
+    thread_params: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+    reaction: Option<buzz_db::import_session::ImportReaction<'_>>,
+    auth: &IngestAuth,
+    threaded_visibility: Option<crate::state::ThreadedChannelVisibility>,
+) -> Result<IngestResult, IngestError> {
+    use buzz_db::import_session::ImportInsertOutcome;
+    let event_id_hex = event.id.to_hex();
+    let kind_u32 = u32::from(event.kind.as_u16());
+    let outcome = state
+        .db
+        .insert_import_event(
+            tenant.community(),
+            event,
+            tags,
+            channel_id,
+            thread_params,
+            reaction,
+            &state.relay_keypair,
+        )
+        .await
+        .map_err(super::conversation_import::storage_failed)?;
+    let (stored_event, snapshot) = match outcome {
+        ImportInsertOutcome::Rejected { reason, snapshot } => {
+            if let Some(snapshot) = snapshot {
+                super::conversation_import::publish_snapshot(tenant, state, &snapshot).await;
+            }
+            return Err(IngestError::Rejected(reason.into()));
+        }
+        ImportInsertOutcome::TargetMissing => {
+            return Err(IngestError::Rejected(format!(
+                "invalid: {REACTION_TARGET_NOT_FOUND}"
+            )));
+        }
+        ImportInsertOutcome::Duplicate => {
+            emit(
+                tracer,
+                TraceAction::WriteDuplicate {
+                    msg_id: msg_id_label(event.id.as_bytes()),
+                    channel: channel_label(channel_id),
+                    claimed_community: claimed_community_from_event(event),
+                },
+                state_for_request(tenant, auth.pubkey()),
+            );
+            return Ok(IngestResult {
+                event_id: event_id_hex,
+                accepted: true,
+                message: "duplicate:".into(),
+            });
+        }
+        ImportInsertOutcome::Inserted {
+            stored_event,
+            snapshot,
+        } => (stored_event, snapshot),
+    };
+    emit(
+        tracer,
+        TraceAction::WriteInsert {
+            msg_id: msg_id_label(event.id.as_bytes()),
+            channel: channel_label(channel_id),
+            claimed_community: claimed_community_from_event(event),
+        },
+        state_for_request(tenant, auth.pubkey()),
+    );
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored_event,
+        kind_u32,
+        &auth.pubkey().to_hex(),
+        threaded_visibility,
+    )
+    .await;
+    if let Some(snapshot) = snapshot {
+        super::conversation_import::publish_snapshot(tenant, state, &snapshot).await;
+    }
+    info!(event_id = %event_id_hex, kind = kind_u32, "Imported event ingested");
+    Ok(IngestResult {
+        event_id: event_id_hex,
+        accepted: true,
+        message: String::new(),
+    })
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -2628,14 +2793,9 @@ async fn ingest_event_inner(
         });
     }
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
-        return Err(IngestError::Rejected(
-            "invalid: event timestamp too far from server time".into(),
-        ));
-    }
+    let import_tags = check_timestamp_drift(&event, now)?;
 
     // kind:40100 canvas events carry a tighter future ceiling — see
     // `validate_canvas_future_timestamp` for the rationale and invariant.
@@ -2893,7 +3053,11 @@ async fn ingest_event_inner(
         // member/open gate here lets the owning human act on private agent channels
         // without being a member (OQ1 decision; see validate_edit_ownership /
         // validate_admin_event for per-kind enforcement).
+        // kind:42113 (import complete): the session store admits only an
+        // accepting participant of the active session, member or not, so a
+        // participant who has left can still let the session finish.
         let skip_membership = kind_u32 == KIND_NIP29_JOIN_REQUEST
+            || kind_u32 == buzz_core::kind::KIND_IMPORT_COMPLETE
             || kind_u32 == KIND_NIP29_CREATE_GROUP
             || kind_u32 == KIND_STREAM_MESSAGE_EDIT
             || kind_u32 == KIND_NIP29_EDIT_METADATA
@@ -3115,6 +3279,41 @@ async fn ingest_event_inner(
                 }
             }
         }
+    }
+
+    // NIP-CI control events passed the channel write gates above; the session
+    // store decides the rest atomically.
+    if buzz_core::kind::is_import_control_kind(kind_u32) {
+        let ch_id = channel_id.ok_or_else(|| {
+            IngestError::Rejected("invalid: channel-scoped events must include an h tag".into())
+        })?;
+        let result =
+            super::conversation_import::accept_control(tenant, state, &event, kind_u32, ch_id)
+                .await?;
+        let msg_id = msg_id_label(event.id.as_bytes());
+        let channel = channel_label(ch_id);
+        let claimed_community = claimed_community_from_event(&event);
+        let action = if result.message.starts_with("duplicate:") {
+            TraceAction::WriteDuplicate {
+                msg_id,
+                channel,
+                claimed_community,
+            }
+        } else {
+            TraceAction::WriteInsert {
+                msg_id,
+                channel,
+                claimed_community,
+            }
+        };
+        emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+        return Ok(result);
+    }
+
+    // NIP-CI rules 2 to 6, read before the remaining validation so a refused
+    // import fails fast. The storage transaction checks them again.
+    if let Some(tags) = &import_tags {
+        check_import_preflight(tenant, state, &event, tags, channel_id).await?;
     }
 
     // Artifact revisions passed the same home-channel write gates as kind 9
@@ -3462,6 +3661,31 @@ async fn ingest_event_inner(
         // the event in the same transaction. Ordering is load-bearing: active
         // duplicate reactions must return before storing a duplicate kind:7 event.
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        if let Some(tags) = &import_tags {
+            let Some(ch_id) = channel_id else {
+                return Err(IngestError::Rejected(
+                    buzz_core::import::reason::CHANNEL_MISMATCH.into(),
+                ));
+            };
+            let reaction = buzz_db::import_session::ImportReaction {
+                target_event_id: &target_id,
+                actor_pubkey: &actor_bytes,
+                emoji,
+            };
+            return store_import_event(
+                tenant,
+                state,
+                tracer,
+                &event,
+                tags,
+                ch_id,
+                thread_params,
+                Some(reaction),
+                &auth,
+                threaded_visibility,
+            )
+            .await;
+        }
         let (stored_event, was_inserted) = match state
             .db
             .insert_reaction_event_with_thread_metadata(
@@ -3546,6 +3770,37 @@ async fn ingest_event_inner(
     } else {
         None
     };
+
+    if let Some(tags) = &import_tags {
+        let Some(ch_id) = channel_id else {
+            return Err(IngestError::Rejected(
+                buzz_core::import::reason::CHANNEL_MISMATCH.into(),
+            ));
+        };
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        let result = store_import_event(
+            tenant,
+            state,
+            tracer,
+            &event,
+            tags,
+            ch_id,
+            thread_params,
+            None,
+            &auth,
+            threaded_visibility,
+        )
+        .await?;
+        if let Some(meta) = &thread_meta {
+            crate::handlers::side_effects::emit_live_thread_summary(
+                tenant,
+                state,
+                meta.channel_id,
+                meta.root_event_id.clone(),
+            );
+        }
+        return Ok(result);
+    }
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
     let mut message = String::new();
@@ -4298,6 +4553,87 @@ mod postgres_tests {
     #[test]
     fn reactions_do_not_require_h_tag() {
         assert!(!requires_h_channel_scope(KIND_REACTION));
+    }
+
+    /// The drift bypass admits only a well-formed import-tagged kind:9 or
+    /// kind:7. Widening it to any other kind, or to an event without an
+    /// `import` tag, fails here.
+    #[test]
+    fn drift_bypass_is_limited_to_imported_messages_and_reactions() {
+        let now = 1_700_000_000;
+        let old = (now - 86_400) as u64;
+        let id = "ab".repeat(32);
+        let build = |kind: u16, tags: Vec<Vec<&str>>| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .tags(tags.into_iter().map(|t| nostr::Tag::parse(t).unwrap()))
+                .custom_created_at(nostr::Timestamp::from(old))
+                .sign_with_keys(&nostr::Keys::generate())
+                .unwrap()
+        };
+        let import = |kind| {
+            build(
+                kind,
+                vec![
+                    vec!["h", "c"],
+                    vec!["import", &id],
+                    vec!["source", "test", "ref"],
+                ],
+            )
+        };
+        let reason = |result: Result<_, IngestError>| match result {
+            Err(IngestError::Rejected(reason)) => reason,
+            other => panic!(
+                "expected a rejection, got {:?}",
+                other.map(|t: Option<_>| t.is_some())
+            ),
+        };
+
+        for kind in [9u16, 7] {
+            let tags = check_timestamp_drift(&import(kind), now)
+                .unwrap_or_else(|_| panic!("kind {kind} import bypasses drift"));
+            assert_eq!(tags.map(|t| t.proposal_id), Some(id.clone()));
+        }
+        for kind in [1u16, 40002, 45001, 42110, 30623] {
+            assert_eq!(
+                reason(check_timestamp_drift(&import(kind), now)),
+                buzz_core::import::reason::KIND_NOT_ALLOWED
+            );
+        }
+        let too_old = "invalid: event timestamp too far from server time";
+        for event in [
+            build(9, vec![vec!["h", "c"]]),
+            build(7, vec![vec!["h", "c"], vec!["source", "test", "ref"]]),
+            build(9, vec![vec!["h", "c"], vec!["imported", &id]]),
+        ] {
+            assert_eq!(reason(check_timestamp_drift(&event, now)), too_old);
+        }
+        let malformed = build(9, vec![vec!["h", "c"], vec!["import", &id]]);
+        assert_eq!(
+            reason(check_timestamp_drift(&malformed, now)),
+            buzz_core::import::reason::TAGS_MALFORMED
+        );
+    }
+
+    #[test]
+    fn import_control_kinds_are_channel_scoped_member_writes() {
+        use buzz_core::kind::{
+            KIND_IMPORT_COMPLETE, KIND_IMPORT_CONSENT, KIND_IMPORT_PROPOSAL,
+            KIND_IMPORT_SESSION_SNAPSHOT, KIND_IMPORT_WITHDRAW,
+        };
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_IMPORT_PROPOSAL,
+            KIND_IMPORT_CONSENT,
+            KIND_IMPORT_WITHDRAW,
+            KIND_IMPORT_COMPLETE,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).ok(),
+                Some(Scope::MessagesWrite)
+            );
+            assert!(requires_h_channel_scope(kind));
+        }
+        assert!(!requires_h_channel_scope(KIND_IMPORT_SESSION_SNAPSHOT));
     }
 
     #[test]

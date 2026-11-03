@@ -747,3 +747,32 @@ async fn put_user_refused_under_the_lock_stores_nothing() {
     assert!(retry.accepted, "{}", retry.message);
     assert_eq!(put_user_events(&state, &tenant, channel_id).await, 1);
 }
+
+/// An outsider cannot put themselves into a DM. A DM member can still add a
+/// third person with kind:9000, so NIP-CI rechecks a DM's member set on every
+/// imported event instead of relying on DM membership being fixed.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn put_user_self_add_is_refused_on_dm_channels() {
+    let state = state().await;
+    let tenant = community(&state, "put-user-dm").await;
+    let (alice, bob, carol) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[&alice.public_key().to_bytes(), &bob.public_key().to_bytes()],
+            &alice.public_key().to_bytes(),
+        )
+        .await
+        .expect("open dm");
+    let carol_hex = carol.public_key().to_hex();
+    let event = put_user(&carol, dm.id, &[&[&carol_hex]], &[]);
+    match ingest(&state, &tenant, event, &carol).await {
+        Err(IngestError::Rejected(message)) => {
+            assert_eq!(message, "restricted: not a channel member");
+        }
+        other => panic!("expected a refusal, got {:?}", other.map(|r| r.message)),
+    }
+    assert_eq!(role_of(&state, &tenant, dm.id, &carol).await, None);
+}

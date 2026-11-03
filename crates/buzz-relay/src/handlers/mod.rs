@@ -16,6 +16,10 @@ pub mod coalesced_refresh;
 pub mod command_executor;
 /// Relay-operator community provisioning HTTP support.
 pub mod community_provisioning;
+/// NIP-CI conversation import control events and snapshot delivery.
+pub mod conversation_import;
+#[cfg(test)]
+mod conversation_import_postgres_tests;
 /// NIP-45 COUNT handler.
 pub mod count;
 #[cfg(test)]

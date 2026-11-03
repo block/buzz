@@ -4672,6 +4672,11 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
 ///
 /// Works with both thread reply objects and channel message objects.
 fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
+    // Imported history (NIP-CI) is consented to by its human participants
+    // only, so it never enters an agent prompt.
+    if carries_import_tag(obj) {
+        return None;
+    }
     let content = obj.get("content").and_then(|v| v.as_str())?;
     let pubkey = obj
         .get("pubkey")
@@ -4703,6 +4708,17 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
         timestamp,
         content: content.to_string(),
     })
+}
+
+/// Whether a query-response event carries a NIP-CI `import` tag.
+fn carries_import_tag(obj: &serde_json::Value) -> bool {
+    obj.get("tags")
+        .and_then(|tags| tags.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.get(0).and_then(|name| name.as_str()) == Some(buzz_core::import::IMPORT_TAG)
+            })
+        })
 }
 
 /// Parse a Nostr query response (array of events) into thread context.
@@ -6391,6 +6407,68 @@ pub(crate) mod tests {
                     .all(|msg| msg.content != "oldest displayed reply without agent pin"));
             }
             _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_fetchers_drop_imported_history() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let channel_id = Uuid::new_v4();
+        let mut imported = thread_event(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "humanpub",
+            "imported history",
+            2000,
+        );
+        imported["tags"] = json!([
+            ["h", channel_id.to_string()],
+            [
+                "import",
+                "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            ["source", "test", "1"]
+        ]);
+        let live = thread_event(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "humanpub",
+            "live reply",
+            3000,
+        );
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            imported,
+            live
+        ]);
+
+        let thread_json = json.clone();
+        let thread = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            10,
+            agent.public_key(),
+            move |_| std::future::ready(Ok(thread_json.clone())),
+            |_| std::future::ready(Ok(json!({ "count": 0 }))),
+            ThreadContextSessionDelta {
+                overfetch: false,
+                delivered_ids: &HashSet::new(),
+            },
+        )
+        .await
+        .expect("thread context");
+        let dm = fetch_dm_context_with(channel_id, 10, move |_| {
+            std::future::ready(Ok(json.clone()))
+        })
+        .await
+        .expect("dm context");
+
+        for ctx in [thread, dm] {
+            let messages = match ctx {
+                ConversationContext::Thread { messages, .. }
+                | ConversationContext::Dm { messages, .. } => messages,
+            };
+            assert!(messages.iter().any(|m| m.content == "live reply"));
+            assert!(messages.iter().all(|m| m.content != "imported history"));
         }
     }
 
