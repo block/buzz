@@ -283,8 +283,10 @@ impl Credentials {
     pub async fn evidence(&self, relay_url: &str) -> Result<Option<String>, CliError> {
         #[cfg(unix)]
         if let Some(provider) = &self.desktop {
-            let relay_url = crate::desktop_provider::provider_relay_url(relay_url)?;
-            return provider.federated_identity(&relay_url).await;
+            // The relay the provider was opened for, as given: the client's
+            // request base has its trailing slash trimmed.
+            let _ = relay_url;
+            return provider.federated_identity().await;
         }
         match &self.evidence {
             Some(source) => source.assertion(relay_url, self).await.map(Some),

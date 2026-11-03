@@ -38,7 +38,8 @@ const REFRESH_MARGIN_SECS: u64 = 30;
 /// A provider failure, by the contract's error code.
 #[derive(Debug)]
 pub enum ProviderError {
-    /// `revoked`: drop the token and fall through to the next source.
+    /// `revoked`: a paired token is dropped and the next paired one tried;
+    /// an inherited one fails the command.
     Revoked,
     /// No common protocol version: the provider does not apply.
     NoCommonVersion,
@@ -404,6 +405,8 @@ struct CachedAssertion {
 /// A connected provider acting as one identity.
 pub struct Provider {
     endpoint: Endpoint,
+    /// The relay it was opened for, as the desktop binds it.
+    relay: String,
     token: String,
     same_user: bool,
     public_key: PublicKey,
@@ -483,6 +486,7 @@ impl Provider {
         }
         Ok(Ok(Arc::new(Self {
             endpoint,
+            relay,
             token,
             same_user,
             public_key,
@@ -527,9 +531,10 @@ impl Provider {
         }
     }
 
-    /// The NIP-FI assertion for `relay_url`, cached until shortly before its
-    /// `exp`. `None` when the desktop has none for that relay.
-    pub async fn federated_identity(&self, relay_url: &str) -> Result<Option<String>, CliError> {
+    /// The NIP-FI assertion for the relay it was opened for, cached until
+    /// shortly before its `exp`. `None` when the desktop has none for it.
+    pub async fn federated_identity(&self) -> Result<Option<String>, CliError> {
+        let relay_url = self.relay.as_str();
         let mut cached = self.cached.lock().await;
         if let Some(entry) = cached.as_ref() {
             if entry.relay_url == relay_url && unix_now() < entry.refresh_at {
@@ -1605,11 +1610,16 @@ pub(crate) mod tests {
     /// A pairing waiting for approval does not hold the store, and its commit
     /// reloads: a concurrent unpair stays unpaired and a concurrent pairing
     /// is kept.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_pair_and_unpair_keep_each_others_changes() {
         let pubkey = nostr::Keys::generate().public_key().to_hex();
+        // `started` says the approval is pending; `release` lets it answer.
+        let (started_tx, started) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, release_rx) = (StdMutex::new(started_tx), StdMutex::new(release_rx));
         let (slow, _) = provider(move |_, _| {
-            std::thread::sleep(Duration::from_millis(300));
+            started_tx.lock().unwrap().send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
             serde_json::json!({"result": serde_json::json!({
                 "token": "tb", "instance": "b", "pubkey": pubkey, "relays": [RELAY],
             }).to_string()})
@@ -1622,11 +1632,12 @@ pub(crate) mod tests {
                 async move { pair_with(store.as_ref(), "b".into(), slow, RELAY, "cli").await },
             )
         };
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::spawn_blocking(move || started.recv().unwrap())
+            .await
+            .unwrap();
         unpair_with(store.as_ref(), Some("a")).unwrap();
         update(store.as_ref(), |p| {
-            let c = p.0.get("b").cloned();
-            assert!(c.is_none());
+            assert!(!p.0.contains_key("b"));
             p.0.insert(
                 "c".into(),
                 Pairing {
@@ -1637,8 +1648,40 @@ pub(crate) mod tests {
             );
         })
         .unwrap();
+        release.send(()).unwrap();
         pairing.await.unwrap().unwrap();
         assert_eq!(store.instances(), ["b", "c"]);
+    }
+
+    /// Through the CLI's own relay inputs, a community ending in a slash
+    /// reaches the desktop exactly as configured, for inherited discovery,
+    /// evidence and pairing.
+    #[tokio::test]
+    async fn a_non_root_trailing_slash_relay_reaches_the_desktop_unchanged() {
+        const TEAM: &str = "wss://host.example/team/";
+        let (_, relay) = crate::relay_inputs(TEAM);
+        let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![TEAM.into()]).await;
+        let store = MemoryStore::default();
+        let inherited = discover_with(Some((endpoint, "agent".into())), &store, Vec::new, relay)
+            .await
+            .unwrap()
+            .unwrap();
+        inherited.federated_identity().await.unwrap();
+        let asked = seen.lock().unwrap().last().unwrap().2.clone();
+        assert_eq!(asked["params"], serde_json::json!([TEAM]));
+
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let (endpoint, seen) = provider(move |_, _| {
+            serde_json::json!({"result": serde_json::json!({
+                "token": "tok", "instance": "i", "pubkey": pubkey, "relays": [TEAM],
+            }).to_string()})
+        })
+        .await;
+        pair_with(&store, "i".into(), endpoint, relay, "cli")
+            .await
+            .unwrap();
+        let asked = seen.lock().unwrap()[0].2.clone();
+        assert_eq!(asked["params"], serde_json::json!(["cli", TEAM]));
     }
 
     #[tokio::test]

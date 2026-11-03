@@ -131,8 +131,10 @@ secret, in:
 
 ### 3. No provider
 
-If neither source yields a provider, the desktop link in the caller's
-credential chain does not apply, and the caller moves on to its next source.
+Without an inherited token, if no paired token yields a provider, the desktop
+link in the caller's credential chain does not apply, and the caller moves on
+to its next source. A caller with an inherited token never falls through to a
+paired token: when the inherited token cannot serve, the caller fails.
 
 ## Transport
 
@@ -207,8 +209,9 @@ and signs. `sign_event` is subject to the [operation policy](#operation-policy).
 
 - `role` is `agent` or `owner`. `owner_pubkey` is present only for `agent`.
 - A caller MUST NOT use the provider for a relay that is not in `relays`. It
-  treats the provider as not applicable to that relay and moves on to its next
-  credential source.
+  treats the provider as not applicable to that relay: with a paired token it
+  moves on to its next source; with an inherited token it fails (see
+  [Discovery](#discovery)).
 
 `federated_identity` returns a current [NIP-FI](nips/NIP-FI.md) assertion
 whose `nostr_pubkey` is the token's identity and whose audience is the given

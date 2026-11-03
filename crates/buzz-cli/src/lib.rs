@@ -2274,8 +2274,15 @@ pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
+/// The HTTP request base, and the community itself as configured. A desktop
+/// binds the whole community URL, trailing slash included, which the request
+/// base trims; discovery, pairing and evidence take the community.
+pub(crate) fn relay_inputs(configured: &str) -> (String, &str) {
+    (client::normalize_relay_url(configured), configured)
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let relay_url = client::normalize_relay_url(&cli.relay);
+    let (relay_url, relay) = relay_inputs(&cli.relay);
 
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
@@ -2287,7 +2294,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Pairing runs before any credential exists.
     if let Cmd::Auth(sub) = cli.command {
-        return run_auth(sub, &relay_url).await;
+        return run_auth(sub, relay).await;
     }
 
     // Credential chain: the first link that applies to this relay is the
@@ -2299,7 +2306,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             ..Default::default()
         }
         .with_env_evidence(),
-        &relay_url,
+        relay,
     )
     .await?;
     let client = BuzzClient::new(relay_url, credentials)?;
