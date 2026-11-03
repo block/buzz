@@ -28,7 +28,7 @@ use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
-use crate::nip_fi_core::{http_denial, unresolved_host_denial};
+use crate::nip_fi_core::http_denial;
 use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
 
@@ -210,7 +210,11 @@ async fn nip_fi_assertion_guard(
         (Ok(()), Ok(community)) => {
             crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
         }
-        (_, Err(class)) => unresolved_host_denial(class),
+        (_, Err(class)) => crate::nip_fi_core::community_denial(
+            state.nip_fi_communities(),
+            request.headers(),
+            class,
+        ),
         (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), Ok(_)) => http_denial(class),
     }
 }
@@ -4557,9 +4561,11 @@ mod tests {
                 ClassifiedResponse::Ready(Ok(()))
             )
         };
-        assert!(classify(&unresolved_host_denial(
-            DenialClass::AuthorizationUnavailable
-        )));
+        let mut marked = http_denial(DenialClass::AuthorizationUnavailable);
+        marked
+            .extensions_mut()
+            .insert(crate::nip_fi_core::UnresolvedHost);
+        assert!(classify(&marked));
         assert!(!classify(&http_denial(
             DenialClass::AuthorizationUnavailable
         )));

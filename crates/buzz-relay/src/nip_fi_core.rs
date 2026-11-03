@@ -149,6 +149,19 @@ impl Communities<'_> {
             Self::Unavailable => Err(DenialClass::AuthorizationUnavailable),
         }
     }
+
+    /// Whether a failed [`Communities::resolve`] for `headers` is a
+    /// confirmed unmapped Host rather than an unavailable dependency. The
+    /// static map has no dependency, so every failure there is unmapped.
+    fn confirms_unmapped(self, headers: &HeaderMap) -> bool {
+        match self {
+            Self::Env(_) => true,
+            Self::Database(resolver) => {
+                request_host(headers).is_none_or(|host| resolver.confirms_unmapped(host))
+            }
+            Self::Unavailable => false,
+        }
+    }
 }
 
 impl<'a> From<&'a NipFiCommunities> for Communities<'a> {
@@ -294,17 +307,24 @@ pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
         .unwrap_or_else(|_| status.into_response())
 }
 
-/// Response extension on an enforce denial whose request Host resolved to no
-/// community. The HTTP trace layer reads it to treat the denial as an
-/// expected rejection, not a server failure. It never reaches the wire.
+/// Response extension on an enforce denial for a request Host confirmed to
+/// map to no community. The HTTP trace layer reads it to treat the denial as
+/// an expected rejection, not a server failure. It never reaches the wire.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UnresolvedHost;
 
-/// [`http_denial`] for a request whose Host resolved to no community: the
-/// same wire response, marked with [`UnresolvedHost`].
-pub(crate) fn unresolved_host_denial(class: DenialClass) -> Response<Body> {
+/// [`http_denial`] for a failed community resolution: the same wire
+/// response, marked with [`UnresolvedHost`] only when `communities` confirms
+/// the Host is unmapped. A resolver outage stays an unmarked server failure.
+pub(crate) fn community_denial(
+    communities: Communities<'_>,
+    headers: &HeaderMap,
+    class: DenialClass,
+) -> Response<Body> {
     let mut response = http_denial(class);
-    response.extensions_mut().insert(UnresolvedHost);
+    if communities.confirms_unmapped(headers) {
+        response.extensions_mut().insert(UnresolvedHost);
+    }
     response
 }
 

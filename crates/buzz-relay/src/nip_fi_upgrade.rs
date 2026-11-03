@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, Response};
 use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
 
 use crate::nip_fi_core::{
-    evaluate_attached_assertion, http_denial, unresolved_host_denial, AdmissionDeadline,
+    community_denial, evaluate_attached_assertion, http_denial, AdmissionDeadline,
     AssertionRejection, Communities, ResolvedCommunity,
 };
 
@@ -153,7 +153,9 @@ pub(crate) async fn check_nip_fi_at_upgrade<'a>(
     // Enforce mode: resolve the Host's community, then validate the assertion.
     let community = match communities.resolve(headers).await {
         Ok(community) => community,
-        Err(class) => return NipFiUpgradeOutcome::Denied(unresolved_host_denial(class)),
+        Err(class) => {
+            return NipFiUpgradeOutcome::Denied(community_denial(communities, headers, class))
+        }
     };
     match evaluate_attached_assertion(headers, &community, verifier) {
         Ok(assertion) => NipFiUpgradeOutcome::Admitted(assertion, community.deadline()),

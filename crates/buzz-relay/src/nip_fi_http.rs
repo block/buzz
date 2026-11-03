@@ -393,7 +393,7 @@ where
             metrics::counter!("buzz_auth_failures_total", "reason" => reason).increment(1);
         }
         if deny.stage == Stage::Community {
-            crate::nip_fi_core::unresolved_host_denial(deny.class)
+            crate::nip_fi_core::community_denial(communities, headers, deny.class)
         } else {
             http_denial(deny.class)
         }
