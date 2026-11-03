@@ -104,3 +104,6 @@ mod admission_postgres_tests;
 
 /// Durable NIP-FI verified-profile projection state.
 pub mod verified_profiles;
+
+/// NIP-CI conversation import sessions, consents and counters.
+pub mod import_session;

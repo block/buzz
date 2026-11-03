@@ -37,8 +37,9 @@ use uuid::Uuid;
 use buzz_core::kind::{
     KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_GIT_ISSUE, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_IMPORT_PROPOSAL, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -108,7 +109,8 @@ fn build_mentions_query(
         " AND e.kind IN ({KIND_STREAM_MESSAGE}, {KIND_STREAM_MESSAGE_V2}, \
          {KIND_TEXT_NOTE}, {KIND_FORUM_POST}, {KIND_FORUM_COMMENT}, {KIND_GIT_PULL_REQUEST}, \
          {KIND_GIT_PR_UPDATE}, {KIND_GIT_ISSUE}, {KIND_GIT_STATUS_OPEN}, \
-         {KIND_GIT_STATUS_MERGED}, {KIND_GIT_STATUS_CLOSED}, {KIND_GIT_STATUS_DRAFT})"
+         {KIND_GIT_STATUS_MERGED}, {KIND_GIT_STATUS_CLOSED}, {KIND_GIT_STATUS_DRAFT}, \
+         {KIND_IMPORT_PROPOSAL})"
     ));
     push_visible_channel_filter(&mut qb, "e.channel_id", accessible_channel_ids);
     if let Some(s) = since {
@@ -1129,6 +1131,33 @@ mod postgres_tests {
                 && sql.contains(&KIND_TEXT_NOTE.to_string()),
             "mentions feed must include Buzz Git roots and comments: {sql}"
         );
+    }
+
+    #[test]
+    fn mentions_query_includes_import_proposals_only() {
+        use buzz_core::kind::{
+            KIND_IMPORT_COMPLETE, KIND_IMPORT_CONSENT, KIND_IMPORT_PROPOSAL, KIND_IMPORT_WITHDRAW,
+        };
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let mut qb = build_mentions_query(community, &[0x42; 32], &[], None, 10);
+        let query = qb.build();
+        let sql_str = sqlx::Execute::sql(query);
+        let sql = sql_str.as_str();
+
+        assert!(
+            sql.contains(&KIND_IMPORT_PROPOSAL.to_string()),
+            "a waiting import proposal must reach its participants' mentions: {sql}"
+        );
+        for kind in [
+            KIND_IMPORT_CONSENT,
+            KIND_IMPORT_WITHDRAW,
+            KIND_IMPORT_COMPLETE,
+        ] {
+            assert!(
+                !sql.contains(&kind.to_string()),
+                "import control kind {kind} must stay out of mentions: {sql}"
+            );
+        }
     }
 
     #[test]

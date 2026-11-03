@@ -93,3 +93,6 @@ use buzz_core::CommunityId;
 
 /// Durable NIP-FI verified-profile projection state.
 pub use store::verified_profiles;
+
+/// NIP-CI conversation import session state.
+pub use store::import_session;

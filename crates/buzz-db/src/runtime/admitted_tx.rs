@@ -154,6 +154,12 @@ impl AdmittedTx {
         }
     }
 
+    /// Drop the TTL refresh recorded so far, for writes that are not channel
+    /// activity.
+    pub(crate) fn skip_ttl_refresh(&mut self) {
+        self.ttl_refresh_channels.clear();
+    }
+
     /// Commit the transaction. This is the only commit path for admitted
     /// writes.
     ///
