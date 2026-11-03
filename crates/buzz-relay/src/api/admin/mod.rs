@@ -9482,7 +9482,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres — a deleted channel does not strand a committed kick"]
     async fn crash_recovery_finalizes_kick_after_channel_deleted() {
         let pool = e2e_pool().await;
-        let (community_id, _host) = e2e_community(&pool, "kick-recovery-deleted").await;
+        let (community_id, host) = e2e_community(&pool, "kick-recovery-deleted").await;
         let cid = buzz_core::CommunityId::from_uuid(community_id);
         let target = vec![0xAAu8; 32];
         let actor = vec![0xBBu8; 32];
@@ -9588,13 +9588,32 @@ mod postgres_tests {
             .expect("member row")
         };
         let removed_before = removed_at().await.expect("kick removed the member");
+
+        // Discovery published before the delete, which is stale once the
+        // channel is gone; recovery must clean it up before the notice.
+        let state = state_from_pool(pool.clone()).await;
+        let tenant = e2e_tenant(community_id, &host);
+        crate::handlers::side_effects::emit_group_discovery_events(&tenant, &state, channel_id)
+            .await
+            .expect("seed discovery");
+        let live_discovery = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2 \
+                 AND kind IN (39000, 39001, 39002) AND deleted_at IS NULL",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count discovery")
+        };
+        assert!(live_discovery().await > 0, "stale discovery seeded");
         assert!(
             buzz_db::channel::soft_delete_channel(&pool, cid, channel_id)
                 .await
                 .expect("delete channel")
         );
-
-        let state = state_from_pool(pool.clone()).await;
+        let mut barrier = crate::handlers::side_effects::notice_barrier::install(&target);
         let batch = buzz_db::relay_admin_actions::claim_stranded_action_batch(
             &pool,
             "e2e-kick-recovery-deleted",
@@ -9607,7 +9626,23 @@ mod postgres_tests {
             .into_iter()
             .find(|c| c.record.id == action_id)
             .expect("stranded action must appear in batch");
-        crate::handlers::admin_action_worker::recover_one(&state, claim).await;
+        let recovery = tokio::spawn({
+            let state = state.clone();
+            async move { crate::handlers::admin_action_worker::recover_one(&state, claim).await }
+        });
+        let (noticed, release) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), barrier.next())
+                .await
+                .expect("recovery sent no removal notice")
+                .expect("barrier open");
+        assert_eq!(noticed, channel_id);
+        assert_eq!(
+            live_discovery().await,
+            0,
+            "removal notice sent before discovery cleanup"
+        );
+        release.send(()).expect("recovery waiting");
+        recovery.await.expect("recovery task");
 
         let final_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
             .await

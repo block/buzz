@@ -1220,25 +1220,49 @@ pub(crate) mod notice_barrier {
         WAITERS.get_or_init(Default::default)
     }
 
-    /// Park every notice to `recipient`; each arrives as a release handle.
-    pub(crate) fn install(recipient: &[u8]) -> mpsc::UnboundedReceiver<Parked> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// Parks every notice to one recipient while held; dropping it removes
+    /// the recipient's waiter and clock pin.
+    pub(crate) struct Barrier {
+        recipient: Vec<u8>,
+        parked: mpsc::UnboundedReceiver<Parked>,
+    }
+
+    impl Barrier {
+        /// The next notice to reach the barrier, with its release handle.
+        pub(crate) async fn next(&mut self) -> Option<Parked> {
+            self.parked.recv().await
+        }
+
+        /// Sign every later notice to the recipient at `created_at`, as if all
+        /// were sent in the same second.
+        pub(crate) fn pin_created_at(&self, created_at: u64) {
+            pins()
+                .lock()
+                .unwrap()
+                .insert(self.recipient.clone(), created_at);
+        }
+    }
+
+    impl Drop for Barrier {
+        fn drop(&mut self) {
+            waiters().lock().unwrap().remove(&self.recipient);
+            pins().lock().unwrap().remove(&self.recipient);
+        }
+    }
+
+    /// Park every notice to `recipient` until the returned barrier drops.
+    pub(crate) fn install(recipient: &[u8]) -> Barrier {
+        let (tx, parked) = mpsc::unbounded_channel();
         waiters().lock().unwrap().insert(recipient.to_vec(), tx);
-        rx
+        Barrier {
+            recipient: recipient.to_vec(),
+            parked,
+        }
     }
 
     fn pins() -> &'static Mutex<HashMap<Vec<u8>, u64>> {
         static PINS: OnceLock<Mutex<HashMap<Vec<u8>, u64>>> = OnceLock::new();
         PINS.get_or_init(Default::default)
-    }
-
-    /// Sign every later notice to `recipient` at `created_at`, as if all were
-    /// sent in the same second.
-    pub(crate) fn pin_created_at(recipient: &[u8], created_at: u64) {
-        pins()
-            .lock()
-            .unwrap()
-            .insert(recipient.to_vec(), created_at);
     }
 
     pub(super) fn pinned_created_at(recipient: &[u8]) -> Option<u64> {
@@ -1323,6 +1347,7 @@ pub(crate) async fn emit_membership_notification_tagged(
 
 /// [`emit_membership_notification`] for a caller that already read the
 /// channel's type, such as a kind:9000 notifying several people.
+#[allow(clippy::too_many_arguments)]
 async fn emit_typed_membership_notification(
     tenant: &TenantContext,
     state: &Arc<AppState>,

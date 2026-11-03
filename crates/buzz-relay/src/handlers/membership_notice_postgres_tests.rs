@@ -179,12 +179,12 @@ async fn hidden_dms(state: &Arc<AppState>, tenant: &TenantContext, reader: &Keys
 /// Wait for the producer to reach its next notice to the parked reader, run
 /// `on_receipt` while it is held there, then let it continue. Returns the
 /// notice's channel and what `on_receipt` saw.
-async fn at_receipt<T>(
-    barrier: &mut tokio::sync::mpsc::UnboundedReceiver<notice_barrier::Parked>,
+pub(crate) async fn at_receipt<T>(
+    barrier: &mut notice_barrier::Barrier,
     on_receipt: impl AsyncFnOnce(String) -> T,
 ) -> (String, T) {
     let (channel, release) =
-        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.recv())
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.next())
             .await
             .expect("producer reached no notice")
             .expect("barrier open");
@@ -307,7 +307,7 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
     let recipient_bytes = recipient.public_key().to_bytes();
     let mut rx = subscribe_notices(&state, &tenant, &recipient);
     let mut barrier = notice_barrier::install(&recipient_bytes);
-    notice_barrier::pin_created_at(&recipient_bytes, nostr::Timestamp::now().as_secs());
+    barrier.pin_created_at(nostr::Timestamp::now().as_secs());
     let deliver = || {
         let (state, tenant) = (state.clone(), tenant.clone());
         tokio::spawn(async move {
