@@ -12,7 +12,7 @@ Federated Identity Adapter
 
 This NIP defines a provider-neutral HTTP contract between a Nostr client and an enterprise identity adapter. The adapter authenticates a user through a browser login, holds an adapter session for that user, and issues short-lived [NIP-FI](NIP-FI.md) assertions that bind the user to a Nostr key the client proves it controls with [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md).
 
-It also defines how a client obtains and uses an owner-authorized grant for an agent key, and a device authorization login for clients that cannot run a browser.
+It also defines how a client obtains and uses an owner-authorized grant for an agent key.
 
 The adapter MAY use an OIDC or SAML provider, LDAP, or any other upstream identity system behind this boundary. Clients do not implement or depend on that upstream protocol. Discovery of which relays require enterprise identity, and of which adapter serves them, is outside this NIP.
 
@@ -187,7 +187,7 @@ grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange
 - The body MUST contain exactly these six fields, each once. Unknown or repeated fields MUST be rejected with 400 `invalid_request`. `grant_type`, `subject_token_type`, and `requested_token_type` MUST have exactly the values shown.
 - The session travels only as `subject_token`. The adapter MUST reject the request with 400 `invalid_request` when it also carries an `Authorization` header or a cookie.
 - The NIP-98 event MUST be signed by `agent_pubkey` and follow the [Relay assertion](#relay-assertion) proof rules for this endpoint's URL and the exact form body bytes. A request without exactly one `Nostr-Authorization` header MUST be rejected with 400 `invalid_request`.
-- Each proof is single-use on the agent grant, agent assertion, and device authorization routes: the adapter MUST reject a proof whose event `id` it has already accepted on that route, with 400 `invalid_request`, and clients MUST sign a fresh proof for every attempt, including retries.
+- Each proof is single-use on the agent grant and agent assertion routes: the adapter MUST reject a proof whose event `id` it has already accepted on that route, with 400 `invalid_request`, and clients MUST sign a fresh proof for every attempt, including retries.
 - The body is limited to 8192 bytes and MUST NOT be content-encoded.
 
 Success response (`200`, `Cache-Control: no-store`), in the [RFC 8693 §2.2.1](https://www.rfc-editor.org/rfc/rfc8693#section-2.2.1) shape:
@@ -205,7 +205,7 @@ Success response (`200`, `Cache-Control: no-store`), in the [RFC 8693 §2.2.1](h
 
 The grant's lifetime, and whether use extends it, is adapter policy; `expires_in` describes it when issued. Clients MUST reject a response whose `issued_token_type` or `token_type` differs from the values shown, whose `nostr_owner_pubkey` differs from the owner in the tag sent, or whose `access_token` or `nip_fi_issuer` is empty.
 
-An agent key belongs to one owner for good. A successful enrollment, by this exchange or by [Device authorization](#device-authorization), replaces every earlier grant for that agent key. The adapter MUST refuse with 400 `invalid_grant` an enrollment of an agent key it has bound to a different owner, or of an agent key that has been revoked. An expired grant does not end the enrollment: the owner MAY enroll the same agent key again under a valid owner authorization.
+An agent key belongs to one owner for good. A successful enrollment, by this exchange or any other enrollment method an adapter offers, replaces every earlier grant for that agent key. The adapter MUST refuse with 400 `invalid_grant` an enrollment of an agent key it has bound to a different owner, or of an agent key that has been revoked. An expired grant does not end the enrollment: the owner MAY enroll the same agent key again under a valid owner authorization.
 
 Exchange denials use the body shape of [Denials](#denials):
 
@@ -262,68 +262,6 @@ The body MUST contain exactly one field, `agent_pubkey`; any other form MUST be 
 
 Success response (`200`, `Cache-Control: no-store`): `{"revoked": true}`. Revocation is idempotent: revoking an agent the owner already revoked succeeds and changes nothing. The adapter MUST invalidate every grant for that agent key and stop issuing assertions for it, and SHOULD disconnect it with the [NIP-FI](NIP-FI.md) Admin disconnect API. Revocation MUST NOT affect the owner's own key or sessions. An agent key the session's owner never enrolled, including another owner's, MUST be answered as 404 `agent_not_found`, so revocation does not reveal other owners' agents. Session denials are as in [Session check](#session-check); a missing session is 401 `session_required`.
 
-## Device authorization
-
-A client that holds a Nostr key but cannot run a browser login, such as a command-line client on a remote host, obtains its credential through the [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628) device authorization grant, with the adapter as the authorization server. The user approves on another device. A human key receives an adapter session; an agent key receives an agent grant. The presence of `owner_attestation` at the start is what makes it an agent login.
-
-The client MUST send both requests below with an HTTP client that does not follow redirects, and MUST treat any 3xx response as a failure.
-
-### Start
-
-```http
-POST /v1/nip-fi/device-authorization
-Content-Type: application/x-www-form-urlencoded
-Nostr-Authorization: Nostr {base64-NIP-98-event}
-
-nostr_pubkey={64-char lowercase hex public key}
-&owner_attestation={NIP-OA auth tag JSON}
-```
-
-- `owner_attestation` is present exactly when `nostr_pubkey` is an agent key, and is verified as in [Agent keys](#agent-keys) once the approving owner is known.
-- The NIP-98 event MUST be signed by `nostr_pubkey` and follow the [Relay assertion](#relay-assertion) proof rules for this endpoint's URL and the exact form body bytes. The adapter MUST NOT start a flow without a valid proof.
-- The adapter MUST ignore unrecognized fields, as [RFC 8628 §3.1](https://www.rfc-editor.org/rfc/rfc8628#section-3.1) requires. A repeated field, and a missing or repeated `Nostr-Authorization` header, MUST be rejected with 400 `invalid_request`. The body is limited to 8192 bytes and MUST NOT be content-encoded.
-
-Success response (`200`, `Cache-Control: no-store`), as in [RFC 8628 §3.2](https://www.rfc-editor.org/rfc/rfc8628#section-3.2):
-
-```json
-{
-  "device_code": "opaque-device-code",
-  "user_code": "ABCD-EFGH",
-  "verification_uri": "https://adapter.example.com/device",
-  "verification_uri_complete": "https://adapter.example.com/device?user_code=ABCD-EFGH",
-  "expires_in": 600,
-  "interval": 5
-}
-```
-
-The client shows `user_code` and `verification_uri` (or `verification_uri_complete`) to the user. `verification_uri` MUST be an `https` URL on the adapter's origin.
-
-### Approval
-
-The adapter hosts the verification page. The user signs in there through the adapter's normal browser authentication, then approves or denies. The page MUST show the npub of `nostr_pubkey`, and for an agent login MUST also show the agent's name when the adapter knows it. The adapter MUST NOT approve:
-
-- a human login unless `nostr_pubkey` is the key the adapter has bound to the approving user;
-- an agent login unless the `owner_attestation` was signed by the key the adapter has bound to the approving user.
-
-User codes MUST be single-use and MUST expire with the device code.
-
-### Token
-
-The client polls no more often than `interval` seconds:
-
-```http
-POST /v1/nip-fi/device-token
-Content-Type: application/x-www-form-urlencoded
-Nostr-Authorization: Nostr {base64-NIP-98-event}
-
-grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code
-&device_code={device_code}
-```
-
-The NIP-98 event MUST be signed by the key that started the flow and follow the [Relay assertion](#relay-assertion) proof rules for this endpoint. The adapter MUST NOT release a credential to a request without that proof. Each device code yields at most one credential.
-
-While the flow is unresolved, the adapter answers 400 with `authorization_pending`, `slow_down`, `access_denied`, or `expired_token` as [RFC 8628 §3.5](https://www.rfc-editor.org/rfc/rfc8628#section-3.5) defines, and clients act on them as it requires. On approval of a human login, the response is the [Code exchange](#code-exchange) success response, and the client MUST complete it with the same `/v1/session` check before committing the session. On approval of an agent login, the response is the [Agent grant](#agent-grant) success response, checked as that section requires. Other denials use the codes of [Agent grant](#agent-grant). As RFC 8628 §3.5 requires, the client MUST stop polling on any error other than `authorization_pending` or `slow_down`, and starts a new flow to try again.
-
 ## NIP-FI assertion transport
 
 The adapter session header above is only for client-to-adapter requests. It is not the relay's NIP-FI proof transport, and adapter sessions MUST use only `Authorization: Bearer`, except in the [Agent grant](#agent-grant) exchange, where the session travels only as `subject_token`. The origin and redirect rules in [Security Considerations](#security-considerations) apply to it there too.
@@ -340,9 +278,8 @@ WebSocket connections send only `Nostr-Federated-Identity` on the upgrade reques
 ## Security Considerations
 
 - Clients MUST send `session_token` only to the adapter's origin (the scheme, host, and port of `{adapter_base}`), and MUST NOT send it to a relay or any other origin. A leaked session token lets its holder request assertions for a key they control until the adapter binds the user to a key.
-- Clients MUST send agent grants and device codes only to the adapter's origin, under the same rule. Clients MUST NOT send a session token, agent grant, or device code through, or replay it to, a redirect target.
-- Clients and adapters MUST NOT log credentials: the `Authorization` and `Nostr-Authorization` header values on every adapter request, including `/v1/session`; the `handoff_secret` and `session_token` values in the code exchange request and response; `subject_token`, `owner_attestation`, and `access_token` in the agent grant exchange; and `device_code` and the issued credential in device authorization.
-- Device authorization is open to phishing: an attacker can start a flow and persuade a user to approve its code. The approval rules in [Approval](#approval) are the mitigation. Because a human login is released only for the approving user's bound key, and an agent login only for an agent the approving owner authorized, a phished approval cannot enroll a key the attacker chose. These rules do not protect a key that is already approved and later stolen; revoking it is the remedy.
+- Clients MUST send agent grants only to the adapter's origin, under the same rule. Clients MUST NOT send a session token or agent grant through, or replay it to, a redirect target.
+- Clients and adapters MUST NOT log credentials: the `Authorization` and `Nostr-Authorization` header values on every adapter request, including `/v1/session`; the `handoff_secret` and `session_token` values in the code exchange request and response; `subject_token`, `owner_attestation`, and `access_token` in the agent grant exchange.
 
 ## Privacy
 
