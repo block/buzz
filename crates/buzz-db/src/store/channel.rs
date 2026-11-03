@@ -842,11 +842,23 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
     })
 }
 
+/// Whether [`group_metadata_tags`] reads the member roster for `channel`:
+/// only a DM's kind:39000 lists its participants. The locked snapshot that
+/// feeds it reads the roster under the same predicate.
+pub fn group_metadata_uses_members(channel: &ChannelRecord) -> bool {
+    channel.channel_type == ChannelType::Dm.as_str()
+}
+
+/// The roles a channel's relay-signed NIP-29 kind:39001 admins event lists.
+/// The locked snapshot that feeds it reads only these members.
+pub const GROUP_ADMIN_ROLES: [MemberRole; 2] = [MemberRole::Owner, MemberRole::Admin];
+
 /// The tags of a channel's relay-signed NIP-29 kind:39000 metadata event.
 ///
 /// This is the single builder for kind:39000: the relay's discovery emitter
 /// and the `buzz-admin` backfill both call it, so the published flags cannot
-/// drift apart. `members` is used only for DM participant `p` tags.
+/// drift apart. `members` is read only when [`group_metadata_uses_members`]
+/// holds, for DM participant `p` tags.
 ///
 /// The NIP-29 access flags follow the channel's settings:
 /// - `private` (members-only read), or Buzz's explicit `public`;
@@ -896,7 +908,7 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
     if channel.channel_type == ChannelType::System.as_str() && !open {
         tags.push(tag(&["hidden"]));
     }
-    if channel.channel_type == ChannelType::Dm.as_str() {
+    if group_metadata_uses_members(channel) {
         tags.push(tag(&["hidden"]));
         // Include participant pubkeys in kind:39000 for DMs so clients can
         // resolve display names without a separate kind:39002 fetch.
@@ -958,47 +970,67 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
 pub struct LockedGroupStateSnapshot {
     /// The channel, read behind the lock.
     pub channel: ChannelRecord,
-    /// The channel's active members, read behind the lock.
+    /// The active members the kind's tags use, read behind the lock: every
+    /// member for a DM's kind:39000 (its `p` tags), owners and admins for
+    /// kind:39001, and none for any other kind:39000, whose tags do not
+    /// mention members. Reading only those keeps the lock short on large
+    /// channels.
     pub members: Vec<MemberRecord>,
     /// `created_at` of the coordinate's live event, if it has one.
     pub latest_created_at: Option<u64>,
     kind: i32,
     relay_pubkey: Vec<u8>,
     tx: crate::AdmittedTx,
+    /// Times lock, reads and replacement as one `replace_addressable_event`
+    /// transaction, which is where these writes were timed before.
+    timer: crate::observability::TransactionTimer,
 }
 
 impl LockedGroupStateSnapshot {
     /// Store `event`, built from this snapshot, as the coordinate's live
     /// event, and release the lock. Returns `(event, false)`, storing
     /// nothing, when an equal or newer event is already live.
-    pub async fn replace(mut self, event: &nostr::Event) -> Result<(StoredEvent, bool)> {
-        let channel_id = self.channel.id;
-        if buzz_core::kind::event_kind_i32(event) != self.kind
-            || event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+    pub async fn replace(self, event: &nostr::Event) -> Result<(StoredEvent, bool)> {
+        let Self {
+            channel,
+            kind,
+            relay_pubkey,
+            mut tx,
+            timer,
+            ..
+        } = self;
+        let channel_id = channel.id;
+        if buzz_core::kind::event_kind_i32(event) != kind
+            || event.pubkey.to_bytes().as_slice() != relay_pubkey.as_slice()
             || crate::event::extract_d_tag(event) != Some(channel_id.to_string())
         {
             return Err(DbError::InvalidData(
                 "group-state replacement does not match its locked coordinate".into(),
             ));
         }
-        let (stored, inserted) = crate::replaceable::replace_addressable_event_in_transaction(
-            &mut self.tx,
-            event,
-            Some(channel_id),
-        )
-        .await?;
-        if inserted {
-            self.tx.commit().await?;
-        } else {
-            self.tx.rollback().await?;
-        }
-        Ok((stored, inserted))
+        timer
+            .observe(async {
+                let (stored, inserted) = crate::replaceable::replace_addressable_event_under_lock(
+                    &mut tx,
+                    event,
+                    Some(channel_id),
+                )
+                .await?;
+                if inserted {
+                    tx.commit().await?;
+                } else {
+                    tx.rollback().await?;
+                }
+                Ok((stored, inserted))
+            })
+            .await
     }
 }
 
 /// Take the replacement lock of `channel_id`'s relay-signed `kind` event
-/// (39000 or 39001), then read the channel, its members and the live event's
-/// `created_at` behind it. See [`LockedGroupStateSnapshot`].
+/// (39000 or 39001), then read the channel, the members that kind's tags
+/// use and the live event's `created_at` behind it. See
+/// [`LockedGroupStateSnapshot`]. Any other `kind` is refused.
 pub async fn lock_group_state_snapshot(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1006,28 +1038,38 @@ pub async fn lock_group_state_snapshot(
     kind: i32,
     relay_pubkey: &[u8],
 ) -> Result<LockedGroupStateSnapshot> {
-    let mut tx = crate::begin_community_event_write_transaction(
+    if kind != 39000 && kind != 39001 {
+        return Err(DbError::InvalidData(format!(
+            "group-state snapshots cover kind:39000 and kind:39001, not kind:{kind}"
+        )));
+    }
+    // The same writer population and transaction timer as
+    // `Db::replace_addressable_event`, which stored these events before.
+    let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
         pool,
         community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let lock_key = crate::replaceable::event_replacement_lock_key(
-        community_id,
-        kind,
-        relay_pubkey,
-        Some(channel_id.as_bytes()),
+    let timer = crate::observability::TransactionTimer::start(
+        crate::observability::TransactionOperation::ReplaceAddressableEvent,
     );
-    crate::observability::observe_advisory_lock(
-        crate::observability::LockType::Replacement,
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(tx.conn()),
-    )
-    .await?;
+    crate::replaceable::take_replacement_lock(&mut tx, kind, relay_pubkey, Some(channel_id))
+        .await?;
     let channel = select_channel(tx.conn(), community_id, channel_id).await?;
-    let members =
-        crate::channel_members::select_active_members(tx.conn(), community_id, channel_id).await?;
+    let members = if kind == 39001 {
+        crate::channel_members::select_active_members_in_roles(
+            tx.conn(),
+            community_id,
+            channel_id,
+            &GROUP_ADMIN_ROLES,
+        )
+        .await?
+    } else if group_metadata_uses_members(&channel) {
+        crate::channel_members::select_active_members(tx.conn(), community_id, channel_id).await?
+    } else {
+        Vec::new()
+    };
     let latest_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
          AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
@@ -1045,6 +1087,7 @@ pub async fn lock_group_state_snapshot(
         kind,
         relay_pubkey: relay_pubkey.to_vec(),
         tx,
+        timer,
     })
 }
 
@@ -3210,5 +3253,206 @@ mod postgres_tests {
         let next = waiter.await.expect("waiter task").expect("next snapshot");
         assert_eq!(next.channel.topic.as_deref(), Some("changed while waiting"));
         assert_eq!(next.latest_created_at, Some(held_at));
+    }
+
+    /// A snapshot reads only the members its kind's tags use, and the tags
+    /// built from it are the ones the full roster would give: none of the
+    /// roster for a stream's kind:39000, owners and admins in roster order
+    /// for kind:39001, the whole roster for a DM's kind:39000. Any other
+    /// kind is refused. Mutation: read the roster for a stream's kind:39000,
+    /// or drop the role filter for kind:39001 → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn group_state_snapshot_reads_the_members_its_kind_publishes() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let relay_pubkey = Keys::generate().public_key().to_bytes();
+        let roster = async |channel_id: Uuid| {
+            let mut conn = pool.acquire().await.expect("acquire");
+            crate::channel_members::select_active_members(&mut conn, community, channel_id)
+                .await
+                .expect("roster")
+        };
+        let who = |members: &[MemberRecord]| {
+            members
+                .iter()
+                .map(|m| (m.pubkey.clone(), m.role.clone()))
+                .collect::<Vec<_>>()
+        };
+        // `create_test_channel` seats the creator as owner; the rest join
+        // directly, past the join-role policy `add_member` applies.
+        let seat = async |channel_id: Uuid, role: &str| {
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+                 VALUES ($1, $2, $3, $4::member_role)",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .bind(random_pubkey())
+            .bind(role)
+            .execute(&pool)
+            .await
+            .expect("seat member");
+        };
+
+        let owner = random_pubkey();
+        let stream = create_test_channel(
+            &pool,
+            community_id,
+            "group-state-members",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create stream");
+        for role in ["member", "admin", "guest"] {
+            seat(stream.id, role).await;
+        }
+        let all = roster(stream.id).await;
+        assert_eq!(all.len(), 4);
+
+        let metadata = lock_group_state_snapshot(&pool, community, stream.id, 39000, &relay_pubkey)
+            .await
+            .expect("stream 39000 snapshot");
+        assert!(metadata.members.is_empty(), "{:?}", who(&metadata.members));
+        assert_eq!(
+            group_metadata_tags(&metadata.channel, &metadata.members),
+            group_metadata_tags(&metadata.channel, &all)
+        );
+        drop(metadata);
+
+        let admins = lock_group_state_snapshot(&pool, community, stream.id, 39001, &relay_pubkey)
+            .await
+            .expect("stream 39001 snapshot");
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|m| m.role == "owner" || m.role == "admin")
+            .cloned()
+            .collect();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(who(&admins.members), who(&expected));
+        drop(admins);
+
+        let dm = create_test_channel(
+            &pool,
+            community_id,
+            "group-state-members-dm",
+            ChannelType::Dm,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create dm");
+        seat(dm.id, "member").await;
+        let dm_all = roster(dm.id).await;
+        assert_eq!(dm_all.len(), 2);
+        let dm_metadata = lock_group_state_snapshot(&pool, community, dm.id, 39000, &relay_pubkey)
+            .await
+            .expect("dm 39000 snapshot");
+        assert_eq!(who(&dm_metadata.members), who(&dm_all));
+        let tags = group_metadata_tags(&dm_metadata.channel, &dm_metadata.members);
+        assert_eq!(tags, group_metadata_tags(&dm_metadata.channel, &dm_all));
+        assert_eq!(tags.iter().filter(|t| t[0] == "p").count(), 2);
+        drop(dm_metadata);
+
+        let refused = lock_group_state_snapshot(&pool, community, dm.id, 39002, &relay_pubkey)
+            .await
+            .err()
+            .expect("kind:39002 is not a group-state snapshot");
+        assert!(matches!(refused, DbError::InvalidData(_)), "{refused:?}");
+    }
+
+    /// A group-state write takes its replacement lock once: the snapshot
+    /// takes it and the replacement runs under it, so the lock metrics see
+    /// one acquisition per write, as they do for
+    /// `Db::replace_addressable_event`. Mutation: take the lock again in
+    /// `replace_addressable_event_under_lock` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn group_state_replacement_takes_its_lock_once() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "group-state-lock-once",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &random_pubkey(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let relay = Keys::generate();
+        let relay_pubkey = relay.public_key().to_bytes();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        // A debugging snapshot drains what it reads, so each call returns the
+        // acquisitions since the previous one.
+        let replacement_acquisitions_since_last = || {
+            snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, _, _, _)| {
+                    key.key().name() == "buzz_db_advisory_lock_acquisitions_total"
+                        && key.key().labels().any(|label| {
+                            label.key() == "lock_type"
+                                && label.value()
+                                    == crate::observability::LockType::Replacement.as_str()
+                        })
+                })
+                .map(|(_, _, _, value)| match value {
+                    DebugValue::Counter(count) => count,
+                    other => panic!("acquisitions are a counter, got {other:?}"),
+                })
+                .sum::<u64>()
+        };
+
+        let snapshot =
+            lock_group_state_snapshot(&pool, community, channel.id, 39000, &relay_pubkey)
+                .await
+                .expect("snapshot");
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(39000), "")
+            .tags(
+                group_metadata_tags(&snapshot.channel, &snapshot.members)
+                    .into_iter()
+                    .map(|tag| nostr::Tag::parse(tag).expect("tag")),
+            )
+            .sign_with_keys(&relay)
+            .expect("sign 39000");
+        assert!(snapshot.replace(&event).await.expect("store").1);
+        assert_eq!(
+            replacement_acquisitions_since_last(),
+            1,
+            "one lock per group-state write"
+        );
+
+        let profile = nostr::EventBuilder::new(nostr::Kind::Custom(0), "{}")
+            .sign_with_keys(&relay)
+            .expect("sign kind:0");
+        assert!(
+            Db::from_pool(pool.clone())
+                .replace_addressable_event(community, &profile, None)
+                .await
+                .expect("store kind:0")
+                .1
+        );
+        assert_eq!(
+            replacement_acquisitions_since_last(),
+            1,
+            "one lock per addressable replace"
+        );
     }
 }

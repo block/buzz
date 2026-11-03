@@ -389,14 +389,42 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
-/// Replace a replaceable event on a caller-owned transaction, holding the
-/// coordinate's replacement lock until that transaction ends: the body of
-/// [`Db::replace_addressable_event`].
+/// Take the replacement lock of the `(kind, pubkey, channel_id)` coordinate
+/// on `tx`, serializing every writer of that coordinate until the transaction
+/// ends. Key collisions only cause extra serialization; they cannot change
+/// behavior. Taken once per write: it is reentrant, but each take records an
+/// acquisition and a wait sample.
+pub(crate) async fn take_replacement_lock(
+    tx: &mut AdmittedTx,
+    kind: i32,
+    pubkey: &[u8],
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    let lock_key = event_replacement_lock_key(
+        tx.community(),
+        kind,
+        pubkey,
+        channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
+    );
+    observability::observe_advisory_lock(
+        LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.conn()),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Replace a replaceable event on a caller-owned transaction that already
+/// holds the coordinate's replacement lock ([`take_replacement_lock`]): the
+/// body of [`Db::replace_addressable_event`], shared with the relay's locked
+/// group-state snapshots.
 ///
 /// Returns `(event, false)` for a stale write or a duplicate ID. The caller
 /// commits only when the event was inserted and rolls back otherwise: a
 /// duplicate leaves the previous event soft-deleted on the transaction.
-pub(crate) async fn replace_addressable_event_in_transaction(
+pub(crate) async fn replace_addressable_event_under_lock(
     tx: &mut AdmittedTx,
     event: &nostr::Event,
     channel_id: Option<Uuid>,
@@ -407,24 +435,6 @@ pub(crate) async fn replace_addressable_event_in_transaction(
     let created_at_secs = event.created_at.as_secs() as i64;
     let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
-
-    // Collisions only cause extra serialization; they cannot change behavior.
-    let lock_key = event_replacement_lock_key(
-        community_id,
-        kind_i32,
-        pubkey_bytes.as_slice(),
-        channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
-    );
-
-    // Serialize all writers for the same (kind, pubkey, channel_id) tuple.
-    // Advisory lock is transaction-scoped — released on commit/rollback.
-    observability::observe_advisory_lock(
-        LockType::Replacement,
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(tx.conn()),
-    )
-    .await?;
 
     // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
     // historical data where prior bugs may have left multiple live rows.
@@ -557,8 +567,15 @@ impl Db {
 
         transaction_timer
             .observe(async {
+                take_replacement_lock(
+                    &mut tx,
+                    buzz_core::kind::event_kind_i32(event),
+                    &event.pubkey.to_bytes(),
+                    channel_id,
+                )
+                .await?;
                 let (stored, was_inserted) =
-                    replace_addressable_event_in_transaction(&mut tx, event, channel_id).await?;
+                    replace_addressable_event_under_lock(&mut tx, event, channel_id).await?;
                 if was_inserted {
                     tx.commit().await?;
                 } else {

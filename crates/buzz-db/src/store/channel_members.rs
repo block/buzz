@@ -1431,17 +1431,40 @@ pub(crate) async fn select_active_members(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<Vec<MemberRecord>> {
+    select_active_members_filtered(conn, community_id, channel_id, None).await
+}
+
+/// The active members of `channel_id` whose role is one of `roles`, in the
+/// order [`select_active_members`] returns them.
+pub(crate) async fn select_active_members_in_roles(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    roles: &[MemberRole],
+) -> Result<Vec<MemberRecord>> {
+    let roles: Vec<&str> = roles.iter().map(MemberRole::as_str).collect();
+    select_active_members_filtered(conn, community_id, channel_id, Some(&roles)).await
+}
+
+async fn select_active_members_filtered(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    roles: Option<&[&str]>,
+) -> Result<Vec<MemberRecord>> {
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
+          AND ($3::text[] IS NULL OR cm.role::text = ANY($3))
         ORDER BY cm.joined_at ASC
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
+    .bind(roles)
     .fetch_all(conn)
     .await?;
     rows.into_iter().map(row_to_member_record).collect()

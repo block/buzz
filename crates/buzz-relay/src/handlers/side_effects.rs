@@ -1532,6 +1532,8 @@ async fn emit_addressable_discovery_event(
         &[MemberRecord],
     ) -> anyhow::Result<Vec<Tag>>,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_group_state_lock(tenant.community()).await;
     let snapshot = state
         .db
         .lock_group_state_snapshot(
@@ -1697,10 +1699,8 @@ pub async fn emit_group_discovery_events(
         |channel, members| {
             let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
             tags.extend(group_state_identity_tags(&channel.identity())?);
-            for m in members
-                .iter()
-                .filter(|m| m.role == "owner" || m.role == "admin")
-            {
+            // The snapshot already scoped `members` to `GROUP_ADMIN_ROLES`.
+            for m in members {
                 let pubkey_hex = hex::encode(&m.pubkey);
                 tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
             }
