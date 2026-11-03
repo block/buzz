@@ -585,7 +585,7 @@ double? effectiveFontSizeForText(
 void main() {
   for (final fromLauncher in [false, true]) {
     testWidgets(
-      'Bestie DM shows replies inline and sends at top level: launcher=$fromLauncher',
+      'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',
       (tester) async {
         final sender = _RecordingOrdinarySender();
         final dm = Channel(
@@ -607,7 +607,20 @@ void main() {
             bestie: 'agent',
             organization: Stream.value(const MeGroups()),
             channel: dm,
-            soloSender: sender,
+            sender: sender,
+            threadReplies: {
+              threadIdRoot: [
+                _textMsg(
+                  id: threadIdA,
+                  pubkey: 'agent',
+                  content: 'Existing threaded answer',
+                  createdAt: 1001,
+                  extraTags: [
+                    ['e', threadIdRoot, '', 'reply'],
+                  ],
+                ),
+              ],
+            },
             messages: [
               _textMsg(
                 id: threadIdRoot,
@@ -620,7 +633,7 @@ void main() {
                 content: 'Existing threaded answer',
                 createdAt: 1001,
                 extraTags: [
-                  ['e', threadIdRoot, '', 'root'],
+                  ['e', threadIdRoot, '', 'reply'],
                 ],
               ),
             ],
@@ -628,7 +641,6 @@ void main() {
                 ? Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {}))
                 : ChannelDetailPage(
                     channel: dm,
-                    continuousConversation: true,
                     initialMessageId: threadIdA,
                     initialThreadRootId: threadIdRoot,
                   ),
@@ -639,21 +651,34 @@ void main() {
           await tester.tap(find.byType(IconButton));
           await tester.pumpAndSettle();
         }
+        if (fromLauncher) {
+          expect(find.byType(ThreadDetailPage), findsNothing);
+          final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+          await tester.tap(row);
+          await tester.pumpAndSettle();
+        }
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(find.text('Existing threaded answer'), findsOneWidget);
-        expect(find.byType(ThreadDetailPage), findsNothing);
-        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
-        await tester.tap(row);
-        await tester.pumpAndSettle();
-        expect(find.byType(ThreadDetailPage), findsNothing);
-        await tester.drag(row, const Offset(220, 0));
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar).last)
+            .onSend('Reply in thread', []);
+        expect(sender.parents, [threadIdRoot]);
+        await tester.pageBack();
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsNothing);
         await tester
             .widget<ComposeBar>(find.byType(ComposeBar))
             .onSend('Continue here', []);
-        expect(sender.sent, ['Continue here']);
-        expect(sender.parents, [null]);
-        expect(sender.channels.single?.isDm, isTrue);
+        expect(sender.sent, ['Reply in thread', 'Continue here']);
+        expect(sender.parents, [threadIdRoot, null]);
+        expect(
+          sender.channels.every((channel) => channel?.id == dm.id),
+          isTrue,
+        );
+        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+        await tester.drag(row, const Offset(220, 0));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(tester.takeException(), isNull);
       },
     );

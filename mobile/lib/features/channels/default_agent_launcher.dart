@@ -97,10 +97,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           MaterialPageRoute(
             // Native glass and video layers must track the live route.
             allowSnapshotting: false,
-            builder: (_) => ChannelDetailPage(
-              channel: channel,
-              continuousConversation: true,
-            ),
+            builder: (_) => ChannelDetailPage(channel: channel),
           ),
         );
       } catch (error) {
