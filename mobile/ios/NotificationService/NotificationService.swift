@@ -160,7 +160,9 @@ final class NotificationService: UNNotificationServiceExtension {
     resolver.resolve { [weak self] resolution in
       guard let self else { return }
       if let resolution {
-        guard let scope = resolution.notificationScope, self.isCurrent(scope) else {
+        guard let scope = resolution.notificationScope, self.isCurrent(scope),
+          self.resolver?.isStillAuthorized() == true
+        else {
           self.finish(Self.restrictedFallback(from: content))
           return
         }
@@ -184,7 +186,8 @@ final class NotificationService: UNNotificationServiceExtension {
           resolution: resolution,
           isStillAllowed: { [weak self] in
             guard let self else { return false }
-            return self.isCurrent(scope) && !self.isAgeRestricted()
+            return self.isCurrent(scope) && self.resolver?.isStillAuthorized() == true
+              && !self.isAgeRestricted()
           },
           onDeletionFailure: { error in
             NSLog("Notification cleanup retry failed: %@", String(describing: error))
@@ -210,7 +213,7 @@ final class NotificationService: UNNotificationServiceExtension {
     session?.invalidateAndCancel()
     session = nil
     handoff?.finish(
-      resolvedScope.map { isCurrent($0) } == false
+      resolvedScope.map { isCurrent($0) && resolver?.isStillAuthorized() != false } == false
         ? Self.restrictedFallback(from: content) : content,
       restrictedFallback: restrictedFallbackContent ?? Self.restrictedFallback(from: content),
       handoffIfAllowed: { deliver in

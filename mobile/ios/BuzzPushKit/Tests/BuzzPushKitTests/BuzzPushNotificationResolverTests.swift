@@ -926,6 +926,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let issued = "header.payload.signature"
     var issuerBodies: [[String: Any]] = []
     var signOutDuringQuery = false
+    var signOutDuringProfile = false
     URLProtocolStub.handler = { request in
       let body = Self.body(of: request)
       if request.url?.host == "identity.org.example" {
@@ -948,6 +949,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       if enforced, signOutDuringQuery { sharedSession = nil }
       let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
       let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
+      if enforced, signOutDuringProfile, kinds.contains(0) { sharedSession = nil }
       return Self.response(request, status: 200,
         data: try JSONEncoder().encode(kinds.contains(0) ? [profile] : kinds.contains(9) ? [message] : []))
     }
@@ -971,6 +973,21 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
       now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)))
     signOutDuringQuery = false
+
+    // Signing out after the message arrived revokes delivery, which rechecks the session.
+    sharedSession = organization
+    let enriching = makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)
+    _ = resolve(enriching)
+    XCTAssertTrue(enriching.isStillAuthorized())
+    signOutDuringProfile = true
+    let revoked = makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)
+    _ = resolve(revoked)
+    XCTAssertFalse(revoked.isStillAuthorized())
+    signOutDuringProfile = false
 
     // Signing out removes the shared session: the relay refuses, and the notification falls back.
     sharedSession = nil

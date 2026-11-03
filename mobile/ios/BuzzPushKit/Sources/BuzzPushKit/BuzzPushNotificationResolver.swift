@@ -52,6 +52,8 @@ public protocol BuzzPushNotificationResolving {
   func resolve(completion: @escaping (BuzzPushResolution?) -> Void)
   /// Cancels any retry in flight and prevents new ones. Call when the notification is delivered.
   func cancel()
+  /// Whether the organization session behind the resolved message, if any, still holds.
+  func isStillAuthorized() -> Bool
 }
 
 /// Reads configured Buzz communities and resolves their newest unread event.
@@ -70,6 +72,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   private var retrySessions: [URLSession] = []
   private let loadCommunitiesData: () -> Data?
   private let loadPrivateKey: (String) -> String?
+  private let assertionLock = NSLock()
+  private var resolvedAssertion: BuzzRelayAssertion?
   private let now: () -> Date
   private let notificationCache: BuzzNotificationCache?
   private let avatarLoader: BuzzNotificationAvatarLoader?
@@ -108,7 +112,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     }
     let group = DispatchGroup()
     let lock = NSLock()
-    var candidates: [(VerifiedNostrEvent, PushLeaseCommunity)] = []
+    var candidates: [(VerifiedNostrEvent, PushLeaseCommunity, BuzzRelayAssertion?)] = []
     for community in communities {
       group.enter()
       query(community) { candidate in
@@ -128,6 +132,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         completion(nil)
         return
       }
+      self.assertionLock.lock()
+      self.resolvedAssertion = newest.2
+      self.assertionLock.unlock()
       self.resolvePresentation(event: newest.0, community: newest.1, completion: completion)
     }
   }
@@ -150,7 +157,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
 
   private func query(
     _ community: PushLeaseCommunity,
-    completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
+    completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity, BuzzRelayAssertion?)?) -> Void
   ) {
     guard let privateKey = accountPrivateKey(for: community), community.pubkey?.isEmpty == false else {
       completion(nil)
@@ -191,7 +198,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
           },
           community: community
         )
-        completion(candidate.map { ($0, community) })
+        completion(candidate.map { ($0, community, assertion) })
       }
     }
   }
@@ -205,6 +212,15 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       return
     }
     assertionIssuer.header(relayURL: relayURL, privateKeyHex: privateKey, completion: completion)
+  }
+
+  /// Whether the organization session behind the resolved message, if any, is still the shared
+  /// one. The extension checks this again before delivering, as it does the account scope.
+  public func isStillAuthorized() -> Bool {
+    assertionLock.lock()
+    let assertion = resolvedAssertion
+    assertionLock.unlock()
+    return isCurrent(assertion)
   }
 
   /// Responses fetched with an assertion are accepted only while its organization session lasts.
@@ -293,7 +309,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         event: event, community: community, scope: scope, cache: notificationCache,
         avatarLoader: avatarLoader, now: now,
         isCurrent: { [self] in
-          matchingPrivateKey(for: community) != nil
+          matchingPrivateKey(for: community) != nil && isStillAuthorized()
         },
         refresh: { [self] profile, channel, done in
           refreshPresentation(event: event, community: community,
