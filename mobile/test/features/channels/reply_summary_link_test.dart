@@ -12,7 +12,7 @@ void main() {
   for (final mirrored in [false, true]) {
     for (final reducedMotion in [false, true]) {
       testWidgets(
-        'thread footer aligns pending work and moves into replies: mirrored=$mirrored reduced=$reducedMotion',
+        'thread footer keeps pending work and replies at the thread position: mirrored=$mirrored reduced=$reducedMotion',
         (tester) async {
           final complete = ValueNotifier(false);
           addTearDown(complete.dispose);
@@ -59,7 +59,10 @@ void main() {
                       find.byKey(const ValueKey('thread-working-container')),
                     )
                     .left;
-          expect(pending, closeTo(mirrored ? lane.right : lane.left, 0.1));
+          expect(
+            pending,
+            closeTo(mirrored ? lane.right - 32 : lane.left + 32, 0.1),
+          );
           expect(
             find.bySemanticsLabel('View thread: Agent is working'),
             findsOneWidget,
@@ -81,12 +84,8 @@ void main() {
             end,
             closeTo(mirrored ? lane.right - 32 : lane.left + 32, 0.1),
           );
-          if (reducedMotion) {
-            expect(start, closeTo(end, 0.1));
-          } else {
-            expect((middle - start).abs(), greaterThan(1));
-            expect((end - middle).abs(), greaterThan(1));
-          }
+          expect(start, closeTo(end, 0.1));
+          expect(middle, closeTo(end, 0.1));
           expect(
             find.byKey(const ValueKey('thread-working-dots')),
             findsNothing,

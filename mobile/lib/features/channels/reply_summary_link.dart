@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
@@ -10,7 +9,7 @@ import 'timeline_message.dart';
 import 'typing_dots.dart';
 
 /// Desktop-style reply link with a curved branch below the message bubble.
-class ReplySummaryLink extends HookConsumerWidget {
+class ReplySummaryLink extends ConsumerWidget {
   const ReplySummaryLink({
     super.key,
     required this.summary,
@@ -38,24 +37,6 @@ class ReplySummaryLink extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final summary = this.summary;
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final branch = useAnimationController(
-      duration: const Duration(milliseconds: 200),
-      initialValue: summary == null ? 0 : 1,
-    );
-    useEffect(() {
-      final target = summary == null ? 0.0 : 1.0;
-      if (reducedMotion) {
-        branch.value = target;
-      } else {
-        branch.animateTo(target, curve: Curves.easeInOutCubic);
-      }
-      return null;
-    }, [branch, summary != null, reducedMotion]);
-    final animatedProgress = useAnimation(branch);
-    final progress = reducedMotion
-        ? (summary == null ? 0.0 : 1.0)
-        : animatedProgress;
     final workingKeys = {for (final pubkey in working) pubkey.toLowerCase()};
     // As on desktop, working agents leave the participant stack for the
     // working group: at most two avatars, then a count.
@@ -81,31 +62,29 @@ class ReplySummaryLink extends HookConsumerWidget {
     final connectorTop = hasReactions ? -Grid.half : Grid.half;
     return Padding(
       padding: EdgeInsets.only(
-        left: mirrored ? 0 : Grid.xxs * 2 * progress,
-        right: mirrored ? Grid.xxs * 2 * progress : 0,
+        left: mirrored ? 0 : Grid.xxs * 2,
+        right: mirrored ? Grid.xxs * 2 : 0,
       ),
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          // As on desktop, the branch joins existing replies only.
-          if (summary != null)
-            Positioned.fill(
-              top: connectorTop,
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: _ReplyConnector(
-                    context.colors.outlineVariant,
-                    mirrored ? TextDirection.rtl : TextDirection.ltr,
-                    connectorTop,
-                    progress,
-                  ),
+          // Working replies already belong to this thread.
+          Positioned.fill(
+            top: connectorTop,
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _ReplyConnector(
+                  context.colors.outlineVariant,
+                  mirrored ? TextDirection.rtl : TextDirection.ltr,
+                  connectorTop,
                 ),
               ),
             ),
+          ),
           Padding(
             padding: EdgeInsets.only(
-              left: mirrored ? 0 : Grid.twelve * progress,
-              right: mirrored ? Grid.twelve * progress : 0,
+              left: mirrored ? 0 : Grid.twelve,
+              right: mirrored ? Grid.twelve : 0,
             ),
             child: Semantics(
               button: true,
@@ -118,12 +97,7 @@ class ReplySummaryLink extends HookConsumerWidget {
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(minHeight: 44),
                   child: Padding(
-                    padding: EdgeInsets.only(
-                      top: Grid.half,
-                      bottom: Grid.half,
-                      left: mirrored ? Grid.half : Grid.half * progress,
-                      right: mirrored ? Grid.half * progress : Grid.half,
-                    ),
+                    padding: const EdgeInsets.all(Grid.half),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -219,16 +193,10 @@ class _AvatarStack extends StatelessWidget {
 }
 
 class _ReplyConnector extends CustomPainter {
-  const _ReplyConnector(
-    this.color,
-    this.direction,
-    this.topOffset,
-    this.progress,
-  );
+  const _ReplyConnector(this.color, this.direction, this.topOffset);
   final Color color;
   final TextDirection direction;
   final double topOffset;
-  final double progress;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -250,9 +218,8 @@ class _ReplyConnector extends CustomPainter {
         radius: const Radius.circular(radius),
         clockwise: false,
       );
-    final metric = path.computeMetrics().first;
     canvas.drawPath(
-      metric.extractPath(0, metric.length * progress),
+      path,
       Paint()
         ..color = color
         ..style = PaintingStyle.stroke
@@ -265,6 +232,5 @@ class _ReplyConnector extends CustomPainter {
   bool shouldRepaint(_ReplyConnector oldDelegate) =>
       color != oldDelegate.color ||
       direction != oldDelegate.direction ||
-      topOffset != oldDelegate.topOffset ||
-      progress != oldDelegate.progress;
+      topOffset != oldDelegate.topOffset;
 }

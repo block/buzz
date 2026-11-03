@@ -11388,7 +11388,7 @@ void main() {
             tester
                 .getRect(find.byKey(const ValueKey('thread-working-container')))
                 .right,
-            closeTo(tester.getRect(bubble).right, 0.1),
+            closeTo(tester.getRect(bubble).right - 32, 0.1),
           );
         }
         typing.setEntries(const []);
