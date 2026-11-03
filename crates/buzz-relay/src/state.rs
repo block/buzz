@@ -1990,10 +1990,7 @@ impl AppState {
             metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
             return Ok(cached.state);
         }
-        let _turn = self
-            .restriction_reads
-            .turn(key.clone())
-            .await;
+        let _turn = self.restriction_reads.turn(key.clone()).await;
         if let Some(cached) = fresh() {
             metrics::counter!("buzz_restriction_cache_hits_total").increment(1);
             return Ok(cached.state);
@@ -2575,10 +2572,7 @@ impl AppState {
             metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
             return Ok(open);
         }
-        let _turn = self
-            .open_channels_reads
-            .turn(community_id)
-            .await;
+        let _turn = self.open_channels_reads.turn(community_id).await;
         if let Some(open) = fresh() {
             metrics::counter!("buzz_open_channels_cache_hits_total").increment(1);
             return Ok(open);
@@ -3768,7 +3762,10 @@ pub(crate) mod tests {
             .for_each(|read| {
                 read.expect("restriction read");
             });
-            assert_eq!(counted(&snapshotter, "buzz_restriction_cache_misses_total"), 1);
+            assert_eq!(
+                counted(&snapshotter, "buzz_restriction_cache_misses_total"),
+                1
+            );
             let restriction = state
                 .restriction_cache
                 .get(&(community, pubkey))
@@ -3783,7 +3780,10 @@ pub(crate) mod tests {
             assert!(mapped
                 .into_iter()
                 .all(|mapped| mapped.expect("host read") == Some(community)));
-            assert_eq!(counted(&snapshotter, "buzz_tenant_host_cache_misses_total"), 1);
+            assert_eq!(
+                counted(&snapshotter, "buzz_tenant_host_cache_misses_total"),
+                1
+            );
             let (_, read_at) = state.tenant_host_cache.get(&host).expect("host entry");
             assert!(read_at.elapsed() < TENANT_HOST_CACHE_MAX_AGE);
 
@@ -3796,7 +3796,10 @@ pub(crate) mod tests {
             .for_each(|read| {
                 read.expect("open-set read");
             });
-            assert_eq!(counted(&snapshotter, "buzz_open_channels_cache_misses_total"), 1);
+            assert_eq!(
+                counted(&snapshotter, "buzz_open_channels_cache_misses_total"),
+                1
+            );
             let open = state
                 .open_channels_cache
                 .get(&community)

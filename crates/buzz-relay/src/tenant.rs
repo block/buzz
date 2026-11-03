@@ -174,10 +174,7 @@ impl HostResolver for crate::state::AppState {
         }
         let _turn = self
             .tenant_host_reads
-            .turn(
-                normalized_host.to_owned(),
-                crate::state::TENANT_HOST_CACHE_MAX_AGE,
-            )
+            .turn(normalized_host.to_owned())
             .await;
         if let Some(community) = fresh() {
             metrics::counter!("buzz_tenant_host_cache_hits_total").increment(1);
