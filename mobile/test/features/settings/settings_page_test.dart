@@ -130,6 +130,14 @@ void main() {
         final version = find.text('v0.16.0 (432)');
         await tester.scrollUntilVisible(version, 200);
         await tester.pumpAndSettle();
+        final target = find.ancestor(
+          of: version,
+          matching: find.byType(InkWell),
+        );
+        expect(
+          tester.getSize(target).height,
+          greaterThanOrEqualTo(kMinInteractiveDimension),
+        );
 
         if (viaKeyboard) {
           final versionFocus = Focus.of(tester.element(version));

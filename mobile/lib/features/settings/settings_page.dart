@@ -163,17 +163,26 @@ class _VersionFooter extends StatelessWidget {
             borderRadius: BorderRadius.circular(Grid.xs),
             onTap: () =>
                 copyToClipboard(context, label, message: 'Version copied'),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Grid.xs,
-                Grid.xxs,
-                Grid.xs,
-                Grid.xs,
+            // Keep the text where it was and grow the tap target downward
+            // to the platform minimum.
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minHeight: kMinInteractiveDimension,
               ),
-              child: Text(
-                label,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.onSurfaceVariant.withValues(alpha: 0.6),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.xs,
+                  Grid.xxs,
+                  Grid.xs,
+                  Grid.xs,
+                ),
+                child: Text(
+                  label,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant.withValues(
+                      alpha: 0.6,
+                    ),
+                  ),
                 ),
               ),
             ),
