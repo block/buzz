@@ -2272,6 +2272,17 @@ async fn profile_names_match_verified_names() {
         .expect("fake");
     assert_eq!(fakes.get(at + 1), Some(&fake_verified));
     assert!(fakes.contains(&namesake_profile));
+    // Verified names need a three-character prefix; kind:0 does not.
+    assert!(people(&pool, c, "gn", Some(relay), 1, 100).await.is_empty());
+    assert_eq!(
+        people(&pool, c, "gna", Some(relay), 1, 100).await,
+        vec![gina_verified]
+    );
+    let mut short = people(&pool, c, "fa", Some(relay), 1, 100).await;
+    short.sort();
+    let mut full = people(&pool, c, "fake", Some(relay), 1, 100).await;
+    full.sort();
+    assert_eq!(short, full);
     // Words split between kind:0 and the verified profile do not match.
     assert!(people(&pool, c, "fak fname", Some(relay), 1, 100)
         .await

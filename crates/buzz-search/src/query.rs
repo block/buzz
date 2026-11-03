@@ -486,6 +486,10 @@ pub async fn search_profile_names(
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("WITH search_query AS (SELECT ");
     push_tsquery(&mut qb, SearchMode::Prefix, &search_text, 0);
     qb.push(" AS query, ");
+    // Every verified match is ranked before `LIMIT`, so verified names need
+    // the NIP-50 minimum prefix; kind:0 keeps one-character typeahead.
+    push_tsquery(&mut qb, SearchMode::Prefix, &search_text, PREFIX_MIN_CHARS);
+    qb.push(" AS verified_query, ");
     qb.push(TIER_TEXT[0]);
     qb.push_bind(search_text.clone());
     qb.push(TIER_TEXT[1]);
@@ -522,13 +526,18 @@ pub async fn search_profile_names(
         qb.push(" WHERE community_id = ");
         qb.push_bind(*community.as_uuid());
         qb.push(format!(
-            " AND pubkey ~ '^[0-9a-f]{{64}}$' AND {} @@ search_query.query",
+            " AND pubkey ~ '^[0-9a-f]{{64}}$' AND {} @@ search_query.verified_query",
             verified_names_tsv()
         ));
         // The head counts only while its event is live and signed by `author`.
         qb.push(" AND EXISTS (SELECT 1 FROM events e WHERE e.community_id = ");
         qb.push_bind(*community.as_uuid());
-        qb.push(" AND e.id = decode(event ->> 'id', 'hex') AND e.kind = 30382 AND e.pubkey = ");
+        // `created_at` lets Postgres prune `events` to the head's partition.
+        qb.push(
+            " AND e.id = decode(event ->> 'id', 'hex') \
+             AND e.created_at = to_timestamp((event ->> 'created_at')::bigint) \
+             AND e.kind = 30382 AND e.pubkey = ",
+        );
         qb.push_bind(author.to_vec());
         qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
     }
@@ -557,7 +566,9 @@ pub async fn search_profile_names(
         qb.push(
             " UNION ALL (SELECT e.id, e.kind, e.pubkey, e.channel_id, e.created_at \
              FROM nip_fi_profile_heads h JOIN events e ON e.community_id = h.community_id \
-             AND e.id = decode(h.event ->> 'id', 'hex') WHERE h.community_id = ",
+             AND e.id = decode(h.event ->> 'id', 'hex') \
+             AND e.created_at = to_timestamp((h.event ->> 'created_at')::bigint) \
+             WHERE h.community_id = ",
         );
         qb.push_bind(*community.as_uuid());
         qb.push(" AND h.pubkey = encode(people.person, 'hex') AND e.kind = 30382 AND e.pubkey = ");

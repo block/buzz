@@ -41,7 +41,8 @@ whitespace. Every word except the last must equal a word of `name` or
 `display_name`; the last word may be a word prefix. Words may appear in any
 order and may be split across the two fields, so "johnson wes" finds
 "Wes Johnson". A verified profile matches the same way over its three name
-tags. The two sources match separately: a query whose words are split
+tags, except that its last word must be at least three characters, as in
+NIP-50. The two sources match separately: a query whose words are split
 between a person's kind:0 and their verified profile does not match.
 Accents are not folded.
 
