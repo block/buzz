@@ -3175,7 +3175,9 @@ mod postgres_tests {
                 channel_ids: Some(channels[..n].to_vec()),
                 ..EventQuery::for_community(community)
             };
-            query_events_on(&mut conn, &q).await.expect("mention read");
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("mention read");
         }
         assert_eq!(
             prepared_like(&mut conn, "%JOIN event_mentions%").await,
