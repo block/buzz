@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/community_entry_requirements.dart';
@@ -16,6 +17,13 @@ final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
   final client = ref.watch(hostedHttpClientFactoryProvider)();
   ref.onDispose(client.close);
   return client;
+});
+
+/// Opens policy acceptance in the browser without claiming another identity.
+final invitePolicyLauncherProvider = Provider<Future<bool> Function(Uri)>((
+  ref,
+) {
+  return (uri) => launchUrl(uri, mode: LaunchMode.externalApplication);
 });
 
 final inviteKeyGeneratorProvider = Provider<InviteKeyGenerator>((ref) {
@@ -73,6 +81,7 @@ class InviteJoinState {
   final String? communityName;
   final String? errorMessage;
   final bool requiresFreshInvite;
+  final bool requiresPolicyAcceptance;
   final bool isStarterSetupRecovery;
   final String? focusChannelId;
 
@@ -83,6 +92,7 @@ class InviteJoinState {
     this.communityName,
     this.errorMessage,
     this.requiresFreshInvite = false,
+    this.requiresPolicyAcceptance = false,
     this.isStarterSetupRecovery = false,
     this.focusChannelId,
   });
@@ -94,6 +104,7 @@ class InviteJoinState {
     String? communityName,
     Object? errorMessage = _unset,
     bool? requiresFreshInvite,
+    bool? requiresPolicyAcceptance,
     bool? isStarterSetupRecovery,
     Object? focusChannelId = _unset,
   }) => InviteJoinState(
@@ -105,6 +116,8 @@ class InviteJoinState {
         ? this.errorMessage
         : errorMessage as String?,
     requiresFreshInvite: requiresFreshInvite ?? this.requiresFreshInvite,
+    requiresPolicyAcceptance:
+        requiresPolicyAcceptance ?? this.requiresPolicyAcceptance,
     isStarterSetupRecovery:
         isStarterSetupRecovery ?? this.isStarterSetupRecovery,
     focusChannelId: identical(focusChannelId, _unset)
@@ -272,8 +285,32 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
         status: InviteJoinStatus.error,
         errorMessage: _friendlyInviteError(error),
         requiresFreshInvite: requiresFreshInvite,
+        requiresPolicyAcceptance: error.toString().contains(
+          'join_policy_required',
+        ),
       );
     }
+  }
+
+  /// Opens the canonical invite so the user can accept the current join policy.
+  Future<bool> openPolicyAcceptance() async {
+    final invite = state.invite;
+    if (!state.requiresPolicyAcceptance || invite == null) return false;
+    final relay = Uri.parse(invite.relayUrl);
+    final uri = relay.replace(
+      scheme: relay.scheme == 'wss' ? 'https' : 'http',
+      pathSegments: ['invite', invite.code],
+    );
+    try {
+      if (await ref.read(invitePolicyLauncherProvider)(uri)) return true;
+    } catch (_) {
+      // Keep the pending identity and expose the same action for another try.
+    }
+    state = state.copyWith(
+      errorMessage:
+          'Could not open the browser. Try reviewing the join requirements again.',
+    );
+    return false;
   }
 
   Future<void> _retirePendingInvite(
@@ -476,7 +513,7 @@ String _friendlyInviteError(Object error) {
   }
   if (message.contains('invite_invalid')) return 'This invite is not valid.';
   if (message.contains('join_policy_required')) {
-    return 'This invite approval has expired. Re-open the invite link to try again.';
+    return 'Review this community’s join requirements in your browser, then return to Buzz.';
   }
   if (message.contains('SocketException') ||
       message.contains('Connection refused') ||

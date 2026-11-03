@@ -253,6 +253,44 @@ struct BuzzPushPresentationCacheTests {
     #expect(cached.relayMetadataPubkey == relayPubkey)
   }
 
+  @Test("Channel metadata marks only private buzz.solo streams as Solo")
+  func soloClassification() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzPushPresentationCacheStore(containerURL: directory)
+    let relayPubkey = try pubkey(for: relayKey)
+    let creator = try pubkey(for: profileKey)
+    let cases: [(String, [[String]], Bool)] = [
+      ("solo", [["t", "stream"], ["t", "buzz.solo"], ["private"], ["P", creator.uppercased()]], true),
+      ("open-solo", [["t", "stream"], ["t", "buzz.solo"], ["public"]], false),
+      ("forum-solo", [["t", "forum"], ["t", "buzz.solo"], ["private"]], false),
+      ("type-only", [["t", "buzz.solo"], ["private"]], false),
+      ("private", [["t", "stream"], ["private"]], false),
+    ]
+    let events = try cases.map { id, tags, _ in
+      try signedEvent(
+        privateKey: relayKey, createdAt: 100, kind: 39_000,
+        tags: [["d", id], ["name", id]] + tags)
+    }
+
+    try store.updateChannels(
+      communityID: "community-a",
+      relayOrigin: "wss://relay.example",
+      relayMetadataPubkey: relayPubkey,
+      metadataEvents: events,
+      membershipEvents: []
+    )
+
+    let snapshot = try loadSnapshot(directory)
+    for (id, _, expected) in cases {
+      let cached = try #require(
+        snapshot.channel(
+          communityID: "community-a", relayOrigin: "https://relay.example", channelID: id))
+      #expect(cached.isSolo == expected, "\(id)")
+      #expect(cached.creatorPubkey == (id == "solo" ? creator : nil), "\(id)")
+    }
+  }
+
   @Test("Channel membership requires the same relay authority and keeps exact scoped digests")
   func channelMembershipAuthorityAndOrdering() throws {
     let directory = try temporaryDirectory()

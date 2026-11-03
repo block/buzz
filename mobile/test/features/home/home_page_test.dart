@@ -176,7 +176,7 @@ void main() {
       expect(find.byType(MessagesNavigationBar), findsOneWidget);
       await tester.tap(find.byTooltip('Community menu'));
       await tester.pumpAndSettle();
-      expect(find.text('Switch workspace'), findsOneWidget);
+      expect(find.text('Switch community'), findsOneWidget);
       expect(find.text('Agents'), findsOneWidget);
       expect(find.text('Settings'), findsOneWidget);
       await tester.tap(find.text('Settings'));
