@@ -72,6 +72,19 @@ reviewer, and result (`blocked`, `failed`, or `passed`). Preserve redacted evide
 outside this repository. Record the exact command and exit status of every
 check, the tested Git HEAD, and any working-tree changes. Never include raw
 credentials, assertions, session cookies, private keys or mounted secret values.
+Before execution, record the access-controlled artifact location and publish its
+index URI in the ticket. Use this run-scoped layout; an unset evidence location
+blocks execution:
+
+```text
+<evidence-location>/<run-id>/
+  index.md          # actor/reviewer, scope, result, gaps and artifact links
+  artifacts.json    # running images, commits, config/schema and baseline epoch
+  checks/           # exact commands, exit status and executed test-name results
+  scenarios/        # one record per matrix ID; stimulus, observations, verdict
+  obligations/      # deployment/boot/generation and drain/retirement evidence
+  cleanup.md        # resource owners, inverse actions, results and retained items
+```
 
 Before mutations, capture:
 
@@ -82,6 +95,9 @@ Before mutations, capture:
 2. Every serving process's deployment identity, pod UID, boot/incarnation ID,
    image and admission state. Include processes with established sockets even
    after readiness removal. Prove old binaries that ignore policy cannot serve.
+   Compare every registered or socket-holding process's digest with the reviewed
+   candidate set; retain termination/socket-closure evidence for excluded old
+   processes. An image match alone does not prove registration or drain.
    Record the deployment's audited baseline epoch and its enforcement gate;
    empty registration alone cannot prove fleet coverage. Without a valid baseline,
    activation must stay pending or enable must refuse before acceptance.
@@ -127,7 +143,7 @@ during and after every injected failure, including traffic on existing sockets.
 | B3 | Race enable against ownership transfer, archive and deletion separately | Linearized valid outcome; losing request cannot mutate the wrong owner/lifecycle; readback matches durable state |
 | C1 | Repeat identical operation and payload; then change one bound field | Same tuple recovered; changed payload conflicts without a second generation |
 | C2 | Concurrent identical and distinct operation IDs | Contract-defined convergence/conflict; no duplicate upgrade or mixed actor/community tuple |
-| C3 | Drop response after commit; retry; restart kgoose and request status | Recover the original tuple/generation without clearing policy or inferring acceptance from timeout |
+| C3 | Drop response after commit; retry; restart the kgoose harness process and request status | Recover the original tuple/generation without clearing policy or inferring acceptance from timeout |
 | D1 | Drop notifications to one serving incarnation | Durable reconciliation applies target policy and actually drains its sessions; pending persists until its obligation is satisfied |
 | D2 | Race registration, enable and completion; restart/replace processes | No unregistered serving window; a prior boot's acknowledgement cannot discharge a new boot's obligation |
 | D3 | Pause a process with live target sockets across enable; resume it | Pending while unresolved; first resumed admission/effect/delivery cannot use old policy; active requires real quiescence |
@@ -137,7 +153,9 @@ during and after every injected failure, including traffic on existing sockets.
 | D7 | Crash before/after drain and before/after acknowledgement persistence | Durable recovery accounts for each boot; replacement/readiness/heartbeat expiry alone never retires the old obligation |
 | D8 | Attempt completion with an absent/invalid serving baseline; register before enable but open the listener afterward | No false active from an empty registry; startup, participant capture and serving transition share an ordering |
 
-For A3, record the exact request/route and denial body from BUZZ-511's contract.
+The following is the **expected BUZZ-511 contract**, pending its published and
+reviewed implementation. Confirm it against that exact head before a live run.
+For A3, record the exact request/route and denial body from that contract.
 Unavailable verification/policy dependencies must fail closed on required hosts;
 repair `deny_protected` retains 503 precedence. Repeat relevant cases in off,
 shadow and enforce configurations using isolated fixtures. Off/shadow must not
@@ -230,6 +248,9 @@ pass and an independent reviewer has reviewed the exact auth/persistence/
 activation heads. A passing module invocation proves module-to-relay integration;
 it does not prove an HTTP call through a running kgoose pod or V0/V1 onboarding.
 Keep those acceptance claims separate.
+C3 restarts the candidate harness with the normal kgoose injection graph and
+reuses durable relay state; it requires no running kgoose service pod or new
+HTTP endpoint. Record a separate result if a service-pod restart is also tested.
 
 Leave BUZZ-516 open when prerequisites, route fixtures, fault controls, checks,
 independent review or live observations are missing. Report each gap, its owner
