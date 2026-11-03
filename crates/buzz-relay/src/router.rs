@@ -14,10 +14,14 @@ use axum::{
 };
 use serde_json::json;
 use tower::ServiceExt;
+use tower_http::classify::{
+    ClassifiedResponse, ClassifyResponse, NeverClassifyEos, ServerErrorsAsFailures,
+    ServerErrorsFailureClass, SharedClassifier,
+};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
-use tower_http::trace::{HttpMakeClassifier, TraceLayer};
+use tower_http::trace::TraceLayer;
 
 use crate::api;
 use crate::audio;
@@ -210,9 +214,21 @@ async fn nip_fi_assertion_guard(
         (Err(deny), community) => {
             let label = crate::nip_fi_shadow::label(&community);
             crate::nip_fi_shadow::record_denial("http", label, deny);
-            http_denial(deny.class)
+            if community.is_err() {
+                crate::nip_fi_core::community_denial(
+                    state.nip_fi_communities(),
+                    request.headers(),
+                    deny.class,
+                )
+            } else {
+                http_denial(deny.class)
+            }
         }
-        (Ok(()), Err(class)) => http_denial(class),
+        (Ok(()), Err(class)) => crate::nip_fi_core::community_denial(
+            state.nip_fi_communities(),
+            request.headers(),
+            class,
+        ),
     }
 }
 
@@ -499,8 +515,44 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(build_cors_layer(&state.config.cors_origins))
 }
 
-fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
-    TraceLayer::new_for_http().make_span_with(make_http_span as fn(&Request<Body>) -> tracing::Span)
+type MakeHttpSpan = fn(&Request<Body>) -> tracing::Span;
+
+fn http_trace_layer() -> TraceLayer<SharedClassifier<RelayResponseClassifier>, MakeHttpSpan> {
+    TraceLayer::new(SharedClassifier::new(RelayResponseClassifier))
+        .make_span_with(make_http_span as MakeHttpSpan)
+}
+
+/// tower-http's server-errors-as-failures rule, except that an enforce
+/// denial for a Host that maps to no community is not a failure. Probes of
+/// unserved hosts (for example an external scanner) would otherwise log one
+/// `tower_http::trace::on_failure` error per request.
+#[derive(Clone, Copy, Debug)]
+struct RelayResponseClassifier;
+
+impl ClassifyResponse for RelayResponseClassifier {
+    type FailureClass = ServerErrorsFailureClass;
+    type ClassifyEos = NeverClassifyEos<ServerErrorsFailureClass>;
+
+    fn classify_response<B>(
+        self,
+        res: &axum::http::Response<B>,
+    ) -> ClassifiedResponse<Self::FailureClass, Self::ClassifyEos> {
+        if res
+            .extensions()
+            .get::<crate::nip_fi_core::UnresolvedHost>()
+            .is_some()
+        {
+            return ClassifiedResponse::Ready(Ok(()));
+        }
+        ServerErrorsAsFailures::new().classify_response(res)
+    }
+
+    fn classify_error<E>(self, error: &E) -> Self::FailureClass
+    where
+        E: std::fmt::Display + 'static,
+    {
+        ServerErrorsAsFailures::new().classify_error(error)
+    }
 }
 
 fn make_http_span(request: &Request<Body>) -> tracing::Span {
@@ -4495,6 +4547,12 @@ mod tests {
                     token,
                 )
                 .await;
+                assert!(
+                    resp.extensions()
+                        .get::<crate::nip_fi_core::UnresolvedHost>()
+                        .is_some(),
+                    "unmapped-host denial must be marked for the trace classifier: {path} token={token:?}"
+                );
                 assert_eq!(
                     status_and_body(resp).await,
                     (
@@ -4506,6 +4564,60 @@ mod tests {
                 assert_eq!(verifier.calls(), 0, "{path} token={token:?}");
             }
         }
+    }
+
+    // Pins: a 503 from a mapped Host (here the verifier's key source is
+    // unavailable) is not marked as an unresolved Host, so the trace layer
+    // still logs it as a server failure.
+    // Mutation: marking every guard denial hides this dependency outage.
+    #[tokio::test]
+    async fn nip_fi_mapped_host_dependency_503_is_not_marked_unresolved() {
+        let (state, _verifier) =
+            guard_state_with(Err(buzz_auth::VerifierError::KeySourceUnavailable)).await;
+        let resp = nip_fi_gate_response(
+            state,
+            GUARD_PROTECTED_PATH,
+            Some("Nostr-Federated-Identity"),
+            Some("Bearer a.b.c"),
+        )
+        .await;
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp
+            .extensions()
+            .get::<crate::nip_fi_core::UnresolvedHost>()
+            .is_none());
+        assert!(matches!(
+            RelayResponseClassifier.classify_response(&resp),
+            ClassifiedResponse::Ready(Err(_))
+        ));
+    }
+
+    // Pins: the trace classifier treats a marked unresolved-Host denial as
+    // success and keeps tower-http's rule (5xx fails) for everything else.
+    // Mutation: dropping the extension check logs every scanner probe of an
+    // unserved Host as an `on_failure` error.
+    #[test]
+    fn relay_response_classifier_skips_only_unresolved_host_denials() {
+        use buzz_auth::DenialClass;
+        let classify = |resp: &axum::response::Response| {
+            matches!(
+                RelayResponseClassifier.classify_response(resp),
+                ClassifiedResponse::Ready(Ok(()))
+            )
+        };
+        let mut marked = http_denial(DenialClass::AuthorizationUnavailable);
+        marked
+            .extensions_mut()
+            .insert(crate::nip_fi_core::UnresolvedHost);
+        assert!(classify(&marked));
+        assert!(!classify(&http_denial(
+            DenialClass::AuthorizationUnavailable
+        )));
+        assert!(!classify(
+            &StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        ));
+        assert!(classify(&StatusCode::OK.into_response()));
+        assert!(classify(&http_denial(DenialClass::MissingEvidence)));
     }
 
     // Pins: Off mode never consults the community map. With the production

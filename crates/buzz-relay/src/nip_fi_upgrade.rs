@@ -16,7 +16,8 @@ use axum::http::{HeaderMap, Response};
 use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
 
 use crate::nip_fi_core::{
-    evaluate_attached_assertion, http_denial, AdmissionDeadline, Communities, ResolvedCommunity,
+    community_denial, evaluate_attached_assertion, http_denial, AdmissionDeadline, Communities,
+    ResolvedCommunity,
 };
 
 /// Outcome of NIP-FI assertion validation at upgrade time.
@@ -183,7 +184,11 @@ pub(crate) async fn check_nip_fi_at_upgrade<'a>(
         ),
     };
     crate::nip_fi_shadow::record_denial(route.shadow_label(), label, deny);
-    NipFiUpgradeOutcome::Denied(http_denial(deny.class))
+    NipFiUpgradeOutcome::Denied(if deny.stage == crate::nip_fi_shadow::Stage::Community {
+        community_denial(communities, headers, deny.class)
+    } else {
+        http_denial(deny.class)
+    })
 }
 
 #[cfg(test)]

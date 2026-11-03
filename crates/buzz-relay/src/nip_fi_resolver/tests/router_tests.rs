@@ -258,6 +258,34 @@ impl Pod {
         (status, body.to_vec())
     }
 
+    /// Whether each site's denial for `raw_host` carries the trace layer's
+    /// unresolved-Host marker.
+    async fn marked_at_every_site(&self, raw_host: &str) -> Vec<(StatusCode, bool)> {
+        let token = mint(ISS, raw_host);
+        let mut outcomes = Vec::new();
+        for path in sites() {
+            let request = Request::get(&path)
+                .header(axum::http::header::HOST, raw_host)
+                .header("Upgrade", "websocket")
+                .header("Connection", "Upgrade")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .header("Nostr-Federated-Identity", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("request");
+            let response = crate::router::build_router(Arc::clone(&self.state))
+                .oneshot(request)
+                .await
+                .expect("router response");
+            let marked = response
+                .extensions()
+                .get::<crate::nip_fi_core::UnresolvedHost>()
+                .is_some();
+            outcomes.push((response.status(), marked));
+        }
+        outcomes
+    }
+
     /// Every site's outcome for a token from `iss` presented at `label`.
     async fn every_site(&self, iss: &str, label: &str) -> Vec<(StatusCode, Vec<u8>)> {
         let token = mint(iss, &host(label));
@@ -385,6 +413,34 @@ async fn closed_pool_miss_is_unavailable_everywhere_and_caches_nothing() {
 
     store.lookup_fails.store(false, Ordering::SeqCst);
     assert!(cleared_nip_fi(&p.every_site(ISS, "late").await));
+}
+
+// Pins: only a Host the resolver confirms unmapped (no rows found, or never
+// bindable) is marked for the trace layer; a failed lookup is a resolver
+// outage and stays an unmarked server failure.
+// Mutation: marking every community-stage denial marks the failed lookups.
+#[tokio::test]
+async fn only_confirmed_unmapped_hosts_are_marked_as_expected_denials() {
+    let (store, clock) = setup();
+    let p = pod(&store, &clock, NipFiMode::Enforce).await;
+    let unmarked_503 = (StatusCode::SERVICE_UNAVAILABLE, false);
+    let marked_503 = (StatusCode::SERVICE_UNAVAILABLE, true);
+
+    assert_eq!(
+        p.marked_at_every_site(&host("nobody")).await,
+        vec![marked_503; 3]
+    );
+    assert_eq!(
+        p.marked_at_every_site("not-a-community.example").await,
+        vec![marked_503; 3]
+    );
+
+    store.bind("late", &[ISS]);
+    store.lookup_fails.store(true, Ordering::SeqCst);
+    assert_eq!(
+        p.marked_at_every_site(&host("late")).await,
+        vec![unmarked_503; 3]
+    );
 }
 
 // ── Criterion 6(f): the reserved command-audience host never admits ─────────
