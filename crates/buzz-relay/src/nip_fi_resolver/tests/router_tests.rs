@@ -666,10 +666,55 @@ async fn key_disconnected_before_its_community_exists_is_denied_there() {
 /// Requests reach their handlers: the tenant store is real PostgreSQL with a
 /// row for each test host, and protected HTTP uses a valid workflow path with
 /// a NIP-98 proof, so the handler itself calls `admit_nip_fi_http_on_state`.
-/// The first tenant-store connection a request takes can move the resolver
-/// clock, which places a deadline crossing inside the tenant-lookup await.
+/// Advance the binding clock after resolution: during socket tenant binding,
+/// or during the HTTP handler's verification of the guard's shared binding.
 mod postgres_tests {
     use super::*;
+
+    /// Keep the policy row's real identity without consuming the socket's SQL barrier.
+    struct TenantPolicy(uuid::Uuid);
+    impl crate::nip_fi_policy::PolicySource for TenantPolicy {
+        fn lookup<'a>(
+            &'a self,
+            _host: &'a str,
+        ) -> BoxFuture<'a, Result<Option<buzz_db::community_auth::CommunityAuthPolicy>, ()>>
+        {
+            async move {
+                Ok(Some(buzz_db::community_auth::CommunityAuthPolicy {
+                    community_id: self.0,
+                    requires_nip_fi: false,
+                    policy_generation: 0,
+                }))
+            }
+            .boxed()
+        }
+    }
+
+    /// Delegate real crypto, then cross the binding deadline at the handler's
+    /// second verification. The guard's first verification remains fresh.
+    struct HandlerVerificationClock {
+        inner: Arc<dyn buzz_auth::VerifyAssertion>,
+        clock: Arc<ManualClock>,
+        advance: Arc<Mutex<Option<(u8, Duration)>>>,
+    }
+    impl buzz_auth::VerifyAssertion for HandlerVerificationClock {
+        fn verify_assertion(
+            &self,
+            token: &str,
+            community: &buzz_auth::CommunityBinding,
+        ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError> {
+            let assertion = self.inner.verify_assertion(token, community)?;
+            let mut advance = self.advance.lock().unwrap();
+            if let Some((count, at)) = advance.as_mut() {
+                *count += 1;
+                if *count == 2 {
+                    self.clock.set(*at);
+                    *advance = None;
+                }
+            }
+            Ok(assertion)
+        }
+    }
 
     /// Pod over a one-connection pool whose next acquire, once armed, moves
     /// the clock to the armed time.
@@ -677,6 +722,7 @@ mod postgres_tests {
         pod: Pod,
         clock: Arc<ManualClock>,
         advance_on_acquire: Arc<Mutex<Option<Duration>>>,
+        advance_on_handler_verify: Arc<Mutex<Option<(u8, Duration)>>>,
         label: String,
     }
 
@@ -701,19 +747,32 @@ mod postgres_tests {
             .expect("PostgreSQL must be available");
         // Seeding leaves the pool's only connection idle, so every request
         // acquire reuses it and runs the hook.
+        let community_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(uuid::Uuid::new_v4())
+            .bind(community_id)
             .bind(host(&label))
             .execute(&pool)
             .await
             .expect("seed community");
         store.bind(&label, &[ISS]);
         let base = crate::state::tests::test_state_with_database_pool(pool).await;
-        let pod = pod_on(base, store, clock, mode).await;
+        let mut pod = pod_on(base, store, clock, mode).await;
+        let advance_on_handler_verify = Arc::new(Mutex::new(None));
+        let state = Arc::make_mut(&mut pod.state);
+        state.nip_fi_policy = Arc::new(TenantPolicy(community_id));
+        state.nip_fi_verifier = Some(Arc::new(HandlerVerificationClock {
+            inner: state
+                .nip_fi_verifier
+                .clone()
+                .expect("real fixture verifier"),
+            clock: Arc::clone(clock),
+            advance: Arc::clone(&advance_on_handler_verify),
+        }));
         TenantPod {
             pod,
             clock: Arc::clone(clock),
             advance_on_acquire,
+            advance_on_handler_verify,
             label,
         }
     }
@@ -737,7 +796,8 @@ mod postgres_tests {
         /// Each admission site's outcome for one fresh key: root and audio
         /// upgrades, then the workflow-runs handler with a matching proof.
         /// With `crossing = Some((start, at))` every request resolves at
-        /// `start` and its tenant lookup moves the clock to `at`.
+        /// `start`; socket binding or the HTTP handler's real verification moves
+        /// the clock to `at` before the final admission deadline check.
         async fn every_site(
             &self,
             crossing: Option<(Duration, Duration)>,
@@ -763,16 +823,30 @@ mod postgres_tests {
             for (path, proof) in requests {
                 if let Some((start, at)) = crossing {
                     self.clock.set(start);
-                    *self.advance_on_acquire.lock().unwrap() = Some(at);
-                    // The clock moves when the tenant lookup acquires a
-                    // connection, so the lookup must miss the host cache.
-                    self.pod.state.tenant_host_cache.invalidate_all();
+                    if proof.is_some() {
+                        // HTTP reuses the policy tenant; no second SQL bind occurs.
+                        *self.advance_on_acquire.lock().unwrap() = None;
+                        *self.advance_on_handler_verify.lock().unwrap() = Some((0, at));
+                    } else {
+                        *self.advance_on_acquire.lock().unwrap() = Some(at);
+                        self.pod.state.tenant_host_cache.invalidate_all();
+                    }
                 }
                 outcomes.push(
                     self.pod
                         .send_signed(&path, &raw_host, Some(&token), proof)
                         .await,
                 );
+                if crossing.is_some() {
+                    assert!(
+                        self.advance_on_handler_verify.lock().unwrap().is_none(),
+                        "HTTP must reach its real handler verification before the deadline check"
+                    );
+                    assert!(
+                        self.advance_on_acquire.lock().unwrap().is_none(),
+                        "socket binding must reach the primary tenant read"
+                    );
+                }
             }
             outcomes
         }
@@ -814,7 +888,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn snapshot_going_stale_during_the_tenant_lookup_admits_nowhere() {
+    async fn snapshot_going_stale_before_final_admission_admits_nowhere() {
         let (store, clock) = setup();
         let p = tenant_pod(&store, &clock, NipFiMode::Enforce).await;
         let inside = (secs(119.0), secs(119.9));
@@ -859,14 +933,13 @@ mod postgres_tests {
         (output, records)
     }
 
-    // Shadow re-checks the binding's deadline where enforce does, after the
-    // tenant lookup, and records enforce's refusal without changing any
-    // response. Mutation: dropping the upgrade's observed deadline, or
-    // resolving HTTP afresh instead of reusing the guard's binding, records
-    // no `deadline` would-deny at that site.
+    // Shadow re-checks the binding's deadline where enforce does, after
+    // socket binding or HTTP verification, without changing the response.
+    // Removing either transport's final deadline check removes its would-deny.
+    // The separate exact-once witness protects reuse of the guard's binding.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn shadow_records_a_snapshot_going_stale_during_the_tenant_lookup() {
+    async fn shadow_records_a_snapshot_going_stale_before_final_admission() {
         let (store, clock) = setup();
         let p = tenant_pod(&store, &clock, NipFiMode::Shadow).await;
         let inside = (secs(119.0), secs(119.9));
