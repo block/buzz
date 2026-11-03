@@ -192,7 +192,13 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
 
   override func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
     // The editable field owns the label; its visual heading is decorative.
-    if section < 2 { view.accessibilityElementsHidden = true }
+    guard section < 2 else { return }
+    view.isAccessibilityElement = false
+    view.accessibilityElementsHidden = true
+    if let header = view as? UITableViewHeaderFooterView {
+      header.textLabel?.isAccessibilityElement = false
+      header.contentView.accessibilityElementsHidden = true
+    }
   }
 
   override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {

@@ -12,6 +12,8 @@ struct CreateChannelAccessibilityTests {
     for section in 0..<2 {
       let header = controller.tableView.headerView(forSection: section)!
       precondition(header.accessibilityElementsHidden, "Field heading must not add a VoiceOver stop")
+      precondition(!header.isAccessibilityElement)
+      precondition(header.textLabel?.isAccessibilityElement == false)
       let cell = controller.tableView.cellForRow(at: IndexPath(row: 0, section: section))!
       let field = cell.contentView.subviews.first { $0 is UITextField || $0 is UITextView }!
       precondition(field.accessibilityLabel == (section == 0 ? "Channel name" : "Description, optional"))
