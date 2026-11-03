@@ -3147,7 +3147,8 @@ mod postgres_tests {
 
     /// Access-scoped `#p` reads for viewers with different channel counts
     /// share one cached statement on a connection, so Postgres can keep its
-    /// plan instead of planning every read again.
+    /// plan instead of planning every read again. Every scope, empty included,
+    /// still returns and counts exactly its own rows.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_scoped_mention_reads_share_one_prepared_statement() {
@@ -3177,6 +3178,68 @@ mod postgres_tests {
             1,
             "one statement for every channel count"
         );
+        drop(conn);
+
+        // The array bind keeps each scope's rows: one mention of the target in
+        // each scoped channel, one global, and one in a channel no scope names.
+        let db = crate::Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let target = "ab".repeat(32);
+        let mention = |content: String| {
+            EventBuilder::new(Kind::Custom(9), content)
+                .tags([Tag::parse(["p", target.as_str()]).expect("p tag")])
+                .sign_with_keys(&author)
+                .expect("sign mention")
+        };
+        let mut in_channel = Vec::new();
+        for (i, channel) in channels.iter().enumerate() {
+            let event = mention(format!("in channel {i}"));
+            db.insert_event(community, &event, Some(*channel))
+                .await
+                .expect("insert channel mention");
+            in_channel.push(event.id);
+        }
+        let global = mention("global".into());
+        db.insert_event(community, &global, None)
+            .await
+            .expect("insert global mention");
+        let outside_channel = make_test_channel(&pool, community_uuid, None).await;
+        db.insert_event(community, &mention("outside".into()), Some(outside_channel))
+            .await
+            .expect("insert out-of-scope mention");
+
+        for n in 0..=channels.len() {
+            for include_global in [true, false] {
+                let q = EventQuery {
+                    kinds: Some(vec![9]),
+                    p_tag_hex: Some(target.clone()),
+                    channel_ids: Some(channels[..n].to_vec()),
+                    channel_ids_include_global: include_global,
+                    ..EventQuery::for_community(community)
+                };
+                let mut expected = in_channel[..n].to_vec();
+                if include_global {
+                    expected.push(global.id);
+                }
+                expected.sort();
+                let mut page: Vec<_> = query_events(&pool, &q)
+                    .await
+                    .expect("mention page")
+                    .into_iter()
+                    .map(|stored| stored.event.id)
+                    .collect();
+                page.sort();
+                assert_eq!(
+                    page, expected,
+                    "{n} channels, include_global={include_global}: page"
+                );
+                assert_eq!(
+                    count_events(&pool, &q).await.expect("mention count"),
+                    expected.len() as i64,
+                    "{n} channels, include_global={include_global}: count"
+                );
+            }
+        }
     }
 
     /// Effective `statement_timeout` observed *inside* the read deadline, and
