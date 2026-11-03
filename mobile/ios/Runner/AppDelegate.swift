@@ -89,13 +89,7 @@ import os.log
       }
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
-    let composerDrop = ComposerDropPlugin(messenger: messenger)
-    composerDropPlugin = composerDrop
-    if let flutterViewController = engineBridge.pluginRegistry
-      .registrar(forPlugin: "BuzzComposerDrop")?.viewController
-    {
-      DispatchQueue.main.async { composerDrop.attach(to: flutterViewController.view) }
-    }
+    composerDropPlugin = ComposerDropPlugin(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in

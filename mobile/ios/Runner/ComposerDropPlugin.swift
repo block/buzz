@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import UniformTypeIdentifiers
+import os
 
 /// Accepts files dragged onto the app (from Files, Photos, another app in
 /// Split View, or the Mac desktop when running on Apple silicon) and hands
@@ -12,6 +13,7 @@ final class ComposerDropPlugin: NSObject, UIDropInteractionDelegate {
   private let channel: FlutterMethodChannel
   private var enabled = false
   private weak var attachedView: UIView?
+  private let log = Logger(subsystem: "xyz.block.buzz", category: "composer-drop")
 
   init(messenger: FlutterBinaryMessenger) {
     channel = FlutterMethodChannel(name: "buzz/composer_drop", binaryMessenger: messenger)
@@ -22,21 +24,36 @@ final class ComposerDropPlugin: NSObject, UIDropInteractionDelegate {
         result(FlutterMethodNotImplemented)
         return
       }
-      self?.enabled = (call.arguments as? Bool) ?? false
+      guard let self else { result(nil); return }
+      self.enabled = (call.arguments as? Bool) ?? false
+      if self.enabled { self.attachToKeyWindow() }
       result(nil)
     }
   }
 
-  func attach(to view: UIView) {
-    guard attachedView !== view else { return }
-    view.addInteraction(UIDropInteraction(delegate: self))
-    attachedView = view
+  /// The Flutter view controller is not reliably available when the implicit
+  /// engine starts, so attach to the app window once a composer mounts.
+  private func attachToKeyWindow() {
+    let windows = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .flatMap(\.windows)
+    guard let window = windows.first(where: \.isKeyWindow) ?? windows.first else {
+      log.error("no window to attach drop interaction")
+      return
+    }
+    guard attachedView !== window else { return }
+    window.addInteraction(UIDropInteraction(delegate: self))
+    attachedView = window
+    log.info("drop interaction attached")
   }
 
   // MARK: UIDropInteractionDelegate
 
   func dropInteraction(_ interaction: UIDropInteraction, canHandle session: UIDropSession) -> Bool {
-    enabled && session.items.contains { Self.fileType(for: $0.itemProvider) != nil }
+    let accepts = enabled && session.items.contains { Self.fileType(for: $0.itemProvider) != nil }
+    let types = session.items.flatMap { $0.itemProvider.registeredTypeIdentifiers }
+    log.info("drop offered enabled=\(self.enabled, privacy: .public) accepts=\(accepts, privacy: .public) types=\(types, privacy: .public)")
+    return accepts
   }
 
   func dropInteraction(
@@ -47,6 +64,7 @@ final class ComposerDropPlugin: NSObject, UIDropInteractionDelegate {
   }
 
   func dropInteraction(_ interaction: UIDropInteraction, performDrop session: UIDropSession) {
+    log.info("drop with \(session.items.count, privacy: .public) items")
     let providers = session.items.map(\.itemProvider)
     let group = DispatchGroup()
     let lock = NSLock()
