@@ -117,6 +117,20 @@ Before mutations, capture:
    incarnation. Establish them before enable, prove they carry fixture traffic,
    and keep per-connection receive traces. Pin traffic to individual processes
    while preserving canonical Host, SNI, NIP-98 URL and NIP-42 relay binding.
+8. Reconcile the BUZZ-515 routing companion with the final BUZZ-514 staged base
+   before using its Job renderer. Compare rendered and admitted Service and
+   ServiceEntry selectors, Deployment/PDB selectors and security policies.
+   Prove serving pods still match routing, while the Job avoids routing and
+   workload/PDB selection but retains the labels required by security policies.
+   Removing a policy label to escape routing is not a valid substitute. Record
+   the reviewed companion head, render diff and admitted resources; source-only
+   selector tests do not establish the live result.
+9. Verify admitted `envFrom` imports the intended `platform-config`. Review later
+   environment sources and explicit overrides, then record the harness process's
+   effective `CLUSTER_NAME` before the separately approved invocation. Compare it
+   with the expected cell. Missing render, selector/policy, platform-config or
+   effective-environment evidence blocks execution; do not infer it from a
+   template or desired configuration.
 
 Do not infer process coverage from repeated requests through a load balancer.
 Do not treat unavailable audio or Git fixtures as successful denials. Each
