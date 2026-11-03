@@ -50,7 +50,7 @@ harness coverage.
 
 The Postgres-backed cases marked `#[ignore = "requires Postgres"]` also need the
 separate lane below; neither `just ci` nor `just test` executes them. Follow
-[CONTRIBUTING.md's PostgreSQL setup](../CONTRIBUTING.md#postgresql-tests) for
+[CONTRIBUTING.md's PostgreSQL setup](../CONTRIBUTING.md#postgresql-backed-tests) for
 isolated native Postgres/Redis, maintenance-role privileges and protected
 environment configuration, then run the full discovered lane from the repo root:
 
@@ -242,9 +242,9 @@ Report normal-case commit-to-drain and commit-to-active durations for each run,
 with sample count and observed range. Report partition duration and pending
 observations separately; do not claim a partition completion bound.
 
-A run passes only when every matrix row has executable test coverage
-and its required staging evidence, all process obligations are accounted for, package checks
-pass and an independent reviewer has reviewed the exact auth/persistence/
+A run passes only when every matrix row has executable test coverage and staging
+evidence, all process obligations are accounted for, package checks pass and an
+independent reviewer has reviewed the exact auth/persistence/
 activation heads. A passing module invocation proves module-to-relay integration;
 it does not prove an HTTP call through a running kgoose pod or V0/V1 onboarding.
 Keep those acceptance claims separate.
