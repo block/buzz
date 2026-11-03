@@ -741,7 +741,7 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          expect(find.byTooltip('Create your Bestie'), findsOneWidget);
+          expect(find.byTooltip('Bestie'), findsOneWidget);
           await tester.tap(find.byType(IconButton));
           await tester.pumpAndSettle();
           expect(
@@ -761,7 +761,7 @@ void main() {
               tester.element(find.byType(BestieWelcome)),
             );
             final messages =
-                container.read(meMessagesProvider(_channelId).notifier)
+                container.read(channelMessagesProvider(_channelId).notifier)
                     as _FakeMessagesNotifier;
             messages.setMessages([
               _textMsg(
