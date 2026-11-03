@@ -56,9 +56,18 @@ pub(super) async fn authenticate(
     Ok((tenant, pubkey, owner))
 }
 
-pub(super) fn map_claim_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+/// The claim write's refusal, recording an active ban or timeout on `slot`.
+pub(super) fn map_claim_error(
+    slot: &crate::access::AccessSlot,
+    error: buzz_db::DbError,
+) -> (StatusCode, Json<Value>) {
     match error {
-        buzz_db::DbError::InviteRestricted => api_error(StatusCode::FORBIDDEN, "invite_restricted"),
+        buzz_db::DbError::InviteRestricted => {
+            slot.finish(crate::access::AuthResult::Denied(
+                crate::access::AuthReason::Restricted,
+            ));
+            api_error(StatusCode::FORBIDDEN, "invite_restricted")
+        }
         buzz_db::DbError::InviteOwnerMismatch => {
             api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch")
         }

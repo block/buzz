@@ -526,7 +526,7 @@ async fn claim_invite_authed(
                 &state.relay_keypair,
             )
             .await
-            .map_err(map_claim_error)?;
+            .map_err(|e| map_claim_error(slot, e))?;
         metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
             .increment(write.outcome.users_created);
         if write.outcome.owner_link_created {
@@ -568,7 +568,7 @@ async fn claim_invite_authed(
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
             }
             buzz_db::relay_invite::ClaimOutcome::Restricted => {
-                slot.finish(AuthResult::Denied(AuthReason::Banned));
+                slot.finish(AuthResult::Denied(AuthReason::Restricted));
                 Err(api_error(StatusCode::FORBIDDEN, "invite_restricted"))
             }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
@@ -615,7 +615,7 @@ async fn claim_invite_authed(
             &state.relay_keypair,
         )
         .await
-        .map_err(map_claim_error)?;
+        .map_err(|e| map_claim_error(slot, e))?;
     metrics::counter!("buzz_users_created_total", "community" => tenant.host().to_owned())
         .increment(write.outcome.users_created);
     if write.outcome.owner_link_created {
@@ -1898,7 +1898,7 @@ mod postgres_tests {
         assert_eq!(read_json(claim).await["error"], "invite_restricted");
         let lines = out.lines();
         assert_eq!(lines.len(), 2, "one line per request: {lines:?}");
-        for (line, reason) in lines.iter().zip(["not_relay_admin", "banned"]) {
+        for (line, reason) in lines.iter().zip(["not_relay_admin", "restricted"]) {
             assert_eq!(line["outcome"], "denied", "{line}");
             assert_eq!(line["reason"], reason, "{line}");
         }

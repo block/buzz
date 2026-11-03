@@ -643,9 +643,9 @@ fn origin_matches_host(origin: &str, host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_api_origin, authorize, authorize_nip98, canonical_url, header, host_matches,
-        method_has_body, nostr_credential, origin_matches_host, AccessSlot, AdminAccess,
-        AdminPrincipal, AdminRole, AdminSource, AuthResult, ADMIN_API_PREFIX, BASE64,
+        admin_api_origin, authorize, canonical_url, header, host_matches, method_has_body,
+        nostr_credential, origin_matches_host, AccessSlot, AdminAccess, AdminPrincipal, AdminRole,
+        AdminSource, AuthResult, ADMIN_API_PREFIX, BASE64,
     };
 
     #[test]
@@ -1042,15 +1042,30 @@ mod tests {
     // Two Authorization headers are a duplicate, not a missing credential.
     #[tokio::test(flavor = "current_thread")]
     async fn admin_duplicate_authorization_logs_duplicate() {
-        let config = crate::config::AdminConfig {
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        let mut config = (*state.config).clone();
+        config.admin = Some(crate::config::AdminConfig {
             host: "admin.example.com".into(),
             auth: crate::config::AdminAuth::Nip98,
             web_dir: None,
-        };
+        });
+        state.config = std::sync::Arc::new(config);
         let mut headers = axum::http::HeaderMap::new();
         headers.append(header::AUTHORIZATION, "Nostr a".parse().unwrap());
         headers.append(header::AUTHORIZATION, "Nostr b".parse().unwrap());
-        let refused = authorize_nip98(&config, &headers, "/users", "GET", None).await;
-        assert_eq!(refused.unwrap_err().1, "duplicate_authorization");
+        let slot = AccessSlot::default();
+        let (guard, out) = crate::access::tests::capture_scoped();
+        let refused = authorize(&state, &slot, &headers, "/users", "GET", None).await;
+        slot.emit("/api/admin/users", 401);
+        drop(guard);
+        assert!(refused.is_err());
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "failed", "{}", lines[0]);
+        assert_eq!(
+            lines[0]["reason"], "duplicate_authorization",
+            "{}",
+            lines[0]
+        );
     }
 }

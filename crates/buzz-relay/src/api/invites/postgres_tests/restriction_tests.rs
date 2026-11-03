@@ -77,19 +77,41 @@ pub(super) mod postgres_tests {
             )
             .await
             .unwrap();
+        let timed_out = Keys::generate();
+        state
+            .db
+            .timeout_community_member(
+                community,
+                timed_out.public_key().as_bytes(),
+                issuer.public_key().as_bytes(),
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                None,
+            )
+            .await
+            .unwrap();
         let key = derive_invite_key(&state.relay_keypair);
         let (legacy, _) = crate::invite_token::mint_invite(&key, community, 3600);
-        for bearer in [&code, &legacy] {
-            let response = post_json(
-                state.clone(),
-                &host,
-                "/api/invites/claim",
-                &claimant,
-                serde_json::json!({"code":bearer}).to_string(),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-            assert_eq!(read_json(response).await["error"], "invite_restricted");
+        // A ban and a timeout each log one `denied`/`restricted` line on v2
+        // and v1 alike, never the replay admission's `success`.
+        for restricted in [&claimant, &timed_out] {
+            for bearer in [&code, &legacy] {
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let response = post_json(
+                    state.clone(),
+                    &host,
+                    "/api/invites/claim",
+                    restricted,
+                    serde_json::json!({"code":bearer}).to_string(),
+                )
+                .await;
+                drop(guard);
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert_eq!(read_json(response).await["error"], "invite_restricted");
+                let lines = out.lines();
+                assert_eq!(lines.len(), 1, "{lines:?}");
+                assert_eq!(lines[0]["outcome"], "denied", "{}", lines[0]);
+                assert_eq!(lines[0]["reason"], "restricted", "{}", lines[0]);
+            }
         }
         assert!(!state
             .db
