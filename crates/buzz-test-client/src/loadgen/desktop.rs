@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use buzz_core::kind::KIND_PRESENCE_UPDATE;
 use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
 use futures_util::stream::{self, StreamExt};
 use nostr::Keys;
@@ -20,8 +21,8 @@ use serde_json::{json, Value};
 use super::identity::{self, Role};
 use super::net::http_reason;
 use super::run::{
-    connect, observe, roots, stopped, Activity, Backoff, Directory, Rng, Seen, Shared, Step,
-    MAX_IDLE,
+    bounded, connect, observe, roots, stopped, Activity, Backoff, Directory, Rng, Seen, Shared,
+    Step, MAX_IDLE,
 };
 use super::scenario::{DesktopMode, WideSplit};
 use super::stats::{Op, Pending};
@@ -41,8 +42,10 @@ const REPLAY_BATCH: usize = 10;
 const LIVE_BATCH: usize = 2048;
 /// REQs awaiting EOSE at once while a connection establishes.
 const SETUP_CONCURRENCY: usize = 4;
-/// How long a REQ may wait for its EOSE.
+/// How long a REQ may wait for its EOSE, and a silence probe for any frame.
 const REQ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Frames handled in one pass before deadlines are judged.
+const DRAIN_FRAMES: usize = 256;
 /// A resumed subscription starts this long before its cursor.
 const RESUME_LAG_SECS: u64 = 960;
 /// A first subscription starts this long before now.
@@ -59,6 +62,8 @@ const MAX_ROSTER_PAGES: usize = 20;
 const PROFILE_CAP: usize = 1024;
 /// Status authors read.
 const STATUS_AUTHORS: usize = 100;
+/// Presence authors watched: the app's cap.
+const PRESENCE_AUTHORS: usize = 256;
 /// Channels per unread repair read.
 const UNREAD_CHANNELS: usize = 128;
 /// Events per channel window page.
@@ -75,6 +80,8 @@ pub(super) enum Route {
     Profiles,
     /// The global membership route: grants, read state and reminders.
     Membership,
+    /// The global live-only presence route, which replays nothing.
+    Presence,
     /// A channel batch, which stays open.
     Channels,
     /// A replay of channels behind a live-only batch, closed at its EOSE.
@@ -120,10 +127,12 @@ fn channel_filter(ids: &[String], since: u64, limit: usize) -> Value {
     json!({"kinds": CHANNEL_KINDS, "#h": ids, "since": since, "limit": limit})
 }
 
-/// The two global subscriptions, profiles and membership.
-fn global_reqs(viewer: &str, since: u64) -> [Req; 2] {
+/// The global subscriptions: profiles, membership and, while the client
+/// watches anyone's presence, a live-only presence route over those
+/// `presence` authors.
+fn global_reqs(viewer: &str, presence: &[String], since: u64) -> Vec<Req> {
     let limit = REPLAY_LIMIT;
-    [
+    let mut reqs = vec![
         Req {
             id: "profiles".into(),
             filters: vec![
@@ -143,7 +152,15 @@ fn global_reqs(viewer: &str, since: u64) -> [Req; 2] {
             ],
             route: Route::Membership,
         },
-    ]
+    ];
+    if !presence.is_empty() {
+        reqs.push(Req {
+            id: "presence".into(),
+            filters: vec![json!({"kinds": [KIND_PRESENCE_UPDATE], "authors": presence})],
+            route: Route::Presence,
+        });
+    }
+    reqs
 }
 
 /// Channel batch subscriptions, which stay open. Up to 10 channels share
@@ -215,11 +232,12 @@ pub(super) fn replay_reqs(
 pub(super) fn connect_reqs(
     mode: DesktopMode,
     viewer: &str,
+    presence: &[String],
     channels: &[String],
     since: u64,
     generation: u64,
 ) -> Vec<Req> {
-    let mut reqs = Vec::from(global_reqs(viewer, since));
+    let mut reqs = global_reqs(viewer, presence, since);
     reqs.extend(batch_reqs(mode, channels, since, REPLAY_LIMIT, generation));
     reqs.extend(replay_reqs(mode, channels, since, generation));
     reqs
@@ -366,7 +384,7 @@ pub(super) fn establish_fetches(
             reads
         }
         Route::Channels => channel_recovery(windows, threads).collect(),
-        Route::Replay => Vec::new(),
+        Route::Presence | Route::Replay => Vec::new(),
     }
 }
 
@@ -688,11 +706,16 @@ impl Reader {
         let base = &shared.communities[self.community].http_url;
         let body = filters.to_string().into_bytes();
         let pending = shared.stats.begin(op);
-        let response = tokio::time::timeout(
+        let Some(response) = bounded(
+            shared,
             HTTP_TIMEOUT,
             shared.net.post(&self.keys, base, "/query", body, None),
         )
-        .await;
+        .await
+        else {
+            pending.forget();
+            return None;
+        };
         match response {
             Err(_) => pending.err("read timeout"),
             Ok(Err(e)) => pending.err(&e.to_string()),
@@ -844,7 +867,12 @@ impl Reader {
         let shared = &self.shared;
         let base = &shared.communities[self.community].http_url;
         let pending = shared.stats.begin(Op::DesktopNip11);
-        match tokio::time::timeout(HTTP_TIMEOUT, shared.net.relay_info(base)).await {
+        let Some(response) = bounded(shared, HTTP_TIMEOUT, shared.net.relay_info(base)).await
+        else {
+            pending.forget();
+            return;
+        };
+        match response {
             Err(_) => pending.err("read timeout"),
             Ok(Err(e)) => pending.err(&e.to_string()),
             Ok(Ok((status, text))) if !status.is_success() => {
@@ -899,7 +927,7 @@ impl Reader {
         let channel = &self.channels[i % windows];
         let shared = &self.shared;
         let community = &shared.communities[self.community];
-        let found = roots(shared, community, &self.keys, channel).await;
+        let found = roots(shared, community, &self.keys, channel, Some(HTTP_TIMEOUT)).await;
         let Some(root) = found.get((i / windows) % found.len().max(1)) else {
             return;
         };
@@ -990,11 +1018,14 @@ impl Fetcher {
         self.task = Some(tokio::spawn(task));
     }
 
-    /// Waits for the reads under way and queued.
+    /// Waits for the reads under way and queued. The handle stays here
+    /// until the task ends, so a client cancelled meanwhile still aborts it
+    /// on drop instead of detaching it.
     async fn finish(&mut self) {
-        if let Some(task) = self.task.take() {
+        if let Some(task) = &mut self.task {
             let _ = task.await;
         }
+        self.task = None;
     }
 }
 
@@ -1064,6 +1095,12 @@ struct Waiting<'a> {
     sent: Instant,
 }
 
+/// A silence probe awaiting any frame.
+struct Probe<'a> {
+    pending: Pending<'a>,
+    sent: Instant,
+}
+
 /// A desktop client. Its sessions differ by [`Situation`]: the first is
 /// cold, a renewal follows [`renewal`], and any other reconnect is a
 /// [`Situation::Reconnect`].
@@ -1108,6 +1145,7 @@ async fn run_client(shared: Arc<Shared>, global: usize, req_timeout: Duration) {
         unread_at: None,
         caught_up: Vec::new(),
         generation: 0,
+        probes: 0,
         first_renewal: true,
         last_message: None,
         split: scenario.wide_split(Role::Human, global),
@@ -1154,6 +1192,8 @@ struct Client {
     /// The routes the last connection had caught up.
     caught_up: Vec<Route>,
     generation: u64,
+    /// Silence probes sent, across connections.
+    probes: u64,
     first_renewal: bool,
     last_message: Option<Seen>,
     split: Option<WideSplit>,
@@ -1183,7 +1223,15 @@ impl Client {
         let (windows, threads) = (reader.windows, profile.threads);
 
         self.generation += 1;
-        let reqs = connect_reqs(mode, &reader.viewer, channels, since, self.generation);
+        let presence = &reader.profiles[..reader.profiles.len().min(PRESENCE_AUTHORS)];
+        let reqs = connect_reqs(
+            mode,
+            &reader.viewer,
+            presence,
+            channels,
+            since,
+            self.generation,
+        );
         let mut batches: Vec<String> = reqs
             .iter()
             .filter(|r| r.route == Route::Channels)
@@ -1198,7 +1246,13 @@ impl Client {
 
         let mut waiting: HashMap<String, Waiting<'_>> = HashMap::new();
         let mut open: HashSet<String> = HashSet::new();
+        // Whether any frame came since the last tick, the probe a silent
+        // tick sends, and that probe's subscription, closed by the next one.
+        let mut heard = false;
+        let mut probe: Option<Probe<'_>> = None;
+        let mut probe_id: Option<String> = None;
         let mut activity = Activity::new(&scenario.human, &mut self.rng, self.split);
+        activity.root_bound = Some(HTTP_TIMEOUT);
         let tick_every = Duration::from_secs_f64(profile.tick_secs);
         let backstop = Duration::from_secs_f64(profile.backstop_secs);
         let next_renewal = (profile.renewal_secs > 0.0).then(|| {
@@ -1240,16 +1294,115 @@ impl Client {
                 waiting.insert(req.id, waited);
             }
 
+            let probe_deadline = probe.as_ref().map(|p| p.sent + self.req_timeout);
+            let due = [
+                activity.due(),
+                Some(self.next_tick),
+                next_renewal,
+                probe_deadline,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let wait = due
+                .map(|d| d.saturating_duration_since(Instant::now()))
+                .unwrap_or(MAX_IDLE)
+                .min(MAX_IDLE);
+            // The first frame waits; after it, only frames already in hand
+            // are handled (at most DRAIN_FRAMES), so an EOSE buffered while a
+            // publish waited for its OK is seen before deadlines are judged.
+            let mut established = Vec::new();
+            let mut drained = 0;
+            let mut next = conn.next_event(wait).await;
+            let backlogged = loop {
+                match next {
+                    Ok(RelayMessage::Eose { subscription_id }) => {
+                        if let Some(w) = waiting.remove(&subscription_id) {
+                            w.pending.ok();
+                            let retired = match (w.route, w.slot) {
+                                (Route::Replay, _) => Some(subscription_id),
+                                (_, Some(slot)) => {
+                                    open.insert(subscription_id.clone());
+                                    let old =
+                                        std::mem::replace(&mut batches[slot], subscription_id);
+                                    open.remove(&old);
+                                    Some(old)
+                                }
+                                (route, None) => {
+                                    open.insert(subscription_id);
+                                    let cut = limited(w.cut, w.events);
+                                    established.extend(establishment.eose(route, cut));
+                                    None
+                                }
+                            };
+                            if let Some(id) = retired {
+                                if let Err(e) = close(conn, &id).await {
+                                    break 'session disconnected(e);
+                                }
+                            }
+                        }
+                    }
+                    Ok(RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    }) => {
+                        // Live subscriptions the relay refuses end the session,
+                        // as for the basic human; a refused replay is an error.
+                        if let Some(w) = waiting.remove(&subscription_id) {
+                            w.pending.err(&message);
+                            if w.route != Route::Replay {
+                                break 'session End::Failed;
+                            }
+                        } else if open.remove(&subscription_id) {
+                            stats.err(
+                                Op::DesktopLive,
+                                &format!("CLOSED {subscription_id}: {message}"),
+                            );
+                            break 'session End::Failed;
+                        }
+                    }
+                    Ok(message) => {
+                        // An event before EOSE is replay, which the app counts
+                        // against its limit; only events after EOSE are delivery.
+                        if let RelayMessage::Event {
+                            subscription_id, ..
+                        } = &message
+                        {
+                            if let Some(w) = waiting.get_mut(subscription_id) {
+                                w.events += 1;
+                            } else if open.contains(subscription_id) {
+                                if let Some(target) = observe(stats, &message) {
+                                    self.last_message = Some(target);
+                                }
+                            }
+                        }
+                    }
+                    Err(WsClientError::Timeout) => break false,
+                    Err(e) => break 'session disconnected(e),
+                }
+                // Any frame proves the socket still reaches the relay.
+                heard = true;
+                if let Some(p) = probe.take() {
+                    p.pending.ok();
+                }
+                drained += 1;
+                if drained == DRAIN_FRAMES {
+                    break true;
+                }
+                next = conn.next_event(Duration::ZERO).await;
+            };
+
             // A REQ past its deadline: a replay or a replacement is closed (a
             // replacement keeps the batch it would have replaced, and the next
             // tick tries again); a connection's live route stays open, and
-            // establishes as cut, since it may have missed history.
+            // establishes as cut, since it may have missed history. A backlog
+            // still in hand may hold an EOSE in time, so its deadlines wait
+            // for the next pass.
             let expired: Vec<String> = waiting
                 .iter()
-                .filter(|(_, w)| w.sent.elapsed() >= self.req_timeout)
+                .filter(|(_, w)| !backlogged && w.sent.elapsed() >= self.req_timeout)
                 .map(|(id, _)| id.clone())
                 .collect();
-            let mut established = Vec::new();
             for id in expired {
                 let Some(w) = waiting.remove(&id) else {
                     continue;
@@ -1268,77 +1421,12 @@ impl Client {
                 }
             }
 
-            let due = [activity.due(), Some(self.next_tick), next_renewal]
-                .into_iter()
-                .flatten()
-                .min();
-            let wait = due
-                .map(|d| d.saturating_duration_since(Instant::now()))
-                .unwrap_or(MAX_IDLE)
-                .min(MAX_IDLE);
-            match conn.next_event(wait).await {
-                Ok(RelayMessage::Eose { subscription_id }) => {
-                    if let Some(w) = waiting.remove(&subscription_id) {
-                        w.pending.ok();
-                        let retired = match (w.route, w.slot) {
-                            (Route::Replay, _) => Some(subscription_id),
-                            (_, Some(slot)) => {
-                                open.insert(subscription_id.clone());
-                                let old = std::mem::replace(&mut batches[slot], subscription_id);
-                                open.remove(&old);
-                                Some(old)
-                            }
-                            (route, None) => {
-                                open.insert(subscription_id);
-                                let cut = limited(w.cut, w.events);
-                                established.extend(establishment.eose(route, cut));
-                                None
-                            }
-                        };
-                        if let Some(id) = retired {
-                            if let Err(e) = close(conn, &id).await {
-                                break 'session disconnected(e);
-                            }
-                        }
-                    }
+            // A probe nothing answered: the socket stopped delivering.
+            if !backlogged && probe_deadline.is_some_and(|d| Instant::now() >= d) {
+                if let Some(p) = probe.take() {
+                    p.pending.err("probe timeout");
                 }
-                Ok(RelayMessage::Closed {
-                    subscription_id,
-                    message,
-                }) => {
-                    // Live subscriptions the relay refuses end the session,
-                    // as for the basic human; a refused replay is an error.
-                    if let Some(w) = waiting.remove(&subscription_id) {
-                        w.pending.err(&message);
-                        if w.route != Route::Replay {
-                            break End::Failed;
-                        }
-                    } else if open.remove(&subscription_id) {
-                        stats.err(
-                            Op::DesktopLive,
-                            &format!("CLOSED {subscription_id}: {message}"),
-                        );
-                        break End::Failed;
-                    }
-                }
-                Ok(message) => {
-                    // An event before EOSE is replay, which the app counts
-                    // against its limit; only events after EOSE are delivery.
-                    if let RelayMessage::Event {
-                        subscription_id, ..
-                    } = &message
-                    {
-                        if let Some(w) = waiting.get_mut(subscription_id) {
-                            w.events += 1;
-                        } else if open.contains(subscription_id) {
-                            if let Some(target) = observe(stats, &message) {
-                                self.last_message = Some(target);
-                            }
-                        }
-                    }
-                }
-                Err(WsClientError::Timeout) => {}
-                Err(e) => break disconnected(e),
+                break End::Failed;
             }
 
             // `legacy` read everything when it connected.
@@ -1358,6 +1446,8 @@ impl Client {
                 }
             }
 
+            // A publish's OK is a frame too, though the step consumes it.
+            let before = activity.due();
             let step = activity
                 .step(
                     &shared,
@@ -1370,7 +1460,7 @@ impl Client {
                 )
                 .await;
             match step {
-                Ok(Step::Continue) => {}
+                Ok(Step::Continue) => heard |= activity.due() != before,
                 Ok(Step::SessionEnd) => break End::Dropped,
                 Err(e) => break disconnected(e),
             }
@@ -1403,6 +1493,27 @@ impl Client {
                     batches_at = Some(now);
                 }
                 self.fetch(tick_fetches(due));
+                // A silent minute asks the relay for an empty answer, in
+                // both modes; no frame by the deadline ends the session.
+                if !std::mem::take(&mut heard) && probe.is_none() {
+                    if let Some(old) = probe_id.take() {
+                        if let Err(e) = close(conn, &old).await {
+                            break disconnected(e);
+                        }
+                    }
+                    self.probes += 1;
+                    let id = format!("probe-{}", self.probes);
+                    let req =
+                        json!(["REQ", id, {"kinds": [44100], "#p": [reader.viewer], "limit": 0}]);
+                    if let Err(e) = conn.send_raw(&req).await {
+                        break disconnected(e);
+                    }
+                    probe = Some(Probe {
+                        pending: stats.begin(Op::DesktopProbe),
+                        sent: Instant::now(),
+                    });
+                    probe_id = Some(id);
+                }
             }
             if next_renewal.is_some_and(|t| now >= t) {
                 break End::Renewal;
@@ -1411,6 +1522,9 @@ impl Client {
         // Subscriptions still setting up are abandoned with the socket, not failed.
         for (_, w) in waiting.drain() {
             w.pending.forget();
+        }
+        if let Some(p) = probe {
+            p.pending.forget();
         }
         self.caught_up = establishment.caught_up();
         end
@@ -1448,7 +1562,7 @@ mod tests {
     #[test]
     fn up_to_ten_channels_share_one_replaying_batch_in_both_modes() {
         for mode in [DesktopMode::Legacy, DesktopMode::Current] {
-            let reqs = connect_reqs(mode, "v", &ids(5), 100, 1);
+            let reqs = connect_reqs(mode, "v", &[], &ids(5), 100, 1);
             let names: Vec<&str> = reqs.iter().map(|r| r.id.as_str()).collect();
             assert_eq!(names, ["profiles", "membership", "batch-1-0"], "{mode:?}");
             assert_eq!(shape(&reqs[2..]), [(5, 500, 1, false)], "{mode:?}");
@@ -1460,13 +1574,13 @@ mod tests {
 
     #[test]
     fn more_than_ten_channels_batch_by_ten_before_and_replay_separately_after() {
-        let legacy = connect_reqs(DesktopMode::Legacy, "v", &ids(25), 100, 1);
+        let legacy = connect_reqs(DesktopMode::Legacy, "v", &[], &ids(25), 100, 1);
         assert_eq!(
             shape(&legacy[2..]),
             [(10, 500, 1, false), (10, 500, 1, false), (5, 500, 1, false)]
         );
         assert!(legacy.iter().all(|r| !r.cut_by_design()));
-        let current = connect_reqs(DesktopMode::Current, "v", &ids(25), 100, 1);
+        let current = connect_reqs(DesktopMode::Current, "v", &[], &ids(25), 100, 1);
         assert_eq!(
             shape(&current[2..]),
             [
@@ -1480,7 +1594,7 @@ mod tests {
         let cut: Vec<_> = current.iter().map(Req::cut_by_design).collect();
         assert_eq!(cut, [false, false, true, false, false, false]);
         // One live-only filter holds up to 2048 channels.
-        let wide = connect_reqs(DesktopMode::Current, "v", &ids(2049), 100, 1);
+        let wide = connect_reqs(DesktopMode::Current, "v", &[], &ids(2049), 100, 1);
         let live: Vec<_> = wide[2..]
             .iter()
             .filter(|r| r.route == Route::Channels)
@@ -1713,6 +1827,32 @@ mod tests {
     }
 
     #[test]
+    fn presence_is_a_live_only_global_only_while_someone_is_watched() {
+        for mode in [DesktopMode::Legacy, DesktopMode::Current] {
+            let watched = ["a".to_string(), "b".to_string()];
+            let reqs = connect_reqs(mode, "v", &watched, &ids(5), 100, 1);
+            let routes: Vec<Route> = reqs.iter().map(|r| r.route).collect();
+            assert_eq!(
+                routes,
+                [
+                    Route::Profiles,
+                    Route::Membership,
+                    Route::Presence,
+                    Route::Channels
+                ],
+                "{mode:?}"
+            );
+            assert_eq!(
+                reqs[2].filters,
+                [json!({"kinds": [20001], "authors": ["a", "b"]})]
+            );
+            let alone = connect_reqs(mode, "v", &[], &ids(5), 100, 1);
+            assert!(alone.iter().all(|r| r.route != Route::Presence));
+        }
+        assert!(establish_fetches(Route::Presence, false, Owed::default(), 2, 1).is_empty());
+    }
+
+    #[test]
     fn resumed_subscriptions_start_before_the_cursor_but_not_before_the_floor() {
         assert_eq!(resume_since(10_000, None, 20_000), 19_700);
         assert_eq!(resume_since(10_000, Some(15_000), 20_000), 14_040);
@@ -1804,10 +1944,15 @@ mod tests {
         Arc::new(|_, _| (0, Duration::ZERO))
     }
 
-    /// A loopback relay that challenges, accepts AUTH and every EVENT, answers
-    /// each REQ per `plan` and records REQs and CLOSEs. With `drop_first`, it
-    /// closes its first connection that long after accepting it.
-    async fn fake_ws_relay(plan: Plan, drop_first: Option<Duration>) -> (String, Frames) {
+    /// A loopback relay that challenges, accepts AUTH and every EVENT (its OK
+    /// `ok_delay` late), answers each REQ per `plan` and records REQs and
+    /// CLOSEs. With `drop_first`, it closes its first connection that long
+    /// after accepting it.
+    async fn fake_ws_relay(
+        plan: Plan,
+        drop_first: Option<Duration>,
+        ok_delay: Duration,
+    ) -> (String, Frames) {
         use futures_util::SinkExt;
         use tokio_tungstenite::tungstenite::Message;
 
@@ -1853,8 +1998,16 @@ mod tests {
                         let verb = frame[0].as_str().unwrap_or_default().to_string();
                         let id = frame[1].as_str().unwrap_or_default().to_string();
                         match verb.as_str() {
-                            "AUTH" | "EVENT" => {
+                            "AUTH" => {
                                 let _ = tx.send(text(json!(["OK", frame[1]["id"], true, ""])));
+                            }
+                            "EVENT" => {
+                                let (tx, ok) =
+                                    (tx.clone(), json!(["OK", frame[1]["id"], true, ""]));
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(ok_delay).await;
+                                    let _ = tx.send(text(ok));
+                                });
                             }
                             "REQ" => {
                                 let (events, delay) = plan(index, &id);
@@ -1993,7 +2146,9 @@ mod tests {
     /// `humans` desktop humans in one community of 25 channels, each in
     /// `joined`, with two windows and one thread open and no traffic of
     /// their own.
-    fn desktops(ws: &str, http: &str, humans: usize, joined: usize, desktop: &str) -> Scenario {
+    fn desktops(rig: &Rig, ws: &str, http: &str) -> Scenario {
+        let (humans, joined, desktop) = (rig.humans, rig.joined, &rig.desktop);
+        let presence = rig.presence_secs;
         Scenario::parse(&format!(
             r#"
 run_id = "d"
@@ -2008,7 +2163,7 @@ humans = {humans}
 agents = 0
 channels_per_member = {joined}
 [human]
-presence_interval_secs = 3600.0
+presence_interval_secs = {presence:?}
 typing_per_hour = 0.0
 messages_per_hour = 0.0
 reactions_per_hour = 0.0
@@ -2101,6 +2256,10 @@ hold_secs = 1
         fail: FailOnce,
         slow: Slow,
         req_timeout: Duration,
+        /// How late the relay acknowledges each EVENT.
+        ok_delay: Duration,
+        /// The humans' presence interval; their only traffic of their own.
+        presence_secs: f64,
     }
 
     /// One client, with a co-member whose profile it reads.
@@ -2122,15 +2281,17 @@ hold_secs = 1
             fail: &[],
             slow: None,
             req_timeout: REQ_TIMEOUT,
+            ok_delay: Duration::ZERO,
+            presence_secs: 3600.0,
         }
     }
 
     /// Runs the clients for at least `min`, until `done` holds, then stops
     /// them and returns what they did. Fails after 15 s without `done`.
     async fn drive(rig: Rig, min: Duration, done: impl Fn(&Outcome) -> bool) -> Outcome {
-        let (ws, frames) = fake_ws_relay(rig.plan, rig.drop_first).await;
+        let (ws, frames) = fake_ws_relay(rig.plan.clone(), rig.drop_first, rig.ok_delay).await;
         let (http, queries) = fake_api("d", rig.fail, rig.slow).await;
-        let scenario = desktops(&ws, &http, rig.humans, rig.joined, &rig.desktop);
+        let scenario = desktops(&rig, &ws, &http);
         let net = Net::new(&scenario).await.unwrap();
         let stats = Arc::new(Stats::default());
         let (stop_tx, stop) = watch::channel(false);
@@ -2217,16 +2378,18 @@ hold_secs = 1
     #[tokio::test]
     async fn a_cold_start_sends_the_modeled_requests_once() {
         // Legacy: per-channel batches of ten for 25 channels; current: one
-        // live-only batch and three replays. Both read the same over HTTP.
+        // live-only batch and three replays. Both open the three globals
+        // (each client watches the other's presence) and read the same over
+        // HTTP.
         let cases = [
-            ("legacy", 25, vec![("desktop_live_eose", 2 * 5)]),
+            ("legacy", 25, vec![("desktop_live_eose", 2 * 6)]),
             (
                 "current",
                 25,
-                vec![("desktop_live_eose", 2 * 3), ("desktop_replay_eose", 2 * 3)],
+                vec![("desktop_live_eose", 2 * 4), ("desktop_replay_eose", 2 * 3)],
             ),
-            ("legacy", 5, vec![("desktop_live_eose", 2 * 3)]),
-            ("current", 5, vec![("desktop_live_eose", 2 * 3)]),
+            ("legacy", 5, vec![("desktop_live_eose", 2 * 4)]),
+            ("current", 5, vec![("desktop_live_eose", 2 * 4)]),
         ];
         for (mode, joined, subs) in cases {
             let want = with(cold_reads(2), &subs);
@@ -2237,6 +2400,7 @@ hold_secs = 1
             .await;
             no_errors(&out);
             assert_eq!(out.desktop(), want, "{mode} J={joined}");
+            assert!(out.saw("REQ", "presence"), "{mode} J={joined}");
             assert_eq!(out.count("ws_connect_auth"), 2, "{mode} J={joined}");
         }
     }
@@ -2558,7 +2722,8 @@ hold_secs = 1
             "the roster retry waited for reminders"
         );
         assert_eq!(out.errors("desktop_roster"), 1);
-        assert_eq!(out.count("desktop_reminders"), 1);
+        // Still slow at the stop, the reminders read is abandoned there.
+        assert_eq!(out.ops.get("desktop_reminders"), None);
     }
 
     #[tokio::test]
@@ -2628,11 +2793,14 @@ hold_secs = 1
         )
         .await;
         no_errors(&before);
+        // Silent ticks probe, as many times as the run had silent ticks.
+        let mut ops = before.desktop();
+        ops.remove("desktop_probe");
         assert_eq!(
-            before.desktop(),
+            ops,
             with(
                 cold_reads(2),
-                &[("desktop_live_eose", 6), ("desktop_replay_eose", 6)]
+                &[("desktop_live_eose", 8), ("desktop_replay_eose", 6)]
             )
         );
         assert!(!before
@@ -2715,5 +2883,82 @@ hold_secs = 1
         cold.remove("desktop_unread");
         assert_eq!(reads, cold);
         assert!(small.count("desktop_unread") <= 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_read_in_flight_at_the_stop_is_abandoned_not_waited_for() {
+        // The roster read takes far longer than the stop may: `drive` gives
+        // a stopped client 5 s to return.
+        let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
+        rig.slow = Some(("roster", Duration::from_secs(8)));
+        let out = drive(rig, Duration::ZERO, |o| {
+            o.queries.iter().any(|f| f["kinds"] == json!([39002]))
+        })
+        .await;
+        // Abandoned, like an EOSE wait at the stop: neither a success nor
+        // an error.
+        assert_eq!(out.count("desktop_roster"), 0);
+        assert_eq!(out.errors("desktop_roster"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_finish_still_aborts_the_read_task() {
+        let (alive, ended) = tokio::sync::oneshot::channel::<()>();
+        let mut fetcher = Fetcher::default();
+        fetcher.task = Some(tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        }));
+        let finishing = tokio::spawn(async move { fetcher.finish().await });
+        tokio::task::yield_now().await;
+        finishing.abort();
+        let _ = finishing.await;
+        let ended = tokio::time::timeout(Duration::from_secs(2), ended).await;
+        assert!(ended.expect("the read task ended").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_eose_in_time_is_not_expired_behind_a_slow_ok() {
+        // Every EOSE comes 1.2 s after its REQ, well within the deadline,
+        // but while the first presence heartbeat (within a second of the
+        // connect) waits 3.5 s for its OK, past the deadline.
+        let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
+        rig.presence_secs = 1.0;
+        rig.ok_delay = Duration::from_millis(3_500);
+        rig.req_timeout = Duration::from_millis(2_500);
+        rig.plan = Arc::new(|_, _| (0, Duration::from_millis(1_200)));
+        let out = drive(rig, Duration::ZERO, |o| {
+            o.count("publish_ephemeral_ok") >= 1 && o.count("desktop_live_eose") >= 4
+        })
+        .await;
+        assert_eq!(out.errors("desktop_live_eose"), 0, "{:?}", out.ops);
+        assert_eq!(out.count("desktop_live_eose"), 4, "{:?}", out.ops);
+        assert!(!out.saw("CLOSE", "batch-1-0"), "{:?}", out.frames);
+    }
+
+    #[tokio::test]
+    async fn a_silent_tick_probes_and_an_unanswered_probe_reconnects() {
+        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 1.0");
+        rig.req_timeout = Duration::from_millis(500);
+        // The first connection never answers its probe.
+        rig.plan = Arc::new(|conn, id| {
+            let late = conn == 0 && id.starts_with("probe-");
+            (0, Duration::from_secs(if late { 30 } else { 0 }))
+        });
+        let out = drive(rig, Duration::ZERO, |o| o.count("desktop_probe") >= 1).await;
+        assert_eq!(out.errors("desktop_probe"), 1, "{:?}", out.ops);
+        let probes: Vec<_> = out
+            .frames
+            .iter()
+            .filter(|(_, v, id)| v == "REQ" && id.starts_with("probe-"))
+            .map(|(conn, _, id)| (*conn, id.as_str()))
+            .collect();
+        assert_eq!(probes[0], (0, "probe-1"), "{:?}", out.frames);
+        assert!(
+            probes.iter().any(|(conn, _)| *conn == 1),
+            "{:?}",
+            out.frames
+        );
+        assert_eq!(out.count("ws_connect_auth"), 2, "{:?}", out.ops);
     }
 }

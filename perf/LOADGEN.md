@@ -129,14 +129,17 @@ the report.
 On a **cold start** it:
 
 1. reads the relay's NIP-11 document (`desktop_nip11`);
-2. opens its profile and membership subscriptions, and its channel
-   subscriptions (`desktop_live_eose`). With up to ten channels both modes
+2. opens its profile and membership subscriptions, a live-only presence
+   subscription over up to 256 co-members, and its channel subscriptions
+   (`desktop_live_eose`). With up to ten channels both modes
    open one per-channel batch that replays the newest 500 events. With more,
    `legacy` opens one such batch per ten channels; `current` opens one
    live-only subscription per 2048 channels and replays the channels ten at a
    time in separate subscriptions it closes at EOSE (`desktop_replay_eose`).
    At most four are set up at once, each with a 10 s EOSE timeout;
-3. reads over HTTP, at most six at a time with a 30 s timeout: its roster
+3. reads over HTTP, at most six at a time with a 30 s timeout (a
+   simplification: the app has no read limiter of its own, and its reads
+   time out after 10 s or 20 s): its roster
    (`desktop_roster`, paged), channel names (`desktop_metadata`), sidebar
    preferences (`desktop_sidebar`), co-member profiles (`desktop_profiles`)
    and statuses (`desktop_statuses`), the custom emoji set
@@ -145,7 +148,10 @@ On a **cold start** it:
    (`desktop_reminders`), and for each of `windows` open channels a window
    catch-up (`desktop_window`) and its notices (`desktop_notices`), and for
    each of `threads` open threads a seeded root lookup and its first thread
-   page (`desktop_thread_root`, `desktop_thread_window`). A window catch-up
+   page (`desktop_thread_root`, `desktop_thread_window`). The root lookup is
+   the generator's own search for seeded roots (`http_query`), cached per
+   channel; a reply's lookup runs on the socket, outside the six, with the
+   same timeout. A window catch-up
    reads the head page, then follows the cursor in the relay's window
    bounds (kind 39006) for up to five older pages, until the bounds say
    history is exhausted.
@@ -182,6 +188,15 @@ profile read runs again when the profile subscription next establishes. A
 replacement is live-only and is opened before the subscription it replaces
 is closed. A replacement that misses its EOSE deadline is closed, the
 subscription it would have replaced stays, and the next tick tries again.
+In both modes, a tick with no frame from the relay since the previous tick
+sends a silence probe, a live-only REQ for the viewer's membership notices
+(`desktop_probe`). Any frame answers it; none within 10 s ends the session
+as failed, and the client reconnects with backoff.
+
+`legacy` is a lower bound on the app before its fixes. That app also gave
+each open channel, and each channel it watched without being a member, a
+subscription of its own beside the batches, and re-sent every subscription
+on each tick; the generator models only the batches.
 
 Every `renewal_secs` (0 disables it; the first is jittered) the client renews
 its identity and reconnects. In `legacy` that is an ordinary reconnect, which
@@ -251,7 +266,8 @@ are recorded as `unfinished at stop` errors, and the cancellation fails the run
 whatever the limits. Keep `target.connect_timeout_secs` below 15, or a stalled
 connect is cancelled instead of timing out. Publishes, history fetches and
 HTTP requests can outlast the grace period (30 s, 30 s and 60 s deadlines), in
-which case the client is cancelled and the run fails.
+which case the client is cancelled and the run fails. Desktop reads, like
+EOSE waits, are abandoned at the stop and not recorded.
 
 The process exits non-zero when a step aborts, a client panics, a client had to
 be cancelled, or `shutdown.abort_reason` is set.

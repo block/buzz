@@ -43,9 +43,9 @@ pub async fn seed(scenario: &Scenario, net: &Net, stats: &Arc<Stats>) -> anyhow:
         }
         create_channels(scenario, net, &community, &owner).await?;
         if let Some(members) = &members {
-            let added = add_members(scenario, net, &community, &owner, members).await?;
+            let ensured = add_members(scenario, net, &community, &owner, members).await?;
             eprintln!(
-                "seed: community {} memberships added ({added} people)",
+                "seed: community {} memberships ensured ({ensured} people)",
                 community.index
             );
         }

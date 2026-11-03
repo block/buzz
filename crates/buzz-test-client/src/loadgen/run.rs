@@ -519,21 +519,52 @@ pub(super) async fn connect(
     None
 }
 
+/// `read` under `limit`, abandoned once the run stops: `None` when it was,
+/// as EOSE waits are abandoned at stop. A read still running then would
+/// outlive the shutdown grace and fail a healthy run.
+pub(super) async fn bounded<T>(
+    shared: &Shared,
+    limit: Duration,
+    read: impl std::future::Future<Output = T>,
+) -> Option<Result<T, tokio::time::error::Elapsed>> {
+    if stopped(shared) {
+        return None;
+    }
+    tokio::select! {
+        result = tokio::time::timeout(limit, read) => Some(result),
+        () = stopping(shared) => None,
+    }
+}
+
 /// Thread roots of `channel`, cached once found. Concurrent first callers may
 /// each query; a failed query is not cached, so a later reply retries it.
+/// With `bound`, the lookup is [`bounded`] by it; one abandoned at stop is
+/// not recorded.
 pub(super) async fn roots(
     shared: &Shared,
     community: &Community,
     reader: &Keys,
     channel: &str,
+    bound: Option<Duration>,
 ) -> Arc<Vec<String>> {
     if let Some(found) = shared.roots.lock().await.get(channel) {
         return found.clone();
     }
     let owner = identity::keys(&shared.scenario.run_id, Role::Owner, community.index);
     let pending = shared.stats.begin(Op::HttpQuery);
-    let found = match find_roots(&shared.net, community, reader, &owner, channel, ROOT_PREFIX).await
-    {
+    let lookup = find_roots(&shared.net, community, reader, &owner, channel, ROOT_PREFIX);
+    let result = match bound {
+        None => lookup.await,
+        Some(limit) => match bounded(shared, limit, lookup).await {
+            Some(Ok(result)) => result,
+            Some(Err(_)) => Err(anyhow::anyhow!("read timeout")),
+            None => {
+                pending.forget();
+                return Arc::new(Vec::new());
+            }
+        },
+    };
+    let found = match result {
         Ok(found) => {
             pending.ok();
             found
@@ -738,6 +769,9 @@ pub(super) struct Activity {
     /// With a split, the latest message seen in a wide (0) and a regular (1)
     /// channel, so reactions follow the split too.
     recent: [Option<Seen>; 2],
+    /// The bound of a reply's thread root lookup ([`roots`]); `None` for the
+    /// basic human.
+    pub(super) root_bound: Option<Duration>,
 }
 
 /// Index into `channels` of the channel a member's next typing indicator,
@@ -773,6 +807,7 @@ impl Activity {
                 .flatten(),
             split,
             recent: [None, None],
+            root_bound: None,
         }
     }
 
@@ -827,7 +862,7 @@ impl Activity {
             let channel = &channels[pick_channel(self.split, channels, rng)];
             let mut tags = vec![tag(["h", channel])];
             if rng.unit() < profile.thread_reply_fraction {
-                let roots = roots(shared, community, keys, channel).await;
+                let roots = roots(shared, community, keys, channel, self.root_bound).await;
                 if !roots.is_empty() {
                     tags.push(tag(["e", &roots[rng.below(roots.len())], "", "reply"]));
                 }
