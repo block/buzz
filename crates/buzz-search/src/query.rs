@@ -331,7 +331,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = crate::cancel::fetch_all(pool, qb.build()).await?;
 
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
@@ -449,7 +449,7 @@ pub async fn search_profile_names(
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    let rows = qb.build().fetch_all(pool).await?;
+    let rows = crate::cancel::fetch_all(pool, qb.build()).await?;
     let mut hits = Vec::with_capacity(rows.len());
     for row in rows {
         let id_bytes: Vec<u8> = row.try_get("id")?;

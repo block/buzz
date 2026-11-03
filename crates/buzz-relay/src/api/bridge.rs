@@ -4,6 +4,7 @@
 //! authenticated via NIP-98 signed events.
 
 mod read_state_snapshot;
+pub(crate) mod search_slots;
 
 use std::sync::Arc;
 
@@ -23,7 +24,9 @@ use crate::nip_fi_http::{admit_nip_fi_http_on_state, Nip98Proof};
 use crate::state::AppState;
 
 use super::relay_members::MembershipRefusal;
-use super::{api_error, db_read_error, internal_error, not_found, parse_query_or_400};
+use super::{
+    api_error, db_read_error, internal_error, not_found, parse_query_or_400, search_read_error,
+};
 
 mod thread_roots;
 mod thread_window;
@@ -1602,7 +1605,7 @@ async fn query_member_events(
                 "mixed search and non-search filters not supported",
             ));
         }
-        return handle_bridge_search(
+        let search = handle_bridge_search(
             state,
             &raw_filters,
             &filters,
@@ -1611,8 +1614,12 @@ async fn query_member_events(
             tenant,
             &authed_pubkey_hex,
             &pubkey_bytes,
-        )
-        .await;
+        );
+        return state
+            .search_slots
+            .run(tenant.community(), pubkey.to_bytes(), search)
+            .await
+            .unwrap_or_else(|superseded| Err(superseded.into()));
     }
 
     if let Some(presence_result) =
@@ -2582,7 +2589,7 @@ async fn handle_bridge_search(
             .search
             .search(&search_query)
             .await
-            .map_err(|e| internal_error(&format!("search error: {e}")))?;
+            .map_err(|e| search_read_error("search error", &e))?;
 
         // Fetch full events from DB by ID. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.
@@ -9008,6 +9015,9 @@ pub(crate) mod postgres_tests {
         admin: sqlx::PgPool,
         writer: sqlx::PgPool,
         replica: sqlx::PgPool,
+        /// The production search pool options on the writer, with a 300ms
+        /// session `statement_timeout` they must keep (it is tighter).
+        search: sqlx::PgPool,
         names: [String; 2],
         state: Arc<crate::state::AppState>,
         host: String,
@@ -9082,6 +9092,16 @@ pub(crate) mod postgres_tests {
         }
         let replica = pools.pop().expect("replica");
         let writer = pools.pop().expect("writer");
+        let search_url = format!("{base}/{}", names[0]);
+        let search = buzz_search::pool_options()
+            .connect_with(
+                search_url
+                    .parse::<sqlx::postgres::PgConnectOptions>()
+                    .expect("search url")
+                    .options([("statement_timeout", "300ms")]),
+            )
+            .await
+            .expect("search pool");
 
         let mut config = crate::config::Config::from_env().expect("config");
         config.redis_url =
@@ -9107,7 +9127,7 @@ pub(crate) mod postgres_tests {
             buzz_audit::AuditService::new(writer.clone()),
             pubsub,
             buzz_auth::AuthService::new(config.auth.clone()),
-            buzz_search::SearchService::new(writer.clone()),
+            buzz_search::SearchService::new(search.clone()),
             Arc::new(buzz_workflow::WorkflowEngine::new(
                 db,
                 buzz_workflow::WorkflowConfig::default(),
@@ -9120,6 +9140,7 @@ pub(crate) mod postgres_tests {
             admin,
             writer,
             replica,
+            search,
             names: [names[0].clone(), names[1].clone()],
             state: Arc::new(state),
             host,
@@ -9158,20 +9179,43 @@ pub(crate) mod postgres_tests {
         }
 
         async fn http(&self, uri: &str, filter: &serde_json::Value) -> (StatusCode, Value) {
+            let body = serde_json::to_vec(&[filter]).expect("json");
+            self.post(uri, body, axum::http::HeaderMap::new()).await
+        }
+
+        /// `POST /profiles/search` for `needle`, NIP-98 signed by the reader.
+        async fn profile_search(&self) -> (StatusCode, Value) {
+            let path = super::super::profiles::SEARCH_PATH;
+            let body = serde_json::to_vec(&serde_json::json!({"query": "needle"})).expect("json");
+            let url = super::nip98_expected_url(
+                &self.state.config.relay_url,
+                &TenantContext::resolved(self.community, self.host.clone()),
+                path,
+            );
+            let auth = make_nip98_headers(&self.reader, &url, "POST", &body);
+            self.post(path, body, auth).await
+        }
+
+        async fn post(
+            &self,
+            uri: &str,
+            body: Vec<u8>,
+            headers: axum::http::HeaderMap,
+        ) -> (StatusCode, Value) {
             use axum::body::Body;
             use axum::http::{header, Request};
             use tower::ServiceExt;
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::HOST, &self.host)
+                .header("x-pubkey", self.reader.public_key().to_hex())
+                .header("content-type", "application/json");
+            if let Some(map) = request.headers_mut() {
+                map.extend(headers);
+            }
             let resp = crate::router::build_router(self.state.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(uri)
-                        .header(header::HOST, &self.host)
-                        .header("x-pubkey", self.reader.public_key().to_hex())
-                        .header("content-type", "application/json")
-                        .body(Body::from(serde_json::to_vec(&[filter]).expect("json")))
-                        .expect("request"),
-                )
+                .oneshot(request.body(Body::from(body)).expect("request"))
                 .await
                 .expect("oneshot");
             let status = resp.status();
@@ -9257,6 +9301,7 @@ pub(crate) mod postgres_tests {
 
         async fn drop(self) {
             drop(self.state);
+            self.search.close().await;
             for (pool, name) in [
                 (self.writer, &self.names[0]),
                 (self.replica, &self.names[1]),
@@ -9353,6 +9398,90 @@ pub(crate) mod postgres_tests {
         assert!(
             frame.starts_with(r#"["CLOSED","c","error: "#) && !frame.contains("query timed out"),
             "WS COUNT {arm} ordinary error: {frame}"
+        );
+
+        fx.drop().await;
+    }
+
+    /// The search itself (not its hydrate) cancelled by the search pool's
+    /// statement timeout answers with the timeout contract on every search
+    /// caller: HTTP `/query` and `/profiles/search` 503 `query timed out`, WS
+    /// CLOSED `error: query timed out`. The ordinary-error control (42P01)
+    /// keeps the generic 500 and the retryable `error: search failed`.
+    /// Mutations: drop the 57014 check in any caller, or map every search
+    /// error to the timeout → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn search_statement_timeout_maps_to_timeout_contract() {
+        use crate::handlers::req::{QUERY_TIMED_OUT_CLOSED, SEARCH_FAILED_CLOSED};
+        let fx = cancel_fixture().await;
+        let closed = |reason: &str| format!(r#"["CLOSED","s","{reason}"]"#);
+
+        // Healthy controls.
+        let (status, body) = fx.http("/query", &fx.search_filter()).await;
+        assert_eq!(status, StatusCode::OK, "healthy HTTP search: {body}");
+        assert!(
+            body.to_string().contains("root needle"),
+            "search hit: {body}"
+        );
+        let (status, body) = fx.profile_search().await;
+        assert_eq!(status, StatusCode::OK, "healthy profile search: {body}");
+        let frame = fx.ws_search().await;
+        assert!(frame.contains("root needle"), "healthy WS search: {frame}");
+
+        // `events` locked on the search pool's database: the search waits past
+        // its 300ms `statement_timeout` and is cancelled with 57014.
+        let mut locker = fx.writer.begin().await.expect("begin locker");
+        sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .expect("lock search events");
+        let timed_out = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(super::super::QUERY_TIMED_OUT),
+        );
+        let (status, body) = fx.http("/query", &fx.search_filter()).await;
+        assert_eq!((status, body["error"].as_str()), timed_out, "HTTP search");
+        let (status, body) = fx.profile_search().await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            timed_out,
+            "HTTP profile search"
+        );
+        assert_eq!(
+            fx.ws_search().await,
+            closed(QUERY_TIMED_OUT_CLOSED),
+            "WS search"
+        );
+        locker.rollback().await.expect("unlock");
+
+        // Ordinary-error controls: `events` gone → 42P01. Not a timeout.
+        for pool in [&fx.writer, &fx.replica] {
+            sqlx::query("ALTER TABLE events RENAME TO events_gone")
+                .execute(pool)
+                .await
+                .expect("rename events");
+        }
+        let failed = (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("internal server error"),
+        );
+        let (status, body) = fx.http("/query", &fx.search_filter()).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            failed,
+            "HTTP search ordinary error"
+        );
+        let (status, body) = fx.profile_search().await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            failed,
+            "HTTP profile search ordinary error"
+        );
+        assert_eq!(
+            fx.ws_search().await,
+            closed(SEARCH_FAILED_CLOSED),
+            "WS search ordinary error"
         );
 
         fx.drop().await;

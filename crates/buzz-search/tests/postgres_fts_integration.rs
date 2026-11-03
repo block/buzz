@@ -1775,3 +1775,203 @@ async fn profile_names_survive_unparsable_content() {
 
     teardown(pool, &schema).await;
 }
+
+/// Connect the way the relay does: [`buzz_search::pool_options`].
+async fn search_pool() -> PgPool {
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+    buzz_search::pool_options()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("connect search pool")
+}
+
+/// Backends in this test's database, other than the caller's, that wait on
+/// a lock inside a search. Scoped to the database so concurrent tests in
+/// sibling databases cannot change the count.
+async fn waiting_searches(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
+         AND datname = current_database() \
+         AND wait_event_type = 'Lock' AND query LIKE '%search_query.query%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count waiting searches")
+}
+
+/// Poll until [`waiting_searches`] is `want`, failing after five seconds.
+async fn await_waiting_searches(pool: &PgPool, want: i64, why: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let got = waiting_searches(pool).await;
+        if got == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{why}: {got} waiting searches"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Hold `start()`'s search on a table lock, drop it while it waits, and
+/// require that its statement stops; then run it again unlocked.
+async fn abandon_under_lock<F, Fut>(pool: &PgPool, name: &str, start: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<buzz_search::SearchResult, buzz_search::SearchError>>,
+{
+    let mut lock = pool.begin().await.expect("begin lock");
+    sqlx::query("LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .expect("lock events");
+    // Boxed so `drop` drops the search itself, not a pinned reference to it.
+    let mut running = Box::pin(start());
+    tokio::select! {
+        result = &mut running => panic!("{name} finished under the lock: {result:?}"),
+        () = await_waiting_searches(pool, 1, "search never reached the lock") => {}
+    }
+    drop(running);
+    await_waiting_searches(pool, 0, &format!("abandoned {name} still running")).await;
+    lock.rollback().await.expect("release lock");
+    // The cancelled connection is usable again.
+    start()
+        .await
+        .unwrap_or_else(|e| panic!("{name} after cancel: {e}"));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn search_pool_bounds_every_statement() {
+    let (pool, schema) = setup().await;
+    let search = search_pool().await;
+    let mut conns = Vec::new();
+    for _ in 0..2 {
+        let mut conn = search.acquire().await.expect("search connection");
+        let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read statement_timeout");
+        assert_eq!(timeout, "20s", "every search connection is bounded");
+        conns.push(conn);
+    }
+    drop(conns);
+    search.close().await;
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn abandoned_search_cancels_its_statement() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "abandoned-search.example").await;
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        9,
+        "project plan",
+        None,
+        1_700_000_000,
+    )
+    .await;
+    let svc = SearchService::new(search_pool().await);
+    let message_query = SearchQuery {
+        community: c,
+        q: "project".into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![9]),
+        authors: None,
+        since: None,
+        until: None,
+        page: 1,
+        per_page: 10,
+        mode: buzz_search::SearchMode::Prefix,
+        sort: buzz_search::SearchSort::Relevance,
+    };
+    abandon_under_lock(&pool, "search", || svc.search(&message_query)).await;
+    abandon_under_lock(&pool, "search_profile_names", || {
+        svc.search_profile_names(c, "proj", 1, 10)
+    })
+    .await;
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cancel_signals_only_the_named_backend() {
+    let (pool, schema) = setup().await;
+    let mut victim = pool.acquire().await.expect("victim connection");
+    let (pid, started_us): (i32, i64) = sqlx::query_as(
+        "SELECT pid, (EXTRACT(EPOCH FROM backend_start) * 1000000)::bigint \
+         FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+    )
+    .fetch_one(&mut *victim)
+    .await
+    .expect("victim backend");
+    let sleeping = tokio::spawn(async move {
+        sqlx::query("SELECT pg_sleep(30)")
+            .execute(&mut *victim)
+            .await
+            .map(|_| ())
+    });
+    // Signal only once the victim's statement is running: a cancel that
+    // lands first is a no-op, and the named cancel below would then pass
+    // without stopping anything.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let running: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE pid = $1 AND state = 'active' AND query LIKE '%pg_sleep(30)%')",
+        )
+        .bind(pid)
+        .fetch_one(&pool)
+        .await
+        .expect("victim activity");
+        if running {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "victim statement never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    // A same-pid backend that started at another time (another replica, or a
+    // reused pid) is not signalled.
+    let other: Option<bool> = sqlx::query_scalar(buzz_search::cancel::CANCEL_SQL)
+        .bind(pid)
+        .bind(started_us + 1)
+        .fetch_optional(&pool)
+        .await
+        .expect("cancel other backend");
+    assert_eq!(other, None);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !sleeping.is_finished(),
+        "an unmatched cancel must not stop the statement"
+    );
+
+    let named: Option<bool> = sqlx::query_scalar(buzz_search::cancel::CANCEL_SQL)
+        .bind(pid)
+        .bind(started_us)
+        .fetch_optional(&pool)
+        .await
+        .expect("cancel named backend");
+    assert_eq!(named, Some(true));
+    let err = tokio::time::timeout(std::time::Duration::from_secs(5), sleeping)
+        .await
+        .expect("cancelled statement ends")
+        .expect("join")
+        .expect_err("statement was cancelled");
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("57014")
+    );
+    teardown(pool, &schema).await;
+}

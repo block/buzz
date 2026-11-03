@@ -140,6 +140,11 @@ run_unit_tests() {
   run_test_step "buzz-db source-policy tests" \
     cargo test -p buzz-db --test observability_source -- --nocapture
 
+  # buzz-search unit tests (no infra); its Postgres suite runs in the
+  # PostgreSQL lane.
+  run_test_step "buzz-search unit tests" \
+    cargo test -p buzz-search --lib -- --nocapture
+
   run_test_step "buzz-media storage snapshot serialization test" \
     cargo test -p buzz-media --lib bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys -- --exact --nocapture
 
@@ -342,6 +347,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay profile search request tests" \
     cargo test -p buzz-relay --lib api::profiles:: -- --nocapture
+
+  run_test_step "buzz-relay per-user search cap tests" \
+    cargo test -p buzz-relay --lib api::bridge::search_slots::tests:: -- --nocapture
 
   run_test_step "buzz-relay Git transport Off-mode precedence tests" \
     cargo test -p buzz-relay --lib api::git::transport::off_mode_precedence_tests:: -- --nocapture

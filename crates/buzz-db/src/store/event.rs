@@ -893,6 +893,21 @@ pub(crate) const TIGHTEN_STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('state
             OR current_setting('statement_timeout')::interval > $1::text::interval \
           THEN $1::text ELSE current_setting('statement_timeout') END, $2)";
 
+/// Lower `conn`'s session `statement_timeout` to [`READ_STATEMENT_TIMEOUT`]
+/// unless it is already tighter. For pools whose every statement is a read:
+/// run it once per new connection (`after_connect`), so no statement on that
+/// pool is unbounded.
+pub async fn tighten_session_read_statement_timeout(
+    conn: &mut sqlx::PgConnection,
+) -> sqlx::Result<()> {
+    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+        .bind(READ_STATEMENT_TIMEOUT)
+        .bind(false)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
 /// Run an event read under [`READ_STATEMENT_TIMEOUT`] without changing the
 /// deadline for anything else on `conn`. `begin()` opens a transaction on an
 /// autocommit writer connection or a savepoint inside the replica's read
