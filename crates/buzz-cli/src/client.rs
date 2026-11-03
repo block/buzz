@@ -1235,6 +1235,10 @@ impl BuzzClient {
         .map_err(|e| match e.upgrade_rejection_status() {
             // A denial decided on the upgrade is an HTTP response (NIP-FI).
             Some(status) => self.relay_error(status, String::new()),
+            // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
+            None if matches!(e, buzz_ws_client::WsClientError::PolicyClose(_)) => {
+                CliError::Auth(e.to_string())
+            }
             None => CliError::Other(e.to_string()),
         })?;
 
@@ -3085,5 +3089,42 @@ mod federated_identity_route_tests {
             "redirect followed: {:?}",
             covered(&log)
         );
+    }
+
+    /// A WebSocket refused after NIP-42 with a policy close (a NIP-FI key
+    /// mismatch) is an auth error, exit 3, not a generic failure.
+    #[tokio::test]
+    async fn a_websocket_policy_close_is_an_auth_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await
+                .unwrap();
+            let _auth = ws.next().await;
+            let _ = ws
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: "auth-required: key mismatch".into(),
+                })))
+                .await;
+        });
+        let client = client(&relay, false);
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&client.credentials().test_keys())
+            .unwrap();
+        let err = client.publish_ephemeral_event(event).await.unwrap_err();
+        assert!(
+            matches!(&err, CliError::Auth(m) if m.contains("key mismatch")),
+            "{err:?}"
+        );
+        assert_eq!(crate::error::exit_code(&err), 3);
+        assert!(!crate::error::is_retryable_error(&err));
     }
 }

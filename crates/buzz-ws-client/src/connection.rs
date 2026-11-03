@@ -207,7 +207,7 @@ impl NostrWsConnection {
                 Message::Ping(data) => {
                     self.ws.send(Message::Pong(data)).await?;
                 }
-                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                Message::Close(frame) => return Err(closed(frame)),
                 _ => {}
             }
         }
@@ -267,7 +267,7 @@ impl NostrWsConnection {
                 Message::Ping(data) => {
                     self.ws.send(Message::Pong(data)).await?;
                 }
-                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                Message::Close(frame) => return Err(closed(frame)),
                 _ => {}
             }
         }
@@ -321,7 +321,7 @@ impl NostrWsConnection {
                 Message::Ping(data) => {
                     self.ws.send(Message::Pong(data)).await?;
                 }
-                Message::Close(_) => return Err(WsClientError::ConnectionClosed),
+                Message::Close(frame) => return Err(closed(frame)),
                 _ => {}
             }
         }
@@ -355,6 +355,18 @@ pub async fn publish_event<S: NostrSigner>(
     .await
     .map_err(|_| WsClientError::Timeout)?;
     result
+}
+
+/// The error for a close frame: a policy close keeps its reason, since a
+/// relay denial is not an ordinary connection loss.
+fn closed(frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> WsClientError {
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    match frame {
+        Some(frame) if frame.code == CloseCode::Policy => {
+            WsClientError::PolicyClose(frame.reason.to_string())
+        }
+        _ => WsClientError::ConnectionClosed,
+    }
 }
 
 #[cfg(test)]
@@ -413,5 +425,43 @@ mod tests {
             server.await.unwrap(),
             Some(HeaderValue::from_static("Bearer header.payload.signature"))
         );
+    }
+
+    /// A relay that answers NIP-42 AUTH by closing with `code`, as the relay
+    /// does on a NIP-FI key mismatch (1008).
+    async fn close_after_auth(code: u16) -> WsClientError {
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await
+                .unwrap();
+            let _auth = ws.next().await;
+            ws.send(Message::Close(Some(CloseFrame {
+                code: CloseCode::from(code),
+                reason: "auth-required: key mismatch".into(),
+            })))
+            .await
+            .unwrap();
+        });
+        NostrWsConnection::connect_authenticated(&url, &nostr::Keys::generate(), None)
+            .await
+            .err()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_policy_close_keeps_its_reason_and_other_closes_do_not() {
+        let err = close_after_auth(1008).await;
+        assert!(
+            matches!(&err, WsClientError::PolicyClose(r) if r.contains("key mismatch")),
+            "{err:?}"
+        );
+        let err = close_after_auth(1000).await;
+        assert!(matches!(err, WsClientError::ConnectionClosed), "{err:?}");
     }
 }

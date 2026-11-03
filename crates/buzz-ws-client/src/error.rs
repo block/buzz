@@ -27,6 +27,11 @@ pub enum WsClientError {
     #[error("Connection closed unexpectedly")]
     ConnectionClosed,
 
+    /// The relay closed the connection with a policy close (1008), as a
+    /// NIP-FI denial does; the string is the close reason.
+    #[error("Connection refused by relay policy: {0}")]
+    PolicyClose(String),
+
     /// The relay sent a message that was not expected at this point.
     #[error("Unexpected relay message: {0}")]
     UnexpectedMessage(String),

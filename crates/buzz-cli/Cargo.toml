@@ -91,5 +91,8 @@ rand = { workspace = true }
 tempfile = "3"
 # Minimal HTTP test server for retry/policy integration tests
 axum = { workspace = true }
+# A raw WebSocket relay for NIP-FI close-classification tests
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
 # `test-util` enables paused-time control for deterministic timeout tests
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
