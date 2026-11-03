@@ -999,30 +999,40 @@ void main() {
       fakeAgent,
     });
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
-
-    // Another community can retain its registration after account-wide deletion.
-    container.updateOverrides([
-      ownedAgentDirectoryProvider.overrideWith(
-        (ref) async => [
-          OwnedAgentDirectoryEntry(
-            pubkey: fakeAgent,
-            runtime: 'block.builderlab/builderlab',
-          ),
-        ],
-      ),
-      presenceCacheProvider.overrideWith(_AgentPresence.new),
-      activeCommunityProvider.overrideWith((ref) async => _community()),
-      remoteAgentControllerProvider.overrideWithValue(controller),
-      relaySessionProvider.overrideWith(() => relay),
-    ]);
-    registry.listed = [];
-    await controller.run(controller.refresh);
-    await container.read(ownedAgentDirectoryProvider.future);
-    await container.read(availableRemoteAgentsProvider.future);
-    expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
-    registry.signedIn = false;
-    expect(controller.registryLoaded, isFalse);
   }, skip: !HostedEnvironment.enabled);
+
+  test(
+    'loaded empty registry overrides a retained hosted registration',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final container = ProviderContainer(
+        overrides: [
+          ownedAgentDirectoryProvider.overrideWith(
+            (ref) async => [
+              OwnedAgentDirectoryEntry(
+                pubkey: fakeAgent,
+                runtime: 'block.builderlab/builderlab',
+              ),
+            ],
+          ),
+          presenceCacheProvider.overrideWith(_AgentPresence.new),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+          availableRemoteAgentsProvider.overrideWith((ref) async => {}),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(ownedAgentDirectoryProvider.future);
+      await container.read(availableRemoteAgentsProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
+      await controller.run(controller.refresh);
+      await container.pump();
+      expect(controller.registryLoaded, isTrue);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      registry.signedIn = false;
+      expect(controller.registryLoaded, isFalse);
+    },
+  );
 
   test('owner proof verifies for only the provisioned agent key', () {
     final other = nostr.Keys('0' * 63 + '3');
