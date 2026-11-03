@@ -3119,8 +3119,10 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let mut conn = pool.acquire().await.expect("acquire");
-        sqlx::query("DEALLOCATE ALL")
-            .execute(&mut *conn)
+        // Clear SQLx's statement cache and Postgres's prepared statements
+        // together; a raw `DEALLOCATE ALL` would leave the client cache
+        // pointing at statements the server no longer has.
+        sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
         let mut q = EventQuery::for_community(community);
@@ -3160,8 +3162,10 @@ mod postgres_tests {
             channels.push(make_test_channel(&pool, community_uuid, None).await);
         }
         let mut conn = pool.acquire().await.expect("acquire");
-        sqlx::query("DEALLOCATE ALL")
-            .execute(&mut *conn)
+        // Clear SQLx's statement cache and Postgres's prepared statements
+        // together; a raw `DEALLOCATE ALL` would leave the client cache
+        // pointing at statements the server no longer has.
+        sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
         for n in 1..=channels.len() {
