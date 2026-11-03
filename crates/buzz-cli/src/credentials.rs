@@ -214,7 +214,12 @@ impl Credentials {
     pub fn relay_scoped_customer_id(&self, relay_url: &str) -> String {
         match self.local_keys.as_ref() {
             Some(keys) => customer_id(keys.secret_key().as_secret_bytes(), relay_url),
-            None => uuid::Uuid::new_v4().simple().to_string(),
+            None => {
+                static PROCESS_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                PROCESS_ID
+                    .get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+                    .clone()
+            }
         }
     }
 
@@ -262,11 +267,23 @@ impl Credentials {
     }
 
     /// NIP-44 decrypt `payload` from `peer` as this identity.
-    pub async fn nip44_decrypt(&self, peer: &PublicKey, payload: &str) -> Result<String, CliError> {
+    /// NIP-44 decrypt `payload` from `peer`. `Ok(None)` means the payload is
+    /// not valid ciphertext for this key; `Err` means the signer itself failed.
+    /// A local key decides that itself; any other signer's failure is `Err`,
+    /// since it cannot be told apart from an unavailable credential.
+    pub async fn nip44_decrypt(
+        &self,
+        peer: &PublicKey,
+        payload: &str,
+    ) -> Result<Option<String>, CliError> {
+        if let Some(keys) = &self.local_keys {
+            return Ok(nostr::nips::nip44::decrypt(keys.secret_key(), peer, payload).ok());
+        }
         self.signer
             .nip44_decrypt(peer, payload)
             .await
-            .map_err(|e| CliError::Other(format!("NIP-44 decryption failed: {e}")))
+            .map(Some)
+            .map_err(|e| CliError::Auth(format!("NIP-44 decryption failed: {e}")))
     }
 
     /// Sign a NIP-98 HTTP auth event (kind:27235) for `method` + `url` and
@@ -527,10 +544,17 @@ mod tests {
         let peer = Keys::generate().public_key();
         assert!(credentials.engram_d_tag(&peer, "core").await.is_err());
         let relay = "https://relay.example";
-        assert_ne!(
+        let id = credentials.relay_scoped_customer_id(relay);
+        assert_eq!(
+            id,
             credentials.relay_scoped_customer_id(relay),
-            credentials.relay_scoped_customer_id(relay),
-            "no local key: a random id, not a public-key derivation"
+            "one id per process"
         );
+        assert_ne!(
+            id,
+            customer_id(&[0; 32], relay),
+            "no local key: a random id, not a key derivation"
+        );
+        assert_eq!(id.len(), 32);
     }
 }

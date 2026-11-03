@@ -492,6 +492,14 @@ pub struct BuzzClient {
     credentials: Credentials,
 }
 
+/// A credential header value, marked sensitive so `Debug` output redacts it.
+fn sensitive(value: String) -> Result<reqwest::header::HeaderValue, CliError> {
+    let mut value = reqwest::header::HeaderValue::try_from(value)
+        .map_err(|_| CliError::Auth("credential is not a valid header value".into()))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 impl BuzzClient {
     /// Create a new client pointing at `relay_url`.
     ///
@@ -504,6 +512,10 @@ impl BuzzClient {
     /// A value of zero for either variable is treated as invalid and falls back to the default.
     pub fn new(relay_url: String, credentials: Credentials) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
+            // Never replay credentials to a redirect target: reqwest strips
+            // `Authorization` across origins but not `x-auth-tag` or the
+            // NIP-FI assertion. A 3xx surfaces as a relay error instead.
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
             .build()
@@ -605,12 +617,15 @@ impl BuzzClient {
                 )
             }
         };
-        let mut req = req.header(reqwest::header::AUTHORIZATION, authorization);
+        let mut req = req.header(reqwest::header::AUTHORIZATION, sensitive(authorization)?);
         if let Some(tag) = self.credentials.auth_tag() {
-            req = req.header("x-auth-tag", &tag.json);
+            req = req.header("x-auth-tag", sensitive(tag.json.clone())?);
         }
         if let Some(assertion) = self.credentials.evidence(&self.relay_url).await? {
-            req = req.header(FEDERATED_IDENTITY_HEADER, format!("Bearer {assertion}"));
+            req = req.header(
+                FEDERATED_IDENTITY_HEADER,
+                sensitive(format!("Bearer {assertion}"))?,
+            );
         }
         Ok(req)
     }
@@ -620,8 +635,10 @@ impl BuzzClient {
     async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
         if let Some(assertion) = self.credentials.evidence(&self.relay_url).await? {
-            let value = buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
-                .map_err(|_| CliError::Auth("assertion is not a valid header value".into()))?;
+            let mut value =
+                buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
+                    .map_err(|_| CliError::Auth("assertion is not a valid header value".into()))?;
+            value.set_sensitive(true);
             headers.insert(FEDERATED_IDENTITY_HEADER, value);
         }
         Ok(headers)
@@ -639,7 +656,9 @@ impl BuzzClient {
         if status == 401 && !self.credentials.has_evidence_source() {
             return CliError::Auth(format!(
                 "relay requires authentication ({message}); if it enforces federated identity \
-                 (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} and {FEDERATED_IDENTITY_ADAPTER_ENV}"
+                 (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} to your own NIP-FA sign-in session \
+                 (a human session for this key, not an agent grant) and \
+                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion"
             ));
         }
         if status == 403 && self.credentials.auth_tag().is_some() {
@@ -2681,12 +2700,15 @@ mod federated_identity_route_tests {
     use crate::error::CliError;
     use crate::federated_identity::AdapterSession;
 
-    const ASSERTION: &str = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1In0.c2ln";
+    use crate::federated_identity::test_support::{self, count, raw_adapter};
+
     const HASH: &str = "4f2b5e7c1a9d3e6f8b0c2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a";
 
     #[derive(Default)]
     struct Log {
         mints: usize,
+        /// The last assertion the adapter issued.
+        assertion: String,
         requests: Vec<(String, String, HeaderMap)>,
     }
 
@@ -2704,12 +2726,17 @@ mod federated_identity_route_tests {
                     move |body: axum::body::Bytes| {
                         let log = log.clone();
                         async move {
-                            log.lock().unwrap().mints += 1;
                             let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
+                            let expires_at = nostr::Timestamp::now().as_secs() + 300;
+                            let assertion = test_support::assertion(pubkey, expires_at);
+                            let mut log = log.lock().unwrap();
+                            log.mints += 1;
+                            log.assertion = assertion.clone();
                             axum::Json(serde_json::json!({
-                                "assertion": ASSERTION,
-                                "nostr_pubkey": req["nostr_pubkey"],
-                                "expires_at": nostr::Timestamp::now().as_secs() + 300,
+                                "assertion": assertion,
+                                "nostr_pubkey": pubkey,
+                                "expires_at": expires_at,
                             }))
                         }
                     }
@@ -2754,11 +2781,18 @@ mod federated_identity_route_tests {
     }
 
     fn client(base: &str, evidence: bool) -> BuzzClient {
-        let mut credentials = Credentials::from_keys(Keys::generate());
         if evidence {
-            credentials = credentials.with_evidence(AdapterSession::new(base, "token").unwrap());
+            client_via(base, base)
+        } else {
+            BuzzClient::new(base.to_owned(), Credentials::from_keys(Keys::generate())).unwrap()
         }
-        BuzzClient::new(base.to_owned(), credentials).unwrap()
+    }
+
+    /// A client for the relay at `relay` that mints from the adapter at `adapter`.
+    fn client_via(relay: &str, adapter: &str) -> BuzzClient {
+        let credentials = Credentials::from_keys(Keys::generate())
+            .with_evidence(AdapterSession::new(adapter, "token").unwrap());
+        BuzzClient::new(relay.to_owned(), credentials).unwrap()
     }
 
     /// Drive every protected request path once, ignoring results (the WS
@@ -2847,7 +2881,7 @@ mod federated_identity_route_tests {
                 headers
                     .get("nostr-federated-identity")
                     .and_then(|v| v.to_str().ok()),
-                Some(format!("Bearer {ASSERTION}").as_str()),
+                Some(format!("Bearer {}", log.assertion).as_str()),
                 "{method} {path}"
             );
             if path != "/" {
@@ -2928,6 +2962,128 @@ mod federated_identity_route_tests {
         assert!(
             matches!(err, CliError::Relay { status: 401, .. }),
             "{err:?}"
+        );
+    }
+
+    /// The paths a failed mint must stop before anything reaches the relay:
+    /// a read, a post-once write, a moderation command, a stored message
+    /// (`messages send`) and the WebSocket upgrade (`users set-presence`).
+    /// Returns each path's error and how many mints that one call made.
+    async fn every_path_once(
+        client: &BuzzClient,
+        mints: &std::sync::atomic::AtomicUsize,
+    ) -> Vec<(&'static str, CliError, usize)> {
+        let keys = client.credentials().test_keys();
+        let event = |kind: u16| {
+            EventBuilder::new(Kind::Custom(kind), "hi")
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let body = serde_json::json!({"k": "v"});
+        let mut out = Vec::new();
+        let mut record = |path, result: Result<String, CliError>, before| {
+            out.push((path, result.unwrap_err(), count(mints) - before));
+        };
+        let before = count(mints);
+        record(
+            "read",
+            client.query(&serde_json::json!({"kinds": [1]})).await,
+            before,
+        );
+        let before = count(mints);
+        record(
+            "post-once",
+            client.post_json_once_authed("/api/post-once", &body).await,
+            before,
+        );
+        let before = count(mints);
+        record("moderation", client.submit_event(event(9041)).await, before);
+        let before = count(mints);
+        record("message", client.submit_event(event(9)).await, before);
+        let before = count(mints);
+        record(
+            "websocket",
+            client.publish_ephemeral_event(event(20001)).await,
+            before,
+        );
+        out
+    }
+
+    /// An adapter 500 or 503 is retried a bounded number of times on every
+    /// path, then fails as a retryable adapter error. Nothing reaches the
+    /// relay, so a message is never reported as possibly delivered.
+    #[tokio::test]
+    async fn adapter_5xx_is_retried_on_every_path_and_never_reaches_the_relay() {
+        for response in [test_support::HTTP_500, test_support::HTTP_503] {
+            let (relay, log) = origin(None).await;
+            let (adapter, mints) = raw_adapter(response).await;
+            let client = client_via(&relay, &adapter);
+            for (path, err, attempts) in every_path_once(&client, &mints).await {
+                assert!(matches!(err, CliError::Adapter(_)), "{path}: {err:?}");
+                assert!(crate::error::is_retryable_error(&err), "{path}");
+                assert_eq!(attempts, 3, "{path}: three mints, no more");
+            }
+            assert!(
+                log.lock().unwrap().requests.is_empty(),
+                "the relay saw a request"
+            );
+        }
+    }
+
+    /// A 403 whose body is cut off is one refusal on every path, not a
+    /// retryable network error, and nothing reaches the relay.
+    #[tokio::test]
+    async fn a_truncated_adapter_403_is_a_single_refusal_on_every_path() {
+        let (relay, log) = origin(None).await;
+        let (adapter, mints) = raw_adapter(test_support::TRUNCATED_403).await;
+        let client = client_via(&relay, &adapter);
+        for (path, err, attempts) in every_path_once(&client, &mints).await {
+            assert!(matches!(err, CliError::Auth(_)), "{path}: {err:?}");
+            assert!(!crate::error::is_retryable_error(&err), "{path}");
+            assert_eq!(attempts, 1, "{path}: one mint");
+        }
+        assert!(
+            log.lock().unwrap().requests.is_empty(),
+            "the relay saw a request"
+        );
+    }
+
+    /// A relay redirect to another origin is never followed: the assertion,
+    /// proof and auth tag stay with the relay that was asked.
+    #[tokio::test]
+    async fn a_cross_origin_relay_redirect_is_not_followed() {
+        let (target, target_log) = origin(None).await;
+        let location = format!("{target}/query");
+        let app = axum::Router::new().fallback(move || {
+            let location = location.clone();
+            async move { (StatusCode::TEMPORARY_REDIRECT, [("location", location)]) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // Mint from the target origin's adapter so the client has an assertion to leak.
+        let client = client_via(&relay, &target);
+        let body = serde_json::json!({"k": "v"});
+        for err in [
+            client.query(&serde_json::json!({})).await.unwrap_err(),
+            client.get_authed("/api/get").await.unwrap_err(),
+            client
+                .post_json_authed("/api/post", &body)
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(err, CliError::Relay { status: 307, .. }),
+                "{err:?}"
+            );
+        }
+        let log = target_log.lock().unwrap();
+        assert_eq!(log.mints, 1);
+        assert!(
+            log.requests.is_empty(),
+            "redirect followed: {:?}",
+            covered(&log)
         );
     }
 }

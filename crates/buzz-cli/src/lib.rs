@@ -128,10 +128,11 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
-  BUZZ_FEDERATED_IDENTITY_TOKEN    NIP-FA adapter session token  [optional]
+  BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
   BUZZ_FEDERATED_IDENTITY_ADAPTER  NIP-FA adapter base URL  [optional]
-    Set both for relays that enforce federated identity (NIP-FI): the CLI
-    mints an assertion from the adapter and sends it on every request.
+    Set both for relays that enforce federated identity (NIP-FI). The token
+    is a human session for your own key, not an agent grant. The CLI requests
+    an assertion, the adapter mints it, and the CLI sends it on every request.
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.

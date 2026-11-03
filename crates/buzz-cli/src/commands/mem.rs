@@ -145,7 +145,7 @@ async fn open_engram(
         return Ok(None);
     };
     let credentials = client.credentials();
-    let Ok(plaintext) = credentials.nip44_decrypt(their_pubkey, &ev.content).await else {
+    let Some(plaintext) = credentials.nip44_decrypt(their_pubkey, &ev.content).await? else {
         return Ok(None);
     };
     let Ok(body) = Body::from_json_bytes(plaintext.as_bytes()) else {

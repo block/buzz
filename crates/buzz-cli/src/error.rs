@@ -39,6 +39,12 @@ pub enum CliError {
     #[error("delivery unknown: {0}")]
     DeliveryUnknown(String),
 
+    /// The NIP-FA identity adapter stayed unavailable through its bounded
+    /// retries. Nothing was sent to the relay, so the command is safe to
+    /// re-run later; relay retry loops never repeat it.
+    #[error("identity adapter error: {0}")]
+    Adapter(String),
+
     /// Catch-all for unexpected failures
     #[error("{0}")]
     Other(String),
@@ -47,7 +53,7 @@ pub enum CliError {
 /// Walk the full `std::error::Error::source()` chain on a `reqwest::Error`
 /// and render it as a colon-separated string, e.g.
 /// `error sending request: dns error: failed to lookup address information: ...`
-fn fmt_reqwest_error(e: &reqwest::Error) -> String {
+pub(crate) fn fmt_reqwest_error(e: &reqwest::Error) -> String {
     let mut msg = e.to_string();
     let mut source: &dyn std::error::Error = e;
     while let Some(cause) = source.source() {
@@ -65,7 +71,8 @@ fn fmt_reqwest_error(e: &reqwest::Error) -> String {
 ///
 /// Transport-level network errors (connect failure, timeout, mid-request,
 /// mid-body transfer, or body decode failure) and relay overload responses
-/// (429 / 502 / 503 / 504) are retryable.  `DeliveryUnknown` is never
+/// (429 / 502 / 503 / 504) are retryable, as is an adapter that stayed
+/// unavailable (`Adapter`: nothing reached the relay).  `DeliveryUnknown` is never
 /// retryable: the operation may already have executed.  All other errors
 /// indicate a permanent failure: auth, bad input, builder errors, or logic
 /// errors.
@@ -79,6 +86,7 @@ pub fn is_retryable_error(e: &CliError) -> bool {
                 || net_err.is_decode()
         }
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
+        CliError::Adapter(_) => true,
         CliError::DeliveryUnknown(_) => false,
         _ => false,
     }
@@ -103,6 +111,7 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Conflict(_) => 5,
         CliError::NotFound(_) => 1,
         CliError::DeliveryUnknown(_) => 2,
+        CliError::Adapter(_) => 2,
         CliError::Other(_) => 4,
     }
 }
@@ -125,6 +134,7 @@ pub fn print_error(e: &CliError) {
         CliError::Conflict(_) => "conflict",
         CliError::NotFound(_) => "not_found",
         CliError::DeliveryUnknown(_) => "delivery_unknown",
+        CliError::Adapter(_) => "adapter_error",
         CliError::Other(_) => "error",
     };
     let obj = serde_json::json!({
