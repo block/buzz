@@ -466,10 +466,17 @@ pub enum IngestError {
 /// Which admission outcome an [`IngestError::Ban`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BanRefusal {
-    /// The principal or its owner is banned.
-    Banned,
+    /// The principal is banned; the source says whose row decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// The restriction lookup failed, so no ban decision could be made.
     Unavailable,
+}
+
+impl BanRefusal {
+    /// The ban refusal for a banned restriction snapshot.
+    pub(crate) fn banned(restriction: &buzz_db::moderation::RestrictionState) -> Self {
+        Self::Banned(crate::handlers::auth::BanSource::of(restriction))
+    }
 }
 
 impl IngestError {
@@ -517,8 +524,8 @@ fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestEr
     match error {
         // Same wire prefix and HTTP status (403) as every other durable
         // restriction refusal — see the write-path gate below and `auth.rs`.
-        RelayAdminError::Banned => IngestError::ban(
-            BanRefusal::Banned,
+        RelayAdminError::Banned(source) => IngestError::ban(
+            BanRefusal::Banned(source),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ),
         RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
@@ -2351,7 +2358,7 @@ fn write_restriction_denial(
 ) -> Option<IngestError> {
     if restriction.banned {
         return Some(IngestError::ban(
-            BanRefusal::Banned,
+            BanRefusal::banned(restriction),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ));
     }
@@ -3979,11 +3986,13 @@ mod postgres_tests {
     /// client retry-loop against an authorization decision.
     #[test]
     fn relay_admin_ban_maps_to_blocked_auth_failure() {
-        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::Own,
+        ));
         assert!(matches!(
             mapped,
             IngestError::Ban {
-                refusal: BanRefusal::Banned,
+                refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Own),
                 ..
             }
         ));
@@ -7518,7 +7527,7 @@ mod postgres_tests {
         match enforce_write_restriction(&state, &tenant, KIND_REPORT, &agent.public_key()).await {
             Err(
                 err @ IngestError::Ban {
-                    refusal: BanRefusal::Banned,
+                    refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Owner),
                     ..
                 },
             ) => match err.into_legacy() {

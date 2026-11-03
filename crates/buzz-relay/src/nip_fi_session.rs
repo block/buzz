@@ -105,6 +105,12 @@ pub(crate) async fn enforce_nip_fi_key_pairing(
         "reason" => "nip_fi_key_mismatch"
     )
     .increment(1);
+    // The verdict is claimed before any denial frame is awaited.
+    let deny = crate::nip_fi_shadow::pairing_denial(assertion, proven_pubkey);
+    match &target {
+        PairingDenialTarget::Root(conn) => conn.community_control.deny_nip_fi_enforce(deny),
+        PairingDenialTarget::Audio { control, .. } => control.deny_nip_fi_enforce(deny),
+    }
 
     match target {
         PairingDenialTarget::Root(conn) => {
@@ -197,7 +203,7 @@ pub(crate) fn spawn_nip_fi_expiry_task(
             std::time::Duration::ZERO
         };
         let terminal = || {
-            control.deny_authorization(&terminal_ctrl_tx, route);
+            control.expire_authorization(&terminal_ctrl_tx, route);
             metrics::counter!("buzz_nip_fi_lease_expirations_total").increment(1);
             warn!(
                 route = ?route,

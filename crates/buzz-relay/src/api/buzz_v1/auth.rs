@@ -171,8 +171,17 @@ pub(super) async fn recheck(
         .db
         .moderation_restriction_state(principal.tenant.community(), &principal.actor.to_bytes())
         .await
-        .map_err(|_| refuse(DenialClass::AuthorizationUnavailable, Error::unavailable()))?;
+        .map_err(|_| {
+            crate::nip_fi_http::owner_refused(
+                DenialClass::AuthorizationUnavailable,
+                "owner_ban_unavailable",
+            );
+            refuse(DenialClass::AuthorizationUnavailable, Error::unavailable())
+        })?;
     if restrictions.banned {
+        if !restrictions.own_banned {
+            crate::nip_fi_http::owner_refused(DenialClass::AuthorizationDenied, "owner_banned");
+        }
         return Err(refuse(
             DenialClass::AuthorizationDenied,
             Error::new(StatusCode::FORBIDDEN, "forbidden"),

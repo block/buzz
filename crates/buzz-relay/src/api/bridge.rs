@@ -1013,21 +1013,23 @@ pub async fn submit_event(
     // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
     // assertion verify → pair → deny-map in fixed order. The proven pubkey is
     // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
     })
     .await;
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
-        verify_bridge_auth_with_options(
-            &headers,
-            "POST",
-            &url,
-            Some(&body),
-            state.config.require_auth_token || nip_fi_active,
-            nip_fi_enforce,
-        )
-        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
-        .map_err(|e| e.into_response())
+        proof
+            .record(verify_bridge_auth_with_options(
+                &headers,
+                "POST",
+                &url,
+                Some(&body),
+                state.config.require_auth_token || nip_fi_active,
+                nip_fi_enforce,
+            ))
+            .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
+            .map_err(|e| e.into_response())
     })
     .await?;
     let pubkey = *admission.proven_pubkey();
@@ -1271,15 +1273,25 @@ async fn submit_event_authed(
     // token-less request, keeps its existing response.
     let result = match result {
         Err(IngestError::Ban { refusal, .. }) if token_owner.is_some() => {
+            use crate::handlers::{auth::BanSource, ingest::BanRefusal};
             crate::handlers::ingest::reject_with_transport("http", "auth");
-            let refusal = MembershipRefusal::NipFi(match refusal {
-                crate::handlers::ingest::BanRefusal::Banned => {
-                    buzz_auth::DenialClass::AuthorizationDenied
+            let class = match refusal {
+                BanRefusal::Banned(_) => buzz_auth::DenialClass::AuthorizationDenied,
+                BanRefusal::Unavailable => buzz_auth::DenialClass::AuthorizationUnavailable,
+            };
+            // An owner-decided late refusal is the request's verdict, not its
+            // earlier admit. The agent's own ban is not its owner's, as at
+            // every other seam.
+            match refusal {
+                BanRefusal::Banned(BanSource::Owner) => {
+                    crate::nip_fi_http::owner_refused(class, "owner_banned");
                 }
-                crate::handlers::ingest::BanRefusal::Unavailable => {
-                    buzz_auth::DenialClass::AuthorizationUnavailable
+                BanRefusal::Unavailable => {
+                    crate::nip_fi_http::owner_refused(class, "owner_ban_unavailable");
                 }
-            });
+                BanRefusal::Banned(BanSource::Own) => {}
+            }
+            let refusal = MembershipRefusal::NipFi(class);
             return SubmitOutcome::Err {
                 status: refusal.status(),
                 response: refusal,
@@ -1390,21 +1402,23 @@ pub async fn query_events(
     let nip_fi_enforce = state.config.nip_fi.mode.enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
     })
     .await;
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
-        verify_bridge_auth_with_options(
-            &headers,
-            "POST",
-            &url,
-            Some(&body),
-            state.config.require_auth_token || nip_fi_active,
-            nip_fi_enforce,
-        )
-        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
-        .map_err(|e| e.into_response())
+        proof
+            .record(verify_bridge_auth_with_options(
+                &headers,
+                "POST",
+                &url,
+                Some(&body),
+                state.config.require_auth_token || nip_fi_active,
+                nip_fi_enforce,
+            ))
+            .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
+            .map_err(|e| e.into_response())
     })
     .await?;
     let pubkey = *admission.proven_pubkey();
@@ -2088,21 +2102,23 @@ pub async fn count_events(
     let nip_fi_enforce = state.config.nip_fi.mode.enforces();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
         verify_bridge_auth_with_options(&headers, "POST", &url, Some(&body), true, true).map(drop)
     })
     .await;
     let admission = admit_nip_fi_http_on_state(&state, &headers, || {
-        verify_bridge_auth_with_options(
-            &headers,
-            "POST",
-            &url,
-            Some(&body),
-            state.config.require_auth_token || nip_fi_active,
-            nip_fi_enforce,
-        )
-        .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
-        .map_err(|e| e.into_response())
+        proof
+            .record(verify_bridge_auth_with_options(
+                &headers,
+                "POST",
+                &url,
+                Some(&body),
+                state.config.require_auth_token || nip_fi_active,
+                nip_fi_enforce,
+            ))
+            .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
+            .map_err(|e| e.into_response())
     })
     .await?;
     let pubkey = *admission.proven_pubkey();
@@ -2952,20 +2968,22 @@ async fn authorize_moderation_read(
     let nip_fi_active = state.config.nip_fi.mode.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let proof = crate::nip_fi_shadow::EnforcedProof::new(state, headers, "bridge");
     crate::nip_fi_shadow::observe_strict_proof(state, headers, "bridge", || {
         verify_bridge_auth(headers, "GET", &url, None, true).map(drop)
     })
     .await;
     let admission = admit_nip_fi_http_on_state(state, headers, || {
-        verify_bridge_auth(
-            headers,
-            "GET",
-            &url,
-            None,
-            state.config.require_auth_token || nip_fi_active,
-        )
-        .map(|auth| auth.proof(auth.event_id_bytes))
-        .map_err(|e| e.into_response())
+        proof
+            .record(verify_bridge_auth(
+                headers,
+                "GET",
+                &url,
+                None,
+                state.config.require_auth_token || nip_fi_active,
+            ))
+            .map(|auth| auth.proof(auth.event_id_bytes))
+            .map_err(|e| e.into_response())
     })
     .await?;
     let pubkey = *admission.proven_pubkey();
@@ -6744,7 +6762,13 @@ pub(crate) mod postgres_tests {
             format!("Nostr {}", B64.encode(event.as_json().as_bytes()))
         };
 
-        for owner_banned in [true, false] {
+        // (case, the owner refusal reason it gives every route)
+        for (case, reason) in [
+            ("owner_banned", Some("owner_banned")),
+            ("conflict", Some("not_stored_owner")),
+            ("clear", None),
+        ] {
+            let owner_banned = reason.is_some();
             let host = format!("owner-routes-{}.local", uuid::Uuid::new_v4().simple());
             let community = state
                 .db
@@ -6767,7 +6791,22 @@ pub(crate) mod postgres_tests {
                     .map(|write| write.outcome)
                     .expect("add member");
             }
-            if owner_banned {
+            if case == "conflict" {
+                let other = Keys::generate().public_key();
+                for key in [agent.public_key(), other] {
+                    state
+                        .db
+                        .ensure_user(community, key.as_bytes())
+                        .await
+                        .expect("ensure user");
+                }
+                assert!(state
+                    .db
+                    .set_agent_owner(community, agent.public_key().as_bytes(), other.as_bytes())
+                    .await
+                    .expect("seed another stored owner"));
+            }
+            if case == "owner_banned" {
                 let owner_bytes = owner.public_key().to_bytes();
                 state
                     .db
@@ -6930,8 +6969,30 @@ pub(crate) mod postgres_tests {
                         .parse()
                         .expect("assertion header"),
                 );
-                let (status, headers, body) =
-                    oneshot_request_full(state.clone(), method, &path, &host, headers, &body).await;
+                let ((status, headers, body), records, lines) =
+                    crate::nip_fi_shadow::tests::enforce_records_during(oneshot_request_full(
+                        state.clone(),
+                        method,
+                        &path,
+                        &host,
+                        headers,
+                        &body,
+                    ))
+                    .await;
+                // One request, one enforce verdict, whatever its path and
+                // however many owner rechecks it runs.
+                let expected = if owner_banned {
+                    "http owner/denied"
+                } else {
+                    "http admit/admit"
+                };
+                assert_eq!(records, [expected], "{case} {method} {path}: {lines:?}");
+                if let Some(reason) = reason {
+                    assert!(
+                        lines.len() == 1 && lines[0].contains(&format!("reason=\"{reason}\"")),
+                        "{case} {method} {path}: {lines:?}"
+                    );
+                }
                 let denied = status == StatusCode::FORBIDDEN
                     && headers
                         .get(header::CONTENT_TYPE)
@@ -6958,7 +7019,7 @@ pub(crate) mod postgres_tests {
         use crate::nip_fi_test_hooks::http_ban_recheck_hook::arm;
         use axum::http::{header, StatusCode};
 
-        for case in ["banned", "unavailable"] {
+        for case in ["banned", "owner_banned", "unavailable"] {
             for route in ["buzz_v1", "git_settings"] {
                 let fixture = nip_fi_enforce_test_state().await.expect("local Postgres");
                 let mut state = (*fixture).clone();
@@ -6998,6 +7059,10 @@ pub(crate) mod postgres_tests {
                         db.ban_community_member(community, &agent_bytes, &owner_bytes, None, None)
                             .await
                             .expect("ban agent");
+                    } else if case == "owner_banned" {
+                        db.ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                            .await
+                            .expect("ban owner");
                     } else {
                         db.pool().close().await;
                     }
@@ -7016,12 +7081,35 @@ pub(crate) mod postgres_tests {
                         .parse()
                         .expect("assertion header"),
                 );
-                let (status, headers, body) =
-                    oneshot_request_full(state.clone(), "GET", &path, &host, headers, b"").await;
+                let ((status, headers, body), records, lines) =
+                    crate::nip_fi_shadow::tests::enforce_records_during(oneshot_request_full(
+                        state.clone(),
+                        "GET",
+                        &path,
+                        &host,
+                        headers,
+                        b"",
+                    ))
+                    .await;
                 refuse.await.expect("refusal task");
+                // The reread's refusal is the request's one verdict: an
+                // unreadable ban state is the owner step's, as shadow records
+                // it; the agent's own ban is not an owner refusal.
+                let (expected, reason) = match case {
+                    "banned" => ("http admit/admit", None),
+                    "owner_banned" => ("http owner/denied", Some("owner_banned")),
+                    _ => ("http owner/unavailable", Some("owner_ban_unavailable")),
+                };
+                assert_eq!(records, [expected], "{case} {route}: {lines:?}");
+                if let Some(reason) = reason {
+                    assert!(
+                        lines.len() == 1 && lines[0].contains(&format!("reason=\"{reason}\"")),
+                        "{case} {route}: {lines:?}"
+                    );
+                }
 
                 let (expected_status, expected_body) = match case {
-                    "banned" => (StatusCode::FORBIDDEN, "authorization denied\n"),
+                    "banned" | "owner_banned" => (StatusCode::FORBIDDEN, "authorization denied\n"),
                     _ => (
                         StatusCode::SERVICE_UNAVAILABLE,
                         "authorization unavailable\n",
@@ -7066,15 +7154,17 @@ pub(crate) mod postgres_tests {
         // (check, kind, refusal, token): refusal is "banned", "unavailable"
         // or "timeout"; token-less rows publish as the member owner.
         let mut cases = Vec::new();
+        // `who`: whose row a ban lands on, the agent's, its owner's or both.
         for check in ["write", "typing", "moderation", "relay_admin"] {
-            for refusal in ["banned", "unavailable"] {
-                cases.push((check, refusal, true));
+            for who in ["agent", "owner", "both"] {
+                cases.push((check, "banned", who, true));
             }
-            cases.push((check, "banned", false));
+            cases.push((check, "unavailable", "agent", true));
+            cases.push((check, "banned", "agent", false));
         }
-        cases.push(("write", "timeout", true));
+        cases.push(("write", "timeout", "agent", true));
 
-        for (check, refusal, token) in cases {
+        for (check, refusal, who, token) in cases {
             let fixture = nip_fi_enforce_test_state().await.expect("local Postgres");
             let mut state = (*fixture).clone();
             let config = Arc::make_mut(&mut state.config);
@@ -7135,14 +7225,23 @@ pub(crate) mod postgres_tests {
                 let state = state.clone();
                 let target = author.public_key().to_bytes();
                 let actor = owner.public_key().to_bytes();
+                // Without a token the author is the owner, so `agent` bans it.
+                let banned = match who {
+                    "agent" => vec![target],
+                    "owner" => vec![actor],
+                    _ => vec![target, actor],
+                };
                 tokio::spawn(async move {
                     arrived.await.expect("ban check reached");
                     if refusal == "banned" {
-                        state
-                            .db
-                            .ban_community_member(community, &target, &actor, None, None)
-                            .await
-                            .expect("ban");
+                        for key in banned {
+                            state
+                                .db
+                                .ban_community_member(community, &key, &actor, None, None)
+                                .await
+                                .expect("ban");
+                            state.invalidate_restriction_cache(community, &key);
+                        }
                         state.invalidate_restriction_cache(community, &target);
                     } else {
                         state.invalidate_restriction_cache(community, &target);
@@ -7181,8 +7280,16 @@ pub(crate) mod postgres_tests {
                         .expect("assertion header"),
                 );
             }
-            let (status, headers, body) =
-                oneshot_request_full(state.clone(), "POST", "/events", &host, headers, &body).await;
+            let ((status, headers, body), records, _) =
+                crate::nip_fi_shadow::tests::enforce_records_during(oneshot_request_full(
+                    state.clone(),
+                    "POST",
+                    "/events",
+                    &host,
+                    headers,
+                    &body,
+                ))
+                .await;
             if let Some(refuse) = refuse {
                 tokio::time::timeout(std::time::Duration::from_secs(10), refuse)
                     .await
@@ -7194,7 +7301,19 @@ pub(crate) mod postgres_tests {
 
             let content_type = headers[header::CONTENT_TYPE].to_str().unwrap_or_default();
             let body = std::str::from_utf8(&body).expect("utf-8 body");
-            let case = format!("{check} {refusal} token={token}");
+            let case = format!("{check} {refusal} {who} token={token}");
+            // A late owner-decided token refusal is the request's one verdict,
+            // never an admit. The agent's own ban, alone or with its owner's,
+            // is not its owner's refusal, as at every other seam.
+            let expected = match (refusal, who, token) {
+                ("banned", "owner", true) => Some("http owner/denied"),
+                ("banned", _, true) => Some("http admit/admit"),
+                ("unavailable", _, true) => Some("http owner/unavailable"),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(records, [expected], "{case}");
+            }
             match (refusal, token) {
                 ("banned", true) => assert_eq!(
                     (status, content_type, body),
