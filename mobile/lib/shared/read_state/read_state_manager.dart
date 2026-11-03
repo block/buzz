@@ -491,6 +491,14 @@ class ReadStateManager {
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
+              event.tags.any(
+                (tag) =>
+                    tag.isNotEmpty &&
+                    tag.first == 'd' &&
+                    _slots.contains(
+                      tag[1].substring(readStateDTagPrefix.length),
+                    ),
+              ) &&
               decodeReadStateEvent(
                     event,
                     pubkey: pubkey,

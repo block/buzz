@@ -214,6 +214,111 @@ void main() {
     expect(published, {'channel-1': 10});
   });
 
+  for (final ownSlot in [false, true]) {
+    test(
+      'unknown version blocks publication only for own slot: $ownSlot',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final keychain = nostr.Keys.generate();
+        final crypto = ReadStateCrypto.tryCreate(
+          nsec: keychain.nsec,
+          pubkey: keychain.public,
+        )!;
+        final slot = ReadStateStorage(
+          prefs,
+        ).getOrCreateSlotId(keychain.public, _relayUrl);
+        final session = _FakeRelaySession()
+          ..historyEvents = [
+            _readStateEvent(
+              pubkey: keychain.public,
+              crypto: crypto,
+              clientId: 'future-client',
+              slotId: ownSlot ? slot : 'f' * 32,
+              contexts: {'channel-1': 100},
+              createdAt: 100,
+              version: 2,
+            ),
+          ];
+        final relay = _FakeSignedEventRelay();
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: session,
+          signedEventRelay: relay,
+          remoteEnabled: true,
+          onChanged: () {},
+          now: () => 2000,
+        );
+        manager.markContextRead('channel-1', 10);
+        await manager.flush();
+        expect(manager.getEffectiveTimestamp('channel-1'), 10);
+        expect(relay.contents, ownSlot ? isEmpty : hasLength(1));
+        expect(manager.syncError, ownSlot ? isStateError : isNull);
+        if (!ownSlot) {
+          expect(
+            decodeReadStateBlob(
+              crypto.decrypt(relay.contents.single),
+            )!.contexts,
+            {'channel-1': 10},
+          );
+        }
+        manager.dispose(flushPending: false);
+      },
+    );
+  }
+
+  test(
+    'upgrade carries legacy publishable frontiers into the journal',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      ReadStateStorage(prefs).write(
+        keychain.public,
+        _relayUrl,
+        {'channel-1': 10, 'thread:root': 20, 'msg:a': 30, 'seeded': 40},
+        {'channel-1', 'thread:root', 'msg:a'},
+        {},
+      );
+      final relay = _FakeSignedEventRelay();
+      ReadStateManager create() => ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: null,
+        signedEventRelay: relay,
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
+      final manager = create();
+      await manager.flush();
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.single))!.contexts,
+        {'channel-1': 10, 'thread:root': 20},
+      );
+      manager.dispose(flushPending: false);
+      final restarted = create();
+      expect(restarted.getEffectiveTimestamp('msg:a'), 30);
+      expect(restarted.getEffectiveTimestamp('seeded'), 40);
+      restarted.markContextRead('new-channel', 50);
+      await restarted.flush();
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.last))!.contexts,
+        {'channel-1': 10, 'thread:root': 20, 'new-channel': 50},
+      );
+      restarted.dispose(flushPending: false);
+    },
+  );
+
   test('publishes again when a debounce fires during a publish', () async {
     final keychain = nostr.Keys.generate();
     final crypto = ReadStateCrypto.tryCreate(
@@ -994,8 +1099,10 @@ NostrEvent _readStateEvent({
   required int createdAt,
   // Extra raw wire entries, such as values that are not valid timestamps.
   Map<String, Object?> rawContexts = const {},
+  int version = 1,
 }) {
   final blob = ReadStateBlob(clientId: clientId, contexts: contexts).toJson();
+  blob['v'] = version;
   blob['contexts'] = <String, Object?>{...contexts, ...rawContexts};
   return NostrEvent(
     id: 'event-$clientId-$createdAt',
