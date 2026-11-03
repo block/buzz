@@ -218,14 +218,15 @@ class OnboardingAppEntry extends HookConsumerWidget {
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
         creatingCommunity: creating.value,
-        onSubmitCommunity: flow == null
+        onSubmitCommunity: !HostedEnvironment.canCreateCommunity || flow == null
             ? null
             : (name) {
                 creating.value = false;
                 unawaited(flow.start(HostedCreateCommunity(name)));
               },
         onCommunityLink: () => enteringCommunityLink.value = true,
-        onCreateCommunity: flow == null || busy
+        onCreateCommunity:
+            !HostedEnvironment.canCreateCommunity || flow == null || busy
             ? null
             : () => creating.value = true,
         onBuilderlab: flow == null

@@ -325,6 +325,9 @@ class BrowserAuth {
         defaultTargetPlatform == TargetPlatform.android) {
       return _channel.invokeMethod<String>('start', {
         'url': uri.toString(),
+        // Native receives the trusted build origin separately from the URL;
+        // a relay, invite, or organization login cannot expand this authority.
+        'configuredAccountOrigin': HostedEnvironment.origin.toString(),
         if (kDebugMode &&
             const bool.fromEnvironment('BUZZ_DEBUG_PRIVATE_LOGIN'))
           'ephemeral': 'true',

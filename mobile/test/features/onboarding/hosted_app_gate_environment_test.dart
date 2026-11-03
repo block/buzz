@@ -1,3 +1,6 @@
+import 'package:buzz/onboarding_app_entry.dart';
+import '../../helpers/hosted_communities_fixture.dart';
+import '../../helpers/widget_helpers.dart';
 import 'package:buzz/features/channels/deep_link_dispatcher.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/hosted_app_gate.dart';
@@ -34,6 +37,33 @@ class _Flow extends HostedFlow {
 }
 
 void main() {
+  testWidgets('entry offers creation only for a configured community domain', (
+    tester,
+  ) async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final fixture = HostedCommunitiesFixture();
+    await fixture.initialize(widget: true);
+    addTearDown(fixture.dispose);
+    await tester.binding.setSurfaceSize(const Size(440, 956));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        // The signed-out welcome has a repeating decorative animation.
+        disableAnimations: true,
+        overrides: [hostedFlowProvider.overrideWithValue(fixture.flow)],
+        child: const OnboardingAppEntry(restoreAccount: false),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Create a community'),
+      HostedEnvironment.canCreateCommunity ? findsOneWidget : findsNothing,
+    );
+    expect(find.text('Scan a QR code'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
+
   testWidgets('app dispatch keeps staging invites out of legacy generation', (
     tester,
   ) async {

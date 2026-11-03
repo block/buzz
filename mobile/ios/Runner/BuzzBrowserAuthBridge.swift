@@ -35,7 +35,7 @@ final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationCont
       guard self.session == nil,
         let args = call.arguments as? [String: String],
         let raw = args["url"], let url = URL(string: raw),
-        Self.allowsLogin(url)
+        Self.allowsLogin(url, configuredAccountOrigin: args["configuredAccountOrigin"])
       else { result(FlutterError(code: "unavailable", message: nil, details: nil)); return }
       self.pending = result
       let attemptID = UUID()
@@ -58,12 +58,20 @@ final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationCont
     }
   }
 
-  /// Builderlab login pages only: the public account's `/auth/native`, and a
-  /// tenant's CLI login on its own host for organization sign-in.
-  static func allowsLogin(_ url: URL) -> Bool {
+  /// Dart supplies its compiled account origin separately from the login URL.
+  /// This channel is private to the Flutter app, not a webview or relay API.
+  /// Keep existing public/organization login support when that input is absent.
+  static func allowsLogin(_ url: URL, configuredAccountOrigin: String? = nil) -> Bool {
     guard url.scheme == "https", let host = url.host?.lowercased(),
       url.user == nil, url.password == nil, url.port == nil, url.fragment == nil
     else { return false }
+    if let rawOrigin = configuredAccountOrigin, let origin = URL(string: rawOrigin),
+      origin.scheme == "https", let configuredHost = origin.host?.lowercased(),
+      origin.user == nil, origin.password == nil, origin.port == nil,
+      origin.path.isEmpty, origin.query == nil, origin.fragment == nil,
+      host == configuredHost, url.path == "/auth/native" {
+      return true
+    }
     let publicHosts = ["app.builderlab.xyz", "app.builderlabstaging.xyz"]
     if publicHosts.contains(host) { return url.path == "/auth/native" }
     let tenant = ["builderlab.xyz", "builderlabstaging.xyz"].contains { domain in

@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
@@ -9,6 +11,37 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+  test(
+    'native login carries the build origin separately from the login URL',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const channel = MethodChannel('buzz/browser_auth');
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            return null;
+          });
+      final browser = BrowserAuth();
+      addTearDown(() async {
+        await browser.dispose();
+        debugDefaultTargetPlatformOverride = null;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+      await browser.start({'type': 'account'});
+      final arguments = calls.single.arguments as Map;
+      expect(calls.single.method, 'start');
+      expect(
+        arguments['configuredAccountOrigin'],
+        HostedEnvironment.origin.toString(),
+      );
+      final login = Uri.parse(arguments['url'] as String);
+      expect(login.origin, HostedEnvironment.origin.origin);
+      expect(login.path, '/auth/native');
+    },
+  );
 
   test('cold-start callback restores PKCE and intent, consumes once', () async {
     late Uri login;
