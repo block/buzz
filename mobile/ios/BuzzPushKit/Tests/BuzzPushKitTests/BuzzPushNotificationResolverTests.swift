@@ -1003,6 +1003,25 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       }
       wait(for: [done], timeout: 2)
     }
+    // Signing out while issuance is in flight discards the minted assertion.
+    var current: BuzzOrganizationSession? = organization
+    URLProtocolStub.handler = { request in
+      current = nil
+      return Self.response(request, status: 200, data: try JSONSerialization.data(withJSONObject: [
+        "assertion": "a.b.c", "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now + 300,
+      ]))
+    }
+    let racing = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { current })
+    let raced = expectation(description: "sign-out during issuance")
+    racing.header(
+      relayURL: URL(string: "https://relay.org.example")!, privateKeyHex: Self.privateKey
+    ) { header in
+      XCTAssertNil(header)
+      raced.fulfill()
+    }
+    wait(for: [raced], timeout: 2)
+
     // Hosts are exact: a subdomain or another port is not the organization relay.
     for relay in ["https://evil.relay.org.example", "https://relay.org.example:8443"] {
       URLProtocolStub.reset()

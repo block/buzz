@@ -132,7 +132,8 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
         return
       }
       let expiry = Date(timeIntervalSince1970: TimeInterval(expiresAt))
-      guard expiry > now() else {
+      // A sign-out or account change during issuance revokes this result.
+      guard expiry > now(), loadSession() == organization else {
         completion(nil)
         return
       }
