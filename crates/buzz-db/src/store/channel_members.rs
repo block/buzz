@@ -697,6 +697,10 @@ pub struct PutMemberResult {
     /// The active role before the write; `None` when they were not an active
     /// member. Read under the same lock as the write.
     pub prior_role: Option<String>,
+    /// Whether the channel was an announce channel (see
+    /// [`ChannelRecord::is_announce`]) when the write was decided, read under
+    /// the same lock.
+    pub announce: bool,
 }
 
 /// [`put_member`] for several people at once (kind:9000 naming several `p`
@@ -903,6 +907,7 @@ async fn put_members_on(
     let archived = channel.archived_at.is_some();
     let private = channel.visibility == "private";
     let join_role = buzz_core::channel::ChannelJoinRole::parse_fail_closed(&channel.join_role);
+    let announce = channel.is_announce();
 
     // Active roles of everyone the decisions read: the targets and the actor.
     let mut involved: Vec<Vec<u8>> = targets.iter().map(|t| t.pubkey.to_vec()).collect();
@@ -1051,7 +1056,11 @@ async fn put_members_on(
             let member = written.remove(target.pubkey).ok_or_else(|| {
                 DbError::InvalidData("membership upsert returned no row".to_string())
             })?;
-            Ok(PutMemberResult { member, prior_role })
+            Ok(PutMemberResult {
+                member,
+                prior_role,
+                announce,
+            })
         })
         .collect())
 }
@@ -1075,7 +1084,8 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
 /// `actor_pubkey` must be an active owner/admin, the agent's owner, or the member
 /// removing themselves.
 ///
-/// Returns `Err(DbError::MemberNotFound)` if the target is not an active member.
+/// Returns the membership it ended, or `Err(DbError::MemberNotFound)` if the
+/// target is not an active member.
 ///
 /// The per-channel membership lock is the transaction's first statement, so the
 /// actor's role check, the last-owner count, and the UPDATE are all serialized
@@ -1095,7 +1105,7 @@ pub async fn remove_member(
     channel_id: Uuid,
     pubkey: &[u8],
     actor_pubkey: &[u8],
-) -> Result<()> {
+) -> Result<RemovedMember> {
     let is_self_remove = pubkey == actor_pubkey;
 
     // Immutable, and must not be queried while holding the lock (second pool
@@ -1168,12 +1178,27 @@ pub async fn remove_member(
     .execute(tx.conn())
     .await?;
 
-    if result.rows_affected() == 0 {
+    let Some(role) = target_role.filter(|_| result.rows_affected() > 0) else {
         return Err(DbError::MemberNotFound(channel_id));
-    }
+    };
+    let announce = match get_channel_tx(tx.conn(), community_id, channel_id).await {
+        Ok(channel) => channel.is_announce(),
+        Err(DbError::ChannelNotFound(_)) => false,
+        Err(error) => return Err(error),
+    };
 
     tx.commit().await?;
-    Ok(())
+    Ok(RemovedMember { role, announce })
+}
+
+/// The membership a [`remove_member`] ended, read under its lock.
+#[derive(Debug, Clone)]
+pub struct RemovedMember {
+    /// The role the person held until the removal.
+    pub role: String,
+    /// Whether the channel was an announce channel (see
+    /// [`ChannelRecord::is_announce`]) at the removal.
+    pub announce: bool,
 }
 
 /// Returns `true` if the given pubkey is an active member of the channel.
@@ -2268,7 +2293,7 @@ impl Db {
         .await
     }
 
-    /// Removes a member from a channel.
+    /// Removes a member from a channel, returning the membership it ended.
     #[datastore_span(name = "remove_member", system = "postgresql")]
     pub async fn remove_member(
         &self,
@@ -2276,7 +2301,7 @@ impl Db {
         channel_id: Uuid,
         pubkey: &[u8],
         actor_pubkey: &[u8],
-    ) -> Result<()> {
+    ) -> Result<RemovedMember> {
         remove_member(&self.pool, community_id, channel_id, pubkey, actor_pubkey).await
     }
 
@@ -5277,7 +5302,9 @@ mod postgres_tests {
                     )
                     .await
                     .map(|_| ()),
-                    _ => remove_member(&pool2, community, channel_id, &target, &actor).await,
+                    _ => remove_member(&pool2, community, channel_id, &target, &actor)
+                        .await
+                        .map(|_| ()),
                 }
             });
 

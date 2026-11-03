@@ -12,7 +12,7 @@ use buzz_core::kind::{
 use buzz_core::TenantContext;
 use buzz_db::channel::ChannelUpdate;
 use buzz_db::event::EventQuery;
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use uuid::Uuid;
 
 use crate::handlers::group_state_postgres_tests::{
@@ -39,16 +39,7 @@ async fn publish(
     kind: u16,
     tags: &[Vec<String>],
 ) {
-    let tags: Vec<Tag> = tags
-        .iter()
-        .map(|tag| Tag::parse(tag.iter().map(String::as_str)).unwrap())
-        .collect();
-    let event = EventBuilder::new(Kind::Custom(kind), "")
-        .tags(tags)
-        .allow_self_tagging()
-        .sign_with_keys(keys)
-        .expect("sign");
-    let result = ingest_event(state, tenant, event, http_auth(keys))
+    let result = ingest_event(state, tenant, signed(keys, kind, tags), http_auth(keys))
         .await
         .unwrap_or_else(|error| panic!("ingest kind:{kind}: {error:?}"));
     assert!(result.accepted, "kind:{kind} refused: {}", result.message);
@@ -190,7 +181,7 @@ async fn on_roster(state: &AppState, tenant: &TenantContext, channel_id: Uuid, w
 /// A kind:9021 into an announce channel makes the joiner a guest and posts no
 /// `member_joined`; the roster, the joiner's kind:44100 and the membership
 /// cache still update.
-/// Mutation: make `join_posts_notice` always true → a notice (RED).
+/// Mutation: make `posts_member_notice` always true → a notice (RED).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn guest_self_join_in_announce_channel_posts_no_notice() {
@@ -396,9 +387,8 @@ async fn joins_that_are_not_announce_guest_joins_still_post() {
 /// leaver's kind:44101 still update. Every other departure still posts: a
 /// member leaving the announce channel, a member and a guest leaving a normal
 /// channel, and a kick of a guest.
-/// Mutation: make `is_guest_leaving_announce_channel` always false → a
-/// `member_left` for the guests (RED); always true → none for the members
-/// (RED).
+/// Mutation: post every `member_left` in the leave paths → a `member_left`
+/// for the guests (RED); post none → none for the members (RED).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn guest_leaving_an_announce_channel_posts_no_notice() {
@@ -484,7 +474,7 @@ async fn guest_leaving_an_announce_channel_posts_no_notice() {
 /// admission's join of someone who was never a member. A default channel that
 /// is not an announce channel still announces both, and each person still
 /// gets a roster entry and a kind:44100 for the announce channel.
-/// Mutation: make `join_posts_notice` always true → a notice in the announce
+/// Mutation: make `posts_member_notice` always true → a notice in the announce
 /// channel (RED).
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -540,5 +530,195 @@ async fn auto_join_into_an_announce_default_channel_posts_no_notice() {
             Some("member")
         );
         assert_eq!(joined(&state, &tenant, normal, person).await, 1);
+    }
+}
+
+/// What the lock holder changes while a membership write waits for the lock.
+enum Meanwhile {
+    /// Set the channel's `join_role`.
+    JoinRole(&'static str),
+    /// Set the person's membership role.
+    Role(&'static str),
+}
+
+/// The notice is decided from the membership write itself, under its lock,
+/// not from what validation or the handler read before it. Each case starts a
+/// kind:9000, 9001 self-remove or 9022 while a transaction holds the channel's
+/// membership lock, changes the channel or the person's role in that
+/// transaction, and releases it; the write then runs on the changed state.
+/// Mutation: decide the kind:9000 notice from the channel validation read →
+/// the add made a guest is announced and the guest add into a channel that
+/// stopped being announce is quiet (RED). Decide the leave notice from the
+/// roster and channel read before `remove_member` → the promoted guests'
+/// leaves are quiet and the demoted members' leaves post (RED).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn notices_follow_the_membership_write_not_the_state_read_before_it() {
+    // Its own pool with the normal acquire timeout: the test holds one
+    // connection while the waiting write holds another.
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .expect("connect test pool");
+    let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+    let tenant = community(&state, "quiet-interleave").await;
+    let owner = Keys::generate();
+
+    // (kind, channel starts announce, the person's role before, the change,
+    // whether the notice posts)
+    let cases: [(u16, bool, Option<&str>, Meanwhile, bool); 7] = [
+        // An add with no role tag lands as the channel's `join_role`.
+        (9000, false, None, Meanwhile::JoinRole("guest"), false),
+        // An explicit guest add into a channel that stops being announce.
+        (9000, true, None, Meanwhile::JoinRole("member"), true),
+        (9022, true, Some("guest"), Meanwhile::Role("member"), true),
+        (9022, true, Some("member"), Meanwhile::Role("guest"), false),
+        (
+            9022,
+            true,
+            Some("guest"),
+            Meanwhile::JoinRole("member"),
+            true,
+        ),
+        (9001, true, Some("guest"), Meanwhile::Role("member"), true),
+        (9001, true, Some("member"), Meanwhile::Role("guest"), false),
+    ];
+    for (index, (kind, announce, before, meanwhile, posts)) in cases.into_iter().enumerate() {
+        let person = Keys::generate();
+        let channel_id = if announce {
+            announce_channel(&state, &tenant, &owner).await
+        } else {
+            create_channel(&state, &tenant, &owner, &[]).await
+        };
+        match before {
+            Some("guest") => join(&state, &tenant, &person, channel_id).await,
+            Some(role) => {
+                add(
+                    &state,
+                    &tenant,
+                    &owner,
+                    channel_id,
+                    &[(&person, Some(role))],
+                )
+                .await
+            }
+            None => {}
+        }
+
+        let mut p_tag = vec!["p".to_owned(), person.public_key().to_hex()];
+        let (signer, tags) = match kind {
+            9000 => {
+                if announce {
+                    p_tag.push("guest".to_owned());
+                }
+                (&owner, vec![h(channel_id), p_tag])
+            }
+            9001 => (&person, vec![h(channel_id), p_tag]),
+            _ => (&person, vec![h(channel_id)]),
+        };
+        let event = signed(signer, kind, &tags);
+
+        let lock_key = format!(
+            "buzz_channel_membership:{}:{}",
+            tenant.community().as_uuid(),
+            channel_id
+        );
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("hold the membership lock");
+        let write = tokio::spawn({
+            let (state, tenant, auth) = (Arc::clone(&state), tenant.clone(), http_auth(signer));
+            async move { ingest_event(&state, &tenant, event, auth).await }
+        });
+        wait_for_lock_waiter(&pool, &lock_key, &write).await;
+
+        match meanwhile {
+            Meanwhile::JoinRole(join_role) => sqlx::query(
+                "UPDATE channels SET join_role = $3 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(channel_id)
+            .bind(join_role),
+            Meanwhile::Role(role) => sqlx::query(
+                "UPDATE channel_members SET role = $4::member_role \
+                 WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(channel_id)
+            .bind(person.public_key().to_bytes().to_vec())
+            .bind(role),
+        }
+        .execute(&mut *holder)
+        .await
+        .expect("change the state under the lock");
+        holder.commit().await.expect("release the membership lock");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), write)
+            .await
+            .expect("the write returns after the lock is released")
+            .expect("write task must not panic")
+            .unwrap_or_else(|error| panic!("case {index}: ingest kind:{kind}: {error:?}"));
+        assert!(
+            result.accepted,
+            "case {index}: kind:{kind} refused: {}",
+            result.message
+        );
+
+        let notice_type = if kind == 9000 {
+            "member_joined"
+        } else {
+            "member_left"
+        };
+        assert_eq!(
+            notices(&state, &tenant, channel_id, notice_type, &person).await,
+            usize::from(posts),
+            "case {index}: kind:{kind} {notice_type}"
+        );
+    }
+}
+
+/// An event of `kind` that `keys` signs, with `tags`.
+fn signed(keys: &Keys, kind: u16, tags: &[Vec<String>]) -> Event {
+    let tags: Vec<Tag> = tags
+        .iter()
+        .map(|tag| Tag::parse(tag.iter().map(String::as_str)).unwrap())
+        .collect();
+    EventBuilder::new(Kind::Custom(kind), "")
+        .tags(tags)
+        .allow_self_tagging()
+        .sign_with_keys(keys)
+        .expect("sign")
+}
+
+/// Wait until a transaction waits for the advisory lock `lock_key`.
+async fn wait_for_lock_waiter<T>(
+    pool: &sqlx::PgPool,
+    lock_key: &str,
+    write: &tokio::task::JoinHandle<T>,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0))",
+        )
+        .bind(lock_key)
+        .fetch_one(pool)
+        .await
+        .expect("read lock waiters");
+        if waiting {
+            return;
+        }
+        assert!(
+            !write.is_finished(),
+            "the write finished without waiting for the lock"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the write never waited for the membership lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
