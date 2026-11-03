@@ -579,23 +579,7 @@ pub async fn lock_member_snapshot(
     )
     .await?;
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
-        FROM channel_members cm
-        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
-        ORDER BY cm.joined_at ASC
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_all(tx.conn())
-    .await?;
-    let members = rows
-        .into_iter()
-        .map(row_to_member_record)
-        .collect::<Result<Vec<_>>>()?;
+    let members = select_active_members(tx.conn(), community_id, channel_id).await?;
     let identity = sqlx::query_as::<_, (String, Vec<String>, Vec<u8>)>(
         "SELECT channel_type::text, labels, created_by FROM channels WHERE community_id = $1 AND id = $2",
     )
@@ -1438,6 +1422,15 @@ async fn get_members_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Vec<MemberRecord>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    select_active_members(&mut connection, community_id, channel_id).await
+}
+
+/// Read a live channel's active members on `conn`, oldest first.
+pub(crate) async fn select_active_members(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<MemberRecord>> {
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
@@ -1449,7 +1442,7 @@ async fn get_members_with_operation(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_all(&mut *connection)
+    .fetch_all(conn)
     .await?;
     rows.into_iter().map(row_to_member_record).collect()
 }

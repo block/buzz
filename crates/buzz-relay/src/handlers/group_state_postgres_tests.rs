@@ -1045,6 +1045,113 @@ async fn removed_creator_join_racing_a_private_switch_is_refused() {
     );
 }
 
+/// A join whose kind:39000 publisher read the channel before a racing edit
+/// committed cannot replace the edit's kind:39000. In the e2e
+/// `test_nip29_announce_channel_wire`, an admission auto-joined a default
+/// channel while a relay admin's kind:9002 cleared `auto_join`; the join read
+/// `auto_join` first, stored after the edit at a later second, and the stale
+/// tag stayed live. Here the join's publisher is held after its read until
+/// the edit has finished or is waiting for it. Mutation: build the tags from
+/// a channel read outside `lock_group_state_snapshot`, or take the timestamp
+/// there → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_publisher_that_read_before_an_edit_cannot_replace_it() {
+    let state = state().await;
+    let tenant = community(&state, "group-state-stale-publisher").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let admin = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &admin.public_key().to_hex(),
+            "admin",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay admin");
+    edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        channel_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect("set auto_join");
+
+    let (arrived, release) =
+        crate::nip_fi_test_hooks::group_state_read_hook::arm(tenant.community());
+    let joiner = Keys::generate();
+    let join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id.to_string()]).unwrap()])
+        .sign_with_keys(&joiner)
+        .unwrap();
+    let join_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        let auth = http_auth(&joiner);
+        async move { ingest_event(&state, &tenant, join, auth).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), arrived)
+        .await
+        .expect("the join publishes kind:39000")
+        .expect("the hook stays armed until the join reaches it");
+
+    let edit_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        async move {
+            edit_channel(
+                &state,
+                &tenant,
+                &admin,
+                channel_id,
+                &[&["auto_join", "false"]],
+            )
+            .await
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !edit_task.is_finished() {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
+        )
+        .fetch_one(state.db.pool())
+        .await
+        .expect("read lock waiters");
+        if waiting {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the edit neither finished nor waited for the held publisher"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    release.notify_one();
+
+    let joined = join_task
+        .await
+        .expect("join task must not panic")
+        .unwrap_or_else(|error| panic!("join: {error:?}"));
+    assert!(joined.accepted, "join: {}", joined.message);
+    edit_task
+        .await
+        .expect("edit task must not panic")
+        .expect("clear auto_join");
+    let tags = group_state_tags(&state, &tenant, channel_id, 39000).await;
+    assert!(
+        !tags.contains(&vec!["auto_join".to_string()]),
+        "the join's stale kind:39000 replaced the edit's: {tags:?}"
+    );
+}
+
 /// A create or rename that would list a second open channel under a taken
 /// name is refused with its reason as a client error, and stores nothing.
 /// Mutation: let `ChannelNameTaken` fall through to the internal-error arm

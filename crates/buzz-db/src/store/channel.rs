@@ -565,6 +565,15 @@ async fn get_channel_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<ChannelRecord> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    select_channel(&mut connection, community_id, channel_id).await
+}
+
+/// Read a live channel on `conn`.
+async fn select_channel(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<ChannelRecord> {
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
@@ -579,7 +588,7 @@ async fn get_channel_with_operation(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_optional(&mut *connection)
+    .fetch_optional(conn)
     .await?
     .ok_or(DbError::ChannelNotFound(channel_id))?;
 
@@ -935,6 +944,108 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
         tags.push(tag(&["ttl_deadline", &deadline.to_rfc3339()]));
     }
     tags
+}
+
+/// A channel and its active members, read behind the replacement lock of the
+/// channel's relay-signed kind:39000 or kind:39001 event, with the
+/// `created_at` of that event's live copy.
+///
+/// The event built from this snapshot is stored by [`Self::replace`] before
+/// the lock is released, so racing publishers store in the order they read,
+/// each one second past the last: the live event never falls back to state
+/// read before a newer publisher's. kind:39002 has the same fence in
+/// [`LockedMemberSnapshot`].
+pub struct LockedGroupStateSnapshot {
+    /// The channel, read behind the lock.
+    pub channel: ChannelRecord,
+    /// The channel's active members, read behind the lock.
+    pub members: Vec<MemberRecord>,
+    /// `created_at` of the coordinate's live event, if it has one.
+    pub latest_created_at: Option<u64>,
+    kind: i32,
+    relay_pubkey: Vec<u8>,
+    tx: crate::AdmittedTx,
+}
+
+impl LockedGroupStateSnapshot {
+    /// Store `event`, built from this snapshot, as the coordinate's live
+    /// event, and release the lock. Returns `(event, false)`, storing
+    /// nothing, when an equal or newer event is already live.
+    pub async fn replace(mut self, event: &nostr::Event) -> Result<(StoredEvent, bool)> {
+        let channel_id = self.channel.id;
+        if buzz_core::kind::event_kind_i32(event) != self.kind
+            || event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+            || crate::event::extract_d_tag(event) != Some(channel_id.to_string())
+        {
+            return Err(DbError::InvalidData(
+                "group-state replacement does not match its locked coordinate".into(),
+            ));
+        }
+        let (stored, inserted) = crate::replaceable::replace_addressable_event_in_transaction(
+            &mut self.tx,
+            event,
+            Some(channel_id),
+        )
+        .await?;
+        if inserted {
+            self.tx.commit().await?;
+        } else {
+            self.tx.rollback().await?;
+        }
+        Ok((stored, inserted))
+    }
+}
+
+/// Take the replacement lock of `channel_id`'s relay-signed `kind` event
+/// (39000 or 39001), then read the channel, its members and the live event's
+/// `created_at` behind it. See [`LockedGroupStateSnapshot`].
+pub async fn lock_group_state_snapshot(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    kind: i32,
+    relay_pubkey: &[u8],
+) -> Result<LockedGroupStateSnapshot> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let lock_key = crate::replaceable::event_replacement_lock_key(
+        community_id,
+        kind,
+        relay_pubkey,
+        Some(channel_id.as_bytes()),
+    );
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.conn()),
+    )
+    .await?;
+    let channel = select_channel(tx.conn(), community_id, channel_id).await?;
+    let members =
+        crate::channel_members::select_active_members(tx.conn(), community_id, channel_id).await?;
+    let latest_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey)
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    Ok(LockedGroupStateSnapshot {
+        channel,
+        members,
+        latest_created_at: latest_created_at.map(|created_at| created_at.timestamp() as u64),
+        kind,
+        relay_pubkey: relay_pubkey.to_vec(),
+        tx,
+    })
 }
 
 /// Partial update for channel metadata. Every field is `None` to leave the
@@ -1973,6 +2084,19 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await
+    }
+
+    /// Read a channel's kind:39000 or kind:39001 inputs behind that event's
+    /// replacement lock. See [`LockedGroupStateSnapshot`].
+    #[datastore_span(name = "lock_group_state_snapshot", system = "postgresql")]
+    pub async fn lock_group_state_snapshot(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        kind: i32,
+        relay_pubkey: &[u8],
+    ) -> Result<LockedGroupStateSnapshot> {
+        lock_group_state_snapshot(&self.pool, community_id, channel_id, kind, relay_pubkey).await
     }
 
     /// Returns the canvas content for a channel, if any.
@@ -3026,5 +3150,65 @@ mod postgres_tests {
                 .expect("second delete"),
             "a second delete finds no live channel"
         );
+    }
+
+    /// A group-state snapshot reads behind its coordinate's replacement lock.
+    /// One taken while another is held waits for it, then sees a channel
+    /// change committed while it waited and the held snapshot's stored
+    /// `created_at`. Mutation: read the channel or the live timestamp before
+    /// taking the lock → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn group_state_snapshot_reads_behind_the_replacement_lock() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "group-state-snapshot",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &random_pubkey(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let relay = Keys::generate();
+        let relay_pubkey = relay.public_key().to_bytes();
+
+        let held = lock_group_state_snapshot(&pool, community, channel.id, 39000, &relay_pubkey)
+            .await
+            .expect("hold snapshot");
+        assert_eq!(held.latest_created_at, None);
+        let waiter_pool = crate::test_support::named_pool("group-state-snapshot").await;
+        let channel_id = channel.id;
+        let waiter = tokio::spawn(async move {
+            lock_group_state_snapshot(&waiter_pool, community, channel_id, 39000, &relay_pubkey)
+                .await
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "group-state-snapshot").await;
+        sqlx::query("UPDATE channels SET topic = 'changed while waiting' WHERE id = $1")
+            .bind(channel.id)
+            .execute(&pool)
+            .await
+            .expect("change the channel");
+
+        let held_at = 1_800_000_000;
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(39000), "")
+            .tags(
+                group_metadata_tags(&held.channel, &held.members)
+                    .into_iter()
+                    .map(|tag| nostr::Tag::parse(tag).expect("tag")),
+            )
+            .custom_created_at(nostr::Timestamp::from(held_at))
+            .sign_with_keys(&relay)
+            .expect("sign 39000");
+        assert!(held.replace(&event).await.expect("store held snapshot").1);
+
+        let next = waiter.await.expect("waiter task").expect("next snapshot");
+        assert_eq!(next.channel.topic.as_deref(), Some("changed while waiting"));
+        assert_eq!(next.latest_created_at, Some(held_at));
     }
 }

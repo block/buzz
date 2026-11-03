@@ -211,6 +211,10 @@ make_hook!(auto_join_channel_hook, before_auto_join_channel);
 // `after_auto_join`: fires when an admission auto-join task has finished, so
 // a test can assert what it did (or did not) write.
 make_hook!(auto_join_done_hook, after_auto_join);
+// `after_group_state_read`: fires when a kind:39000/39001 publisher has read
+// the channel and its members, before it signs and stores. Holding a
+// publisher here while the channel changes makes it a stale one.
+make_hook!(group_state_read_hook, after_group_state_read);
 // `before_http_ban_recheck`: fires in `buzz_v1` and Git settings after the
 // shared membership check passes, immediately before the fresh ban reread.
 // A ban or closed pool here makes only the reread refuse.
