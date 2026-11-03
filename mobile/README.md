@@ -101,7 +101,7 @@ engine all come from the same Flutter version.
 
 ### iOS toolchain
 
-Use Xcode 27.0 for iOS development and build validation on an Apple silicon
+Use Xcode 27.1 for iOS development and build validation on an Apple silicon
 Mac running macOS Tahoe 26.6 or later, as required by the
 [Xcode 27 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes).
 On Intel Macs or hosts that cannot meet those requirements, use a compatible
@@ -112,7 +112,7 @@ When multiple Xcode versions are installed, select the intended version for
 the command with `DEVELOPER_DIR`, for example:
 
 ```bash
-DEVELOPER_DIR=/Applications/Xcode-27.0.0.app/Contents/Developer xcodebuild -version
+DEVELOPER_DIR=/Applications/Xcode-27.1.0.app/Contents/Developer xcodebuild -version
 ```
 
 Adjust the path to your installation. Keep the compiler and SDK from the same
