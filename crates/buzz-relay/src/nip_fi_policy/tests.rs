@@ -111,23 +111,33 @@ async fn mixed_required_and_signed_unsigned_optional_admission() {
         for signed in [false, true] {
             // Optional controls retain both legacy proofs, regardless of attached FI.
             let h = headers("free.example", false);
-            let result = admit_nip_fi_http_on_state(&state, &h, || {
-                Ok(if signed {
-                    Nip98Proof::new(key, ())
-                } else {
-                    Nip98Proof::unsigned(key, ())
-                })
-            })
+            let result = admit_nip_fi_http_on_state(
+                &state,
+                &h,
+                &crate::access::AccessSlot::default(),
+                || {
+                    Ok(if signed {
+                        Nip98Proof::new(key, ())
+                    } else {
+                        Nip98Proof::unsigned(key, ())
+                    })
+                },
+            )
             .await;
             assert!(result.is_ok(), "{global:?} signed={signed}");
             let h = headers("required.example", true);
-            let result = admit_nip_fi_http_on_state(&state, &h, || {
-                Ok(if signed {
-                    Nip98Proof::new(key, ())
-                } else {
-                    Nip98Proof::unsigned(key, ())
-                })
-            })
+            let result = admit_nip_fi_http_on_state(
+                &state,
+                &h,
+                &crate::access::AccessSlot::default(),
+                || {
+                    Ok(if signed {
+                        Nip98Proof::new(key, ())
+                    } else {
+                        Nip98Proof::unsigned(key, ())
+                    })
+                },
+            )
             .await;
             if signed {
                 assert!(result.is_ok());
@@ -137,22 +147,26 @@ async fn mixed_required_and_signed_unsigned_optional_admission() {
         }
         let h = headers("required.example", false);
         assert_eq!(
-            admit_nip_fi_http_on_state(&state, &h, || Ok(Nip98Proof::new(key, ())))
-                .await
-                .err()
-                .unwrap()
-                .status(),
+            admit_nip_fi_http_on_state(&state, &h, &crate::access::AccessSlot::default(), || Ok(
+                Nip98Proof::new(key, ())
+            ))
+            .await
+            .err()
+            .unwrap()
+            .status(),
             StatusCode::UNAUTHORIZED
         );
     }
     let (state, _, key, _) = fixture(NipFiMode::Enforce).await;
     let h = headers("free.example", false);
     assert_eq!(
-        admit_nip_fi_http_on_state(&state, &h, || Ok(Nip98Proof::new(key, ())))
-            .await
-            .err()
-            .unwrap()
-            .status(),
+        admit_nip_fi_http_on_state(&state, &h, &crate::access::AccessSlot::default(), || Ok(
+            Nip98Proof::new(key, ())
+        ))
+        .await
+        .err()
+        .unwrap()
+        .status(),
         StatusCode::UNAUTHORIZED
     );
 }
@@ -170,11 +184,13 @@ async fn required_retains_verifier_and_key_pairing_denials() {
         ] {
             let mut state = (*base).clone();
             state.nip_fi_verifier = Some(Arc::new(ScriptedVerifier::new(Err(error))));
-            let result =
-                admit_nip_fi_http_on_state(&state, &headers("required.example", true), || {
-                    Ok(Nip98Proof::new(key, ()))
-                })
-                .await;
+            let result = admit_nip_fi_http_on_state(
+                &state,
+                &headers("required.example", true),
+                &crate::access::AccessSlot::default(),
+                || Ok(Nip98Proof::new(key, ())),
+            )
+            .await;
             let expected = if error == VerifierError::KeySourceUnavailable {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
@@ -188,9 +204,12 @@ async fn required_retains_verifier_and_key_pairing_denials() {
         }
         let wrong = nostr::Keys::generate().public_key();
         assert_eq!(
-            admit_nip_fi_http_on_state(&base, &headers("required.example", true), || Ok(
-                Nip98Proof::new(wrong, ())
-            ))
+            admit_nip_fi_http_on_state(
+                &base,
+                &headers("required.example", true),
+                &crate::access::AccessSlot::default(),
+                || Ok(Nip98Proof::new(wrong, ()))
+            )
             .await
             .err()
             .unwrap()
@@ -315,11 +334,13 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
                     })
                 }
             }
-            let result =
-                admit_nip_fi_http_on_state(&state, &headers("required.example", false), || {
-                    Ok(Nip98Proof::new(key, ()))
-                })
-                .await;
+            let result = admit_nip_fi_http_on_state(
+                &state,
+                &headers("required.example", false),
+                &crate::access::AccessSlot::default(),
+                || Ok(Nip98Proof::new(key, ())),
+            )
+            .await;
             assert_eq!(
                 result.err().unwrap().status(),
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -373,11 +394,14 @@ async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries
         for _ in 0..3 {
             assert!(mode(&state, &h).await.enforces());
         }
-        assert!(
-            admit_nip_fi_http_on_state(&state, &h, || Ok(Nip98Proof::new(key, ())))
-                .await
-                .is_ok()
-        );
+        assert!(admit_nip_fi_http_on_state(
+            &state,
+            &h,
+            &crate::access::AccessSlot::default(),
+            || Ok(Nip98Proof::new(key, ()))
+        )
+        .await
+        .is_ok());
     })
     .await;
     assert_eq!(source.calls.load(Ordering::SeqCst), before);
@@ -409,14 +433,18 @@ async fn unmapped_legacy_rejection_scope_never_yields_an_admission_proof() {
         );
 
         let mut called = false;
-        let response =
-            admit_nip_fi_http_on_state(&state, &headers("unknown.example", false), || {
+        let response = admit_nip_fi_http_on_state(
+            &state,
+            &headers("unknown.example", false),
+            &crate::access::AccessSlot::default(),
+            || {
                 called = true;
                 Ok(Nip98Proof::new(key, ()))
-            })
-            .await
-            .err()
-            .unwrap();
+            },
+        )
+        .await
+        .err()
+        .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             !called,

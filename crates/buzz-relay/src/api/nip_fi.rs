@@ -2563,11 +2563,13 @@ mod route_integration_tests {
                     CLIENT_ATTACHED_HEADER,
                     format!("Bearer {token}").parse().unwrap(),
                 );
-                let result =
-                    crate::nip_fi_http::admit_nip_fi_http_on_state(&state, &headers, || {
-                        Ok(crate::nip_fi_http::Nip98Proof::new(key, ()))
-                    })
-                    .await;
+                let result = crate::nip_fi_http::admit_nip_fi_http_on_state(
+                    &state,
+                    &headers,
+                    &crate::access::AccessSlot::default(),
+                    || Ok(crate::nip_fi_http::Nip98Proof::new(key, ())),
+                )
+                .await;
                 if bad == "valid" {
                     assert!(result.is_ok(), "{mode:?} valid assertion");
                 } else {

@@ -705,14 +705,18 @@ where
     // A legacy dev header is an identity hint, never proof of key possession.
     // Required rows must reject it even if a caller accidentally returns one.
     if !proof.signed {
-        return Err(WouldDeny::new(
-            Stage::Nip98,
-            if headers.contains_key("authorization") {
-                DenialClass::EvidenceRejected
-            } else {
-                DenialClass::MissingEvidence
-            },
-            "unsigned_proof",
+        return Err(EnforceDenial::new(
+            WouldDeny::new(
+                Stage::Nip98,
+                if headers.contains_key("authorization") {
+                    DenialClass::EvidenceRejected
+                } else {
+                    DenialClass::MissingEvidence
+                },
+                "unsigned_proof",
+            ),
+            None,
+            Some(AuthResult::Failed("unsigned_proof")),
         ));
     }
 
@@ -780,7 +784,15 @@ pub(crate) async fn admit_nip_fi_http_on_state<X, F>(
 where
     F: FnOnce() -> Result<Nip98Proof<X>, Response<Body>>,
 {
-    let mode = crate::nip_fi_policy::admission_mode(state, headers).await?;
+    let mode = crate::nip_fi_policy::admission_mode(state, headers)
+        .await
+        .map_err(|response| {
+            slot.method(AuthMethod::NipFi);
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::AuthorizationUnavailable,
+            ));
+            response
+        })?;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = state.nip_fi_communities();
     let admission = match state.nip_fi_deny_map.as_deref() {
