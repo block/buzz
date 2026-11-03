@@ -2767,7 +2767,6 @@ void main() {
     'create channel sheet uses checked menus and a validated header action',
     (tester) async {
       final semantics = tester.ensureSemantics();
-      addTearDown(semantics.dispose);
       tester.view.physicalSize = const Size(390, 800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
@@ -2916,6 +2915,7 @@ void main() {
       await tester.tap(find.byTooltip('Close'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('create-channel-name')), findsNothing);
+      semantics.dispose();
     },
   );
 
