@@ -2376,12 +2376,14 @@ async fn search_pool() -> PgPool {
 
 /// Backends in this test's database, other than the caller's, that wait on
 /// a lock inside a search. Scoped to the database so concurrent tests in
-/// sibling databases cannot change the count.
+/// sibling databases cannot change the count. Matches each search by its
+/// leading text, since `pg_stat_activity` keeps only the first 1 kB of a query.
 async fn waiting_searches(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
-         AND datname = current_database() \
-         AND wait_event_type = 'Lock' AND query LIKE '%ts_rank_cd(%'",
+         AND datname = current_database() AND wait_event_type = 'Lock' \
+         AND (query LIKE 'SELECT id, kind, pubkey, channel_id, %ts_rank_cd(%' \
+           OR query LIKE 'WITH search_query AS (SELECT %')",
     )
     .fetch_one(pool)
     .await
