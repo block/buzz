@@ -13,12 +13,14 @@ void main() {
     final h = await AgentsHarness.create();
     final gate = Completer<void>();
     h.registry.restoreGate = gate;
+    h.registry.signedIn = false;
     // Simulate a pre-existing cold-start load that owns the controller lock.
     final loading = h.controller.run(h.controller.refresh);
     await h.open(tester, directory: [], createOnOpen: true, settle: false);
     expect(find.byType(LinearProgressIndicator), findsOneWidget);
     expect(find.byType(CreateAgentPage), findsNothing);
     h.registry.bound = 'f' * 64;
+    h.registry.signedIn = true;
     gate.complete();
     await loading;
     await tester.pumpAndSettle();
