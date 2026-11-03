@@ -115,6 +115,73 @@ void main() {
     });
   }
 
+  // Pairing validation disconnects in a finally block after a failed connect;
+  // an unbounded close there stranded pairing until the pairing relay expired.
+  for (final refusal in [401, null]) {
+    test(
+      'disconnect completes after '
+      '${refusal == null ? 'a timed-out handshake' : 'a refused upgrade ($refusal)'}',
+      () async {
+        HttpServer? refusing;
+        ServerSocket? stalled;
+        if (refusal == null) {
+          stalled = (await _stalledHandshakeServer()).$1;
+        } else {
+          refusing = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          refusing.listen((request) async {
+            request.response.statusCode = refusal;
+            await request.response.close();
+          });
+        }
+        final url = 'ws://127.0.0.1:${(refusing?.port ?? stalled!.port)}';
+        Object? reported;
+        final socket = RelaySocket(
+          wsUrl: url,
+          nsec: null,
+          onMessage: (_) {},
+          onConnected: () {},
+          onDisconnected: (error) => reported = error,
+        );
+
+        await socket.connect();
+        expect(socket.state, SocketState.disconnected);
+        if (refusal != null) expect(relayUpgradeRefused(reported), isTrue);
+        await socket.disconnect().timeout(
+          testConnectTimeout * 10,
+          onTimeout: () =>
+              fail('disconnect() hung on a channel that never opened'),
+        );
+
+        await refusing?.close(force: true);
+        await stalled?.close();
+      },
+    );
+  }
+
+  test('disconnect is bounded while the upgrade is still pending', () async {
+    // Pairing's 8s validation deadline can fire before the 10s connect timeout.
+    RelaySocket.debugConnectTimeout = const Duration(seconds: 30);
+    final (server, _) = await _stalledHandshakeServer();
+    final socket = RelaySocket(
+      wsUrl: 'ws://127.0.0.1:${server.port}',
+      nsec: null,
+      onMessage: (_) {},
+      onConnected: () {},
+      onDisconnected: (_) {},
+    );
+    unawaited(socket.connect());
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    await socket.disconnect().timeout(
+      RelaySocket.closeTimeout * 2,
+      onTimeout: () => fail('disconnect() hung on a pending upgrade'),
+    );
+    expect(socket.state, SocketState.disconnected);
+
+    socket.dispose();
+    await server.close();
+  });
+
   test('detects a peer that stops answering pings', () async {
     final server = await _silentAfterHandshakeServer();
 

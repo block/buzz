@@ -110,6 +110,60 @@ void main() {
       },
     );
 
+    test(
+      'organization relays are admitted by their session, not pre-validated',
+      () async {
+        // An organization relay refuses this unauthenticated check until
+        // organization sign-in, so running it would always fail pairing.
+        final auth = FakeAuthNotifier();
+        var validated = false;
+        final notifier = PairingNotifier(
+          organizationRelay: (relay) => relay.host == 'org.example',
+          validationSocketFactory:
+              ({
+                required wsUrl,
+                required nsec,
+                required onMessage,
+                required onConnected,
+                required onDisconnected,
+              }) {
+                validated = true;
+                return _ValidationOutcomeSocket(() => false);
+              },
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        String input(String relayUrl) => base64Url.encode(
+          utf8.encode(
+            jsonEncode({
+              'relayUrl': relayUrl,
+              'nsec': nostr.Keys.generate().nsec,
+            }),
+          ),
+        );
+
+        await container
+            .read(pairingProvider.notifier)
+            .pair(input('https://org.example'));
+        expect(validated, isFalse);
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(auth.lastCommunity?.relayUrl, 'https://org.example');
+
+        // Other relays still have to accept the identity before it is saved.
+        auth.lastCommunity = null;
+        await container
+            .read(pairingProvider.notifier)
+            .pair(input('https://relay.example'));
+        expect(validated, isTrue);
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(auth.lastCommunity, isNull);
+      },
+    );
+
     test('starts in idle state', () {
       container = createContainer();
       final state = container.read(pairingProvider);
