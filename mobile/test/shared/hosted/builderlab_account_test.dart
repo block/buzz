@@ -113,6 +113,35 @@ void main() {
         await BuilderlabAccountClient(httpClient: transport).restore(),
         isNull,
       );
+      // A credential adopted while an earlier share is in flight is shared
+      // once that write completes.
+      final gate = Completer<void>();
+      final delayed = <String?>[];
+      var issued = 0;
+      final rotating = BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/exchange')
+                  ? {
+                      'session_credential': 'next-${++issued}',
+                      'expires_at': expiry,
+                    }
+                  : {'subject': 'account-1', 'expires_at': expiry},
+            ),
+            200,
+          ),
+        ),
+        onSessionChanged: (credential) async {
+          await gate.future;
+          delayed.add(credential);
+        },
+      );
+      await rotating.exchange(code: 'one-use', verifier: verifier);
+      await rotating.exchange(code: 'two-use', verifier: verifier);
+      gate.complete();
+      await pumpEventQueue();
+      expect(delayed, ['next-1', 'next-2']);
     },
   );
 

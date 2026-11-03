@@ -263,7 +263,12 @@ class BuilderlabAccountClient {
           .catchError(
             (Object error) => debugPrint('Session share failed: $error'),
           )
-          .whenComplete(() => _sharing = false),
+          .whenComplete(() {
+            _sharing = false;
+            // A newer credential adopted while this write was in flight still needs sharing.
+            final pending = _unshared;
+            if (pending != null && pending != credential) _share();
+          }),
     );
   }
 

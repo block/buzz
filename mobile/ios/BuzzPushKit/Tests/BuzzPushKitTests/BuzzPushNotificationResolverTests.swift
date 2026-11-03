@@ -927,6 +927,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     var issuerBodies: [[String: Any]] = []
     var signOutDuringQuery = false
     var signOutDuringProfile = false
+    var redirectedHeaders: [String?] = []
     URLProtocolStub.handler = { request in
       let body = Self.body(of: request)
       if request.url?.host == "identity.org.example" {
@@ -940,6 +941,10 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
         ]))
       }
       XCTAssertNil(request.value(forHTTPHeaderField: "X-BB-Session-Credential"))
+      if request.url?.host == "elsewhere.example" {
+        redirectedHeaders.append(request.value(forHTTPHeaderField: "Nostr-Federated-Identity"))
+        return Self.response(request, status: 200, data: try JSONEncoder().encode([message]))
+      }
       let enforced = request.url?.host == "relay.org.example"
       let assertion = request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
       if enforced, assertion != "Bearer \(issued)" {
@@ -966,6 +971,16 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(issuerBodies.count, 1)
     XCTAssertEqual(issuerBodies.first?["relay_url"] as? String, "wss://relay.org.example")
     XCTAssertEqual(issuerBodies.first?["nostr_pubkey"] as? String, Self.ownPubkey)
+
+    // A redirecting relay is refused, so its target never sees the assertion.
+    URLProtocolStub.redirect = { request in
+      request.url?.host == "relay.org.example" ? URL(string: "https://elsewhere.example/query") : nil
+    }
+    XCTAssertNil(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://relay.org.example")]),
+      now: Date(timeIntervalSince1970: TimeInterval(Self.now)), assertionIssuer: issuer)))
+    XCTAssertEqual(redirectedHeaders, [])
+    URLProtocolStub.redirect = nil
 
     // Signing out while the relay query is in flight drops what that assertion fetched.
     signOutDuringQuery = true
@@ -1410,6 +1425,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
     static var finishLoading: ((URLRequest) -> Bool)?
     static var onStopLoading: ((URLRequest) -> Void)?
+    static var redirect: ((URLRequest) -> URL?)?
     static var requests: [URLRequest] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -1419,7 +1435,18 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       Self.lock.lock()
       Self.requests.append(request)
       let handler = Self.handler
+      let redirect = Self.redirect
       Self.lock.unlock()
+      if let url = request.url, let target = redirect?(request) {
+        var next = request
+        next.url = target
+        let response = HTTPURLResponse(
+          url: url, statusCode: 307, httpVersion: nil, headerFields: ["Location": target.absoluteString])!
+        client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+        return
+      }
       do {
         let (response, data) = try handler?(request) ?? { throw URLError(.unsupportedURL) }()
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -1439,6 +1466,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       handler = nil
       finishLoading = nil
       onStopLoading = nil
+      redirect = nil
       requests = []
       lock.unlock()
     }

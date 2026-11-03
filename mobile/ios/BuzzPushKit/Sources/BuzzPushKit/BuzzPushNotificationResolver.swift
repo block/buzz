@@ -264,7 +264,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     if let federatedIdentity {
       request.setValue(federatedIdentity, forHTTPHeaderField: "Nostr-Federated-Identity")
     }
-    session.dataTask(with: request) { data, response, error in
+    let task = session.dataTask(with: request) { data, response, error in
       guard let error = error as? URLError,
         [.timedOut, .networkConnectionLost].contains(error.code), canRetry?() == true
       else {
@@ -288,7 +288,10 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         retrySession.finishTasksAndInvalidate()
         completion(data, response)
       }
-    }.resume()
+    }
+    // A redirect would forward the federated identity header to its target, so it is refused.
+    task.delegate = BuzzRedirectRefusal.shared
+    task.resume()
   }
 
   private func resolvePresentation(
@@ -637,5 +640,18 @@ extension PushLeaseCommunity {
       }
     components.path = ""
     return components.url
+  }
+}
+
+/// Refuses every redirect, so a signed relay request never forwards its proof or assertion.
+final class BuzzRedirectRefusal: NSObject, URLSessionTaskDelegate, Sendable {
+  static let shared = BuzzRedirectRefusal()
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 }
