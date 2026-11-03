@@ -37,6 +37,10 @@ pub struct RelayInfo {
     /// Opt-in, host-bound private accessory API; separate from legacy NIP-RS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buzz_v1: Option<BuzzV1Descriptor>,
+    /// Guarded task archive and restore; present only when the guard and
+    /// `buzz_v1` are both enabled on a resolved host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_guard: Option<serde_json::Value>,
     /// NIP-AR artifact query transport and enforced resource limits.
     pub artifacts: serde_json::Value,
     /// Relay operator's public key (hex), if published.
@@ -283,6 +287,7 @@ impl RelayInfo {
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
             buzz_v1: None,
+            lifecycle_guard: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
                 "query": "/query", "count": "/count",
@@ -414,6 +419,14 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
                 max_intents: MAX_INTENTS,
                 eligible_kinds: ELIGIBLE_KINDS,
             });
+            if state.config.lifecycle_guard_enabled {
+                info.lifecycle_guard = Some(serde_json::json!({
+                    "version": 1,
+                    "state_path": crate::api::buzz_v1::LIFECYCLE_STATE_PATH,
+                    "max_state_channels": buzz_db::lifecycle::MAX_STATE_CHANNELS,
+                    "max_subtree_channels": state.config.lifecycle_max_subtree_channels,
+                }));
+            }
         }
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,

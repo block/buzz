@@ -2288,7 +2288,12 @@ async fn run_active_audio_connection(
                 room.clear_ended();
                 room_emptied = false;
             }
-            Ok(()) => {
+            Ok(archived) => {
+                // A task channel stays active: only a guarded request changes
+                // its archive state. The huddle still ends normally.
+                if !archived {
+                    info!(channel_id = %channel_id, "huddle ended; task channel stays active");
+                }
                 room_emptied = state
                     .audio_rooms
                     .cleanup_if_empty(tenant.community(), channel_id);

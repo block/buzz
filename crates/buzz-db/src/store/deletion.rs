@@ -78,6 +78,7 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "artifact_parents",
     "nip_fi_profile_heads",
     "api_tokens",
     "archived_identities",
@@ -130,6 +131,7 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "artifact_parents",
     "nip_fi_profile_heads",
     "personal_read_frontiers",
     "personal_read_accounts",
@@ -8760,6 +8762,132 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .verify_postgres_logically_deleted(&token)
             .await
             .expect("verify after straggler removed");
+    }
+
+    /// `artifact_parents` is tenant-owned: once deletion of its community
+    /// starts, a task edge write is refused at admission, and the purge
+    /// removes the community's edges. Run on both schema paths.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn artifact_parents_are_fenced_and_purged() {
+        assert_artifact_parents_fenced_and_purged().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_artifact_parents_are_fenced_and_purged() {
+        assert_artifact_parents_fenced_and_purged().await;
+    }
+
+    async fn assert_artifact_parents_fenced_and_purged() {
+        use crate::store::artifact::ArtifactOutcome;
+        use buzz_core::channel::{ChannelType, ChannelVisibility};
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        /// A `nexus.task` create for `channel` under `parent`.
+        fn task(owner: &Keys, channel: Uuid, parent: Option<Uuid>) -> nostr::Event {
+            let mut tags = vec![
+                vec!["ar".to_string(), "1".into()],
+                vec![
+                    "d".into(),
+                    buzz_core::lifecycle::task_d(channel).to_string(),
+                ],
+                vec!["h".into(), channel.to_string()],
+                vec![
+                    "type".into(),
+                    buzz_core::lifecycle::TASK_ARTIFACT_TYPE.into(),
+                ],
+                vec!["op".into(), "create".into()],
+                vec!["title".into(), "Task".into()],
+            ];
+            let mut content = serde_json::json!({"v": 0, "channelId": channel.to_string()});
+            if let Some(parent) = parent {
+                tags.push(vec!["parent".into(), parent.to_string()]);
+                content["parentChannelId"] = serde_json::json!(parent.to_string());
+            }
+            EventBuilder::new(Kind::Custom(45010), content.to_string())
+                .tags(tags.into_iter().map(|t| Tag::parse(t).expect("tag")))
+                .sign_with_keys(owner)
+                .expect("sign task record")
+        }
+        async fn edges(db: &Db, community: CommunityId) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM artifact_parents WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count edges")
+        }
+
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let (owner, relay) = (Keys::generate(), Keys::generate());
+        let mut channels = Vec::new();
+        for name in ["root", "child", "late"] {
+            let channel = db
+                .create_channel(
+                    community,
+                    name,
+                    ChannelType::Stream,
+                    ChannelVisibility::Open,
+                    None,
+                    &owner.public_key().to_bytes(),
+                    None,
+                )
+                .await
+                .expect("create channel");
+            channels.push(channel.id);
+        }
+        for (channel, parent) in [(channels[0], None), (channels[1], Some(channels[0]))] {
+            let event = task(&owner, channel, parent);
+            let env = buzz_core::artifact::validate(&event).expect("valid task record");
+            let outcome = db
+                .accept_artifact(community, &event, &env, None, &relay, true)
+                .await
+                .expect("accept task record");
+            assert!(matches!(outcome, ArtifactOutcome::Accepted(_)));
+        }
+        assert_eq!(edges(&db, community).await, 2);
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let late = task(&owner, channels[2], Some(channels[0]));
+        let env = buzz_core::artifact::validate(&late).expect("valid task record");
+        let error = db
+            .accept_artifact(community, &late, &env, None, &relay, true)
+            .await
+            .expect_err("a quiescing community must refuse task edges");
+        assert!(
+            crate::test_support::is_admission_rejection(&error),
+            "expected entry admission rejection, got: {error:#}"
+        );
+        assert_eq!(edges(&db, community).await, 2);
+
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(deleted.get("artifact_parents"), Some(&2));
+        assert_eq!(edges(&db, community).await, 0);
     }
 
     /// A database bootstrapped from `schema/schema.sql` (the pgschema

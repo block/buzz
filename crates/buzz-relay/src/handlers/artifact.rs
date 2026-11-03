@@ -44,6 +44,7 @@ pub(crate) async fn accept(
             &env,
             source,
             &state.relay_keypair,
+            state.config.lifecycle_guard_enabled,
         )
         .await
         .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;

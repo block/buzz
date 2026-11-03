@@ -173,8 +173,8 @@ pub async fn create_dm(
     sqlx::query(
         r#"
         INSERT INTO channels
-            (id, community_id, name, channel_type, visibility, created_by, participant_hash)
-        VALUES ($1, $2, $3, 'dm', 'private', $4, $5)
+            (id, community_id, name, channel_type, visibility, created_by, participant_hash, lifecycle_token)
+        VALUES ($1, $2, $3, 'dm', 'private', $4, $5, $6)
         "#,
     )
     .bind(id)
@@ -182,6 +182,7 @@ pub async fn create_dm(
     .bind(&name)
     .bind(created_by)
     .bind(hash.as_slice())
+    .bind(crate::lifecycle::new_token())
     .execute(tx.conn())
     .await?;
 

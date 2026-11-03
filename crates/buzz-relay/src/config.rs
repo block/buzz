@@ -191,6 +191,14 @@ pub struct Config {
     pub buzz_v1_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
+    /// Guarded task archive and restore (NEXUS-4111). Off by default. When
+    /// off, the relay neither advertises the capability nor accepts a new
+    /// task parent edge, but it still enforces every guard and maintains
+    /// the existing task projection.
+    pub lifecycle_guard_enabled: bool,
+    /// Largest number of channels one guarded archive or restore changes.
+    /// Bounded by the measured lock and transaction cost.
+    pub lifecycle_max_subtree_channels: usize,
     /// Comma-separated list of allowed CORS origins.
     /// If empty, permissive CORS is used (dev mode).
     /// Example: "tauri://localhost,http://localhost:3000"
@@ -589,6 +597,12 @@ fn parse_operator_listener_delivery_urls(
     }
     Ok(endpoints)
 }
+
+/// Default for `BUZZ_LIFECYCLE_MAX_SUBTREE_CHANNELS`.
+pub const DEFAULT_LIFECYCLE_SUBTREE_CHANNELS: usize = 250;
+/// Upper bound for `BUZZ_LIFECYCLE_MAX_SUBTREE_CHANNELS`. A guarded request
+/// takes two advisory locks per channel, which share the server lock table.
+pub const MAX_LIFECYCLE_SUBTREE_CHANNELS: usize = 1000;
 
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
     match std::env::var(name) {
@@ -1412,6 +1426,22 @@ impl Config {
             _ => buzz_db::personal_read::DEFAULT_RETENTION_SECONDS,
         };
 
+        let lifecycle_guard_enabled = parse_bool("BUZZ_LIFECYCLE_GUARD_ENABLED", false)?;
+        let lifecycle_max_subtree_channels = match std::env::var(
+            "BUZZ_LIFECYCLE_MAX_SUBTREE_CHANNELS",
+        ) {
+            Ok(v) => v
+                .parse()
+                .ok()
+                .filter(|n| (1..=MAX_LIFECYCLE_SUBTREE_CHANNELS).contains(n))
+                .ok_or_else(|| {
+                    ConfigError::InvalidValue(format!(
+                        "BUZZ_LIFECYCLE_MAX_SUBTREE_CHANNELS must be 1..={MAX_LIFECYCLE_SUBTREE_CHANNELS}"
+                    ))
+                })?,
+            Err(_) => DEFAULT_LIFECYCLE_SUBTREE_CHANNELS,
+        };
+
         let nip_fi = crate::nip_fi_config::NipFiRelayConfig::from_env()?;
         let nip_fi_provision_binding = crate::nip_fi_config::parse_provision_binding()?;
         let nip_fi_resolver_bounds =
@@ -1447,6 +1477,8 @@ impl Config {
             require_auth_token,
             buzz_v1_enabled,
             buzz_v1_retention_seconds,
+            lifecycle_guard_enabled,
+            lifecycle_max_subtree_channels,
             cors_origins,
             relay_private_key,
             uds_path,
@@ -2088,6 +2120,43 @@ mod tests {
         .admin
         .expect("admin surface is configured");
         assert!(matches!(admin.auth, crate::config::AdminAuth::Nip98));
+    }
+
+    /// The subtree limit defaults to 250 and accepts 1..=1000. Mutation:
+    /// change the default or either bound and a row fails.
+    #[test]
+    fn lifecycle_subtree_limit_defaults_to_250_and_is_bounded() {
+        const KEY: &str = "BUZZ_LIFECYCLE_MAX_SUBTREE_CHANNELS";
+        let _guards = env_guards();
+        let previous = std::env::var_os(KEY);
+        let mut results = Vec::new();
+        for value in [None, Some("1"), Some("1000"), Some("0"), Some("1001")] {
+            match value {
+                Some(value) => std::env::set_var(KEY, value),
+                None => std::env::remove_var(KEY),
+            }
+            let limit = Config::from_env().map(|config| config.lifecycle_max_subtree_channels);
+            results.push((value, limit));
+        }
+        match previous {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
+        for (value, limit) in results {
+            match value {
+                None => assert_eq!(limit.ok(), Some(250), "unset"),
+                Some("1") => assert_eq!(limit.ok(), Some(1)),
+                Some("1000") => assert_eq!(limit.ok(), Some(1000)),
+                Some(value) => assert!(
+                    matches!(
+                        limit,
+                        Err(ConfigError::InvalidValue(ref message))
+                            if message == "BUZZ_LIFECYCLE_MAX_SUBTREE_CHANNELS must be 1..=1000"
+                    ),
+                    "{value}: {limit:?}"
+                ),
+            }
+        }
     }
 
     #[test]

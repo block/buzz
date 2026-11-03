@@ -209,6 +209,57 @@ pub(super) async fn write_intent(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LifecycleStateRequest {
+    channel_ids: Vec<String>,
+}
+
+/// 1..=MAX_STATE_CHANNELS unique ids in canonical lowercase form.
+fn parse_lifecycle_ids(raw: &[String]) -> Option<Vec<Uuid>> {
+    let ids = raw
+        .iter()
+        .map(|id| Uuid::parse_str(id).ok().filter(|u| u.to_string() == *id))
+        .collect::<Option<Vec<_>>>()?;
+    let unique: BTreeSet<_> = ids.iter().collect();
+    ((1..=buzz_db::lifecycle::MAX_STATE_CHANNELS).contains(&ids.len()) && unique.len() == ids.len())
+        .then_some(ids)
+}
+
+/// Current lifecycle state of the requested channels the actor created or
+/// is an active member of, in one statement. An omitted id is unknown to
+/// the actor. Body POST, so a large id list never becomes a long URI.
+pub(super) async fn lifecycle_state(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Result<Response, Error> {
+    if body.len() > 64 * 1024 {
+        return Err(Error::invalid());
+    }
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let principal = auth::authorize(&state, &headers, &uri, "POST", Some(&body)).await?;
+        let request: LifecycleStateRequest =
+            serde_json::from_slice(&body).map_err(|_| Error::invalid())?;
+        let ids = parse_lifecycle_ids(&request.channel_ids).ok_or_else(Error::invalid)?;
+        let channels = state
+            .db
+            .lifecycle_state(
+                principal.tenant.community(),
+                &principal.actor.to_bytes(),
+                &ids,
+            )
+            .await
+            .map_err(|_| Error::unavailable())?;
+        // Release rows only after admission and bans are rechecked.
+        auth::recheck(&state, &headers, &principal).await?;
+        auth::response(json!({ "channels": channels }))
+    })
+    .await
+    .map_err(|_| Error::unavailable())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +292,45 @@ mod tests {
         let outcomes = vec![json!({"status":"unknown","retryable":true}); MAX_INTENTS];
         let body = json!({ "outcomes": outcomes, "channels": channels });
         let bytes = serde_json::to_vec(&body).unwrap().len();
+        assert!(bytes <= auth::MAX_RESPONSE_BYTES, "{bytes} bytes");
+    }
+
+    #[test]
+    fn lifecycle_ids_are_canonical_unique_and_bounded() {
+        let id = |n: u128| Uuid::from_u128(n).to_string();
+        assert_eq!(
+            parse_lifecycle_ids(&[id(1)]),
+            Some(vec![Uuid::from_u128(1)])
+        );
+        assert_eq!(parse_lifecycle_ids(&[]), None);
+        assert_eq!(parse_lifecycle_ids(&[id(1), id(1)]), None);
+        assert_eq!(parse_lifecycle_ids(&[id(10).to_uppercase()]), None);
+        assert_eq!(parse_lifecycle_ids(&[id(1).replace('-', "")]), None);
+        assert_eq!(parse_lifecycle_ids(&[format!("{{{}}}", id(1))]), None);
+        let max = buzz_db::lifecycle::MAX_STATE_CHANNELS as u128;
+        let full: Vec<_> = (0..max).map(id).collect();
+        assert_eq!(
+            parse_lifecycle_ids(&full).map(|ids| ids.len()),
+            Some(full.len())
+        );
+        let over: Vec<_> = (0..=max).map(id).collect();
+        assert_eq!(parse_lifecycle_ids(&over), None);
+    }
+
+    /// The largest state response fits the response limit.
+    #[test]
+    fn largest_lifecycle_state_response_fits_the_response_limit() {
+        let channels: Vec<_> = (0..buzz_db::lifecycle::MAX_STATE_CHANNELS)
+            .map(|_| buzz_db::lifecycle::ChannelLifecycleState {
+                id: Uuid::max(),
+                archived_at: Some(i64::MAX),
+                deleted: true,
+                lifecycle_token: Some(Uuid::max()),
+            })
+            .collect();
+        let bytes = serde_json::to_vec(&json!({ "channels": channels }))
+            .unwrap()
+            .len();
         assert!(bytes <= auth::MAX_RESPONSE_BYTES, "{bytes} bytes");
     }
 }
