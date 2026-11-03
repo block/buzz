@@ -311,6 +311,18 @@ pub async fn resolve_admin_principal(
         .ok_or_else(ApiError::forbidden)
 }
 
+/// True when `pubkey` holds the operator role (not moderator), with the same
+/// precedence as [`lookup_admin_principal`]. A roster lookup failure is an
+/// `Err`, never "not an operator".
+pub(crate) async fn is_relay_operator(
+    state: &AppState,
+    pubkey: [u8; 32],
+) -> Result<bool, ApiError> {
+    Ok(lookup_admin_principal(state, pubkey)
+        .await?
+        .is_some_and(|p| p.role == AdminRole::Operator))
+}
+
 /// Effective staff grant for `pubkey`, same precedence as
 /// [`resolve_admin_principal`]. `Ok(None)` means "not staff"; a roster lookup
 /// failure is an `Err`, so callers fail closed instead of treating it as

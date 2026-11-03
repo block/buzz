@@ -67,6 +67,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
         onChannelTap: channelTap,
       ),
       _MarkdownLabelEntityMd(),
+      _MarkdownEscapeMd(),
       for (final component in MarkdownComponent.inlineComponents)
         component is ATagMd ? _MessageLinkMd() : component,
     ],
@@ -158,6 +159,20 @@ class _MarkdownLabelEntityMd extends InlineMd {
     String text,
     GptMarkdownConfig config,
   ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
+}
+
+// Backslash-escaped characters, held by shieldMarkdownEscapes so no other
+// syntax matches them, shown as themselves.
+class _MarkdownEscapeMd extends InlineMd {
+  @override
+  RegExp get exp => RegExp('(?:${shieldedMarkdownEscape.pattern})+');
+
+  @override
+  InlineSpan span(
+    BuildContext context,
+    String text,
+    GptMarkdownConfig config,
+  ) => TextSpan(text: unshieldMarkdownEscapes(text), style: config.style);
 }
 
 // Labels are already normalized, including literal/nested brackets. The

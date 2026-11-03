@@ -30,6 +30,12 @@ class _ThreadCursor {
   final String eventId;
 
   const _ThreadCursor({required this.createdAt, required this.eventId});
+
+  /// Whether this sorts after [other] in the relay's thread order: time, then
+  /// event id (lowercase hex, so string order is byte order).
+  bool isAfter(_ThreadCursor other) =>
+      createdAt > other.createdAt ||
+      (createdAt == other.createdAt && eventId.compareTo(other.eventId) > 0);
 }
 
 final threadRepliesProvider = FutureProvider.autoDispose
@@ -59,7 +65,10 @@ final threadRepliesProvider = FutureProvider.autoDispose
         );
       }
       try {
-        final replies = await fetchCompleteThreadReplies(session, args);
+        // Edits, reactions and deletions of the root and its replies ride
+        // along, so a reply edited before the thread opens shows that edit.
+        // Only the replies themselves feed the reply cache below.
+        final (:replies, :aux) = await fetchCompleteThread(session, args);
         // Explicit markers also settle unacknowledged local sends, whose
         // absence cannot prove deletion even in an insertion-complete scan.
         final missingIds =
@@ -111,7 +120,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
             );
           }
         }
-        return replies;
+        return [...replies, ...aux];
       } catch (_) {
         if (queryVersion != null) {
           channelMessages?.failThreadQuery(args.rootId, queryVersion);
@@ -126,8 +135,26 @@ Future<List<NostrEvent>> fetchCompleteThreadReplies(
   RelaySessionNotifier session,
   ThreadRepliesArgs args, {
   bool Function()? isCurrent,
+}) async => (await fetchCompleteThread(
+  session,
+  args,
+  isCurrent: isCurrent,
+  includeAux: false,
+)).replies;
+
+/// [fetchCompleteThreadReplies], plus the edits, reactions and deletions the
+/// relay attaches to the root and each reply page when [includeAux] is set.
+/// Pages are counted and resumed by their replies alone.
+Future<({List<NostrEvent> replies, List<NostrEvent> aux})> fetchCompleteThread(
+  RelaySessionNotifier session,
+  ThreadRepliesArgs args, {
+  bool Function()? isCurrent,
+  bool includeAux = true,
 }) async {
   final replies = <NostrEvent>[];
+  final aux = <NostrEvent>[];
+  final replyIds = <String>{};
+  final auxIds = <String>{};
   // -1 precedes unsigned Nostr timestamps. A non-null cursor selects the
   // insertion-complete route and writer-verified EOF instead of a stale head.
   _ThreadCursor? cursor = const _ThreadCursor(
@@ -139,20 +166,52 @@ Future<List<NostrEvent>> fetchCompleteThreadReplies(
       throw StateError('Thread scan superseded');
     }
     final events = await session.queryRelay([
-      _threadRepliesFilter(args, cursor),
+      _threadRepliesFilter(args, cursor, includeAux: includeAux),
     ]);
-    replies.addAll(events);
-    if (events.length < 200) return replies;
-    final last = events.last;
-    cursor = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
+    final rows = includeAux ? _leadingRows(events, args.rootId) : events;
+    for (final row in rows) {
+      if (!includeAux || replyIds.add(row.id)) replies.add(row);
+    }
+    for (final event in events.skip(rows.length)) {
+      if (auxIds.add(event.id)) aux.add(event);
+    }
+    if (rows.length < 200) return (replies: replies, aux: aux);
+    final last = rows.last;
+    final next = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
+    // A full page of real rows always moves past the cursor. One that does
+    // not was a short final page whose aux looked like rows.
+    if (includeAux && !next.isAfter(cursor!)) {
+      return (replies: replies, aux: aux);
+    }
+    cursor = next;
   }
   throw Exception('Thread ${args.rootId} exceeded the page safety limit.');
 }
 
+/// The rows of one `include_aux` thread page. The relay sends a page's rows,
+/// each a reply-marked event and at most 200, before the aux closure. The
+/// closure repeats the root's aux on every page, and a reply-marked edit or
+/// NIP-29 deletion there is also a row of some page, so the rows are the
+/// leading run of events reply-marked into this thread. Reactions and NIP-09
+/// deletions are never thread rows.
+List<NostrEvent> _leadingRows(List<NostrEvent> events, String rootId) {
+  var count = 0;
+  while (count < events.length &&
+      count < 200 &&
+      events[count].threadReference.parentId != null &&
+      events[count].threadReference.rootId == rootId &&
+      events[count].kind != EventKind.reaction &&
+      events[count].kind != EventKind.deletion) {
+    count++;
+  }
+  return events.sublist(0, count);
+}
+
 NostrFilter _threadRepliesFilter(
   ThreadRepliesArgs args,
-  _ThreadCursor? cursor,
-) {
+  _ThreadCursor? cursor, {
+  required bool includeAux,
+}) {
   return NostrFilter(
     kinds: EventKind.channelTimelineContentKinds,
     tags: {
@@ -163,6 +222,7 @@ NostrFilter _threadRepliesFilter(
     extensions: {
       // The relay binds this as signed i32. Include every representable depth.
       'depth_limit': 0x7fffffff,
+      if (includeAux) 'include_aux': true,
       if (cursor != null) 'thread_cursor': cursor.createdAt,
       if (cursor != null) 'thread_cursor_id': cursor.eventId,
     },
@@ -252,9 +312,9 @@ final threadRepliesWithLocalProvider = Provider.autoDispose
 /// Union two event lists by id, newest-wins, in timeline order.
 ///
 /// The thread view needs this to fold the channel's live socket events into its
-/// own one-shot query result: the query asks for content kinds only, so
-/// reactions, edits, and deletions that land while a thread is open never reach
-/// it on their own.
+/// own one-shot query result: the query returns the reactions, edits, and
+/// deletions that existed when it ran, so ones that land while a thread is
+/// open never reach it on their own.
 List<NostrEvent> mergeThreadEvents(
   Iterable<NostrEvent> first,
   Iterable<NostrEvent> second,

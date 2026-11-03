@@ -10,6 +10,8 @@ library;
 import '../relay/relay_validation.dart';
 import '../hosted/hosted_environment.dart';
 
+part 'agent_creation_link.dart';
+
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
   const BuzzDeepLink();
@@ -297,6 +299,7 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
 
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
+    parseAgentCreationDeepLink(uri) ??
     parseNostrBindDeepLink(uri) ??
     parseAddCommunityDeepLink(uri) ??
     parseInviteDeepLink(uri) ??

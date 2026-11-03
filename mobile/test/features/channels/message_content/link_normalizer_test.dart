@@ -182,6 +182,46 @@ void main() {
         expected: '```\n$url ``` still code\n```\n[$url]($url)',
       ),
       (
+        name: 'tilde fence indented three spaces',
+        input: '   ~~~\n$url\n   ~~~\n$url',
+        expected: '   ~~~\n$url\n   ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence opens after deeper indentation',
+        input: '    ~~~\n$url',
+        expected: '    ~~~\n$url',
+      ),
+      (
+        name: 'unclosed fence inside a quote',
+        input: '> ```sh\n> $url',
+        expected: '> ```sh\n> $url',
+      ),
+      (
+        name: 'unclosed quoted fence ends with its quote',
+        input: '> ```sh\n> $url\n\n$url',
+        expected: '> ```sh\n> $url\n\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence ends at a lazy line',
+        input: '> ```sh\n> $url\n$url',
+        expected: '> ```sh\n> $url\n[$url]($url)',
+      ),
+      (
+        name: 'top-level fence does not close on a quoted fence',
+        input: '```md\n> ```\n$url\n```\n$url',
+        expected: '```md\n> ```\n$url\n```\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence closes inside the quote',
+        input: '> ~~~\n> $url\n> ~~~\n$url',
+        expected: '> ~~~\n> $url\n> ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence closer must end its line',
+        input: '~~~\n$url\n~~~ x\n~~~\n$url',
+        expected: '~~~\n$url\n~~~ x\n~~~\n[$url]($url)',
+      ),
+      (
         name: 'unclosed backticks remain prose',
         input: '$url then `$url',
         expected: '[$url]($url) then `[$url]($url)',
@@ -193,6 +233,46 @@ void main() {
         expect(normalizeBareLinks(testCase.input), testCase.expected);
       });
     }
+
+    test('bare links leave a trailing backslash outside the destination', () {
+      expect(
+        normalizeBareLinks(r'see https://example.com/a\'),
+        r'see [https://example.com/a](https://example.com/a)\',
+      );
+      expect(
+        normalizeBareLinks(r'*https://example.com/a\**'),
+        r'*[https://example.com/a](https://example.com/a)\**',
+      );
+    });
+
+    test('a literal backslash before a bare link stays literal', () {
+      expect(
+        normalizeBareLinks(r'see \https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+      expect(
+        normalizeBareLinks(r'see \\https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+    });
+
+    test('near-limit fence-like runs on one line complete linearly', () {
+      // Each run checks only its own indentation and the rest of its line up
+      // to the next character, so a long line of runs is not rescanned.
+      for (final input in [
+        'x~~~' * (256 * 1024 ~/ 4),
+        '~~~\n${' ~~~' * (256 * 1024 ~/ 4)}',
+        '```\n${' ```' * (256 * 1024 ~/ 4)}',
+        '>' * (256 * 1024 - 3) + '~~~',
+        '> ~~~' * (256 * 1024 ~/ 5),
+      ]) {
+        final watch = Stopwatch()..start();
+        final result = normalizeBareLinks(input);
+        watch.stop();
+        expect(result == input, isTrue);
+        expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+      }
+    });
   });
 
   test(

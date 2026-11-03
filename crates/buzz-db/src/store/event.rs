@@ -927,6 +927,21 @@ pub(crate) enum ReadDeadline {
     PerRead,
 }
 
+/// Lower `conn`'s session `statement_timeout` to [`READ_STATEMENT_TIMEOUT`]
+/// unless it is already tighter. For pools whose every statement is a read:
+/// run it once per new connection (`after_connect`), so no statement on that
+/// pool is unbounded.
+pub async fn tighten_session_read_statement_timeout(
+    conn: &mut sqlx::PgConnection,
+) -> sqlx::Result<()> {
+    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+        .bind(READ_STATEMENT_TIMEOUT)
+        .bind(false)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
 /// Run an event read under [`READ_STATEMENT_TIMEOUT`] without changing the
 /// deadline for anything else on `conn`. Inside an open transaction the read
 /// takes a savepoint, so a failed or cancelled read leaves the transaction

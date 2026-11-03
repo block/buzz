@@ -80,8 +80,8 @@ class AvatarImageContent extends ConsumerStatefulWidget {
 
   /// Load the relay's small JPEG thumbnail for a small relay-hosted image
   /// (see [MediaImage.preferThumbnail]). People and agent avatars set this,
-  /// matching desktop. Leave it off for images that may be transparent, such
-  /// as community icons: the thumbnail renders transparent areas black.
+  /// matching desktop. Leave it off for images that may be transparent: the
+  /// thumbnail renders transparent areas black.
   final bool preferThumbnail;
 
   const AvatarImageContent({

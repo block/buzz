@@ -20,6 +20,8 @@ extension _UnreadCatchUp on ChannelsNotifier {
     int subscriptionGeneration,
   ) async {
     if (!_lifecycleRef.mounted) return;
+    // A catch-up that misses channels is retried, as a list read.
+    var incomplete = false;
     try {
       final myPk = _lifecycleRef.read(myPubkeyProvider);
       if (myPk == null) return;
@@ -71,7 +73,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
         failedChannelIds: failedChannelIds,
       );
       // Unavailable: keep the unread state already observed.
-      if (events == null) return;
+      if (events == null) {
+        incomplete = true;
+        return;
+      }
       // The relay round-trip above is the window Jed's probes park in: a newer
       // refresh, a community switch or an identity switch here means every
       // write below belongs to a channel list the user has left.
@@ -87,6 +92,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         cursorsAtStart: cursorsAtStart,
         mutedChannelIds: mutedChannelIds,
       );
+      incomplete = failedChannelIds.isNotEmpty;
 
       // Keep this response's deletion evidence independently of the bounded
       // cross-request tombstones: a large batch can evict its own early IDs.
@@ -186,6 +192,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         _publishUnreadCatchUp(recordedAtByChannel);
       }
     } catch (error) {
+      incomplete = true;
       if (!_lifecycleRef.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
     } finally {
@@ -195,6 +202,11 @@ extension _UnreadCatchUp on ChannelsNotifier {
           !_isCatchUpRetired(fence, subscriptionGeneration)) {
         _settledUnreadGeneration = subscriptionGeneration;
         _notifyUnreadReadinessChanged();
+        if (incomplete) {
+          _unreadCatchUpRetry.schedule(_retryUnreadCatchUp);
+        } else {
+          _unreadCatchUpRetry.cancel();
+        }
       }
     }
   }

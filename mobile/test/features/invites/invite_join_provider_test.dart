@@ -564,12 +564,102 @@ void main() {
     expect(state.requiresFreshInvite, isTrue);
     expect(
       state.errorMessage,
-      'This invite approval has expired. Re-open the invite link to try again.',
+      'Review this community’s join requirements in your browser, then return to Buzz.',
     );
 
     await container.read(inviteJoinProvider.notifier).confirmJoin();
     expect(attempts, 1);
   });
+
+  for (final receipt in <String?>[null, 'expired.receipt']) {
+    test(
+      'policy recovery preserves identity and resumes claim ($receipt)',
+      () async {
+        final secure = FakeSecureStorage();
+        final storage = CommunityStorage(secure: secure);
+        final pubkeys = <String>[];
+        final opened = <Uri>[];
+        var launches = 0;
+        final container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(storage),
+            communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+            authProvider.overrideWith(_RecordingAuthNotifier.new),
+            inviteJoinRecoveryProvider.overrideWithValue(
+              (_) => _successfulRecovery(),
+            ),
+            invitePolicyLauncherProvider.overrideWithValue((uri) async {
+              opened.add(uri);
+              return ++launches > 1;
+            }),
+            inviteJoinHttpClientProvider.overrideWithValue(
+              http_testing.MockClient((request) async {
+                final event =
+                    jsonDecode(
+                          utf8.decode(
+                            base64Decode(
+                              request.headers['Authorization']!.substring(
+                                'Nostr '.length,
+                              ),
+                            ),
+                          ),
+                        )
+                        as Map;
+                pubkeys.add(event['pubkey'] as String);
+                return (jsonDecode(request.body) as Map)['policy_receipt'] ==
+                        'fresh.receipt'
+                    ? http.Response(jsonEncode({'status': 'joined'}), 200)
+                    : http.Response(
+                        jsonEncode({'error': 'join_policy_required'}),
+                        403,
+                      );
+              }),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final notifier = container.read(inviteJoinProvider.notifier);
+        await notifier.prepare(
+          InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'code',
+            policyReceipt: receipt,
+          ),
+        );
+        await notifier.confirmJoin();
+        expect(
+          container.read(inviteJoinProvider).requiresPolicyAcceptance,
+          isTrue,
+        );
+        final pending = await secure.readAll();
+        expect(await notifier.openPolicyAcceptance(), isFalse);
+        expect(
+          container.read(inviteJoinProvider).errorMessage,
+          contains('Could not open the browser'),
+        );
+        expect(await notifier.openPolicyAcceptance(), isTrue);
+        expect(
+          opened,
+          everyElement(Uri.parse('https://relay.example.com/invite/code')),
+        );
+        expect(await secure.readAll(), pending);
+        expect(pubkeys, hasLength(1));
+        await notifier.prepare(
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'code',
+            policyReceipt: 'fresh.receipt',
+          ),
+        );
+        await notifier.confirmJoin();
+        expect(
+          container.read(inviteJoinProvider).status,
+          InviteJoinStatus.success,
+        );
+        expect(pubkeys, [pubkeys.first, pubkeys.first]);
+      },
+    );
+  }
 
   test('invite_exhausted requires a fresh invite and cannot retry', () async {
     final keys = nostr.Keys.generate();

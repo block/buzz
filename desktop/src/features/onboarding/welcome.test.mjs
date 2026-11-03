@@ -332,6 +332,25 @@ test("ensureStarterChannels resumes when one starter channel is missing", async 
   assert.equal(ensureCalls, 1);
 });
 
+test("ensureStarterChannels keeps the starters setup did not skip", async () => {
+  // welcome-everyone's name belongs to an archived channel, so the native
+  // command skips it and returns only general.
+  const general = makeChannel({
+    id: "general-channel",
+    name: "general",
+    visibility: "open",
+  });
+
+  const result = await ensureStarterChannels({
+    getChannels: async () => [],
+    ensureStarterChannels: async () => [general],
+  });
+
+  assert.equal(result.generalChannel, general);
+  assert.equal(result.welcomeChannel, null);
+  assert.deepEqual(result.channels, [general]);
+});
+
 test("isWelcomeExperienceChannel matches legacy Welcome and starter welcome-everyone", () => {
   assert.equal(isWelcomeExperienceChannel(makeChannel()), true);
   assert.equal(

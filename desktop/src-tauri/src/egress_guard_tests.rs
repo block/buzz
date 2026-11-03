@@ -293,8 +293,9 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     // Stub-relay route in the tombstone-flush gate tests; production flush
     // publishes through the guarded boundary-1 funnel.
     ("src/commands/teams/pending/tests/gate.rs", 1, 0),
-    // Accepting stub relay in the starter-channel creation tests.
-    ("src/commands/channels/starter_tests.rs", 1, 0),
+    // Stub relays in the starter-channel creation tests: one accepts every
+    // event, the other refuses channel creates.
+    ("src/commands/channels/starter_tests.rs", 2, 0),
     // Admin API: every JSON body passes the guard in
     // `helpers::send_admin_mutation` (injection tests in admin `direct_action_tests.rs`),
     // and every admin API request URL passes it before signing or sending:

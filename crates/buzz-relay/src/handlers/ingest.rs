@@ -2825,7 +2825,7 @@ async fn ingest_event_inner(
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
         // kind:3 (contact lists), kind:0 (profiles), and kind:9007 (create-group
-        // without an h-tag, which would auto-assign a server UUID).
+        // without an h-tag, which the create path also refuses).
         return Err(IngestError::AuthFailed(
             "restricted: channel-scoped tokens cannot publish global events".into(),
         ));
@@ -3190,8 +3190,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // A kind:9007 with an `h` tag creates its channel when it is stored, in the
-    // same transaction (see the storage dispatch below).
+    // A kind:9007 must carry the new channel's id in its `h` tag. It creates
+    // its channel when it is stored, in the same transaction (see the storage
+    // dispatch below).
     let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
@@ -3268,6 +3269,12 @@ async fn ingest_event_inner(
                 unlisted,
                 members,
             });
+        } else {
+            // The channel is created in the same commit as its event, so a
+            // refused create (a taken name, for example) reaches the client.
+            return Err(IngestError::Rejected(
+                "invalid: create-group must include an h tag with the new channel id".into(),
+            ));
         }
     }
 
@@ -3536,8 +3543,12 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNameTaken(_) => {
+                    IngestError::Rejected(format!("invalid: {e}"))
+                }
+                _ => IngestError::Internal(format!("error: {e}")),
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3601,6 +3612,9 @@ async fn ingest_event_inner(
             .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
+                    IngestError::Rejected(format!("invalid: {taken}"))
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
@@ -4245,7 +4259,8 @@ mod postgres_tests {
 
     #[test]
     fn create_group_does_not_require_h_tag() {
-        // kind:9007 creates the channel — h-tag is optional (client-chosen UUID)
+        // kind:9007 names its new channel in h, but the create path checks that
+        // itself (it refuses a create without one), not requires_h_channel_scope
         assert!(!requires_h_channel_scope(KIND_NIP29_CREATE_GROUP));
     }
 

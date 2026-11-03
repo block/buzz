@@ -17,6 +17,7 @@ Future<void> _presentIosEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
+  bool nativeEmojiOnly = false,
 }) async {
   // Only one native sheet owns the handler at a time. Reject a reentrant open
   // without replacing the live sheet's callbacks, and complete the rejected
@@ -28,14 +29,18 @@ Future<void> _presentIosEmojiPicker({
   _iosEmojiPickerPresenting = true;
 
   final container = ProviderScope.containerOf(context, listen: false);
-  final paletteState = container.read(customEmojiPaletteProvider);
+  final paletteState = nativeEmojiOnly
+      ? null
+      : container.read(customEmojiPaletteProvider);
   final List<CustomEmoji> customEmoji;
   BuildContext? loadingSheetContext;
   var leavingLoadingSheet = false;
   var loadingCancelled = false;
   Future<void>? loadingSheet;
 
-  if (paletteState case AsyncData(:final value)) {
+  if (nativeEmojiOnly) {
+    customEmoji = const [];
+  } else if (paletteState case AsyncData(:final value)) {
     customEmoji = value;
   } else {
     // Palette history can take the relay timeout to resolve. Give the tap an
@@ -92,6 +97,7 @@ Future<void> _presentIosEmojiPicker({
           context: context,
           onSelect: onSelect,
           onDismiss: onDismiss,
+          nativeEmojiOnly: nativeEmojiOnly,
         );
       }
       return;
@@ -156,7 +162,11 @@ Future<void> _presentIosEmojiPicker({
           for (final emoji in customEmoji)
             <String, String>{'shortcode': emoji.shortcode, 'url': emoji.url},
         ],
-        'recent': [for (final entry in recent) entry.emoji],
+        'recent': [
+          for (final entry in recent)
+            if (!nativeEmojiOnly || !entry.emoji.startsWith(':')) entry.emoji,
+        ],
+        'largeEmoji': nativeEmojiOnly,
         'skinTone': _validSkinTone(prefs.getInt(_emojiSkinTonePrefsKey)),
         'surfaceColor': colors.surface.toARGB32(),
         'controlColor': colors.surfaceContainerHighest.toARGB32(),
@@ -187,5 +197,6 @@ Future<void> _presentIosEmojiPicker({
     context: context,
     onSelect: onSelect,
     onDismiss: onDismiss,
+    nativeEmojiOnly: nativeEmojiOnly,
   );
 }
