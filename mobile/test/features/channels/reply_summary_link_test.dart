@@ -86,7 +86,7 @@ void main() {
             );
           }
           await tester.pump(const Duration(milliseconds: 100));
-          final middle = endPosition();
+          final middle = tester.getTopLeft(find.byType(SmallAvatar)).dx;
           final background =
               tester
                       .widget<DecoratedBox>(
@@ -104,7 +104,10 @@ void main() {
           if (reducedMotion) {
             expect(start, closeTo(end, 0.1));
           } else {
-            expect((end - middle).abs(), greaterThan(0.1));
+            expect(
+              (tester.getTopLeft(find.byType(SmallAvatar)).dx - middle).abs(),
+              greaterThan(0.1),
+            );
           }
           expect(tester.element(find.byType(SmallAvatar)), same(avatarElement));
           expect(

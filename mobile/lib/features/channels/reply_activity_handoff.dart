@@ -107,25 +107,28 @@ class ReplyActivityHandoff extends HookWidget {
                 ),
               if (label != null)
                 Positioned(
-                  left:
-                      (existingLabel.value ? 61 : 30) * (1 - progress) +
-                      24 * progress,
+                  left: existingLabel.value ? 61 - 37 * progress : 24,
+                  right: 0,
                   top: 0,
                   bottom: 0,
-                  width: textWidth,
-                  child: Center(
-                    child: Opacity(
-                      opacity: working || existingLabel.value ? 1 : progress,
-                      child: Transform.scale(
-                        scale: working || existingLabel.value
-                            ? 1
-                            : 0.95 + 0.05 * progress,
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          label!,
-                          style: style,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: Alignment.centerRight,
+                      minWidth: textWidth,
+                      maxWidth: textWidth,
+                      child: Opacity(
+                        opacity: working || existingLabel.value ? 1 : progress,
+                        child: Transform.scale(
+                          scale: working || existingLabel.value
+                              ? 1
+                              : 0.95 + 0.05 * progress,
+                          alignment: Alignment.centerRight,
+                          child: Text(
+                            label!,
+                            style: style,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                     ),
