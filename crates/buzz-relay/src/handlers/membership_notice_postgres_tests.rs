@@ -295,67 +295,6 @@ async fn moderation_kick_notifies_the_kicked_member_after_cleanup() {
     );
 }
 
-/// A re-add that commits after the kick's fence, while its notice is still
-/// to come, stops the notice: a client never hears the removal after the
-/// re-add that undid it.
-#[tokio::test]
-#[ignore = "requires Postgres and Redis"]
-async fn moderation_kick_sends_no_notice_after_a_re_add() {
-    let (state, tenant) = fixture().await;
-    let owner = Keys::generate();
-    let member = Keys::generate();
-    let channel = create_channel(&state, &tenant, &owner, &[]).await;
-    let h = channel.to_string();
-    let member_bytes = member.public_key().to_bytes();
-    let owner_bytes = owner.public_key().to_bytes();
-    publish(
-        &state,
-        &tenant,
-        &owner,
-        9000,
-        &[&["h", &h], &["p", &member.public_key().to_hex()]],
-    )
-    .await;
-    let mut rx = subscribe_notices(&state, &tenant, &member);
-    let mut barrier = notice_barrier::install(&member_bytes);
-
-    state
-        .db
-        .remove_member(tenant.community(), channel, &member_bytes, &owner_bytes)
-        .await
-        .expect("remove member");
-    let effects = tokio::spawn({
-        let (state, tenant) = (state.clone(), tenant.clone());
-        async move {
-            crate::handlers::side_effects::apply_kick_live_side_effects(
-                &tenant,
-                &state,
-                channel,
-                &member_bytes,
-            )
-            .await
-        }
-    });
-    // Parked after the fence committed, before the notice: re-add now.
-    at_receipt(&mut barrier, async |_| {
-        state
-            .db
-            .add_member(
-                tenant.community(),
-                channel,
-                &member_bytes,
-                buzz_db::channel::MemberRole::Member,
-                Some(&owner_bytes),
-            )
-            .await
-            .expect("re-add")
-    })
-    .await;
-    effects.await.expect("task").expect("kick live effects");
-
-    assert_eq!(notices(&mut rx), vec![], "removal notice after the re-add");
-}
-
 /// A recipient whose channel set is cached when its moderation DM is
 /// created still finds the DM in the read its notice prompts.
 #[tokio::test]

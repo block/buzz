@@ -1313,28 +1313,6 @@ impl MembershipRemovalFence {
         self.tx.commit().await?;
         Ok(affected)
     }
-
-    /// Insert `event` on this guard's connection, so it is written while the
-    /// lock still holds off a re-add. It is readable once [`Self::commit`]
-    /// runs.
-    pub async fn insert_event(
-        &mut self,
-        event: &nostr::Event,
-        channel_id: Option<Uuid>,
-    ) -> crate::Result<(buzz_core::StoredEvent, bool)> {
-        let result =
-            crate::event::insert_event_in_transaction(&mut self.tx, event, channel_id).await?;
-        if result.1 {
-            crate::insert_mentions_in_transaction(&mut self.tx, event, channel_id).await?;
-        }
-        Ok(result)
-    }
-
-    /// Commit the transaction, releasing the advisory lock.
-    pub async fn commit(self) -> crate::Result<()> {
-        self.tx.commit().await?;
-        Ok(())
-    }
 }
 
 /// Acquire the per-channel membership advisory lock and check whether the
