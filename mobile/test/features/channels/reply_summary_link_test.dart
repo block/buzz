@@ -4,6 +4,7 @@ import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -101,6 +102,19 @@ void main() {
           expect(background.color!.a, reducedMotion ? 0 : closeTo(0.5, 0.1));
           await tester.pump(const Duration(milliseconds: 150));
           final end = endPosition();
+          final paragraph = tester.renderObject<RenderParagraph>(
+            find.text('1 reply'),
+          );
+          final glyphBox = paragraph
+              .getBoxesForSelection(
+                const TextSelection(baseOffset: 0, extentOffset: 7),
+              )
+              .first
+              .toRect();
+          expect(
+            paragraph.localToGlobal(glyphBox.center).dy,
+            closeTo(tester.getCenter(find.byType(SmallAvatar)).dy, 1),
+          );
           expect(
             end,
             closeTo(mirrored ? lane.right - 32 : lane.left + 32, 0.1),

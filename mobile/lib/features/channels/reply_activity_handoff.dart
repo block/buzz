@@ -117,6 +117,8 @@ class ReplyActivityHandoff extends HookWidget {
                   child: ClipRect(
                     child: OverflowBox(
                       alignment: Alignment.centerRight,
+                      minHeight: 0,
+                      maxHeight: height,
                       minWidth: textWidth,
                       maxWidth: textWidth,
                       child: Opacity(
