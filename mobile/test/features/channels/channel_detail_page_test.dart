@@ -276,6 +276,10 @@ Widget _buildTestable({
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
+
+  /// The channel's own history in a personal chat, which [messagesNotifier]
+  /// does not back there.
+  _FakeMessagesNotifier? channelMessagesNotifier,
   _FakeTypingNotifier? typingNotifier,
   _FakeTypingNotifier? huddleTypingNotifier,
   String? canvasContent,
@@ -351,7 +355,7 @@ Widget _buildTestable({
         videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
-            ? _FakeMessagesNotifier(messages)
+            ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
             : fakeMessagesNotifier,
       ),
       channelTypingProvider(
@@ -692,6 +696,76 @@ void main() {
       },
     );
   }
+  testWidgets('a saved Bestie welcome keeps a way to older history', (
+    tester,
+  ) async {
+    List<NostrEvent> hiddenPage(int page) => [
+      for (var i = 0; i < 3; i++)
+        _systemMsg(
+          id: 'join$page-$i',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'user$page-$i',
+            'target': 'user$page-$i',
+          },
+          createdAt: 10000 - page * 10 - i,
+        ),
+    ];
+    final messagesNotifier = _FakeMessagesNotifier(
+      hiddenPage(0),
+      olderPages: [
+        for (var page = 1; page <= 5; page++) hiddenPage(page),
+        [_textMsg(id: 'old', pubkey: 'agent', content: 'Older chat')],
+      ],
+    );
+    final dm = Channel(
+      id: _channelId,
+      name: 'Bestie',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'self',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      participantPubkeys: const ['self', 'agent'],
+      isMember: true,
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        signingPubkey: 'self',
+        bestie: 'agent',
+        organization: Stream.value(const MeGroups()),
+        channel: dm,
+        messages: const [],
+        channelMessagesNotifier: messagesNotifier,
+        home: const Scaffold(
+          body: DefaultAgentLauncher(onChooseAgent: _noAgentChoice),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(DefaultAgentLauncher)),
+    );
+    await saveBestieWelcome(
+      container.read(savedPrefsProvider),
+      container.read(meSyncProvider),
+      _channelId,
+      'agent',
+    );
+    await tester.tap(find.byType(IconButton));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BestieWelcome), findsOneWidget);
+    expect(messagesNotifier.fetchOlderCalls, 5);
+    expect(find.text('Load earlier messages'), findsOneWidget);
+
+    await tester.tap(find.text('Load earlier messages'));
+    await tester.pumpAndSettle();
+    expect(findRichText('Older chat'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   for (final hasHistory in [true, false]) {
     testWidgets('a saved Bestie welcome stays at the start of its chat: '
         'history=$hasHistory', (tester) async {
@@ -5464,9 +5538,22 @@ void main() {
             createdAt: 1000 + i,
           ),
       ];
+      // A page of only hidden notices sits between, adding no entry.
+      final hiddenPage = [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$i',
+              'target': 'user$i',
+            },
+            createdAt: 1049,
+          ),
+      ];
       final messagesNotifier = _FakeMessagesNotifier(
         newestPage,
-        olderPages: [olderPage],
+        olderPages: [hiddenPage, olderPage],
       );
       final channelsNotifier = _FakeChannelsNotifier(
         [_testChannel],
@@ -5506,7 +5593,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(messagesNotifier.fetchOlderCalls, 1);
+      expect(messagesNotifier.fetchOlderCalls, 2);
       await tester.tap(
         find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
       );
@@ -10883,6 +10970,53 @@ void main() {
 
       expect(messagesNotifier.fetchOlderCalls, 8);
       expect(findRichText('Older chat'), findsOneWidget);
+    });
+
+    testWidgets('caps hidden-only paging after one scroll', (tester) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'chat$i',
+              pubkey: 'alice',
+              content: 'Chat $i',
+              createdAt: 20000 + i,
+            ),
+        ],
+        olderPages: [for (var page = 1; page <= 20; page++) hiddenPage(page)],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final before = messagesNotifier.fetchOlderCalls;
+
+      await tester.drag(
+        find.byKey(const ValueKey('channel-message-list')),
+        const Offset(0, 20000),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls - before, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
     });
 
     testWidgets('fills a short collapsed history without a scroll', (

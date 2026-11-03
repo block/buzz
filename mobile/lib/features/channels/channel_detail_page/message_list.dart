@@ -236,6 +236,7 @@ class _MessageList extends HookConsumerWidget {
         initialOldestOrdinaryUnreadMessageId,
         initialForcedUnreadMessageIds,
         entries.length,
+        allMessages.length, // A page of hidden notices adds no entry.
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,
       ],
@@ -562,11 +563,12 @@ class _MessageList extends HookConsumerWidget {
               oldestVisible < displayEntries.length - 3 ||
               isLoadingOlder.value ||
               navigatingOldest.value ||
-              olderFetchPaused.value) {
+              olderFetchPaused.value ||
+              viewportFillPages.value >= _maxAutoOlderPages) {
             return;
           }
           if (notifier.reachedOldest) return;
-          if (fills) viewportFillPages.value++;
+          viewportFillPages.value++;
           _fetchOlderPage(
             context,
             notifier,
@@ -830,12 +832,9 @@ class _MessageList extends HookConsumerWidget {
 
     final hiddenHistory = _useHiddenHistoryPaging(
       context: context,
-      active:
-          entries.isEmpty &&
-          !notifier.reachedOldest &&
-          allMessages.any(isHiddenMembershipNotice),
+      noRows: entries.isEmpty,
+      loaded: allMessages,
       notifier: notifier,
-      loadedCount: allMessages.length,
       isLoadingOlder: isLoadingOlder,
       olderFetchPaused: olderFetchPaused,
     );
@@ -878,6 +877,7 @@ class _MessageList extends HookConsumerWidget {
           child: Column(
             children: [
               BestieWelcome(agent: welcomeAgent!),
+              ?hiddenHistory,
               if (displayedTyping.isNotEmpty)
                 InlineAgentTyping(
                   channelId: channelId,

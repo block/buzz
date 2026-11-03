@@ -6,19 +6,21 @@ part of '../channel_detail_page.dart';
 const _maxAutoOlderPages = 5;
 
 /// A loaded page can hold only hidden self-joins and leaves, leaving no row to
-/// scroll for older history. While [active], pages older history automatically
-/// until something renders, at most [_maxAutoOlderPages] times, and
-/// returns what to show in place of the empty list: a loading indicator, or a
-/// button that resumes paging after the cap or a failed fetch. Null when not
-/// [active].
+/// scroll for older history. While nothing renders ([noRows]) but hidden
+/// notices are [loaded] and older history remains, pages older history
+/// automatically, at most [_maxAutoOlderPages] times. Returns what to show in
+/// place of the empty list: a loading indicator, or a button that resumes
+/// paging after the cap or a failed fetch. Null otherwise.
 Widget? _useHiddenHistoryPaging({
   required BuildContext context,
-  required bool active,
+  required bool noRows,
+  required List<TimelineMessage> loaded,
   required ChannelMessagesNotifier notifier,
-  required int loadedCount,
   required ValueNotifier<bool> isLoadingOlder,
   required ObjectRef<bool> olderFetchPaused,
 }) {
+  final active =
+      noRows && !notifier.reachedOldest && loaded.any(isHiddenMembershipNotice);
   final autoPages = useRef(0);
   final resume = useState(0);
   if (!active) autoPages.value = 0;
@@ -37,7 +39,7 @@ Widget? _useHiddenHistoryPaging({
       }),
     );
     return () => cancelled = true;
-  }, [active, loadedCount, isLoadingOlder.value, resume.value]);
+  }, [active, loaded.length, isLoadingOlder.value, resume.value]);
 
   if (!active) return null;
   if (isLoadingOlder.value || (!capped && !olderFetchPaused.value)) {
@@ -82,8 +84,9 @@ bool _oldestRowFits(Iterable<ItemPosition> positions, int rowCount) =>
 
 /// History that fits the viewport can't be scrolled (Android clamping), so
 /// while the loaded rows [fits] the viewport and the user hasn't [scrolled],
-/// older pages are fetched automatically ([fills]) up to [_maxAutoOlderPages];
-/// then, or after a [paused] failure, the list offers a button.
+/// older pages are fetched automatically ([fills]). Every automatic fetch
+/// since the last scroll gesture counts toward [_maxAutoOlderPages]; at the
+/// cap, or after a [paused] failure, the list offers a button.
 ({bool fills, bool offerLoadEarlier}) _viewportFill({
   required bool fits,
   required bool scrolled,
@@ -99,7 +102,7 @@ bool _oldestRowFits(Iterable<ItemPosition> positions, int rowCount) =>
         fits &&
         !reachedOldest &&
         !busy &&
-        (paused || (!scrolled && pages >= _maxAutoOlderPages)),
+        (paused || pages >= _maxAutoOlderPages),
   );
 }
 
