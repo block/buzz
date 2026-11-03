@@ -486,7 +486,7 @@ void main() {
       expect(find.text('Connect'), findsNothing);
     });
 
-    testWidgets('pairing actions are disabled when connecting', (tester) async {
+    testWidgets('connection progress replaces pairing actions', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(
           overrides: [
@@ -497,13 +497,12 @@ void main() {
       );
       await tester.pump();
 
-      final scanButton = tester.widget<FilledButton>(find.byType(FilledButton));
-      final pairingCodeButton = tester.widget<TextButton>(
-        find.widgetWithText(TextButton, 'Use pairing code'),
+      expect(
+        find.byKey(const Key('pairing-community-loading')),
+        findsOneWidget,
       );
-
-      expect(scanButton.onPressed, isNull);
-      expect(pairingCodeButton.onPressed, isNull);
+      expect(find.text('Scan a QR code'), findsNothing);
+      expect(find.text('Use pairing code'), findsNothing);
     });
 
     testWidgets('recovery entry rejects ordinary nostrpair codes', (

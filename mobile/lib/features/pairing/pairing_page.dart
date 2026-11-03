@@ -241,6 +241,7 @@ class PairingPage extends HookConsumerWidget {
         : null;
 
     final showLoading =
+        pairingState.status == PairingStatus.connecting ||
         pairingState.status == PairingStatus.transferring ||
         pairingState.status == PairingStatus.storing ||
         pairingState.status == PairingStatus.success;
