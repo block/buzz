@@ -44,6 +44,7 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../activity/compose_drafts_provider.dart';
 import 'camera_capture_cleanup.dart';
+import 'composer_file_drop.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';

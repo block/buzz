@@ -834,6 +834,34 @@ class ComposeBar extends HookConsumerWidget {
     Future<void> retainAndQueueImages(List<XFile> images) =>
         prepare(() => _retainAndQueueImages(context, images, queueImages));
 
+    final dropHandler = useRef<ValueChanged<ComposerDrop>?>(null);
+    dropHandler.value = (drop) {
+      if (!context.mounted) return;
+      if (drop.files.isEmpty) {
+        if (drop.failures > 0) {
+          uploadError.value = 'Unable to read dropped file.';
+        }
+        return;
+      }
+      for (final dropped in drop.files) {
+        queueAttachment(
+          XFile(dropped.path, name: dropped.name, mimeType: dropped.mimeType),
+          _droppedAttachmentKind(dropped.mimeType),
+          deleteAfterUse: true,
+        );
+      }
+      if (drop.failures > 0 && uploadError.value == null) {
+        uploadError.value = drop.failures == 1
+            ? 'One dropped file could not be read.'
+            : '${drop.failures} dropped files could not be read.';
+      }
+    };
+    final fileDrop = ref.watch(composerFileDropProvider);
+    useEffect(() {
+      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+      return fileDrop.register((drop) => dropHandler.value?.call(drop));
+    }, [fileDrop]);
+
     final pasteClipboardImage = useCallback(() {
       ContextMenuController.removeAny();
       unawaited(
