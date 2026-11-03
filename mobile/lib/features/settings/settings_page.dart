@@ -159,8 +159,8 @@ class _VersionFooter extends StatelessWidget {
         child: Semantics(
           button: true,
           onTapHint: 'Copy version',
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(Grid.xs),
             onTap: () =>
                 copyToClipboard(context, label, message: 'Version copied'),
             child: Padding(
