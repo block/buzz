@@ -4404,20 +4404,39 @@ pub(crate) mod tests {
             own_banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
         };
-        // Every waiter holds a clone of the leader's gate while it waits, so
-        // the gate's count proves all of them reached it before the cache
-        // is filled; none can take the initial cache-hit path instead.
-        async fn enrolled(gate: Option<Arc<tokio::sync::Mutex<()>>>, waiters: usize) {
-            let gate = gate.expect("the leader's gate");
-            let base = Arc::strong_count(&gate);
+        // On this current-thread runtime a waiter's first poll runs without
+        // interruption from its count to its first await, the wait on the
+        // leader's gate. Once all have counted, all are waiting at the gate,
+        // so none can take the initial cache-hit path when the cache is
+        // filled. (The gate's `Arc` count is no proof: the cache may hold a
+        // transient clone of its own.)
+        async fn enrolled(started: &std::sync::atomic::AtomicUsize, waiters: usize) {
             let start = Instant::now();
-            while Arc::strong_count(&gate) < base + waiters {
+            while started.load(std::sync::atomic::Ordering::SeqCst) < waiters {
+                // A watchdog only; timing is not part of what is checked.
                 assert!(
-                    start.elapsed() < std::time::Duration::from_millis(500),
+                    start.elapsed() < std::time::Duration::from_secs(10),
                     "waiters did not reach the gate"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
+        }
+        fn spawn_waiters<T: Send + 'static, F>(
+            started: &Arc<std::sync::atomic::AtomicUsize>,
+            read: impl Fn() -> F,
+        ) -> Vec<tokio::task::JoinHandle<T>>
+        where
+            F: std::future::Future<Output = T> + Send + 'static,
+        {
+            (0..8)
+                .map(|_| {
+                    let (started, read) = (Arc::clone(started), read());
+                    tokio::spawn(async move {
+                        started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        read.await
+                    })
+                })
+                .collect()
         }
 
         let leader = state
@@ -4425,20 +4444,12 @@ pub(crate) mod tests {
             .turn((community, pubkey.clone()))
             .await
             .expect("no read in flight");
-        let waiters = (0..8)
-            .map(|_| {
-                let state = Arc::clone(&state);
-                let pubkey = pubkey.clone();
-                tokio::spawn(
-                    async move { state.restriction_state_cached(community, &pubkey).await },
-                )
-            })
-            .collect::<Vec<_>>();
-        enrolled(
-            state.restriction_reads.gate(&(community, pubkey.clone())),
-            waiters.len(),
-        )
-        .await;
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waiters = spawn_waiters(&started, || {
+            let (state, pubkey) = (Arc::clone(&state), pubkey.clone());
+            async move { state.restriction_state_cached(community, &pubkey).await }
+        });
+        enrolled(&started, waiters.len()).await;
         state.seed_restriction((community, pubkey.clone()), muted.clone());
         drop(leader);
         for waiter in waiters {
@@ -4451,14 +4462,12 @@ pub(crate) mod tests {
             .turn(host.clone())
             .await
             .expect("no read in flight");
-        let waiters = (0..8)
-            .map(|_| {
-                let state = Arc::clone(&state);
-                let host = host.clone();
-                tokio::spawn(async move { state.resolve_host(&host).await })
-            })
-            .collect::<Vec<_>>();
-        enrolled(state.tenant_host_reads.gate(&host), waiters.len()).await;
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waiters = spawn_waiters(&started, || {
+            let (state, host) = (Arc::clone(&state), host.clone());
+            async move { state.resolve_host(&host).await }
+        });
+        enrolled(&started, waiters.len()).await;
         state
             .tenant_host_cache
             .insert(host.clone(), (community, Instant::now()));
