@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -14,7 +15,7 @@ use axum::{
 };
 use serde_json::json;
 use tower::ServiceExt;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::{HttpMakeClassifier, TraceLayer};
@@ -1006,10 +1007,26 @@ async fn mesh_status_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
     }
 }
 
+/// How long a browser may reuse a preflight answer. Without `Access-Control-Max-Age`,
+/// browsers fall back to 5 seconds, so every authenticated `GET /media/*` a web client
+/// repeats pays another `OPTIONS` round trip. Chromium caps this at 2 hours.
+const CORS_PREFLIGHT_MAX_AGE: Duration = Duration::from_secs(600);
+
 /// Build a CORS layer from the configured origins list.
+///
+/// Request headers are mirrored rather than answered with `*`: the Fetch standard does not
+/// let a wildcard cover `Authorization`, so a `*` answer is never cached for the Blossom and
+/// NIP-98 requests a browser client sends, and each one is preceded by its own preflight.
+/// Mirroring allows exactly the same headers as before.
 fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     if cors_origins.is_empty() {
-        return CorsLayer::permissive();
+        // `CorsLayer::permissive()`, with mirrored request headers (see above).
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(AllowHeaders::mirror_request())
+            .expose_headers(Any)
+            .max_age(CORS_PREFLIGHT_MAX_AGE);
     }
 
     let origins: Vec<axum::http::HeaderValue> = cors_origins
@@ -1028,8 +1045,9 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+        .allow_methods(Any)
+        .allow_headers(AllowHeaders::mirror_request())
+        .max_age(CORS_PREFLIGHT_MAX_AGE)
 }
 
 #[cfg(test)]
@@ -4564,5 +4582,72 @@ mod tests {
         .await;
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(verifier.calls(), 1);
+    }
+
+    async fn preflight(layer: CorsLayer, origin: &str) -> axum::http::Response<Body> {
+        let app = Router::new()
+            .route("/media/{blob}", get(|| async { "blob" }))
+            .layer(layer);
+        app.oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/media/abc")
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,x-auth-tag",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn development_cors_names_authorization_so_browsers_cache_the_preflight() {
+        let resp = preflight(build_cors_layer(&[]), "http://localhost:5173").await;
+        let headers = resp.headers();
+        assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(
+            headers[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "authorization,x-auth-tag"
+        );
+        assert_eq!(headers[header::ACCESS_CONTROL_MAX_AGE], "600");
+    }
+
+    #[tokio::test]
+    async fn listed_origin_cors_names_authorization_so_browsers_cache_the_preflight() {
+        let layer = build_cors_layer(&["https://app.example".to_string()]);
+        let resp = preflight(layer, "https://app.example").await;
+        let headers = resp.headers();
+        assert_eq!(
+            headers[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://app.example"
+        );
+        assert_eq!(
+            headers[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "authorization,x-auth-tag"
+        );
+        assert_eq!(headers[header::ACCESS_CONTROL_MAX_AGE], "600");
+        let vary: Vec<_> = headers.get_all(header::VARY).iter().collect();
+        assert!(
+            vary.iter().any(|v| v
+                .to_str()
+                .unwrap()
+                .contains("access-control-request-headers")),
+            "mirrored headers must vary on the request header list: {vary:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlisted_origin_gets_no_cors_grant() {
+        let layer = build_cors_layer(&["https://app.example".to_string()]);
+        let resp = preflight(layer, "https://evil.example").await;
+        assert!(resp
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
     }
 }
