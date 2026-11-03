@@ -1294,12 +1294,11 @@ impl Client {
                 waiting.insert(req.id, waited);
             }
 
-            let probe_deadline = probe.as_ref().map(|p| p.sent + self.req_timeout);
             let due = [
                 activity.due(),
                 Some(self.next_tick),
                 next_renewal,
-                probe_deadline,
+                probe.as_ref().map(|p| p.sent + self.req_timeout),
             ]
             .into_iter()
             .flatten()
@@ -1395,15 +1394,13 @@ impl Client {
             // A REQ past its deadline: a replay or a replacement is closed (a
             // replacement keeps the batch it would have replaced, and the next
             // tick tries again); a connection's live route stays open, and
-            // establishes as cut, since it may have missed history. A backlog
-            // still in hand may hold an EOSE in time, so its deadlines wait
-            // for the next pass.
-            let expired: Vec<String> = waiting
+            // establishes as cut, since it may have missed history.
+            let timed_out: Vec<String> = waiting
                 .iter()
-                .filter(|(_, w)| !backlogged && w.sent.elapsed() >= self.req_timeout)
+                .filter(|(_, w)| expired(w.sent.elapsed(), self.req_timeout, backlogged))
                 .map(|(id, _)| id.clone())
                 .collect();
-            for id in expired {
+            for id in timed_out {
                 let Some(w) = waiting.remove(&id) else {
                     continue;
                 };
@@ -1421,11 +1418,10 @@ impl Client {
                 }
             }
 
-            // A probe nothing answered: the socket stopped delivering.
-            if !backlogged && probe_deadline.is_some_and(|d| Instant::now() >= d) {
-                if let Some(p) = probe.take() {
-                    p.pending.err("probe timeout");
-                }
+            // A probe nothing answered: the socket stopped delivering. Any
+            // frame drained above has answered it.
+            if let Some(p) = probe.take_if(|p| p.sent.elapsed() >= self.req_timeout) {
+                p.pending.err("probe timeout");
                 break End::Failed;
             }
 
@@ -1446,8 +1442,17 @@ impl Client {
                 }
             }
 
-            // A publish's OK is a frame too, though the step consumes it.
-            let before = activity.due();
+            // While a deadline waits on the backlog, the pass only drains: a
+            // publish waiting for its OK, or a tick, could outlast the
+            // deferral and expire an EOSE already in hand.
+            if backlogged
+                && waiting
+                    .values()
+                    .any(|w| w.sent.elapsed() >= self.req_timeout)
+            {
+                continue;
+            }
+
             let step = activity
                 .step(
                     &shared,
@@ -1460,7 +1465,15 @@ impl Client {
                 )
                 .await;
             match step {
-                Ok(Step::Continue) => heard |= activity.due() != before,
+                Ok(Step::Continue) => {}
+                // A publish's OK is a frame too, though the step consumed it;
+                // one in time answers the probe.
+                Ok(Step::Answered) => {
+                    heard = true;
+                    if let Some(p) = probe.take_if(|p| p.sent.elapsed() < self.req_timeout) {
+                        p.pending.ok();
+                    }
+                }
                 Ok(Step::SessionEnd) => break End::Dropped,
                 Err(e) => break disconnected(e),
             }
@@ -1529,6 +1542,14 @@ impl Client {
         self.caught_up = establishment.caught_up();
         end
     }
+}
+
+/// Whether a REQ that has waited `waited` for its EOSE is judged expired. A
+/// backlog still in hand may hold the EOSE in time, so its deadline waits for
+/// the next pass, but at most one more `timeout`: traffic that keeps every
+/// pass full does not defer it forever.
+fn expired(waited: Duration, timeout: Duration, backlogged: bool) -> bool {
+    waited >= timeout && (!backlogged || waited >= timeout * 2)
 }
 
 async fn close(conn: &mut NostrWsConnection, id: &str) -> Result<(), WsClientError> {
@@ -1945,9 +1966,9 @@ mod tests {
     }
 
     /// A loopback relay that challenges, accepts AUTH and every EVENT (its OK
-    /// `ok_delay` late), answers each REQ per `plan` and records REQs and
-    /// CLOSEs. With `drop_first`, it closes its first connection that long
-    /// after accepting it.
+    /// `ok_delay` late), answers each REQ per `plan` and records REQs,
+    /// CLOSEs and EVENTs (by kind). With `drop_first`, it closes its first
+    /// connection that long after accepting it.
     async fn fake_ws_relay(
         plan: Plan,
         drop_first: Option<Duration>,
@@ -1996,7 +2017,10 @@ mod tests {
                     while let Some(Ok(Message::Text(raw))) = stream.next().await {
                         let frame: Value = serde_json::from_str(&raw).unwrap();
                         let verb = frame[0].as_str().unwrap_or_default().to_string();
-                        let id = frame[1].as_str().unwrap_or_default().to_string();
+                        let id = match frame[1].get("kind") {
+                            Some(kind) => kind.to_string(),
+                            None => frame[1].as_str().unwrap_or_default().to_string(),
+                        };
                         match verb.as_str() {
                             "AUTH" => {
                                 let _ = tx.send(text(json!(["OK", frame[1]["id"], true, ""])));
@@ -2022,7 +2046,7 @@ mod tests {
                             }
                             _ => {}
                         }
-                        if verb == "REQ" || verb == "CLOSE" {
+                        if matches!(verb.as_str(), "REQ" | "CLOSE" | "EVENT") {
                             seen.lock().unwrap().push((index, verb, id));
                         }
                     }
@@ -2033,7 +2057,7 @@ mod tests {
     }
 
     /// Reads the fake API fails once each, by name: `roster`, `read_state`,
-    /// `unread`, `reminders`.
+    /// `unread`, `reminders`, `roots`.
     type FailOnce = &'static [&'static str];
 
     /// A read the fake API answers late, by name, and how late.
@@ -2100,6 +2124,8 @@ mod tests {
                 "read_state"
             } else if filter["kinds"] == json!([30300]) {
                 "reminders"
+            } else if filter["kinds"] == json!([9]) && filter.get("authors").is_some() {
+                "roots"
             } else {
                 ""
             };
@@ -2144,11 +2170,12 @@ mod tests {
     }
 
     /// `humans` desktop humans in one community of 25 channels, each in
-    /// `joined`, with two windows and one thread open and no traffic of
-    /// their own.
+    /// `joined`, with two windows and one thread open and only the traffic
+    /// of their own that `rig` sets.
     fn desktops(rig: &Rig, ws: &str, http: &str) -> Scenario {
         let (humans, joined, desktop) = (rig.humans, rig.joined, &rig.desktop);
-        let presence = rig.presence_secs;
+        let (presence, messages, reactions) =
+            (rig.presence_secs, rig.messages_per_hour, rig.reactions_per_hour);
         Scenario::parse(&format!(
             r#"
 run_id = "d"
@@ -2165,8 +2192,9 @@ channels_per_member = {joined}
 [human]
 presence_interval_secs = {presence:?}
 typing_per_hour = 0.0
-messages_per_hour = 0.0
-reactions_per_hour = 0.0
+messages_per_hour = {messages:?}
+reactions_per_hour = {reactions:?}
+thread_reply_fraction = 1.0
 history_limit = 1
 [desktop]
 fraction = 1.0
@@ -2258,8 +2286,11 @@ hold_secs = 1
         req_timeout: Duration,
         /// How late the relay acknowledges each EVENT.
         ok_delay: Duration,
-        /// The humans' presence interval; their only traffic of their own.
+        /// The humans' presence interval.
         presence_secs: f64,
+        /// Their messages, each a thread reply, and reactions.
+        messages_per_hour: f64,
+        reactions_per_hour: f64,
     }
 
     /// One client, with a co-member whose profile it reads.
@@ -2283,6 +2314,8 @@ hold_secs = 1
             req_timeout: REQ_TIMEOUT,
             ok_delay: Duration::ZERO,
             presence_secs: 3600.0,
+            messages_per_hour: 0.0,
+            reactions_per_hour: 0.0,
         }
     }
 
@@ -2960,5 +2993,110 @@ hold_secs = 1
             out.frames
         );
         assert_eq!(out.count("ws_connect_auth"), 2, "{:?}", out.ops);
+    }
+
+    #[test]
+    fn a_backlog_defers_a_deadline_by_at_most_one_more_timeout() {
+        let t = Duration::from_secs(10);
+        let s = Duration::from_secs;
+        assert!(!expired(s(9), t, false));
+        assert!(expired(s(10), t, false));
+        // A backlog may hold the EOSE: wait for it, but not forever.
+        assert!(!expired(s(10), t, true));
+        assert!(!expired(s(19), t, true));
+        assert!(expired(s(20), t, true));
+    }
+
+    #[tokio::test]
+    async fn a_long_backlog_behind_slow_oks_keeps_its_timely_eoses() {
+        // Every REQ replays 600 events, more than one pass drains, with its
+        // EOSE 1.2 s late, while heartbeats each second wait 3.5 s for OKs.
+        // No heartbeat may run between the backlog's passes: a second OK
+        // wait would outlast the deferral.
+        let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
+        rig.presence_secs = 1.0;
+        rig.ok_delay = Duration::from_millis(3_500);
+        rig.req_timeout = Duration::from_millis(2_500);
+        rig.plan = Arc::new(|_, _| (600, Duration::from_millis(1_200)));
+        let out = drive(rig, Duration::ZERO, |o| {
+            o.count("publish_ephemeral_ok") >= 2 && o.count("desktop_live_eose") >= 4
+        })
+        .await;
+        assert_eq!(out.errors("desktop_live_eose"), 0, "{:?}", out.ops);
+        assert_eq!(out.count("desktop_live_eose"), 4, "{:?}", out.ops);
+    }
+
+    #[tokio::test]
+    async fn a_probe_answered_behind_a_late_ok_does_not_reconnect() {
+        // Ticks every 0.25 s; a heartbeat every 1 s waits 0.5 s for its OK.
+        // The tick after an OK hears it, so the next one, 0.25 s before the
+        // next heartbeat, probes. The probe's EOSE comes 0.3 s later, while
+        // that heartbeat waits, and is read once its OK comes, after the
+        // probe's 0.7 s deadline.
+        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 0.25");
+        rig.presence_secs = 1.0;
+        rig.ok_delay = Duration::from_millis(500);
+        rig.req_timeout = Duration::from_millis(700);
+        rig.plan = Arc::new(|_, id| {
+            let late = if id.starts_with("probe-") { 300 } else { 0 };
+            (0, Duration::from_millis(late))
+        });
+        let out = drive(rig, Duration::ZERO, |o| o.saw("REQ", "probe-3")).await;
+        assert_eq!(out.errors("desktop_probe"), 0, "{:?}", out.ops);
+        assert!(out.count("desktop_probe") >= 1, "{:?}", out.ops);
+        assert_eq!(out.count("ws_connect_auth"), 1, "{:?}", out.ops);
+        assert!(out.frames.iter().all(|(conn, ..)| *conn == 0), "{:?}", out.frames);
+    }
+
+    #[tokio::test]
+    async fn a_publish_ok_in_time_answers_an_outstanding_probe() {
+        // No probe ever gets its EOSE. Ticks every 0.5 s; a heartbeat every
+        // second waits 0.2 s for its OK. A probe follows a silent tick, and
+        // the next heartbeat's OK comes well inside its 3 s deadline.
+        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 0.5");
+        rig.presence_secs = 1.0;
+        rig.ok_delay = Duration::from_millis(200);
+        rig.req_timeout = Duration::from_secs(3);
+        rig.plan = Arc::new(|_, id| {
+            let late = if id.starts_with("probe-") { 60 } else { 0 };
+            (0, Duration::from_secs(late))
+        });
+        let out = drive(rig, Duration::ZERO, |o| o.saw("REQ", "probe-2")).await;
+        assert_eq!(out.errors("desktop_probe"), 0, "{:?}", out.ops);
+        assert!(out.count("desktop_probe") >= 1, "{:?}", out.ops);
+        assert_eq!(out.count("ws_connect_auth"), 1, "{:?}", out.ops);
+    }
+
+    #[tokio::test]
+    async fn a_reaction_with_no_target_is_not_heard_as_a_frame() {
+        // Reactions come several times a second but have nothing to react
+        // to, so nothing is sent and nothing comes back: a silent tick
+        // still probes.
+        let mut rig = solo(5, "mode = \"current\"\ntick_secs = 0.5");
+        rig.reactions_per_hour = 36_000.0;
+        let out = drive(rig, Duration::ZERO, |o| o.count("desktop_probe") >= 1).await;
+        assert_eq!(out.errors("desktop_probe"), 0, "{:?}", out.ops);
+        assert!(!out.saw("EVENT", "7"), "{:?}", out.frames);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_whose_root_lookup_the_stop_cut_short_is_not_published() {
+        // The first message is a reply whose root search outlasts the stop
+        // may; its OK would never come in time either.
+        let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
+        rig.messages_per_hour = 36_000.0;
+        rig.slow = Some(("roots", Duration::from_secs(8)));
+        rig.ok_delay = Duration::from_secs(60);
+        let out = drive(rig, Duration::from_millis(500), |o| {
+            o.queries
+                .iter()
+                .filter(|f| f["kinds"] == json!([9]) && f.get("authors").is_some())
+                .count()
+                >= 2
+        })
+        .await;
+        assert!(!out.saw("EVENT", "9"), "{:?}", out.frames);
+        assert_eq!(out.count("http_query"), 0, "{:?}", out.ops);
+        assert_eq!(out.errors("http_query"), 0, "{:?}", out.ops);
     }
 }

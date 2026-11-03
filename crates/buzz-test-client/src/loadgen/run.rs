@@ -464,25 +464,29 @@ pub(super) fn observe(stats: &Stats, message: &RelayMessage) -> Option<Seen> {
     seen(message)
 }
 
-/// Publishes over the socket and records send→OK latency.
+/// Publishes over the socket and records send→OK latency. `true` when the
+/// relay answered, accepting or not.
 async fn publish(
     stats: &Stats,
     conn: &mut NostrWsConnection,
     op: Op,
     event: Event,
-) -> Result<(), WsClientError> {
+) -> Result<bool, WsClientError> {
     let pending = stats.begin(op);
     match conn.send_event(event).await {
         Ok(ok) if ok.accepted => pending.ok(),
         Ok(ok) => pending.err(&ok.message),
-        Err(WsClientError::Timeout) => pending.err("OK timeout"),
+        Err(WsClientError::Timeout) => {
+            pending.err("OK timeout");
+            return Ok(false);
+        }
         Err(e) => {
             // The caller records the broken socket.
             pending.forget();
             return Err(e);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Connects with retry until connected or stopped. Each attempt is bounded
@@ -722,7 +726,7 @@ async fn human(shared: Arc<Shared>, global: usize) {
                 )
                 .await;
             match outcome {
-                Ok(Step::Continue) => {}
+                Ok(Step::Continue | Step::Answered) => {}
                 Ok(Step::SessionEnd) => break,
                 Err(e) => {
                     shared
@@ -750,6 +754,8 @@ async fn human(shared: Arc<Shared>, global: usize) {
 /// What [`Activity::step`] leaves the session to do.
 pub(super) enum Step {
     Continue,
+    /// The relay answered a publish: a frame arrived.
+    Answered,
     /// The session reached its scheduled end; reconnect.
     SessionEnd,
 }
@@ -845,24 +851,29 @@ impl Activity {
             }
         }
         let now = Instant::now();
+        let mut answered = false;
         if self.next_presence.is_some_and(|t| t <= now) {
             self.next_presence = Some(now + Duration::from_secs_f64(self.interval));
             let event =
                 EventBuilder::new(kind(KIND_PRESENCE_UPDATE), "online").sign_with_keys(keys);
-            send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
+            answered = send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
         } else if self.next_typing.is_some_and(|t| t <= now) {
             self.next_typing = rng.after(profile.typing_per_hour);
             let channel = &channels[pick_channel(self.split, channels, rng)];
             let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
                 .tags([tag(["h", channel])])
                 .sign_with_keys(keys);
-            send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
+            answered = send(&shared.stats, conn, Op::PublishEphemeral, event).await?;
         } else if self.next_message.is_some_and(|t| t <= now) {
             self.next_message = rng.after(profile.messages_per_hour);
             let channel = &channels[pick_channel(self.split, channels, rng)];
             let mut tags = vec![tag(["h", channel])];
             if rng.unit() < profile.thread_reply_fraction {
                 let roots = roots(shared, community, keys, channel, self.root_bound).await;
+                // A lookup the stop cut short leaves nothing to publish.
+                if stopped(shared) {
+                    return Ok(Step::Continue);
+                }
                 if !roots.is_empty() {
                     tags.push(tag(["e", &roots[rng.below(roots.len())], "", "reply"]));
                 }
@@ -874,7 +885,7 @@ impl Activity {
             )
             .tags(tags)
             .sign_with_keys(keys);
-            send(&shared.stats, conn, Op::PublishMessage, event).await?;
+            answered = send(&shared.stats, conn, Op::PublishMessage, event).await?;
         } else if self.next_reaction.is_some_and(|t| t <= now) {
             self.next_reaction = rng.after(profile.reactions_per_hour);
             // React to each seen message at most once; the relay rejects duplicates.
@@ -889,12 +900,16 @@ impl Activity {
                 let event = EventBuilder::new(kind(KIND_REACTION), "+")
                     .tags([tag(["h", &target.channel]), tag(["e", &target.id])])
                     .sign_with_keys(keys);
-                send(&shared.stats, conn, Op::PublishMessage, event).await?;
+                answered = send(&shared.stats, conn, Op::PublishMessage, event).await?;
             }
         } else if self.session_end.is_some_and(|t| t <= now) {
             return Ok(Step::SessionEnd);
         }
-        Ok(Step::Continue)
+        Ok(if answered {
+            Step::Answered
+        } else {
+            Step::Continue
+        })
     }
 }
 
@@ -903,12 +918,12 @@ pub(super) async fn send(
     conn: &mut NostrWsConnection,
     op: Op,
     event: Result<Event, nostr::event::builder::Error>,
-) -> Result<(), WsClientError> {
+) -> Result<bool, WsClientError> {
     match event {
         Ok(event) => publish(stats, conn, op, event).await,
         Err(e) => {
             stats.err(op, &format!("sign: {e}"));
-            Ok(())
+            Ok(false)
         }
     }
 }
@@ -1160,7 +1175,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                         shared
                             .stats
                             .err(Op::PublishEphemeral, &format!("observer: {e}"));
-                        Ok(())
+                        Ok(false)
                     }
                 };
                 if let Err(e) = result {

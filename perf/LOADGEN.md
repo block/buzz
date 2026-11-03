@@ -190,8 +190,9 @@ is closed. A replacement that misses its EOSE deadline is closed, the
 subscription it would have replaced stays, and the next tick tries again.
 In both modes, a tick with no frame from the relay since the previous tick
 sends a silence probe, a live-only REQ for the viewer's membership notices
-(`desktop_probe`). Any frame answers it; none within 10 s ends the session
-as failed, and the client reconnects with backoff.
+(`desktop_probe`). Any frame answers it, a publish's `OK` included; none
+within 10 s ends the session as failed, and the client reconnects with
+backoff.
 
 `legacy` is a lower bound on the app before its fixes. That app also gave
 each open channel, and each channel it watched without being a member, a
@@ -267,7 +268,8 @@ whatever the limits. Keep `target.connect_timeout_secs` below 15, or a stalled
 connect is cancelled instead of timing out. Publishes, history fetches and
 HTTP requests can outlast the grace period (30 s, 30 s and 60 s deadlines), in
 which case the client is cancelled and the run fails. Desktop reads, like
-EOSE waits, are abandoned at the stop and not recorded.
+EOSE waits, are abandoned at the stop and not recorded, and a reply whose
+thread-root lookup the stop cuts short is not published.
 
 The process exits non-zero when a step aborts, a client panics, a client had to
 be cancelled, or `shutdown.abort_reason` is set.
