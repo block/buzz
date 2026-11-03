@@ -3049,6 +3049,106 @@ mod postgres_tests {
                 .policy_generation,
             1
         );
+        // Exercise the real HTTP-to-config-to-transaction seam: no raw trust
+        // precondition can bypass the deployment's configured issuer selection.
+        let mut changed: Value = serde_json::from_str(&body).unwrap();
+        let mismatched_id = Uuid::new_v4();
+        changed["operation_id"] = serde_json::json!(mismatched_id);
+        changed["expected_issuer"] = serde_json::json!("https://unapproved.example");
+        let mismatch = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(mismatch).await["code"], "issuer_conflict");
+        assert!(state
+            .db
+            .community_auth_upgrade_status(mismatched_id, &operator.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
+
+        state
+            .db
+            .unbind_nip_fi_issuer(community.id, NIP_FI_ISSUER, true)
+            .await
+            .unwrap();
+        let missing_id = Uuid::new_v4();
+        changed["operation_id"] = serde_json::json!(missing_id);
+        changed["expected_issuer"] = serde_json::json!(NIP_FI_ISSUER);
+        let missing = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(missing).await["code"], "issuer_conflict");
+        state
+            .db
+            .bind_nip_fi_issuers(community.id, &[NIP_FI_ISSUER.to_owned()])
+            .await
+            .unwrap();
+
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config)
+            .nip_fi
+            .registry = buzz_auth::IssuerRegistry::new();
+        let inactive_id = Uuid::new_v4();
+        changed["operation_id"] = serde_json::json!(inactive_id);
+        let inactive = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(inactive.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            read_json(inactive).await["code"],
+            "authorization_unavailable"
+        );
+        let recovered =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(recovered.status(), StatusCode::OK);
+        let recovered = read_json(recovered).await;
+        assert_eq!(recovered["operation_id"], record["operation_id"]);
+        assert_eq!(recovered["policy_generation"], record["policy_generation"]);
+        assert_eq!(recovered["state"], "unavailable");
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+            None;
+        let unconfigured = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(unconfigured.status(), StatusCode::SERVICE_UNAVAILABLE);
+        for operation in [missing_id, inactive_id] {
+            assert!(state
+                .db
+                .community_auth_upgrade_status(operation, &operator.public_key().to_hex())
+                .await
+                .unwrap()
+                .is_none());
+        }
+        assert!(
+            state
+                .db
+                .community_auth_policy(community.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .requires_nip_fi
+        );
     }
 
     async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
