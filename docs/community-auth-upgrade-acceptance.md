@@ -152,6 +152,10 @@ test infrastructure for shared DB/Redis faults unless staging has a reviewed way
 to constrain the fault. Do not change whole-fleet policy or drain unrelated
 communities as a fallback. If an injector cannot preserve these boundaries,
 record the scenario blocked and use a deterministic local integration fixture.
+The local fixture supplies supplemental evidence only. Every matrix row is
+mandatory for this ticket, including the required staging fault observations.
+An unexercised staging row keeps live acceptance blocked; reviewer agreement
+cannot waive it or relabel it not applicable.
 
 Synchronize race tests on observed production boundaries (transaction commit,
 participant registration, held DB response, effect permit, drain barrier), not
@@ -192,8 +196,8 @@ Report normal-case commit-to-drain and commit-to-active durations for each run,
 with sample count and observed range. Report partition duration and pending
 observations separately; do not claim a partition completion bound.
 
-A run passes only when every applicable matrix row has executable test coverage
-and live evidence, all process obligations are accounted for, package checks
+A run passes only when every matrix row has executable test coverage
+and its required staging evidence, all process obligations are accounted for, package checks
 pass and an independent reviewer has reviewed the exact auth/persistence/
 activation heads. A passing module invocation proves module-to-relay integration;
 it does not prove an HTTP call through a running kgoose pod or V0/V1 onboarding.
