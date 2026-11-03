@@ -296,11 +296,16 @@ async fn discovery_is_host_specific_compatible_uncached_and_consistent() {
 async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
     for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::DenyProtected] {
         let (base, _, key, _) = fixture(global).await;
-        for missing in ["verifier", "deny_map", "policy"] {
+        for missing in ["verifier", "deny_map", "lifetime", "policy"] {
             let mut state = (*base).clone();
             match missing {
                 "verifier" => state.nip_fi_verifier = None,
                 "deny_map" => state.nip_fi_deny_map = None,
+                "lifetime" => {
+                    Arc::make_mut(&mut state.config)
+                        .nip_fi
+                        .max_connection_lifetime_secs = 0
+                }
                 _ => {
                     state.nip_fi_policy = Arc::new(Source {
                         required: AtomicBool::new(true),
@@ -319,6 +324,29 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "{global:?} {missing}"
             );
+            if global != NipFiMode::DenyProtected {
+                assert!(!state.nip_fi_required_admission_ready() || missing == "policy");
+                let app = crate::router::build_router(Arc::new(state));
+                for path in ["/", "/info"] {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::get(path)
+                                .header(header::HOST, "required.example")
+                                .header(header::ACCEPT, "application/nostr+json")
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "{global:?} {missing} {path}"
+                    );
+                    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                }
+            }
         }
     }
 }

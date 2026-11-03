@@ -415,7 +415,7 @@ pub(crate) async fn nip11_document(
             .resolve(&headers)
             .await
             .map_err(crate::nip_fi_core::http_denial)?;
-        if state.nip_fi_verifier.is_none() {
+        if !crate::nip_fi_policy::required_dependencies_ready(state) {
             return Err(crate::nip_fi_core::http_denial(
                 buzz_auth::DenialClass::AuthorizationUnavailable,
             ));

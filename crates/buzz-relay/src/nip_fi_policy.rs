@@ -11,6 +11,8 @@ use buzz_auth::{DenialClass, NipFiMode};
 use buzz_db::community_auth::CommunityAuthPolicy;
 use futures_util::future::{BoxFuture, FutureExt};
 
+const POLICY_READ_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Host policy source, shared by admission and discovery.
 pub(crate) trait PolicySource: Send + Sync {
     fn lookup<'a>(
@@ -37,6 +39,8 @@ pub(crate) struct Policy {
     pub mode: NipFiMode,
     pub required: bool,
     pub stored_required: bool,
+    // False only for the guard's legacy rejection scope after an authoritative
+    // host miss. Such a scope must never yield an admission proof.
     pub mapped: bool,
 }
 
@@ -69,11 +73,7 @@ pub(crate) async fn resolve(
         return Err(not_found());
     }
     let start = std::time::Instant::now();
-    let read = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        state.nip_fi_policy.lookup(&host),
-    )
-    .await;
+    let read = tokio::time::timeout(POLICY_READ_BUDGET, state.nip_fi_policy.lookup(&host)).await;
     metrics::histogram!("buzz_nip_fi_policy_read_seconds").record(start.elapsed().as_secs_f64());
     metrics::counter!("buzz_nip_fi_policy_reads_total").increment(1);
     let policy = match read {
@@ -131,12 +131,14 @@ pub(crate) async fn admission_mode(
     Ok(configured_mode(state, policy))
 }
 
+pub(crate) fn required_dependencies_ready(state: &crate::state::AppState) -> bool {
+    state.nip_fi_verifier.is_some()
+        && state.nip_fi_deny_map.is_some()
+        && state.config.nip_fi.max_connection_lifetime().is_some()
+}
+
 fn configured_mode(state: &crate::state::AppState, policy: Policy) -> NipFiMode {
-    if policy.stored_required
-        && (state.nip_fi_verifier.is_none()
-            || state.nip_fi_deny_map.is_none()
-            || state.config.nip_fi.max_connection_lifetime().is_none())
-    {
+    if policy.stored_required && !required_dependencies_ready(state) {
         NipFiMode::unavailable()
     } else {
         policy.mode

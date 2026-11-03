@@ -72,8 +72,8 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// When `NipFiMode::Off` or `NipFiMode::Shadow` the guard is fully transparent —
-// no request is touched; Shadow records its verdict elsewhere.  [FI-INV-15]
+// Off and Shadow preserve optional-community admission after the policy read.
+// A stored requirement enforces FI independently of the global mode.
 //
 // ## What this guard checks (and does NOT check)
 //

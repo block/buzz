@@ -1654,6 +1654,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Whether local FI admission dependencies can serve a stored requirement.
+    /// This is not fleet activation or registry-baseline verification.
+    pub fn nip_fi_required_admission_ready(&self) -> bool {
+        crate::nip_fi_policy::required_dependencies_ready(self)
+    }
+
     /// The NIP-FI community source admission resolves against.
     pub(crate) fn nip_fi_communities(&self) -> crate::nip_fi_core::Communities<'_> {
         use crate::nip_fi_config::CommunitySource;

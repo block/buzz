@@ -942,6 +942,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("NIP-FI: binding snapshot loaded");
         app_state.nip_fi_resolver = Some(resolver);
     }
+    metrics::gauge!("buzz_nip_fi_required_admission_ready").set(
+        if app_state.nip_fi_required_admission_ready() {
+            1.0
+        } else {
+            0.0
+        },
+    );
     let state = Arc::new(app_state);
     if let Some(tenant) = &deployment_community {
         buzz_relay::handlers::side_effects::fan_out_nip43_membership_list(
