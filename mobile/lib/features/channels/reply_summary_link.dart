@@ -5,6 +5,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../../shared/theme/theme.dart';
 import 'small_avatar.dart';
+import 'reply_activity_handoff.dart';
 import 'timeline_message.dart';
 import 'typing_dots.dart';
 
@@ -59,6 +60,8 @@ class ReplySummaryLink extends ConsumerWidget {
       [final only] => '$only is working',
       _ => '${workingNames.length} agents are working',
     };
+    final identities = {...participants, ...workingKeys};
+    final singleAgent = identities.length == 1;
     final connectorTop = hasReactions ? -Grid.half : Grid.half;
     return Padding(
       padding: EdgeInsets.only(
@@ -98,68 +101,90 @@ class ReplySummaryLink extends ConsumerWidget {
                   constraints: const BoxConstraints(minHeight: 44),
                   child: Padding(
                     padding: const EdgeInsets.all(Grid.half),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (participants.isNotEmpty) ...[
-                          _AvatarStack(participants, userCache),
-                          const SizedBox(width: Grid.half),
-                        ],
-                        if (shownWorking.isNotEmpty) ...[
-                          Container(
-                            key: const ValueKey('thread-working-container'),
-                            padding: const EdgeInsets.fromLTRB(6, 4, 8, 4),
-                            decoration: BoxDecoration(
-                              color: context.controlSurface,
-                              borderRadius: BorderRadius.circular(Grid.twelve),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                // Working agents sit side by side, as on desktop.
-                                for (final (i, pubkey)
-                                    in shownWorking.indexed) ...[
-                                  if (i > 0) const SizedBox(width: Grid.xxs),
-                                  SmallAvatar(
-                                    pubkey: pubkey,
-                                    userCache: userCache,
-                                    agent: true,
+                    child: singleAgent
+                        ? ReplyActivityHandoff(
+                            key: ValueKey(identities.single),
+                            pubkey: identities.single,
+                            userCache: userCache,
+                            working: workingKeys.isNotEmpty,
+                            label: summary == null ? null : label,
+                          )
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (participants.isNotEmpty) ...[
+                                _AvatarStack(participants, userCache),
+                                const SizedBox(width: Grid.half),
+                              ],
+                              if (shownWorking.isNotEmpty) ...[
+                                Container(
+                                  key: const ValueKey(
+                                    'thread-working-container',
                                   ),
-                                ],
-                                if (hiddenWorking > 0) ...[
-                                  const SizedBox(width: Grid.xxs),
-                                  Text(
-                                    '+$hiddenWorking',
+                                  padding: const EdgeInsets.fromLTRB(
+                                    6,
+                                    4,
+                                    8,
+                                    4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: context.controlSurface,
+                                    borderRadius: BorderRadius.circular(
+                                      Grid.twelve,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      // Working agents sit side by side, as on desktop.
+                                      for (final (i, pubkey)
+                                          in shownWorking.indexed) ...[
+                                        if (i > 0)
+                                          const SizedBox(width: Grid.xxs),
+                                        SmallAvatar(
+                                          pubkey: pubkey,
+                                          userCache: userCache,
+                                          agent: true,
+                                        ),
+                                      ],
+                                      if (hiddenWorking > 0) ...[
+                                        const SizedBox(width: Grid.xxs),
+                                        Text(
+                                          '+$hiddenWorking',
+                                          style: context.textTheme.labelMedium
+                                              ?.copyWith(
+                                                color: context
+                                                    .colors
+                                                    .onSurfaceVariant,
+                                              ),
+                                        ),
+                                      ],
+                                      const SizedBox(width: Grid.half),
+                                      const TypingDots(
+                                        key: ValueKey('thread-working-dots'),
+                                        dotSize: 5,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                if (summary != null)
+                                  const SizedBox(width: Grid.half),
+                              ],
+                              if (summary != null)
+                                Flexible(
+                                  child: Text(
+                                    label,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                     style: context.textTheme.labelMedium
                                         ?.copyWith(
                                           color:
                                               context.colors.onSurfaceVariant,
                                         ),
                                   ),
-                                ],
-                                const SizedBox(width: Grid.xs),
-                                const TypingDots(
-                                  key: ValueKey('thread-working-dots'),
-                                  dotSize: 5,
                                 ),
-                              ],
-                            ),
+                            ],
                           ),
-                          if (summary != null) const SizedBox(width: Grid.half),
-                        ],
-                        if (summary != null)
-                          Flexible(
-                            child: Text(
-                              label,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: context.textTheme.labelMedium?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
                   ),
                 ),
               ),

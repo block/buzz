@@ -12,7 +12,7 @@ void main() {
   for (final mirrored in [false, true]) {
     for (final reducedMotion in [false, true]) {
       testWidgets(
-        'thread footer keeps pending work and replies at the thread position: mirrored=$mirrored reduced=$reducedMotion',
+        'thread footer morphs working content while keeping the thread elbow fixed: mirrored=$mirrored reduced=$reducedMotion',
         (tester) async {
           final complete = ValueNotifier(false);
           addTearDown(complete.dispose);
@@ -70,22 +70,43 @@ void main() {
           await tester.tap(find.byType(ReplySummaryLink));
           expect(opened, 1);
 
+          final avatarElement = tester.element(find.byType(SmallAvatar));
+          final avatarBefore = tester.getTopLeft(find.byType(SmallAvatar)).dx;
           complete.value = true;
           await tester.pump();
           double endPosition() => mirrored
               ? tester.getRect(find.text('1 reply')).right
               : tester.getRect(find.byType(SmallAvatar)).left;
           final start = endPosition();
+          expect(tester.element(find.byType(SmallAvatar)), same(avatarElement));
+          if (!reducedMotion) {
+            expect(
+              tester.getTopLeft(find.byType(SmallAvatar)).dx,
+              closeTo(avatarBefore, 0.1),
+            );
+          }
           await tester.pump(const Duration(milliseconds: 100));
           final middle = endPosition();
+          final background =
+              tester
+                      .widget<DecoratedBox>(
+                        find.byKey(const ValueKey('thread-working-container')),
+                      )
+                      .decoration
+                  as BoxDecoration;
+          expect(background.color!.a, reducedMotion ? 0 : closeTo(0.5, 0.1));
           await tester.pump(const Duration(milliseconds: 150));
           final end = endPosition();
           expect(
             end,
             closeTo(mirrored ? lane.right - 32 : lane.left + 32, 0.1),
           );
-          expect(start, closeTo(end, 0.1));
-          expect(middle, closeTo(end, 0.1));
+          if (reducedMotion) {
+            expect(start, closeTo(end, 0.1));
+          } else {
+            expect((end - middle).abs(), greaterThan(0.1));
+          }
+          expect(tester.element(find.byType(SmallAvatar)), same(avatarElement));
           expect(
             find.byKey(const ValueKey('thread-working-dots')),
             findsNothing,
@@ -98,6 +119,46 @@ void main() {
       );
     }
   }
+  testWidgets(
+    'reply arriving before typing ends keeps its count and can resume work',
+    (tester) async {
+      Widget view({required bool working, required bool replied}) =>
+          WidgetHelpers.testable(
+            overrides: [userCacheProvider.overrideWith(_Profiles.new)],
+            child: Align(
+              alignment: Alignment.topRight,
+              child: ReplySummaryLink(
+                mirrored: true,
+                summary: replied
+                    ? const ThreadSummary(
+                        threadHeadId: 'root',
+                        replyCount: 1,
+                        participantPubkeys: ['agent'],
+                      )
+                    : null,
+                working: working ? const ['agent'] : const [],
+                onTap: () {},
+              ),
+            ),
+          );
+      await tester.pumpWidget(view(working: true, replied: false));
+      final avatar = tester.element(find.byType(SmallAvatar));
+      await tester.pumpWidget(view(working: true, replied: true));
+      expect(find.text('1 reply'), findsOneWidget);
+      expect(find.byKey(const ValueKey('thread-working-dots')), findsOneWidget);
+      await tester.pumpWidget(view(working: false, replied: true));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpWidget(view(working: true, replied: true));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(tester.element(find.byType(SmallAvatar)), same(avatar));
+      expect(find.text('1 reply'), findsOneWidget);
+      expect(find.byKey(const ValueKey('thread-working-dots')), findsOneWidget);
+      await tester.pumpWidget(view(working: false, replied: true));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.byKey(const ValueKey('thread-working-dots')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }
 
 class _Profiles extends UserCacheNotifier {
