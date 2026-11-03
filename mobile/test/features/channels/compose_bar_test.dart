@@ -19,6 +19,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/composer_file_drop.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -215,9 +216,12 @@ Widget _buildComposeBar({
   Future<List<UserProfile>> Function(String query)? searchPeople,
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
+  ComposerFileDrop? fileDrop,
 }) {
   return ProviderScope(
     overrides: [
+      if (fileDrop != null)
+        composerFileDropProvider.overrideWithValue(fileDrop),
       if (ownedAgents != null)
         ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (ownedAgentsUnknown)
@@ -4222,6 +4226,76 @@ void main() {
         expect(find.byTooltip('Remove attachment'), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS queues files dropped onto the app', (tester) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final channel = MethodChannel(
+        'test/composer_drop_${identityHashCode(tester)}',
+      );
+      final enabledCalls = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        enabledCalls.add(call.arguments);
+        return null;
+      });
+      final directory = Directory.systemTemp.createTempSync('composer-drop');
+      try {
+        final pdf = File('${directory.path}/notes.pdf')
+          ..writeAsBytesSync([1, 2, 3]);
+        final png = File('${directory.path}/shot.png')
+          ..writeAsBytesSync(_pngBytes);
+        final fileDrop = ComposerFileDrop(channel: channel);
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: MediaUploadService(
+              baseUrl: 'https://relay.example',
+              nsec: nostr.Keys.generate().nsec,
+              pickGalleryVideo: () async => null,
+              pickGalleryImage: () async => null,
+            ),
+            fileDrop: fileDrop,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await tester.pump();
+        expect(enabledCalls, [true]);
+
+        await fileDrop.handleCall(
+          MethodCall('didDrop', {
+            'files': [
+              {
+                'path': pdf.path,
+                'name': 'notes.pdf',
+                'mimeType': 'application/pdf',
+              },
+              {'path': png.path, 'name': 'shot.png', 'mimeType': 'image/png'},
+            ],
+            'failures': 0,
+          }),
+        );
+        await tester.pump();
+
+        expect(find.byTooltip('Remove attachment'), findsNWidgets(2));
+
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump();
+        expect(enabledCalls, [true, false]);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        );
+        directory.deleteSync(recursive: true);
       }
     });
 

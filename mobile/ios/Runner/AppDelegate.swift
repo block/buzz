@@ -50,6 +50,7 @@ import os.log
   private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var identityFilePlugin: IdentityFilePlugin?
+  private var composerDropPlugin: ComposerDropPlugin?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
@@ -88,6 +89,13 @@ import os.log
       }
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    let composerDrop = ComposerDropPlugin(messenger: messenger)
+    composerDropPlugin = composerDrop
+    if let flutterViewController = engineBridge.pluginRegistry
+      .registrar(forPlugin: "BuzzComposerDrop")?.viewController
+    {
+      DispatchQueue.main.async { composerDrop.attach(to: flutterViewController.view) }
+    }
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in

@@ -70,6 +70,28 @@ bool _queueComposerImages(
   return true;
 }
 
+const _droppedImageMimeTypes = {
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+};
+
+/// Images and videos take the sanitizing media paths; everything else uploads
+/// as a generic file attachment.
+_PendingAttachmentKind _droppedAttachmentKind(String mimeType) {
+  final normalized = mimeType.toLowerCase();
+  if (_droppedImageMimeTypes.contains(normalized)) {
+    return _PendingAttachmentKind.image;
+  }
+  if (normalized == 'video/mp4' || normalized == 'video/quicktime') {
+    return _PendingAttachmentKind.video;
+  }
+  return _PendingAttachmentKind.file;
+}
+
 enum _AttachmentSurface { closed, menu, camera, photos }
 
 const _attachmentMenuWidth = 216.0;

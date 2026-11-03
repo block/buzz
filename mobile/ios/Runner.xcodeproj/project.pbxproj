@@ -12,6 +12,7 @@
 		BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */; };
 		F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */; };
 		BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000012 /* IdentityFilePlugin.swift */; };
+		DDCC0000000000000000D001 /* ComposerDropPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDCC0000000000000000D002 /* ComposerDropPlugin.swift */; };
 		BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000002 /* HostedHpkeBackup.swift */; };
 		DAAB00000000000000000001 /* NativeTabler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAB00000000000000000002; };
 		4A71C0192F40D00100A17E02 /* MeAvatarLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */; };
@@ -108,6 +109,7 @@
 		BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzBrowserAuthBridge.swift; sourceTree = "<group>"; };
 		F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSetupRecoveryTests.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000012 /* IdentityFilePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePlugin.swift; sourceTree = "<group>"; };
+		DDCC0000000000000000D002 /* ComposerDropPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDropPlugin.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000002 /* HostedHpkeBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedHpkeBackup.swift; sourceTree = "<group>"; };
 		DAAB00000000000000000002 /* NativeTabler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabler.swift; sourceTree = "<group>"; };
 		4A71C01A2F40D00100A17E02 /* MeAvatarLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeAvatarLoader.swift; sourceTree = "<group>"; };
@@ -295,6 +297,7 @@
 				BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */,
 				BBAA00000000000000000002 /* HostedHpkeBackup.swift */,
 				BBAA00000000000000000012 /* IdentityFilePlugin.swift */,
+				DDCC0000000000000000D002 /* ComposerDropPlugin.swift */,
 				BZZ00000000000000000024 /* PushNativeState.swift */,
 				BZZ00000000000000000027 /* PushEndpointGrantStore.swift */,
 				BZZ0000000000000000002A /* PushSnapshotBridge.swift */,
@@ -642,6 +645,7 @@
 				BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */,
 				BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */,
 				BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */,
+				DDCC0000000000000000D001 /* ComposerDropPlugin.swift in Sources */,
 				BZZ00000000000000000023 /* PushNativeState.swift in Sources */,
 				BZZ00000000000000000026 /* PushEndpointGrantStore.swift in Sources */,
 				BZZ00000000000000000029 /* PushSnapshotBridge.swift in Sources */,
