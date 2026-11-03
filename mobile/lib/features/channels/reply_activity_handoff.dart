@@ -58,7 +58,10 @@ class ReplyActivityHandoff extends HookWidget {
           ellipsis: '…',
         )..layout(maxWidth: math.max(0, constraints.maxWidth - 24));
         final textWidth = text.width;
-        final height = math.max(28.0, text.height);
+        final height = math.max(
+          constraints.minHeight,
+          math.max(28.0, text.height),
+        );
         text.dispose();
         // 20px avatar, 4px gap, 19px dots, and 6/8px container insets.
         final pendingWidth = existingLabel.value ? 61 + textWidth : 57.0;
@@ -71,8 +74,8 @@ class ReplyActivityHandoff extends HookWidget {
             children: [
               Positioned(
                 left: 0,
-                top: 0,
-                bottom: 0,
+                top: (height - 28) / 2,
+                height: 28,
                 width: 57 + (width - 57) * progress,
                 child: DecoratedBox(
                   key: const ValueKey('thread-working-container'),

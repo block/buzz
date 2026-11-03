@@ -48,6 +48,10 @@ void main() {
           );
           await tester.pump();
           final lane = tester.getRect(find.byKey(const ValueKey('lane')));
+          expect(
+            tester.getCenter(find.byType(SmallAvatar)).dy,
+            closeTo(tester.getCenter(find.byType(ReplySummaryLink)).dy, 0.1),
+          );
           final pending = mirrored
               ? tester
                     .getRect(
