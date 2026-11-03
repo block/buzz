@@ -136,10 +136,17 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     _ newestFirst: [(VerifiedNostrEvent, PushLeaseCommunity)]
   ) -> (VerifiedNostrEvent, PushLeaseCommunity)? {
     guard let notificationCache else { return newestFirst.first }
+    // Candidates span communities, so one community's history bounds them all.
+    // Otherwise a community with nothing shown yet would surface its old messages.
+    var seen = Set<String>()
+    let scopes = newestFirst.compactMap { BuzzNotificationCacheScope(community: $0.1) }
+      .filter { seen.insert($0.directoryName).inserted }
+    let newestShown = scopes.compactMap { try? notificationCache.newestPresentation(scope: $0) }.max()
     return newestFirst.first { event, community in
       guard let scope = BuzzNotificationCacheScope(community: community) else { return false }
       do {
-        return try notificationCache.claimPresentation(of: event, scope: scope)
+        return try notificationCache.claimPresentation(
+          of: event, scope: scope, newestShownElsewhere: newestShown)
       } catch BuzzNotificationCacheError.revoked {
         return false
       } catch {

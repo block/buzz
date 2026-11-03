@@ -88,7 +88,12 @@ public final class BuzzNotificationCache: @unchecked Sendable {
 
   private struct PresentedMessage: Codable {
     let id: String
+    /// The event's own `created_at`. Retention follows it, so an entry stays while the
+    /// relay still ranks the event among the newest results.
     let createdAt: Int
+    /// `createdAt` capped at the time it was shown, so a future-dated event can't hold
+    /// back later messages.
+    let watermark: Int
   }
 
   /// How far before the newest shown message a message may be and still be shown.
@@ -267,24 +272,33 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     }
   }
 
+  /// The newest message time shown in `scope`, if any. Pass the newest across scopes to
+  /// ``claimPresentation(of:scope:newestShownElsewhere:)``.
+  public func newestPresentation(scope: BuzzNotificationCacheScope) throws -> Int? {
+    try access(scope, write: false) { state in state.presented?.map(\.watermark).max() }
+  }
+
   /// Records `event` as shown unless it already was or is older than the newest shown
-  /// message by more than ``presentationReorderWindow``. Returns whether the caller may
-  /// show it. A push carries no event reference, so without this every push whose own
-  /// event isn't the newest match would repeat the same message.
+  /// message, here or in `newestShownElsewhere`, by more than
+  /// ``presentationReorderWindow``. Returns whether the caller may show it. A push
+  /// carries no event reference, so without this every push whose own event isn't the
+  /// newest match would repeat the same message.
   public func claimPresentation(
-    of event: VerifiedNostrEvent, scope: BuzzNotificationCacheScope
+    of event: VerifiedNostrEvent, scope: BuzzNotificationCacheScope,
+    newestShownElsewhere: Int? = nil
   ) throws -> Bool {
     try access(scope, write: true) { state in
       let presented = state.presented ?? []
       guard !presented.contains(where: { $0.id == event.id }) else { return false }
-      // A future-dated created_at must not hold back later messages.
-      let createdAt = min(event.createdAt, Int(now().timeIntervalSince1970))
-      if let newest = presented.map(\.createdAt).max(),
-        createdAt < newest - Self.presentationReorderWindow
+      let watermark = min(event.createdAt, Int(now().timeIntervalSince1970))
+      if let newest = (presented.map(\.watermark) + [newestShownElsewhere].compactMap { $0 }).max(),
+        watermark < newest - Self.presentationReorderWindow
       {
         return false
       }
-      state.presented = [PresentedMessage(id: event.id, createdAt: createdAt)] + presented
+      state.presented =
+        [PresentedMessage(id: event.id, createdAt: event.createdAt, watermark: watermark)]
+        + presented
       return true
     }
   }

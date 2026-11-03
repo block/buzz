@@ -440,6 +440,51 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertNil(push())
   }
 
+  func testOneCommunitysHistoryBoundsTheOthersAndFutureMessagesStayShown() throws {
+    let a = community(id: "community-a", relayUrl: "https://a.example")
+    let b = community(id: "community-b", relayUrl: "https://b.example")
+    let snapshot = try snapshotData([a, b])
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scopes = [a, b].compactMap { BuzzNotificationCacheScope(community: $0) }
+    var clock = Self.now
+    func push() -> String? {
+      let now = Date(timeIntervalSince1970: TimeInterval(clock))
+      return resolve(makeResolver(communitiesData: snapshot,
+        privateKeys: ["community-a": Self.privateKey, "community-b": Self.privateKey],
+        cacheOverride: BuzzNotificationCache(
+          directory: root, now: { now }, isCurrent: { scopes.contains($0) }),
+        now: now))?.body
+    }
+    var relayEvents: [String: [VerifiedNostrEvent]] = [:]
+    URLProtocolStub.handler = { request in
+      Self.response(request, status: 200,
+        data: try JSONEncoder().encode(relayEvents[request.url?.host ?? ""] ?? []))
+    }
+    func message(_ content: String, createdAt: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: createdAt,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+
+    // B has shown nothing yet, but A's shown message still marks B's last week as history.
+    relayEvents["a.example"] = [try message("A", createdAt: clock - 60)]
+    relayEvents["b.example"] = [try message("B last week", createdAt: clock - 7 * 24 * 3600)]
+    XCTAssertEqual(push(), "A")
+    XCTAssertNil(push(), "an old message in another community is not new")
+
+    // A future-dated message stays remembered while the relay keeps returning it first,
+    // even after more than the retention limit of messages is shown after it.
+    let future = try message("Future", createdAt: clock + 3600)
+    relayEvents["a.example"] = [future]
+    XCTAssertEqual(push(), "Future")
+    for index in 0..<BuzzNotificationCache.maximumPresentedMessages {
+      clock += 10
+      relayEvents["a.example"] = [future, try message("Message \(index)", createdAt: clock)]
+      XCTAssertEqual(push(), "Message \(index)")
+    }
+    XCTAssertNil(push(), "a future-dated message is not shown again")
+  }
+
   func testFreshVerifiedCacheResolvesSenderAvatarAndChannelWithoutRefresh() throws {
     let message = try Self.signedEvent(
       privateKey: Self.profilePrivateKey,
