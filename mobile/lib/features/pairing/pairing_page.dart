@@ -432,6 +432,7 @@ class PairingPage extends HookConsumerWidget {
 
     final appSurface = PopScope(
       key: const Key('pairing-pop-scope'),
+      canPop: !showLoading,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop && pairingState.status != PairingStatus.success) {
           ref.read(pairingProvider.notifier).reset();
