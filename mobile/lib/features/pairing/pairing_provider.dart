@@ -931,6 +931,13 @@ class PairingNotifier extends Notifier<PairingState> {
     if (nsec == null || nsec.isEmpty) {
       throw const FormatException('Pairing payload missing nsec');
     }
+    // A malformed key could never connect, and the organization branch below
+    // saves without a relay check, so reject it before anything is stored.
+    try {
+      AccountIdentityStore.publicKeyForNsec(nsec);
+    } on AccountIdentityFailure {
+      throw const FormatException('Pairing payload has an invalid nsec');
+    }
     final uri = Uri.parse(relayUrl);
     // Organization relays refuse the upgrade until organization sign-in
     // supplies an assertion, which the saved community's session then offers.

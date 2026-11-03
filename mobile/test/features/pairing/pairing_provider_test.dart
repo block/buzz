@@ -57,7 +57,7 @@ void main() {
           utf8.encode(
             jsonEncode({
               'relayUrl': 'https://relay.example',
-              'nsec': 'pending-key',
+              'nsec': nostr.Keys.generate().nsec,
             }),
           ),
         );
@@ -137,14 +137,21 @@ void main() {
             authProvider.overrideWith(() => auth),
           ],
         );
-        String input(String relayUrl) => base64Url.encode(
+        String input(String relayUrl, {String? nsec}) => base64Url.encode(
           utf8.encode(
             jsonEncode({
               'relayUrl': relayUrl,
-              'nsec': nostr.Keys.generate().nsec,
+              'nsec': nsec ?? nostr.Keys.generate().nsec,
             }),
           ),
         );
+
+        // Skipping the relay check must not admit a key that can never sign.
+        await container
+            .read(pairingProvider.notifier)
+            .pair(input('https://org.example', nsec: 'nsec1notakey'));
+        expect(container.read(pairingProvider).status, PairingStatus.error);
+        expect(auth.lastCommunity, isNull);
 
         await container
             .read(pairingProvider.notifier)
