@@ -21,6 +21,8 @@ pub mod count;
 #[cfg(test)]
 mod create_with_members_postgres_tests;
 #[cfg(test)]
+mod deletion_postgres_tests;
+#[cfg(test)]
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
@@ -32,6 +34,8 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+#[cfg(test)]
+mod membership_notice_postgres_tests;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).

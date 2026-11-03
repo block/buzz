@@ -120,7 +120,11 @@ class HostedCommunitiesFixture {
         if (path.endsWith('/me')) {
           if (expired) return http.Response('{}', 401);
           return http.Response(
-            jsonEncode({'subject': subject, 'expires_at': expiry}),
+            jsonEncode({
+              'subject': subject,
+              'email': 'owner@example.com',
+              'expires_at': expiry,
+            }),
             200,
           );
         }

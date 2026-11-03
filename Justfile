@@ -632,6 +632,7 @@ test-unit:
                 + test(=state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket)
                 + test(=state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket)
                 + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason)
+                + test(=state::tests::enforce_end_is_recorded_only_by_the_winning_terminal)
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'

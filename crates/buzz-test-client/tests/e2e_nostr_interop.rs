@@ -1814,9 +1814,9 @@ async fn test_channel_window_rows_overlays_and_exact_multiple_exhaustion() {
         ])
         .sign_with_keys(&keys)
         .expect("sign reaction");
+    let reaction_id = reaction.id.to_hex();
     let ok = client.send_event(reaction).await.expect("send reaction");
     assert!(ok.accepted, "relay rejected reaction: {}", ok.message);
-    client.disconnect().await.expect("disconnect");
 
     // Page 1 (head request).
     let page1 = query_channel_window(&keys, &channel, 2, None).await;
@@ -1909,6 +1909,27 @@ async fn test_channel_window_rows_overlays_and_exact_multiple_exhaustion() {
     let mut expected = top_ids.clone();
     expected.sort();
     assert_eq!(paged, expected, "paged union != inserted top-level set");
+
+    // Deleting the reaction soft-deletes it in the deletion's own commit, so
+    // it leaves the closure.
+    let unreact = EventBuilder::new(Kind::EventDeletion, "")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &reaction_id]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign reaction deletion");
+    let ok = client.send_event(unreact).await.expect("send deletion");
+    assert!(ok.accepted, "relay rejected deletion: {}", ok.message);
+    client.disconnect().await.expect("disconnect");
+    let after = query_channel_window(&keys, &channel, 2, None).await;
+    let (_, _, _, aux_after) = partition_window(&after);
+    assert!(
+        aux_after
+            .iter()
+            .all(|a| a["id"].as_str() != Some(reaction_id.as_str())),
+        "deleted reaction must leave the aux closure: {aux_after:?}"
+    );
 }
 
 /// The window cursor is composite by contract: `until` without `before_id`

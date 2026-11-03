@@ -745,6 +745,101 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
     teardown(pool, &schema).await;
 }
 
+/// Prefix relevance (typeahead) ranks only the newest 1000 matches, so an
+/// older, better-ranked message drops out, and its pages end with that
+/// window; full-text and profile relevance still rank every match.
+/// Mutation: rank every prefix match → the old message tops the first page;
+/// window profiles too → the old profile drops off the first page.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn prefix_relevance_ranks_only_the_newest_matches() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "rank-window.example").await;
+    let (old, old_profile) = (rand_bytes32(), rand_bytes32());
+    for (id, kind) in [(old, 9), (old_profile, 0)] {
+        insert_event(
+            &pool,
+            c,
+            id,
+            rand_bytes32(),
+            kind,
+            "planning planning planning planning",
+            None,
+            1_700_000_000,
+        )
+        .await;
+        // 1000 newer, weaker matches fill the window.
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             SELECT $1, sha256((g || '/' || $2)::bytea), sha256((g || '/' || $2)::bytea), \
+                    to_timestamp(1700000001 + g), $2, '[]'::jsonb, 'planning notes ' || g, 'signature' \
+             FROM generate_series(1, 1000) g",
+        )
+        .bind(c.as_uuid())
+        .bind(kind)
+        .execute(&pool)
+        .await
+        .expect("insert newer matches");
+    }
+
+    let svc = SearchService::new(pool.clone());
+    let query = |q: &str, mode, page| SearchQuery {
+        community: c,
+        q: q.into(),
+        channel_scope: ChannelScope::Any,
+        kinds: Some(vec![9]),
+        authors: None,
+        since: None,
+        until: None,
+        page,
+        per_page: 20,
+        mode,
+        sort: buzz_search::SearchSort::Relevance,
+    };
+    let ids = |r: buzz_search::SearchResult| r.hits.iter().map(|h| h.event_id).collect::<Vec<_>>();
+
+    let typeahead = ids(svc
+        .search(&query("plan", buzz_search::SearchMode::Prefix, 1))
+        .await
+        .expect("prefix"));
+    assert_eq!(typeahead.len(), 20);
+    assert!(!typeahead.contains(&old), "outside the newest-1000 window");
+
+    let full_text = ids(svc
+        .search(&query("planning", buzz_search::SearchMode::FullText, 1))
+        .await
+        .expect("full text"));
+    assert_eq!(full_text.first(), Some(&old), "full text ranks every match");
+
+    // Every page ranks the same window, so prefix pages end with it.
+    let last = ids(svc
+        .search(&query("plan", buzz_search::SearchMode::Prefix, 50))
+        .await
+        .expect("page 50"));
+    assert_eq!(last.len(), 20);
+    assert!(!last.contains(&old));
+    let past = svc
+        .search(&query("plan", buzz_search::SearchMode::Prefix, 51))
+        .await
+        .expect("page 51");
+    assert!(past.hits.is_empty(), "no page past the window");
+
+    let profiles = ids(svc
+        .search(&SearchQuery {
+            kinds: Some(vec![0]),
+            ..query("plan", buzz_search::SearchMode::Prefix, 1)
+        })
+        .await
+        .expect("profile prefix"));
+    assert_eq!(
+        profiles.first(),
+        Some(&old_profile),
+        "profile typeahead ranks every match"
+    );
+
+    teardown(pool, &schema).await;
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn channel_scope_restricts_results() {
@@ -1990,7 +2085,7 @@ async fn waiting_searches(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
          AND datname = current_database() \
-         AND wait_event_type = 'Lock' AND query LIKE '%search_query.query%'",
+         AND wait_event_type = 'Lock' AND query LIKE '%ts_rank_cd(%'",
     )
     .fetch_one(pool)
     .await

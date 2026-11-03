@@ -17,6 +17,7 @@ import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
+import 'empty_bestie_avatar.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
@@ -97,10 +98,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           MaterialPageRoute(
             // Native glass and video layers must track the live route.
             allowSnapshotting: false,
-            builder: (_) => ChannelDetailPage(
-              channel: channel,
-              continuousConversation: true,
-            ),
+            builder: (_) => ChannelDetailPage(channel: channel),
           ),
         );
       } catch (error) {
@@ -134,7 +132,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : pubkey == null
-                ? const AgentNavigationIcon(size: 24)
+                ? preference.isLoading || preference.hasError
+                      ? const AgentNavigationIcon(size: 24)
+                      : const EmptyBestieAvatar()
                 : usesInsetAgentArtwork(profile?.avatarUrl)
                 ? PresetAgentAvatar(
                     imageUrl: profile!.avatarUrl!,

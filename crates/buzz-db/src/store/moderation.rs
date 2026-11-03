@@ -614,6 +614,8 @@ pub async fn untimeout_member(
 pub struct RestrictionState {
     /// Currently banned (row exists, `banned`, unexpired).
     pub banned: bool,
+    /// Banned by the key's own row, not only its agent owner's.
+    pub own_banned: bool,
     /// Active timeout expiry, if in the future.
     pub muted_until: Option<DateTime<Utc>>,
 }
@@ -639,6 +641,8 @@ pub async fn restriction_state(
         SELECT
             COALESCE(bool_or(banned AND (ban_expires_at IS NULL OR ban_expires_at > now())), false)
                 AS banned,
+            COALESCE(bool_or(pubkey = $2 AND banned AND (ban_expires_at IS NULL OR ban_expires_at > now())), false)
+                AS own_banned,
             max(CASE WHEN muted_until > now() THEN muted_until END) AS muted_until
         FROM community_bans
         WHERE community_id = $1
@@ -657,6 +661,7 @@ pub async fn restriction_state(
 
     Ok(RestrictionState {
         banned: row.try_get("banned")?,
+        own_banned: row.try_get("own_banned")?,
         muted_until: row.try_get("muted_until")?,
     })
 }

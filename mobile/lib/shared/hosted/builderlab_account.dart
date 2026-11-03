@@ -1,4 +1,5 @@
 import '../storage/serial_queue.dart';
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -37,10 +38,12 @@ class BuilderlabAccount {
   const BuilderlabAccount({
     required this.subject,
     required this.expiresAt,
+    this.email,
     this.needsAccountSetup = false,
   });
   final bool needsAccountSetup;
   final String subject;
+  final String? email;
   final DateTime expiresAt;
 }
 
@@ -58,6 +61,7 @@ class BuilderlabAccountClient {
     http.Client? httpClient,
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
+    this.onSessionChanged,
   }) : _http = httpClient ?? http.Client(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
@@ -68,6 +72,14 @@ class BuilderlabAccountClient {
 
   static final origin = HostedEnvironment.origin;
   final Uri accountOrigin;
+
+  /// Receives the session credential each time one is adopted, and null when
+  /// it is cleared or a restore finds no session. Only a trusted owner of
+  /// [accountOrigin]'s session may set it, for example to share the session
+  /// with the notification extension. A failed clear fails the operation that
+  /// cleared, so a signed-out session is never left shared; a failed share of
+  /// an adopted session is retried at the next adopt.
+  final Future<void> Function(String? credential)? onSessionChanged;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -95,6 +107,9 @@ class BuilderlabAccountClient {
   final http.Client _http;
   final FlutterSecureStorage _storage;
   String? _credential;
+  // The adopted credential while the notification extension lacks its copy.
+  String? _unshared;
+  bool _sharing = false;
   BuilderlabAccount? _account;
   final _queue = SerialQueue();
   bool _disposed = false;
@@ -122,7 +137,11 @@ class BuilderlabAccountClient {
   Future<BuilderlabAccount?>? _restoring;
   Future<BuilderlabAccount?> _restore() => _serial(() async {
     final record = await _readRecord();
-    if (record == null) return null;
+    if (record == null) {
+      // Retries a removal that failed after an earlier sign-out.
+      await _unshare();
+      return null;
+    }
     try {
       final verified = await _verify(record.credential);
       if (verified.subject != record.subject) {
@@ -225,7 +244,34 @@ class BuilderlabAccountClient {
     // Assigned before notifying, so subject listeners see the new account.
     _account = verified;
     _subject.value = verified.subject;
+    _unshared = credential;
+    _share();
     return verified;
+  }
+
+  /// Shares the adopted credential with the notification extension. Sharing is
+  /// push enrichment and must never gate sign-in, so a failure is retried by
+  /// the next account request instead of being thrown.
+  void _share() {
+    final share = onSessionChanged;
+    final credential = _unshared;
+    if (share == null || credential == null || _sharing) return;
+    _sharing = true;
+    unawaited(
+      share(credential)
+          .then((_) {
+            if (_unshared == credential) _unshared = null;
+          })
+          .catchError(
+            (Object error) => debugPrint('Session share failed: $error'),
+          )
+          .whenComplete(() {
+            _sharing = false;
+            // A newer credential adopted while this write was in flight still needs sharing.
+            final pending = _unshared;
+            if (pending != null && pending != credential) _share();
+          }),
+    );
   }
 
   Future<BuilderlabAccount> _verify(String credential) async {
@@ -241,6 +287,7 @@ class BuilderlabAccountClient {
         result['account_status'] == 'ACCOUNT_STATUS_NEEDS_DETAILS';
     return BuilderlabAccount(
       subject: subject,
+      email: result['email'] is String ? result['email'] as String : null,
       expiresAt: parsed,
       needsAccountSetup: needsSetup,
     );
@@ -289,6 +336,7 @@ class BuilderlabAccountClient {
     return _serial(() async {
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
+      _share();
       if (expectedSubject != null && _account?.subject != expectedSubject) {
         throw AccountFailure.denied;
       }
@@ -336,11 +384,35 @@ class BuilderlabAccountClient {
 
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
-    _credential = null;
-    _account = null;
-    if (!_disposed) _subject.value = null;
+    // Attempt both removals so one failure never leaves the other copy live.
+    var failed = false;
     try {
       await _storage.delete(key: _storageKey);
+    } catch (_) {
+      failed = true;
+    }
+    try {
+      await _unshare();
+    } on AccountFailure {
+      failed = true;
+    }
+    if (failed) {
+      // The account stays signed in, so the extension gets its copy back.
+      _unshared = _credential;
+      _share();
+      throw AccountFailure.storage;
+    }
+    _credential = null;
+    _unshared = null;
+    _account = null;
+    if (!_disposed) _subject.value = null;
+  }
+
+  Future<void> _unshare() async {
+    final share = onSessionChanged;
+    if (share == null) return;
+    try {
+      await share(null);
     } catch (_) {
       throw AccountFailure.storage;
     }

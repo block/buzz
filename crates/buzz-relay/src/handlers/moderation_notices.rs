@@ -25,11 +25,14 @@ use nostr::{EventBuilder, Kind, Tag};
 use tracing::warn;
 use uuid::Uuid;
 
-use buzz_core::kind::{event_kind_u32, KIND_STREAM_MESSAGE};
+use buzz_core::kind::{event_kind_u32, KIND_MEMBER_ADDED_NOTIFICATION, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::TenantContext;
 
 use super::event::dispatch_persistent_event;
-use super::side_effects::emit_group_discovery_events;
+use super::side_effects::{
+    emit_group_discovery_events, emit_membership_notification_tagged,
+    publish_dm_visibility_snapshot,
+};
 use crate::state::AppState;
 
 /// Tag naming the moderation source row (report/action) a notice was derived
@@ -115,6 +118,13 @@ pub async fn send_moderation_notice(
         )
         .await?;
     let dm_channel_id = dm_channel.id;
+    // Drop both participants' cached channel sets on every pod, as opening a
+    // DM does (`command_executor::handle_dm_open`), so the read the notice
+    // below prompts includes this DM. Done on every delivery, not just on
+    // creation, so a retry after a failed first delivery still drops them.
+    for participant in [recipient_pubkey, relay_pubkey_bytes.as_slice()] {
+        state.invalidate_membership(tenant, dm_channel_id, participant);
+    }
 
     // Count new DM creation; side-effect gates below intentionally do not
     // gate on was_created (see comment at step 2).
@@ -135,6 +145,9 @@ pub async fn send_moderation_notice(
         .db
         .unhide_dm(tenant.community(), dm_channel_id, recipient_pubkey)
         .await?;
+    // Clients filter the sidebar on the NIP-DV snapshot, not `hidden_at`, so
+    // republish it before the notice that makes them re-read.
+    publish_dm_visibility_snapshot(tenant, state, recipient_pubkey).await?;
 
     // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists, and 3.
     //    the DM's kind:39000 discovery (with `hidden` / `t=dm` / `p`). Both are
@@ -149,6 +162,25 @@ pub async fn send_moderation_notice(
     }
     emit_group_discovery_events(tenant, state, dm_channel_id).await?;
 
+    // The DM is now readable in the recipient's channel list: tell them, as
+    // opening a DM does. Sent on every delivery so a new, existing or hidden
+    // DM resurfaces live; a repeated notice is a harmless hint. The source tag
+    // keeps two deliveries in the same second from sharing one notice.
+    let source_id = notice.source_id();
+    if let Err(e) = emit_membership_notification_tagged(
+        tenant,
+        state,
+        dm_channel_id,
+        recipient_pubkey,
+        relay_pubkey_bytes.as_slice(),
+        KIND_MEMBER_ADDED_NOTIFICATION,
+        &[Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?],
+    )
+    .await
+    {
+        warn!(channel = %dm_channel_id, error = %e, "membership notification emission failed");
+    }
+
     // 4. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and a
     //    `moderation_source` tag naming the source row id (idempotency +
     //    client linking).
@@ -159,7 +191,6 @@ pub async fn send_moderation_notice(
     //    (same pubkey + created_at + kind + tags + content = same SHA256 event ID).
     //    `insert_event`'s ON CONFLICT DO NOTHING ensures exactly one row is
     //    durably persisted regardless of how many workers reach this point.
-    let source_id = notice.source_id();
     let tags = vec![
         Tag::parse(["h", &dm_channel_id.to_string()])?,
         Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?,

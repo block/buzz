@@ -285,18 +285,26 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             match link_agent_owner(state, &tenant, &pubkey, &owner).await {
                 OwnerLink::Linked => {}
                 OwnerLink::Conflict => {
+                    crate::nip_fi_http::owner_refused(
+                        buzz_auth::DenialClass::AuthorizationDenied,
+                        "not_stored_owner",
+                    );
                     return Err(crate::nip_fi_core::http_denial(
                         buzz_auth::DenialClass::AuthorizationDenied,
-                    ))
+                    ));
                 }
                 OwnerLink::Unavailable => {
+                    crate::nip_fi_http::owner_refused(
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                        "owner_link_unavailable",
+                    );
                     return Err(unavailable(
                         (
                             StatusCode::SERVICE_UNAVAILABLE,
                             crate::handlers::auth::OWNER_LINK_ERROR,
                         )
                             .into_response(),
-                    ))
+                    ));
                 }
             }
         }
@@ -324,7 +332,24 @@ pub(super) async fn deny_banned_git_principal(
     signed_auth_created_at: Option<u64>,
     token_owner: Option<nostr::PublicKey>,
 ) -> Result<(), Response> {
-    let agent = git_restriction_state(db, community, pubkey).await?;
+    // A verified agent token's ban state is its owner step: an unreadable
+    // ban state or a banned token owner is that step's refusal, as shadow
+    // records it.
+    let owner_refused = |class, reason| {
+        if token_owner.is_some() {
+            crate::nip_fi_http::owner_refused(class, reason);
+        }
+    };
+    let unavailable = |denial| {
+        owner_refused(
+            buzz_auth::DenialClass::AuthorizationUnavailable,
+            "owner_ban_unavailable",
+        );
+        denial
+    };
+    let agent = git_restriction_state(db, community, pubkey)
+        .await
+        .map_err(unavailable)?;
 
     // Skip the owner read when the agent is already banned: the denial is
     // identical either way. Mirrors the WebSocket cascade's short-circuit.
@@ -340,11 +365,20 @@ pub(super) async fn deny_banned_git_principal(
         })
     };
     let owner_state = match owner {
-        Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
+        Some(owner) => Some(
+            git_restriction_state(db, community, &owner)
+                .await
+                .map_err(unavailable)?,
+        ),
         None => None,
     };
 
     enforce_git_ban_cascade(&agent, owner_state.as_ref()).map_err(|status| {
+        // The agent's own ban is not its owner's; a ban inherited from its
+        // stored owner, or its token owner's, is.
+        if !agent.own_banned {
+            owner_refused(buzz_auth::DenialClass::AuthorizationDenied, "owner_banned");
+        }
         warn!(
             pubkey = %pubkey.to_hex(),
             owner = ?owner.map(|owner| owner.to_hex()),
@@ -3379,6 +3413,7 @@ mod sec005_postgres_tests {
     fn durable_ban_denies_git_even_with_otherwise_valid_auth() {
         let restriction = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
 
@@ -3389,6 +3424,7 @@ mod sec005_postgres_tests {
     fn timeout_without_ban_does_not_revoke_git_access() {
         let restriction = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(chrono::Utc::now()),
         };
 
@@ -3398,6 +3434,7 @@ mod sec005_postgres_tests {
     fn restriction(banned: bool) -> buzz_db::moderation::RestrictionState {
         buzz_db::moderation::RestrictionState {
             banned,
+            own_banned: banned,
             muted_until: None,
         }
     }

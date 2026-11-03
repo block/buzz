@@ -9467,6 +9467,190 @@ mod postgres_tests {
 
     // ── Kick live side effects: crash-recovery and re-add race ────────────────
 
+    /// A channel deleted between a committed kick and its recovery leaves no
+    /// roster to refresh. Recovery must treat that as convergence and finalize,
+    /// without running the removal again.
+    #[tokio::test]
+    #[ignore = "requires Postgres — a deleted channel does not strand a committed kick"]
+    async fn crash_recovery_finalizes_kick_after_channel_deleted() {
+        let pool = e2e_pool().await;
+        let (community_id, host) = e2e_community(&pool, "kick-recovery-deleted").await;
+        let cid = buzz_core::CommunityId::from_uuid(community_id);
+        let target = vec![0xAAu8; 32];
+        let actor = vec![0xBBu8; 32];
+
+        // Seed channel + member.
+        let channel_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+               VALUES ($1, $2, 'recovery-deleted-ch', 'stream', 'open', $3)"#,
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+
+        // Claim → enforcing → lease → kick + commit marker (simulates process
+        // that committed the kick but crashed before live side effects ran).
+        let action_id = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            cid,
+            report_id,
+            uuid::Uuid::new_v4(),
+            &actor,
+            "operator",
+            "kick",
+            None,
+            None,
+            "resolve:kick",
+            "relay_operator",
+            Some(&target),
+            None,
+            Some(channel_id),
+        )
+        .await
+        .expect("claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let _ = buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let lease_token =
+            match buzz_db::relay_admin_actions::acquire_action_lease(&pool, action_id, lease_until)
+                .await
+                .expect("acquire lease")
+            {
+                buzz_db::relay_admin_actions::LeaseResult::Acquired(t) => t,
+                other => panic!("expected Acquired, got {other:?}"),
+            };
+        let kick_result = buzz_db::relay_admin_actions::execute_kick_with_marker(
+            &pool,
+            action_id,
+            lease_token,
+            cid,
+            channel_id,
+            &target,
+            &actor,
+        )
+        .await
+        .expect("execute_kick_with_marker");
+        assert!(
+            matches!(
+                kick_result,
+                buzz_db::relay_admin_actions::KickWithMarkerResult::Removed
+            ),
+            "kick must commit before the simulated crash"
+        );
+
+        // Expire the lease so the recovery worker can re-claim.
+        sqlx::query(
+            "UPDATE relay_admin_actions SET action_lease_expires_at = $2, action_lease_token = NULL WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(300))
+        .execute(&pool)
+        .await
+        .expect("expire lease");
+
+        let removed_at = || async {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+                "SELECT removed_at FROM channel_members WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .bind(&target)
+            .fetch_one(&pool)
+            .await
+            .expect("member row")
+        };
+        let removed_before = removed_at().await.expect("kick removed the member");
+
+        // Discovery published before the delete, which is stale once the
+        // channel is gone; recovery must clean it up before the notice.
+        let state = state_from_pool(pool.clone()).await;
+        let tenant = e2e_tenant(community_id, &host);
+        crate::handlers::side_effects::emit_group_discovery_events(&tenant, &state, channel_id)
+            .await
+            .expect("seed discovery");
+        let live_discovery = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2 \
+                 AND kind IN (39000, 39001, 39002) AND deleted_at IS NULL",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count discovery")
+        };
+        assert!(live_discovery().await > 0, "stale discovery seeded");
+        assert!(
+            buzz_db::channel::soft_delete_channel(&pool, cid, channel_id)
+                .await
+                .expect("delete channel")
+        );
+        let mut barrier = crate::handlers::side_effects::notice_barrier::install(&target);
+        let batch = buzz_db::relay_admin_actions::claim_stranded_action_batch(
+            &pool,
+            "e2e-kick-recovery-deleted",
+            chrono::Utc::now() + chrono::Duration::seconds(120),
+            1000,
+        )
+        .await
+        .expect("claim_stranded_action_batch");
+        let claim = batch
+            .into_iter()
+            .find(|c| c.record.id == action_id)
+            .expect("stranded action must appear in batch");
+        let recovery = tokio::spawn({
+            let state = state.clone();
+            async move { crate::handlers::admin_action_worker::recover_one(&state, claim).await }
+        });
+        let (noticed, release) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), barrier.next())
+                .await
+                .expect("recovery sent no removal notice")
+                .expect("barrier open");
+        assert_eq!(noticed, channel_id);
+        assert_eq!(
+            live_discovery().await,
+            0,
+            "removal notice sent before discovery cleanup"
+        );
+        release.send(()).expect("recovery waiting");
+        recovery.await.expect("recovery task");
+
+        let final_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("record must still exist");
+        assert_eq!(
+            final_rec.state, "succeeded",
+            "recovery must finalize the kick"
+        );
+        assert_eq!(
+            removed_at().await,
+            Some(removed_before),
+            "recovery must not run the removal again"
+        );
+    }
+
     /// Recovery seam: commit kick marker, simulate crash, re-drive via the real
     /// recovery worker entry point and assert all three live side effects fire:
     /// membership cache cleared, channel subscription evicted, workflow disabled.

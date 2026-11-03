@@ -57,13 +57,15 @@ pub const CANCEL_SQL: &str = concat!(
     " = $2"
 );
 
-/// Run `query` on a connection from `pool`, cancelling its statement on the
-/// server if the returned future is dropped before it completes.
+/// Run `query` on `conn`, a connection from `pool`, cancelling its statement
+/// on the server if the returned future is dropped before it completes.
+/// Callers pass the connection so earlier steps of the same search reuse one
+/// pool checkout.
 pub(crate) async fn fetch_all(
     pool: &PgPool,
+    mut conn: PoolConnection<Postgres>,
     query: Query<'_, Postgres, PgArguments>,
 ) -> Result<Vec<PgRow>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
     let backend: (i32, i64) = sqlx::query_as(BACKEND_SQL).fetch_one(&mut *conn).await?;
     let mut armed = CancelOnDrop {
         pool: pool.clone(),

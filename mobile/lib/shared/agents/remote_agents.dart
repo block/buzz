@@ -10,6 +10,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../community/community.dart';
+import 'first_agent_bestie.dart';
+import '../me/default_agent.dart';
+import '../me/me_sync.dart';
 import '../community/community_provider.dart';
 import '../crypto/nip_oa.dart';
 import '../hosted/account_identity_store.dart';
@@ -23,6 +26,24 @@ import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
 import '../storage/secure_storage.dart';
+
+/// Last authoritative runtime availability, scoped to the Buzz owner rather
+/// than the Builderlab login so signing out cannot revive a deleted runtime.
+String _availabilityKey(String owner) =>
+    'remote-agent-availability:${HostedEnvironment.origin.host}:$owner';
+
+final savedRemoteAvailabilityProvider = FutureProvider<Set<String>?>((
+  ref,
+) async {
+  final owner = ref.watch(myPubkeyProvider);
+  final controller = ref.watch(remoteAgentControllerProvider);
+  void changed() => ref.invalidateSelf();
+  controller.addListener(changed);
+  ref.onDispose(() => controller.removeListener(changed));
+  if (owner == null) return null;
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getStringList(_availabilityKey(owner))?.toSet();
+});
 
 /// Remote agents run on Builderlab, so they exist only in builds with
 /// Builderlab enabled and only in hosted communities this build supports.
@@ -82,6 +103,15 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
   final controller = RemoteAgentController(
     account: ref.watch(builderlabAccountProvider),
     keys: AccountIdentityStore(),
+    onCreated: (community, pubkey) async {
+      final sync = ref.read(meSyncProvider);
+      if (sync.pubkey != community.pubkey ||
+          ref.read(activeCommunityProvider).asData?.value?.id != community.id) {
+        throw StateError('The community changed. Resume agent setup there.');
+      }
+      await makeFirstAgentBestie(sync, pubkey);
+      ref.invalidate(defaultAgentProvider);
+    },
     relayAuth: ref.watch(hostedRelayAuthProvider),
   );
   ref.onDispose(controller.dispose);
@@ -168,6 +198,7 @@ class RemoteAgentController extends ChangeNotifier {
     required this.account,
     required AccountIdentityStore keys,
     required this.relayAuth,
+    this.onCreated,
   }) : _keys = keys {
     account.subjectChanges.addListener(_accountChanged);
   }
@@ -175,6 +206,9 @@ class RemoteAgentController extends ChangeNotifier {
   final BuilderlabAccountClient account;
   final AccountIdentityStore _keys;
   final HostedRelayAuth relayAuth;
+
+  /// Completes community preferences before clearing the resumable setup.
+  final Future<void> Function(Community community, String pubkey)? onCreated;
 
   bool busy = false;
   int _operation = 0;
@@ -226,6 +260,7 @@ class RemoteAgentController extends ChangeNotifier {
     pending = null;
     deletedAgents = {};
     listingFailed = false;
+    registryLoaded = false;
     _scope = null;
   }
 
@@ -294,6 +329,9 @@ class RemoteAgentController extends ChangeNotifier {
   /// an empty registry.
   bool listingFailed = false;
 
+  /// Whether this account has returned an authoritative registry snapshot.
+  bool registryLoaded = false;
+
   Future<void> refresh() async {
     try {
       await _refresh();
@@ -311,9 +349,18 @@ class RemoteAgentController extends ChangeNotifier {
       return;
     }
     await ensureBinding();
+    final boundOwner = owner!;
+    final scope = _storageScope;
+    void check() {
+      if (_currentScope != scope || owner != boundOwner) {
+        throw StateError('Account changed. Reopen Agents.');
+      }
+    }
+
     final result = await account.post('/v3/beekeeper/list-agents', {
       'include_instructions': true,
-    });
+    }, expectedSubject: session.subject);
+    check();
     requireStatus(result, 'SUCCESS', 1);
     final rows = result['agents'] ?? [];
     if (rows is! List) throw StateError('Invalid agent listing.');
@@ -321,9 +368,9 @@ class RemoteAgentController extends ChangeNotifier {
       for (final row in rows) Map<String, dynamic>.from(row as Map),
     ];
     final prefs = await SharedPreferences.getInstance();
+    check();
     final retries = Map<String, dynamic>.from(
-      jsonDecode(prefs.getString('$_storageScope:delete-retries') ?? '{}')
-          as Map,
+      jsonDecode(prefs.getString('$scope:delete-retries') ?? '{}') as Map,
     );
     // A deletion interrupted after its relay registration was removed keeps
     // its row so Delete can be retried.
@@ -335,9 +382,16 @@ class RemoteAgentController extends ChangeNotifier {
         listed.add(row);
       }
     }
+    registryLoaded = true;
     agents = listed
         .where((row) => !deletedAgents.contains(row['agent_pubkey']))
         .toList();
+    if (!await prefs.setStringList(
+      _availabilityKey(boundOwner),
+      activeAgents.toList(),
+    )) {
+      throw StateError('Could not save agent availability. Retry refresh.');
+    }
   }
 
   /// Requires this account's saved key to be its current server binding.
@@ -659,6 +713,7 @@ class RemoteAgentController extends ChangeNotifier {
     // Retain the completed registration if the listing refresh fails, so Retry
     // resumes the same identity instead of creating another agent.
     await refresh();
+    await onCreated?.call(community, pubkey);
     // Drop the record before its instructions, so an interrupted cleanup never
     // leaves a pending setup whose instructions are gone.
     final prefs = await SharedPreferences.getInstance();
@@ -844,6 +899,17 @@ class RemoteAgentController extends ChangeNotifier {
       );
     }
     deletedAgents = completed;
+    final available =
+        prefs.getStringList(_availabilityKey(member))?.toSet() ?? activeAgents;
+    available.remove(pubkey);
+    if (!await prefs.setStringList(
+      _availabilityKey(member),
+      available.toList(),
+    )) {
+      throw StateError(
+        'Runtime deleted, but local cleanup failed. Retry Delete.',
+      );
+    }
     retries.remove(pubkey);
     if (!await prefs.setString('$scope:delete-retries', jsonEncode(retries))) {
       throw StateError(

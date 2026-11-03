@@ -131,11 +131,27 @@ void main() {
           .toList();
     });
     expect(found.first.model, 'Claude Sonnet');
+    expect(found.first.runtime, 'block.builderlab/builderlab');
+    expect(found[1].runtime, 'block.claude-code/claude-code');
     expect(found.map((entry) => entry.pubkey), [
       fakeAgent,
       desktop.public,
       imported.public,
     ]);
+  });
+
+  test('forged runtime metadata cannot mark an agent as hosted', () async {
+    final forged = NostrEvent.fromJson({
+      ...registration(fakeAgent).toJson(),
+      'sig': '0' * 128,
+    });
+    final found = await loadOwnedAgentDirectory(
+      fakeOwner.public,
+      (filter) async => filter.kinds.contains(30177)
+          ? [forged]
+          : [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+    );
+    expect(found.single.runtime, isNull);
   });
 
   test('a registration whose signature fails keeps the agent without its '
