@@ -132,28 +132,44 @@ class ReplySummaryLink extends HookConsumerWidget {
                           const SizedBox(width: Grid.half),
                         ],
                         if (shownWorking.isNotEmpty) ...[
-                          // Working agents sit side by side, as on desktop.
-                          for (final (i, pubkey) in shownWorking.indexed) ...[
-                            if (i > 0) const SizedBox(width: Grid.xxs),
-                            SmallAvatar(
-                              pubkey: pubkey,
-                              userCache: userCache,
-                              agent: true,
+                          Container(
+                            key: const ValueKey('thread-working-container'),
+                            padding: const EdgeInsets.fromLTRB(6, 4, 8, 4),
+                            decoration: BoxDecoration(
+                              color: context.controlSurface,
+                              borderRadius: BorderRadius.circular(Grid.twelve),
                             ),
-                          ],
-                          if (hiddenWorking > 0) ...[
-                            const SizedBox(width: Grid.xxs),
-                            Text(
-                              '+$hiddenWorking',
-                              style: context.textTheme.labelMedium?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                              ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // Working agents sit side by side, as on desktop.
+                                for (final (i, pubkey)
+                                    in shownWorking.indexed) ...[
+                                  if (i > 0) const SizedBox(width: Grid.xxs),
+                                  SmallAvatar(
+                                    pubkey: pubkey,
+                                    userCache: userCache,
+                                    agent: true,
+                                  ),
+                                ],
+                                if (hiddenWorking > 0) ...[
+                                  const SizedBox(width: Grid.xxs),
+                                  Text(
+                                    '+$hiddenWorking',
+                                    style: context.textTheme.labelMedium
+                                        ?.copyWith(
+                                          color:
+                                              context.colors.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
+                                const SizedBox(width: Grid.xs),
+                                const TypingDots(
+                                  key: ValueKey('thread-working-dots'),
+                                  dotSize: 5,
+                                ),
+                              ],
                             ),
-                          ],
-                          const SizedBox(width: Grid.xs),
-                          const TypingDots(
-                            key: ValueKey('thread-working-dots'),
-                            dotSize: 5,
                           ),
                           if (summary != null) const SizedBox(width: Grid.half),
                         ],

@@ -11386,7 +11386,7 @@ void main() {
           );
           expect(
             tester
-                .getRect(find.byKey(const ValueKey('thread-working-dots')))
+                .getRect(find.byKey(const ValueKey('thread-working-container')))
                 .right,
             closeTo(tester.getRect(bubble).right, 0.1),
           );

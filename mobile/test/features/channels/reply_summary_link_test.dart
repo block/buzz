@@ -50,9 +50,15 @@ void main() {
           final lane = tester.getRect(find.byKey(const ValueKey('lane')));
           final pending = mirrored
               ? tester
-                    .getRect(find.byKey(const ValueKey('thread-working-dots')))
+                    .getRect(
+                      find.byKey(const ValueKey('thread-working-container')),
+                    )
                     .right
-              : tester.getRect(find.byType(SmallAvatar)).left;
+              : tester
+                    .getRect(
+                      find.byKey(const ValueKey('thread-working-container')),
+                    )
+                    .left;
           expect(pending, closeTo(mirrored ? lane.right : lane.left, 0.1));
           expect(
             find.bySemanticsLabel('View thread: Agent is working'),
