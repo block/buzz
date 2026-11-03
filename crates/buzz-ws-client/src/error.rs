@@ -49,3 +49,16 @@ impl From<nostr::event::builder::Error> for WsClientError {
         WsClientError::EventBuilder(e.to_string())
     }
 }
+
+impl WsClientError {
+    /// The HTTP status when the relay refused the WebSocket upgrade with an
+    /// HTTP response (e.g. a NIP-FI `401`/`403` decided at upgrade time).
+    pub fn upgrade_rejection_status(&self) -> Option<u16> {
+        match self {
+            WsClientError::WebSocket(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Some(response.status().as_u16())
+            }
+            _ => None,
+        }
+    }
+}

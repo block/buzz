@@ -1,7 +1,9 @@
 pub mod agent_management;
 mod client;
 mod commands;
+mod credentials;
 mod error;
+mod federated_identity;
 mod help_tree;
 mod links;
 mod validate;
@@ -9,7 +11,6 @@ mod validate;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
-use nostr::Keys;
 use uuid::Uuid;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
@@ -127,6 +128,10 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_FEDERATED_IDENTITY_TOKEN    NIP-FA adapter session token  [optional]
+  BUZZ_FEDERATED_IDENTITY_ADAPTER  NIP-FA adapter base URL  [optional]
+    Set both for relays that enforce federated identity (NIP-FI): the CLI
+    mints an assertion from the adapter and sends it on every request.
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -2196,7 +2201,7 @@ pub enum ModerationCmd {
 /// and the BIP-340 signature. Inputs that are already valid JSON — or not
 /// recognizable as the shorthand — are returned unchanged so the strict
 /// parser reports the error on the original bytes.
-fn normalize_auth_tag_input(input: &str) -> String {
+pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
     let trimmed = input.trim();
     if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
         return trimmed.to_owned();
@@ -2228,42 +2233,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
-    // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
-
-    // NIP-OA: parse and verify the auth tag if provided.
-    //
-    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
-    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
-    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
-    // JSON; all validation and signature verification happen on the strict
-    // path below, unchanged.
-    let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref input) if !input.is_empty() => {
-            let json = normalize_auth_tag_input(input);
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
-                CliError::Auth(format!(
-                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-                    keys.public_key().to_hex()
-                ))
-            })?;
-            // Canonical wire form derives from the parsed-and-verified tag
-            // (same shape as buzz-acp's RestClient), never from raw input.
-            let canonical = serde_json::to_string(tag.as_slice())
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
-            (Some(tag), Some(canonical))
+    // Credential chain: the first configured link is the identity
+    // (see `credentials`). Today that is the explicit key.
+    let credentials = credentials::resolve(
+        credentials::Settings {
+            private_key: cli.private_key,
+            auth_tag: cli.auth_tag,
+            ..Default::default()
         }
-        _ => (None, None),
-    };
-
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+        .with_env_evidence(),
+    )?;
+    let client = BuzzClient::new(relay_url, credentials)?;
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,

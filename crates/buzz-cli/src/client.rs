@@ -1,12 +1,17 @@
 use std::future::Future;
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+use nostr::{EventBuilder, JsonUtil, Kind, PublicKey, Tag};
 use sha2::{Digest, Sha256};
 
+use crate::credentials::{
+    Credentials, FEDERATED_IDENTITY_ADAPTER_ENV, FEDERATED_IDENTITY_TOKEN_ENV,
+};
 use crate::error::CliError;
+
+/// NIP-FI assertion header (`docs/nips/NIP-FI.md` §Client-attached transport).
+const FEDERATED_IDENTITY_HEADER: &str = "Nostr-Federated-Identity";
 
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -74,40 +79,6 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
-
-/// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
-///
-/// The event includes:
-/// - `u` tag: the full request URL
-/// - `method` tag: HTTP method (GET, POST, PUT, DELETE)
-/// - `payload` tag: SHA-256 hex of the request body (if present)
-fn sign_nip98(
-    keys: &Keys,
-    method: &str,
-    url: &str,
-    body: Option<&[u8]>,
-) -> Result<String, CliError> {
-    let mut tags = vec![
-        Tag::parse(["u", url]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        Tag::parse(["method", method]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        // Nonce prevents replay rejection for rapid-fire requests with identical bodies.
-        Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-    ];
-    if let Some(b) = body {
-        let hash = hex::encode(Sha256::digest(b));
-        tags.push(
-            Tag::parse(["payload", &hash])
-                .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        );
-    }
-    let event = EventBuilder::new(Kind::Custom(27235), "")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("NIP-98 signing failed: {e}")))?;
-    let json = event.as_json();
-    Ok(format!("Nostr {}", B64.encode(json.as_bytes())))
-}
 
 fn relay_server_tag(relay_url: &str) -> Option<String> {
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
@@ -322,61 +293,45 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
     ))
 }
 
-fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use nostr::Timestamp;
-
-    let now = Timestamp::now().as_secs();
-    let exp_str = (now + 60).to_string();
-    let domain = relay_server_tag(media_url)
-        .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?;
-    let tags = vec![
-        Tag::parse(["t", "get"]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
-    ];
-
-    let auth_event = EventBuilder::new(Kind::from(24242), "Get media")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
-
-    Ok(format!(
-        "Nostr {}",
-        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
-    ))
+/// Blossom (BUD-01) `t=get` proof for `media_url`, scoped to its server.
+fn blossom_get_event(media_url: &str) -> Result<EventBuilder, CliError> {
+    blossom_event(
+        "get",
+        None,
+        relay_server_tag(media_url)
+            .ok_or_else(|| CliError::Usage(format!("invalid media URL: {media_url}")))?,
+        "Get media",
+    )
 }
 
-fn sign_blossom_upload(
-    keys: &Keys,
-    sha256: &str,
-    _mime: &str,
-    relay_url: &str,
-) -> Result<String, CliError> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use nostr::Timestamp;
+/// Blossom (BUD-02) `t=upload` proof for blob `sha256` on this relay.
+fn blossom_upload_event(sha256: &str, relay_url: &str) -> Result<EventBuilder, CliError> {
+    blossom_event(
+        "upload",
+        Some(sha256),
+        relay_server_tag(relay_url)
+            .ok_or_else(|| CliError::Usage(format!("invalid relay URL: {relay_url}")))?,
+        "Upload file",
+    )
+}
 
-    let now = Timestamp::now().as_secs();
-    let exp_str = (now + 60).to_string();
-    let domain = relay_server_tag(relay_url)
-        .ok_or_else(|| CliError::Usage(format!("invalid relay URL: {relay_url}")))?;
-
-    let tags = vec![
-        Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["x", sha256]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["expiration", &exp_str]).map_err(|e| CliError::Other(e.to_string()))?,
-        Tag::parse(["server", &domain]).map_err(|e| CliError::Other(e.to_string()))?,
-    ];
-
-    let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
-
-    Ok(format!(
-        "Nostr {}",
-        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
-    ))
+fn blossom_event(
+    verb: &str,
+    sha256: Option<&str>,
+    server: String,
+    content: &str,
+) -> Result<EventBuilder, CliError> {
+    let exp = (nostr::Timestamp::now().as_secs() + 60).to_string();
+    let tag = |parts: &[&str]| {
+        Tag::parse(parts.iter().copied()).map_err(|e| CliError::Other(e.to_string()))
+    };
+    let mut tags = vec![tag(&["t", verb])?];
+    if let Some(sha256) = sha256 {
+        tags.push(tag(&["x", sha256])?);
+    }
+    tags.push(tag(&["expiration", &exp])?);
+    tags.push(tag(&["server", &server])?);
+    Ok(EventBuilder::new(Kind::from(24242), content).tags(tags))
 }
 
 #[cfg(test)]
@@ -446,19 +401,12 @@ mod media_download_tests {
 
     #[test]
     fn media_get_auth_header_is_server_scoped() {
-        let keys = Keys::generate();
+        let keys = nostr::Keys::generate();
         let hash = "a".repeat(64);
-        let header = sign_blossom_get(
-            &keys,
-            &format!("https://relay.example:443/media/{hash}.jpg"),
-        )
-        .unwrap();
-        let encoded = header.strip_prefix("Nostr ").unwrap();
-        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(encoded)
+        let event = blossom_get_event(&format!("https://relay.example:443/media/{hash}.jpg"))
+            .unwrap()
+            .sign_with_keys(&keys)
             .unwrap();
-        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
-        event.verify().unwrap();
         assert_eq!(event.kind, Kind::from(24242));
 
         let tags: Vec<Vec<String>> = event
@@ -513,14 +461,35 @@ fn advance_query_cursor(
     Ok(())
 }
 
+/// How a protected relay request proves key possession in `Authorization`.
+enum Proof<'a> {
+    /// NIP-98 over the request method, URL and body.
+    Nip98 {
+        method: &'a str,
+        url: &'a str,
+        body: Option<&'a [u8]>,
+    },
+    /// Blossom kind-24242 upload proof for blob `sha256`.
+    BlossomUpload { sha256: &'a str },
+    /// Blossom kind-24242 read proof for `url`.
+    BlossomGet { url: &'a str },
+}
+
+impl<'a> Proof<'a> {
+    fn post(url: &'a str, body: &'a [u8]) -> Self {
+        Self::Nip98 {
+            method: "POST",
+            url,
+            body: Some(body),
+        }
+    }
+}
+
 pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
-    keys: Keys,
-    /// Optional NIP-OA auth tag injected into every signed event.
-    auth_tag: Option<Tag>,
-    /// Raw JSON of the auth tag for the `x-auth-tag` HTTP header.
-    auth_tag_json: Option<String>,
+    /// Identity, signer, NIP-OA auth tag and NIP-FI evidence source.
+    credentials: Credentials,
 }
 
 impl BuzzClient {
@@ -533,12 +502,7 @@ impl BuzzClient {
     /// - `BUZZ_TIMEOUT_SECS` — per-request total timeout (default 30 s)
     ///
     /// A value of zero for either variable is treated as invalid and falls back to the default.
-    pub fn new(
-        relay_url: String,
-        keys: Keys,
-        auth_tag: Option<Tag>,
-        auth_tag_json: Option<String>,
-    ) -> Result<Self, CliError> {
+    pub fn new(relay_url: String, credentials: Credentials) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
@@ -547,15 +511,18 @@ impl BuzzClient {
         Ok(Self {
             http,
             relay_url,
-            keys,
-            auth_tag,
-            auth_tag_json,
+            credentials,
         })
     }
 
-    /// Get the keypair.
-    pub fn keys(&self) -> &Keys {
-        &self.keys
+    /// The public key this client acts as.
+    pub fn public_key(&self) -> PublicKey {
+        self.credentials.public_key()
+    }
+
+    /// The credentials this client acts with.
+    pub fn credentials(&self) -> &Credentials {
+        &self.credentials
     }
 
     /// Get the relay base URL.
@@ -569,9 +536,9 @@ impl BuzzClient {
     /// The auth tag is `["auth", owner_pubkey, conditions, sig]`; the
     /// owner pubkey lives at index 1.
     pub fn auth_tag_owner_hex(&self) -> Option<String> {
-        self.auth_tag
-            .as_ref()
-            .map(|t| t.as_slice())
+        self.credentials
+            .auth_tag()
+            .map(|t| t.tag.as_slice())
             .and_then(|slice| slice.get(1).cloned())
     }
 
@@ -580,23 +547,21 @@ impl BuzzClient {
     /// All event creation should go through this method to ensure consistent
     /// auth tag injection. Callers MUST NOT add `auth` tags to the builder
     /// before calling this method.
-    pub fn sign_event(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
-        let builder = if let Some(ref tag) = self.auth_tag {
-            builder.tags([tag.clone()])
-        } else {
-            builder
+    pub async fn sign_event(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
+        let auth_tag = self.credentials.auth_tag();
+        let builder = match auth_tag {
+            Some(tag) => builder.tags([tag.tag.clone()]),
+            None => builder,
         };
-        let event = builder
-            .sign_with_keys(&self.keys)
-            .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+        let event = self.credentials.sign(builder).await?;
 
-        // Enforce: auth tags may only come from self.auth_tag injection.
+        // Enforce: auth tags may only come from the credentials' auth tag.
         let auth_count = event
             .tags
             .iter()
             .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
             .count();
-        let expected = if self.auth_tag.is_some() { 1 } else { 0 };
+        let expected = if auth_tag.is_some() { 1 } else { 0 };
         if auth_count != expected {
             return Err(CliError::Other(format!(
                 "event has {auth_count} auth tags — expected {expected}; \
@@ -607,11 +572,87 @@ impl BuzzClient {
         Ok(event)
     }
 
-    /// Attach the `x-auth-tag` header if configured (NIP-OA relay membership delegation).
-    fn with_auth_tag(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.auth_tag_json {
-            Some(ref json) => req.header("x-auth-tag", json),
-            None => req,
+    /// The one place protected relay requests get their credentials:
+    /// `proof` in `Authorization`, the NIP-OA `x-auth-tag` (relay membership
+    /// delegation) when configured, and the NIP-FI `Nostr-Federated-Identity`
+    /// assertion when an evidence source is configured. Called once per
+    /// attempt so every retry carries a fresh proof.
+    async fn authorize(
+        &self,
+        req: reqwest::RequestBuilder,
+        proof: Proof<'_>,
+    ) -> Result<reqwest::RequestBuilder, CliError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let authorization = match proof {
+            Proof::Nip98 { method, url, body } => {
+                format!("Nostr {}", self.credentials.nip98(method, url, body).await?)
+            }
+            Proof::BlossomUpload { sha256 } => {
+                let event = self
+                    .credentials
+                    .sign(blossom_upload_event(sha256, &self.relay_url)?)
+                    .await?;
+                format!(
+                    "Nostr {}",
+                    URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+                )
+            }
+            Proof::BlossomGet { url } => {
+                let event = self.credentials.sign(blossom_get_event(url)?).await?;
+                format!(
+                    "Nostr {}",
+                    URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+                )
+            }
+        };
+        let mut req = req.header(reqwest::header::AUTHORIZATION, authorization);
+        if let Some(tag) = self.credentials.auth_tag() {
+            req = req.header("x-auth-tag", &tag.json);
+        }
+        if let Some(assertion) = self.credentials.evidence(&self.relay_url).await? {
+            req = req.header(FEDERATED_IDENTITY_HEADER, format!("Bearer {assertion}"));
+        }
+        Ok(req)
+    }
+
+    /// The NIP-FI assertion as WebSocket upgrade headers (empty without an
+    /// evidence source).
+    async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
+        let mut headers = buzz_ws_client::HeaderMap::new();
+        if let Some(assertion) = self.credentials.evidence(&self.relay_url).await? {
+            let value = buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
+                .map_err(|_| CliError::Auth("assertion is not a valid header value".into()))?;
+            headers.insert(FEDERATED_IDENTITY_HEADER, value);
+        }
+        Ok(headers)
+    }
+
+    /// Map a non-2xx relay response to a `CliError`.
+    ///
+    /// The relay's `{"error": …}` / `{"message": …}` field becomes the
+    /// message. A 401 without a NIP-FI evidence source names the settings,
+    /// since an enforcing relay answers every request that way; a 403 with an
+    /// auth tag configured hints that the tag may be stale.
+    fn relay_error(&self, status: u16, body: String) -> CliError {
+        let message = extract_relay_message_field(&body).unwrap_or(body);
+        let message = message.trim_end().to_owned();
+        if status == 401 && !self.credentials.has_evidence_source() {
+            return CliError::Auth(format!(
+                "relay requires authentication ({message}); if it enforces federated identity \
+                 (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} and {FEDERATED_IDENTITY_ADAPTER_ENV}"
+            ));
+        }
+        if status == 403 && self.credentials.auth_tag().is_some() {
+            return CliError::Relay {
+                status,
+                body: format!(
+                    "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
+                ),
+            };
+        }
+        CliError::Relay {
+            status,
+            body: message,
         }
     }
 
@@ -750,16 +791,17 @@ impl BuzzClient {
     /// Used only for NIP-IA identity archive/unarchive requests (kind
     /// 9035/9036), whose optional `auth` tag is a *content-level*
     /// owner-of-agent attestation about the *target* identity — unrelated to
-    /// this client's own NIP-OA membership delegation (`self.auth_tag`,
+    /// this client's own NIP-OA membership delegation (the credentials' auth tag,
     /// which [`sign_event`] injects into every other event and which
     /// `submit_event` separately attaches via the `x-auth-tag` HTTP header).
     /// Routing an identity archive request through `sign_event` would either
     /// silently drop the caller's owner attestation or double up an
     /// unrelated tag.
-    pub fn sign_event_unchecked(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
-        builder
-            .sign_with_keys(&self.keys)
-            .map_err(|e| CliError::Other(format!("signing failed: {e}")))
+    pub async fn sign_event_unchecked(
+        &self,
+        builder: EventBuilder,
+    ) -> Result<nostr::Event, CliError> {
+        self.credentials.sign(builder).await
     }
 
     /// GET a public, unauthenticated relay endpoint (e.g. the NIP-11 `/info`
@@ -796,17 +838,16 @@ impl BuzzClient {
             let body = body.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .post(&url)
-                            .header("Authorization", auth)
                             .header("Content-Type", "application/json")
-                            .body(body),
+                            .body(body.clone()),
+                        Proof::post(&url, &body),
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 self.handle_response(resp).await
             }
         })
@@ -826,17 +867,16 @@ impl BuzzClient {
             let body = body.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .post(&url)
-                            .header("Authorization", auth)
                             .header("Content-Type", "application/json")
-                            .body(body),
+                            .body(body.clone()),
+                        Proof::post(&url, &body),
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 self.handle_response(resp).await
             }
         })
@@ -854,11 +894,17 @@ impl BuzzClient {
         self.with_retry_body(|| {
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "GET", &url, None)?;
-                let resp = self
-                    .with_auth_tag(self.http.get(&url).header("Authorization", auth))
-                    .send()
+                let req = self
+                    .authorize(
+                        self.http.get(&url),
+                        Proof::Nip98 {
+                            method: "GET",
+                            url: &url,
+                            body: None,
+                        },
+                    )
                     .await?;
+                let resp = req.send().await?;
                 self.handle_response(resp).await
             }
         })
@@ -884,17 +930,16 @@ impl BuzzClient {
             let body_bytes = body_bytes.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .post(&url)
-                            .header("Authorization", auth)
                             .header("Content-Type", "application/json")
-                            .body(body_bytes),
+                            .body(body_bytes.clone()),
+                        Proof::post(&url, &body_bytes),
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 // 204 No Content: return empty string rather than failing on
                 // an empty body that cannot be parsed as JSON.
                 if resp.status() == reqwest::StatusCode::NO_CONTENT {
@@ -915,29 +960,27 @@ impl BuzzClient {
     ) -> Result<String, CliError> {
         let url = format!("{}{path}", self.relay_url);
         let body = serde_json::to_vec(body).map_err(|e| CliError::Other(e.to_string()))?;
-        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
         let unknown = |detail: String| CliError::DeliveryUnknown(detail);
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
             .build()?;
-        let response = self
-            .with_auth_tag(
+        let req = self
+            .authorize(
                 http.post(&url)
-                    .header("Authorization", auth)
                     .header("Content-Type", "application/json")
-                    .body(body),
+                    .body(body.clone()),
+                Proof::post(&url, &body),
             )
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_connect() || e.is_builder() {
-                    CliError::Network(e)
-                } else {
-                    unknown(e.to_string())
-                }
-            })?;
+            .await?;
+        let response = req.send().await.map_err(|e| {
+            if e.is_connect() || e.is_builder() {
+                CliError::Network(e)
+            } else {
+                unknown(e.to_string())
+            }
+        })?;
         let status = response.status();
         let body = response.text().await.map_err(|e| unknown(e.to_string()))?;
         let message = extract_relay_message_field(&body).unwrap_or_else(|| body.clone());
@@ -948,10 +991,7 @@ impl BuzzClient {
             return Err(unknown(format!("HTTP {}: {message}", status.as_u16())));
         }
         if !status.is_success() {
-            return Err(CliError::Relay {
-                status: status.as_u16(),
-                body: message,
-            });
+            return Err(self.relay_error(status.as_u16(), body));
         }
         Ok(body)
     }
@@ -989,18 +1029,17 @@ impl BuzzClient {
 
             // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
             // event ID, keeping retries safe against the relay's replay guard.
-            let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-            let send_result: Result<reqwest::Response, CliError> = self
-                .with_auth_tag(
+            let req = self
+                .authorize(
                     self.http
                         .post(&url)
-                        .header("Authorization", auth)
                         .header("Content-Type", "application/json")
                         .body(body.clone()),
+                    Proof::post(&url, &body),
                 )
-                .send()
-                .await
-                .map_err(CliError::from);
+                .await?;
+            let send_result: Result<reqwest::Response, CliError> =
+                req.send().await.map_err(CliError::from);
 
             match send_result {
                 Err(e) => {
@@ -1086,26 +1125,7 @@ impl BuzzClient {
                     })?;
                     // Map the body through handle_response's error logic inline.
                     if !resp_was_success(status) {
-                        let message = serde_json::from_str::<serde_json::Value>(&body_text)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("error")
-                                    .or_else(|| v.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .map(str::to_string)
-                            })
-                            .unwrap_or(body_text);
-                        let message = if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
-                            format!(
-                                "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                            )
-                        } else {
-                            message
-                        };
-                        return Err(CliError::Relay {
-                            status,
-                            body: message,
-                        });
+                        return Err(self.relay_error(status, body_text));
                     }
                     return Ok(body_text);
                 }
@@ -1141,17 +1161,16 @@ impl BuzzClient {
                 async move {
                     // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
                     // event ID, keeping retries safe against the relay's replay guard.
-                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
-                    let resp = self
-                        .with_auth_tag(
+                    let req = self
+                        .authorize(
                             self.http
                                 .post(&url)
-                                .header("Authorization", auth)
                                 .header("Content-Type", "application/json")
-                                .body(body),
+                                .body(body.clone()),
+                            Proof::post(&url, &body),
                         )
-                        .send()
                         .await?;
+                    let resp = req.send().await?;
                     self.handle_response(resp).await
                 }
             })
@@ -1184,10 +1203,21 @@ impl BuzzClient {
         // additional overhead absorbed by this budget.
         // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
         // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
-        let ok =
-            buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 75)
-                .await
-                .map_err(|e| CliError::Other(e.to_string()))?;
+        let headers = self.upgrade_headers().await?;
+        let ok = buzz_ws_client::publish_event(
+            &ws_url,
+            event,
+            self.credentials.signer(),
+            self.credentials.auth_tag().map(|t| &t.tag),
+            headers,
+            75,
+        )
+        .await
+        .map_err(|e| match e.upgrade_rejection_status() {
+            // A denial decided on the upgrade is an HTTP response (NIP-FI).
+            Some(status) => self.relay_error(status, String::new()),
+            None => CliError::Other(e.to_string()),
+        })?;
 
         if !ok.accepted {
             return Err(CliError::Relay {
@@ -1262,25 +1292,23 @@ impl BuzzClient {
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
                 async move {
-                    let auth_header =
-                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                    let resp = self
-                        .with_auth_tag(
+                    let req = self
+                        .authorize(
                             self.http
                                 .put(&url)
                                 .timeout(upload_timeout)
-                                .header("Authorization", auth_header)
                                 .header("Content-Type", &mime)
                                 .header("X-SHA-256", &sha256)
                                 .body(upload_body),
+                            Proof::BlossomUpload { sha256: &sha256 },
                         )
-                        .send()
                         .await?;
+                    let resp = req.send().await?;
                     let status = resp.status();
                     if !status.is_success() {
                         let s = status.as_u16();
                         let body = resp.text().await.unwrap_or_default();
-                        return Err(CliError::Relay { status: s, body });
+                        return Err(self.relay_error(s, body));
                     }
                     resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
@@ -1309,23 +1337,22 @@ impl BuzzClient {
             let mime = mime.clone();
             let sha256 = sha256.clone();
             async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                let resp = self
-                    .with_auth_tag(
+                let req = self
+                    .authorize(
                         self.http
                             .put(&legacy_url)
                             .timeout(upload_timeout)
-                            .header("Authorization", auth_header)
                             .header("Content-Type", &mime)
                             .header("X-SHA-256", &sha256)
                             .body(upload_body),
+                        Proof::BlossomUpload { sha256: &sha256 },
                     )
-                    .send()
                     .await?;
+                let resp = req.send().await?;
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+                    return Err(self.relay_error(status, body));
                 }
                 resp.json::<BlobDescriptor>().await.map_err(CliError::from)
             }
@@ -1347,15 +1374,14 @@ impl BuzzClient {
             let url = url.clone();
             let client = client.clone();
             async move {
-                let auth_header = sign_blossom_get(&self.keys, &url)?;
-                let resp = self
-                    .with_auth_tag(client.get(&url).header("Authorization", auth_header))
-                    .send()
+                let req = self
+                    .authorize(client.get(&url), Proof::BlossomGet { url: &url })
                     .await?;
+                let resp = req.send().await?;
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+                    return Err(self.relay_error(status, body));
                 }
                 resp.bytes().await.map_err(CliError::Network)
             }
@@ -1367,28 +1393,7 @@ impl BuzzClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .or_else(|| v.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or(body);
-            if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
-                let message = format!(
-                    "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                );
-                return Err(CliError::Relay {
-                    status,
-                    body: message,
-                });
-            }
-            return Err(CliError::Relay {
-                status,
-                body: message,
-            });
+            return Err(self.relay_error(status, body));
         }
         Ok(resp.text().await?)
     }
@@ -1754,8 +1759,15 @@ mod retry_policy_tests {
     }
 
     fn test_client(base_url: &str) -> BuzzClient {
-        let keys = Keys::generate();
-        BuzzClient::new(base_url.to_string(), keys, None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
+    }
+
+    fn client_keys(client: &BuzzClient) -> Keys {
+        client.credentials().test_keys()
     }
 
     fn make_moderation_event(keys: &Keys, kind: u16) -> nostr::Event {
@@ -1783,7 +1795,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9040);
+        let event = make_moderation_event(&client_keys(&client), 9040);
         let err = client.submit_event(event).await.unwrap_err();
         assert!(
             matches!(err, CliError::DeliveryUnknown(_)),
@@ -1823,7 +1835,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9041);
+        let event = make_moderation_event(&client_keys(&client), 9041);
         let t0 = std::time::Instant::now();
         let result = client.submit_event(event).await;
         let elapsed = t0.elapsed();
@@ -1856,7 +1868,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9040);
+        let event = make_moderation_event(&client_keys(&client), 9040);
         let err = client.submit_event(event).await.unwrap_err();
 
         // Must be Relay(429), not DeliveryUnknown.
@@ -1884,7 +1896,7 @@ mod retry_policy_tests {
         let (url, attempts) =
             test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9042);
+        let event = make_moderation_event(&client_keys(&client), 9042);
         let err = client.submit_event(event).await.unwrap_err();
         assert!(
             matches!(err, CliError::DeliveryUnknown(_)),
@@ -1912,7 +1924,7 @@ mod retry_policy_tests {
 
         let base = format!("http://{addr}");
         let client = test_client(&base);
-        let event = make_moderation_event(client.keys(), 9040);
+        let event = make_moderation_event(&client_keys(&client), 9040);
         let err = client.submit_event(event).await.unwrap_err();
         // Must be Network (retryable), not DeliveryUnknown (retryable:false).
         assert!(
@@ -1943,7 +1955,7 @@ mod retry_policy_tests {
         })
         .await;
         let client = test_client(&url);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let result = client.submit_event(event).await;
         assert!(
             result.is_ok(),
@@ -2203,7 +2215,7 @@ mod retry_policy_tests {
 
         let base = format!("http://{addr}");
         let client = test_client(&base);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let result = client.submit_event(event).await;
         assert!(
             result.is_ok(),
@@ -2365,7 +2377,7 @@ mod retry_policy_tests {
 
         let base = format!("http://{addr}");
         let client = test_client(&base);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let err = client.submit_event(event).await.unwrap_err();
 
         // Final error must be DeliveryUnknown — relay may have accepted any attempt.
@@ -2397,7 +2409,7 @@ mod retry_policy_tests {
         let (url, attempts) =
             test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
         let client = test_client(&url);
-        let event = make_stored_event(client.keys());
+        let event = make_stored_event(&client_keys(&client));
         let err = client.submit_event(event).await.unwrap_err();
 
         assert!(
@@ -2416,7 +2428,7 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        normalize_events, BuzzClient, Credentials, Proof,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2536,21 +2548,19 @@ mod tests {
         (tag, json)
     }
 
-    #[test]
-    fn sign_event_unchecked_does_not_inject_ambient_auth_tag() {
+    #[tokio::test]
+    async fn sign_event_unchecked_does_not_inject_ambient_auth_tag() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
             "https://test.relay".into(),
-            keys,
-            Some(auth_tag),
-            Some(auth_json),
+            Credentials::from_keys(keys).with_auth_tag(auth_tag, auth_json),
         )
         .unwrap();
 
         let builder =
             EventBuilder::new(Kind::Custom(9035), "archive").tags([Tag::parse(["-"]).unwrap()]);
-        let event = client.sign_event_unchecked(builder).unwrap();
+        let event = client.sign_event_unchecked(builder).await.unwrap();
 
         let auth_tags: Vec<_> = event
             .tags
@@ -2564,15 +2574,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sign_event_unchecked_preserves_callers_content_auth_tag() {
+    #[tokio::test]
+    async fn sign_event_unchecked_preserves_callers_content_auth_tag() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
             "https://test.relay".into(),
-            keys,
-            Some(auth_tag),
-            Some(auth_json),
+            Credentials::from_keys(keys).with_auth_tag(auth_tag, auth_json),
         )
         .unwrap();
 
@@ -2586,7 +2594,7 @@ mod tests {
 
         let builder = EventBuilder::new(Kind::Custom(9035), "archive")
             .tags([Tag::parse(["-"]).unwrap(), content_auth]);
-        let event = client.sign_event_unchecked(builder).unwrap();
+        let event = client.sign_event_unchecked(builder).await.unwrap();
 
         let auth_tags: Vec<_> = event
             .tags
@@ -2601,21 +2609,23 @@ mod tests {
         assert_eq!(auth_tags[0].as_slice()[1], "c".repeat(64));
     }
 
-    #[test]
-    fn with_auth_tag_sets_header_when_configured() {
+    #[tokio::test]
+    async fn authorize_sets_auth_tag_header_when_configured() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
             "https://test.relay".into(),
-            keys,
-            Some(auth_tag),
-            Some(auth_json.clone()),
+            Credentials::from_keys(keys).with_auth_tag(auth_tag, auth_json.clone()),
         )
         .unwrap();
 
-        let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
-        let built = req.build().unwrap();
+        let url = "https://test.relay/events";
+        let built = client
+            .authorize(client.http.post(url), Proof::post(url, b"{}"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
         let header = built
             .headers()
             .get("x-auth-tag")
@@ -2627,17 +2637,295 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_auth_tag_omits_header_when_not_configured() {
-        let keys = Keys::generate();
-        let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
+    #[tokio::test]
+    async fn authorize_omits_optional_headers_when_not_configured() {
+        let client = BuzzClient::new(
+            "https://test.relay".into(),
+            Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
-        let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
-        let built = req.build().unwrap();
+        let url = "https://test.relay/events";
+        let built = client
+            .authorize(client.http.post(url), Proof::post(url, b"{}"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(built.headers().get("authorization").is_some());
         assert!(
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
+        );
+        assert!(
+            built.headers().get("nostr-federated-identity").is_none(),
+            "no NIP-FI header without an evidence source"
+        );
+    }
+}
+
+/// NIP-FI evidence on every protected route (Review-Proven Rule #2: every
+/// request path that carries auth is enumerated here, plus the WebSocket
+/// upgrade). One mock origin serves both the NIP-FA adapter and the relay.
+#[cfg(test)]
+mod federated_identity_route_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::Request;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    use super::BuzzClient;
+    use crate::credentials::Credentials;
+    use crate::error::CliError;
+    use crate::federated_identity::AdapterSession;
+
+    const ASSERTION: &str = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1In0.c2ln";
+    const HASH: &str = "4f2b5e7c1a9d3e6f8b0c2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a";
+
+    #[derive(Default)]
+    struct Log {
+        mints: usize,
+        requests: Vec<(String, String, HeaderMap)>,
+    }
+
+    /// Serve the adapter and relay on one loopback origin. Relay routes
+    /// answer `deny` when set, otherwise a plausible success; `PUT /upload`
+    /// is 404 so the legacy `/media/upload` fallback runs too.
+    async fn origin(deny: Option<StatusCode>) -> (String, Arc<Mutex<Log>>) {
+        let log: Arc<Mutex<Log>> = Arc::default();
+        let state = log.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/identity/assertions",
+                axum::routing::post({
+                    let log = log.clone();
+                    move |body: axum::body::Bytes| {
+                        let log = log.clone();
+                        async move {
+                            log.lock().unwrap().mints += 1;
+                            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            axum::Json(serde_json::json!({
+                                "assertion": ASSERTION,
+                                "nostr_pubkey": req["nostr_pubkey"],
+                                "expires_at": nostr::Timestamp::now().as_secs() + 300,
+                            }))
+                        }
+                    }
+                }),
+            )
+            .fallback(move |req: Request| {
+                let log = state.clone();
+                async move {
+                    let method = req.method().to_string();
+                    let path = req.uri().path().to_owned();
+                    log.lock().unwrap().requests.push((
+                        method.clone(),
+                        path.clone(),
+                        req.headers().clone(),
+                    ));
+                    if let Some(status) = deny {
+                        return (status, r#"{"error":"authentication required"}"#).into_response();
+                    }
+                    let body = match (method.as_str(), path.as_str()) {
+                        ("PUT", "/upload") => return StatusCode::NOT_FOUND.into_response(),
+                        // No WebSocket server: the test only needs the upgrade's headers.
+                        ("GET", "/") => return StatusCode::FORBIDDEN.into_response(),
+                        ("PUT", "/media/upload") => serde_json::json!({
+                            "url": format!("http://x/media/{HASH}.png"),
+                            "sha256": HASH,
+                            "size": 8,
+                            "type": "image/png",
+                            "uploaded": 0,
+                        })
+                        .to_string(),
+                        ("POST", "/query") => "[]".to_owned(),
+                        ("POST", "/count") => r#"{"count":0}"#.to_owned(),
+                        _ => r#"{"accepted":true}"#.to_owned(),
+                    };
+                    (StatusCode::OK, body).into_response()
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, log)
+    }
+
+    fn client(base: &str, evidence: bool) -> BuzzClient {
+        let mut credentials = Credentials::from_keys(Keys::generate());
+        if evidence {
+            credentials = credentials.with_evidence(AdapterSession::new(base, "token").unwrap());
+        }
+        BuzzClient::new(base.to_owned(), credentials).unwrap()
+    }
+
+    /// Drive every protected request path once, ignoring results (the WS
+    /// publish fails by design once its upgrade headers are recorded).
+    async fn exercise_every_route(client: &BuzzClient) -> Vec<Result<String, CliError>> {
+        let keys = client.credentials().test_keys();
+        let png = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+        std::fs::write(png.path(), b"\x89PNG\r\n\x1a\n").unwrap();
+        let filter = serde_json::json!({"kinds": [1]});
+        let body = serde_json::json!({"k": "v"});
+        let event = |kind: u16| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let mut results = vec![
+            client.query(&filter).await,
+            client.query_multi(&[filter.clone(), filter.clone()]).await,
+            client.count(&filter).await,
+            client.get_authed("/api/get").await,
+            client.post_json_authed("/api/post", &body).await,
+            client.post_json_once_authed("/api/post-once", &body).await,
+            client.submit_event(event(1)).await,
+            client.submit_event(event(9041)).await,
+            client.publish_ephemeral_event(event(20001)).await,
+        ];
+        results.push(
+            client
+                .upload_file(png.path().to_str().unwrap())
+                .await
+                .map(|d| d.url),
+        );
+        results.push(
+            client
+                .download_media(&format!("{HASH}.png"))
+                .await
+                .map(|_| String::new()),
+        );
+        results
+    }
+
+    /// Each `(method, path)` the CLI sends on a protected route.
+    const PROTECTED: &[(&str, &str)] = &[
+        ("POST", "/query"),
+        ("POST", "/count"),
+        ("GET", "/api/get"),
+        ("POST", "/api/post"),
+        ("POST", "/api/post-once"),
+        ("POST", "/events"),
+        ("GET", "/"),
+        ("PUT", "/upload"),
+        ("PUT", "/media/upload"),
+    ];
+
+    fn covered(log: &Log) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = log
+            .requests
+            .iter()
+            .map(|(m, p, _)| (m.clone(), p.clone()))
+            .collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    }
+
+    #[tokio::test]
+    async fn every_protected_route_and_the_upgrade_carry_the_assertion() {
+        let (base, log) = origin(None).await;
+        let results = exercise_every_route(&client(&base, true)).await;
+
+        let log = log.lock().unwrap();
+        for (method, path) in PROTECTED {
+            assert!(
+                covered(&log).contains(&(method.to_string(), path.to_string())),
+                "{method} {path} was not exercised"
+            );
+        }
+        assert!(
+            log.requests
+                .iter()
+                .any(|(_, p, _)| p.starts_with("/media/") && p != "/media/upload"),
+            "GET /media/<hash> was not exercised"
+        );
+        for (method, path, headers) in &log.requests {
+            assert_eq!(
+                headers
+                    .get("nostr-federated-identity")
+                    .and_then(|v| v.to_str().ok()),
+                Some(format!("Bearer {ASSERTION}").as_str()),
+                "{method} {path}"
+            );
+            if path != "/" {
+                assert!(
+                    headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.starts_with("Nostr ")),
+                    "{method} {path}: Authorization proof"
+                );
+            }
+        }
+        assert_eq!(log.mints, 1, "one assertion serves the whole process");
+        // Everything but the WS publish (no WS server) succeeds.
+        for (i, result) in results.iter().enumerate() {
+            if i != 8 {
+                assert!(result.is_ok(), "route {i}: {result:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exempt_routes_and_relays_without_a_source_get_no_assertion() {
+        let (base, log) = origin(None).await;
+        let plain = client(&base, false);
+        exercise_every_route(&plain).await;
+        plain.get_public("/info").await.unwrap();
+
+        let log = log.lock().unwrap();
+        assert_eq!(log.mints, 0);
+        assert!(log.requests.len() >= PROTECTED.len());
+        for (method, path, headers) in &log.requests {
+            assert!(
+                headers.get("nostr-federated-identity").is_none(),
+                "{method} {path}"
+            );
+        }
+
+        // An exempt route never mints or presents evidence, even with a source.
+        let (base, log) = origin(None).await;
+        client(&base, true).get_public("/info").await.unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.mints, 0);
+        assert!(log.requests[0].2.get("nostr-federated-identity").is_none());
+    }
+
+    /// An enforcing relay's 401 with no evidence source names the settings,
+    /// on HTTP and on the WebSocket upgrade, and is not retried.
+    #[tokio::test]
+    async fn a_401_without_a_source_names_the_evidence_settings() {
+        let (base, log) = origin(Some(StatusCode::UNAUTHORIZED)).await;
+        let plain = client(&base, false);
+        let keys = plain.credentials().test_keys();
+        let ws_event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        for err in [
+            plain.query(&serde_json::json!({})).await.unwrap_err(),
+            plain.publish_ephemeral_event(ws_event).await.unwrap_err(),
+        ] {
+            assert!(
+                matches!(&err, CliError::Auth(m)
+                    if m.contains("BUZZ_FEDERATED_IDENTITY_TOKEN")
+                        && m.contains("BUZZ_FEDERATED_IDENTITY_ADAPTER")),
+                "{err:?}"
+            );
+        }
+        assert_eq!(log.lock().unwrap().requests.len(), 2, "401 is not retried");
+
+        // With a source configured, a 401 is the relay's verdict, not a hint.
+        let (base, _) = origin(Some(StatusCode::UNAUTHORIZED)).await;
+        let err = client(&base, true)
+            .query(&serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CliError::Relay { status: 401, .. }),
+            "{err:?}"
         );
     }
 }

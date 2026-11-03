@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, Keys, Tag};
+use nostr::{Event, NostrSigner, Tag};
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -35,29 +35,29 @@ pub struct NostrWsConnection {
 }
 
 impl NostrWsConnection {
-    /// Connects to the relay at `url` and performs NIP-42 authentication with `keys`.
+    /// Connects to the relay at `url` and performs NIP-42 authentication with `signer`.
     ///
     /// Pass `auth_tag` to include a NIP-OA authorization tag in the AUTH event.
-    pub async fn connect_authenticated(
+    pub async fn connect_authenticated<S: NostrSigner>(
         url: &str,
-        keys: &Keys,
+        signer: &S,
         auth_tag: Option<&Tag>,
     ) -> Result<Self, WsClientError> {
-        Self::connect_authenticated_with_headers(url, keys, auth_tag, HeaderMap::new()).await
+        Self::connect_authenticated_with_headers(url, signer, auth_tag, HeaderMap::new()).await
     }
 
     /// [`Self::connect_authenticated`], sending `headers` on the WebSocket upgrade request.
     ///
     /// Use this for credentials the relay checks at upgrade time, such as a NIP-FI
     /// `Nostr-Federated-Identity` assertion that must pair with the NIP-42 AUTH key.
-    pub async fn connect_authenticated_with_headers(
+    pub async fn connect_authenticated_with_headers<S: NostrSigner>(
         url: &str,
-        keys: &Keys,
+        signer: &S,
         auth_tag: Option<&Tag>,
         headers: HeaderMap,
     ) -> Result<Self, WsClientError> {
         let mut conn = Self::connect_with_headers(url, headers).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        conn.authenticate(signer, auth_tag).await?;
         Ok(conn)
     }
 
@@ -123,19 +123,19 @@ impl NostrWsConnection {
         }
     }
 
-    /// Performs NIP-42 authentication using `keys` against the connected relay.
+    /// Performs NIP-42 authentication using `signer` against the connected relay.
     ///
     /// Pass `auth_tag` to include a NIP-OA authorization tag in the AUTH event.
-    pub async fn authenticate(
+    pub async fn authenticate<S: NostrSigner>(
         &mut self,
-        keys: &Keys,
+        signer: &S,
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
         let challenge = self
             .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
             .await?;
 
-        let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
+        let auth_event = build_auth_event(&challenge, &self.relay_url, signer, auth_tag).await?;
         let event_id = auth_event.id.to_hex();
 
         self.send_raw(&json!(["AUTH", auth_event])).await?;
@@ -330,19 +330,24 @@ impl NostrWsConnection {
 
 /// One-shot helper: connect, authenticate, send one event, disconnect.
 ///
-/// Establishes a fresh WebSocket connection, completes NIP-42 authentication,
-/// publishes `event`, waits for the relay's OK response, then closes the
-/// connection. The entire operation is bounded by `timeout_secs`.
-pub async fn publish_event(
+/// Establishes a fresh WebSocket connection carrying `headers` on the upgrade
+/// (e.g. a NIP-FI `Nostr-Federated-Identity` assertion), completes NIP-42
+/// authentication with `signer`, publishes `event`, waits for the relay's OK
+/// response, then closes the connection. The entire operation is bounded by
+/// `timeout_secs`.
+pub async fn publish_event<S: NostrSigner>(
     relay_url: &str,
     event: Event,
-    keys: &Keys,
+    signer: &S,
     auth_tag: Option<&Tag>,
+    headers: HeaderMap,
     timeout_secs: u64,
 ) -> Result<OkResponse, WsClientError> {
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut conn = NostrWsConnection::connect(relay_url).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        let mut conn = NostrWsConnection::connect_authenticated_with_headers(
+            relay_url, signer, auth_tag, headers,
+        )
+        .await?;
         let ok = conn.send_event(event).await?;
         let _ = conn.disconnect().await;
         Ok::<_, WsClientError>(ok)
