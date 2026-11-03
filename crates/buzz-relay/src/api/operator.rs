@@ -1183,6 +1183,196 @@ mod tests {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunityAuthUpgradeRequest {
+    operation_id: Uuid,
+    community_id: Uuid,
+    expected_host: String,
+    actor_pubkey: String,
+    expected_owner_pubkey: String,
+    expected_issuer: String,
+}
+
+/// Query for operator-scoped upgrade receipt recovery.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommunityAuthUpgradeQuery {
+    operation_id: Uuid,
+}
+
+fn upgrade_configured_trust(
+    state: &AppState,
+    host: &str,
+    issuer: &str,
+) -> Result<(), &'static str> {
+    let policy = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .ok_or("authorization_unavailable")?;
+    let [configured_issuer] = policy.authorized_issuers() else {
+        return Err("authorization_unavailable");
+    };
+    if !policy.is_bindable(host) || configured_issuer != issuer {
+        return Err("issuer_conflict");
+    }
+    if state
+        .config
+        .nip_fi
+        .registry
+        .policy_for_issuer(issuer)
+        .is_none()
+    {
+        return Err("authorization_unavailable");
+    }
+    Ok(())
+}
+
+fn upgrade_response(
+    state: &AppState,
+    mut record: buzz_db::community_auth::UpgradeRecord,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if upgrade_configured_trust(state, &record.expected_host, &record.expected_issuer).is_err() {
+        record.state = "unavailable".to_owned();
+    }
+    Json(record).into_response()
+}
+
+/// Accept or recover a monotonic FI upgrade through the existing operator plane.
+/// The NIP-98 principal is the trusted mediator; the request actor is the owner
+/// authenticated by that mediator. No public user credential can select it.
+pub async fn enable_community_nip_fi(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let operator = authorize_operator_request(
+        &state,
+        &headers,
+        "POST",
+        "/operator/communities/nip-fi-upgrade",
+        None,
+        Some(&body),
+    )
+    .await?;
+    let request: CommunityAuthUpgradeRequest = serde_json::from_slice(&body).map_err(|_| {
+        coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "invalid upgrade request",
+        )
+    })?;
+    let invalid = || {
+        coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "invalid upgrade request",
+        )
+    };
+    if request.operation_id.is_nil() || request.community_id.is_nil() {
+        return Err(invalid());
+    }
+    let host = normalize_candidate_host(&request.expected_host).map_err(|_| invalid())?;
+    let actor = validate_pubkey_hex(&request.actor_pubkey).ok_or_else(invalid)?;
+    let owner = validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(invalid)?;
+    let trust = if state.config.nip_fi_upgrades_enabled {
+        upgrade_configured_trust(&state, &host, &request.expected_issuer)
+    } else {
+        Err("authorization_unavailable")
+    };
+    let tuple = buzz_db::community_auth::UpgradeRequest {
+        operation_id: request.operation_id,
+        community_id: request.community_id,
+        expected_host: host,
+        actor_pubkey: actor,
+        expected_owner_pubkey: owner,
+        expected_issuer: request.expected_issuer,
+        operator_pubkey: operator.to_hex(),
+    };
+    let outcome = state
+        .db
+        .enable_community_nip_fi(&tuple, trust)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "community auth upgrade unavailable");
+            coded_api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable",
+                "authorization unavailable",
+            )
+        })?;
+    match outcome {
+        buzz_db::community_auth::UpgradeOutcome::Accepted(record) => {
+            Ok(upgrade_response(&state, record))
+        }
+        buzz_db::community_auth::UpgradeOutcome::Refused(code) => {
+            let status = match code {
+                "community_not_found" => StatusCode::NOT_FOUND,
+                "authorization_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::CONFLICT,
+            };
+            Err(coded_api_error(status, code, code))
+        }
+    }
+}
+
+/// Recover the original operator's exact durable tuple with truthful state.
+/// A fresh NIP-98 signature is required for every status read and POST retry.
+pub async fn community_nip_fi_upgrade_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<CommunityAuthUpgradeQuery>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let operator = authorize_operator_request(
+        &state,
+        &headers,
+        "GET",
+        "/operator/communities/nip-fi-upgrade",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+    let record = state
+        .db
+        .community_auth_upgrade_status(query.operation_id, &operator.to_hex())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "community auth upgrade status unavailable");
+            coded_api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable",
+                "authorization unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            coded_api_error(
+                StatusCode::NOT_FOUND,
+                "operation_not_found",
+                "operation not found",
+            )
+        })?;
+    Ok(upgrade_response(&state, record))
+}
+
+/// Keep all upgrade responses, including auth and dependency errors, out of caches.
+pub async fn no_store_upgrade_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let upgrade = request.uri().path() == "/operator/communities/nip-fi-upgrade";
+    let mut response = next.run(request).await;
+    if upgrade {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use std::{
@@ -2958,6 +3148,10 @@ mod postgres_tests {
             .nip_fi
             .registry
             .insert(issuer_policy);
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
+            false;
+        assert!(!state.config.nip_fi_upgrades_enabled);
+
         assert_eq!(
             provision_community(state.clone(), &operator, &host, &owner)
                 .await
@@ -2978,6 +3172,59 @@ mod postgres_tests {
         })
         .to_string();
         let path = "/operator/communities/nip-fi-upgrade";
+        // The cache guard also surrounds router/middleware rejections, not only
+        // responses produced inside the authenticated upgrade handler.
+        let oversized = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::CONTENT_LENGTH, (2 * 1024 * 1024).to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(oversized.headers()[header::CACHE_CONTROL], "no-store");
+        let unsupported = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(path)
+                    .header(header::HOST, INGRESS_HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unsupported.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(unsupported.headers()[header::CACHE_CONTROL], "no-store");
+        let disabled =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            read_json(disabled).await["code"],
+            "authorization_unavailable"
+        );
+        assert!(
+            !state
+                .db
+                .community_auth_policy(community.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .requires_nip_fi
+        );
+        assert!(state
+            .db
+            .community_auth_upgrade_status(id, &operator.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
         let response =
             fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -3004,6 +3251,7 @@ mod postgres_tests {
         let other =
             fresh_upgrade_request(state.clone(), &other_operator, "GET", &status_path, None).await;
         assert_eq!(other.status(), StatusCode::NOT_FOUND);
+        assert_eq!(other.headers()[header::CACHE_CONTROL], "no-store");
         let reuse = fresh_upgrade_request(
             state.clone(),
             &other_operator,
@@ -3013,6 +3261,7 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(reuse.status(), StatusCode::CONFLICT);
+        assert_eq!(reuse.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(read_json(reuse).await["code"], "idempotency_conflict");
         let outsider = fresh_upgrade_request(
             state.clone(),
@@ -3023,6 +3272,7 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(outsider.status(), StatusCode::FORBIDDEN);
+        assert_eq!(outsider.headers()[header::CACHE_CONTROL], "no-store");
         let url = format!("http://{INGRESS_HOST}{path}");
         let auth = fresh_upgrade_auth(&operator, &url, "POST", Some(body.as_bytes()));
         let raw = || {
@@ -3039,6 +3289,7 @@ mod postgres_tests {
         let second = build_router(state.clone()).oneshot(raw()).await.unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(second.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             state
                 .db
@@ -3049,8 +3300,44 @@ mod postgres_tests {
                 .policy_generation,
             1
         );
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
+            false;
+        let while_off =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(while_off.status(), StatusCode::OK);
+        assert_eq!(read_json(while_off).await, record);
+        let while_off =
+            fresh_upgrade_request(state.clone(), &operator, "GET", &status_path, None).await;
+        assert_eq!(while_off.status(), StatusCode::OK);
+        assert_eq!(read_json(while_off).await, record);
+        let denied =
+            fresh_upgrade_request(state.clone(), &other_operator, "GET", &status_path, None).await;
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let reuse_off = fresh_upgrade_request(
+            state.clone(),
+            &other_operator,
+            "POST",
+            path,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(reuse_off.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(reuse_off).await["code"], "idempotency_conflict");
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+
         // Exercise the real HTTP-to-config-to-transaction seam: no raw trust
         // precondition can bypass the deployment's configured issuer selection.
+        for invalid in [
+            "{".to_owned(),
+            "{}".to_owned(),
+            body.replace(&id.to_string(), "not-a-uuid"),
+        ] {
+            let response =
+                fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(invalid)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(read_json(response).await["code"], "invalid_request");
+        }
         let mut changed: Value = serde_json::from_str(&body).unwrap();
         let mismatched_id = Uuid::new_v4();
         changed["operation_id"] = serde_json::json!(mismatched_id);
@@ -3064,6 +3351,7 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        assert_eq!(mismatch.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(read_json(mismatch).await["code"], "issuer_conflict");
         assert!(state
             .db
@@ -3071,6 +3359,54 @@ mod postgres_tests {
             .await
             .unwrap()
             .is_none());
+
+        for bad_host in [
+            "outside.example".to_owned(),
+            host.replacen("acme.", "cmd.", 1),
+        ] {
+            changed["operation_id"] = serde_json::json!(Uuid::new_v4());
+            changed["expected_host"] = serde_json::json!(bad_host);
+            changed["expected_issuer"] = serde_json::json!(NIP_FI_ISSUER);
+            let response = fresh_upgrade_request(
+                state.clone(),
+                &operator,
+                "POST",
+                path,
+                Some(changed.to_string()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(read_json(response).await["code"], "issuer_conflict");
+        }
+        changed["expected_host"] = serde_json::json!(host);
+        let original_policy = state.config.nip_fi_provision_binding.clone();
+        let suffix = host.split_once('.').unwrap().1;
+        let multiple = buzz_auth::ProvisionBindingPolicy::parse(
+            &serde_json::json!({"host_suffix": suffix, "authorized_issuers": [NIP_FI_ISSUER, "https://second.example"]}).to_string(),
+            &serde_json::json!([
+                {"issuer": NIP_FI_ISSUER, "command_audiences": [format!("https://cmd.{suffix}")]},
+                {"issuer": "https://second.example", "command_audiences": ["https://commands.example"]}
+            ]).to_string()).unwrap();
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+            Some(multiple);
+        changed["operation_id"] = serde_json::json!(Uuid::new_v4());
+        let ambiguous = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(ambiguous.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ambiguous.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            read_json(ambiguous).await["code"],
+            "authorization_unavailable"
+        );
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+            original_policy;
 
         state
             .db
@@ -3110,6 +3446,7 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(inactive.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(inactive.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             read_json(inactive).await["code"],
             "authorization_unavailable"
@@ -4607,190 +4944,4 @@ mod postgres_tests {
         let body = read_json(response).await;
         assert_eq!(body["error"], "internal server error");
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommunityAuthUpgradeRequest {
-    operation_id: Uuid,
-    community_id: Uuid,
-    expected_host: String,
-    actor_pubkey: String,
-    expected_owner_pubkey: String,
-    expected_issuer: String,
-}
-
-/// Query for operator-scoped upgrade receipt recovery.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommunityAuthUpgradeQuery {
-    operation_id: Uuid,
-}
-
-fn upgrade_configured_trust(
-    state: &AppState,
-    host: &str,
-    issuer: &str,
-) -> Result<(), &'static str> {
-    let policy = state
-        .config
-        .nip_fi_provision_binding
-        .as_ref()
-        .ok_or("authorization_unavailable")?;
-    let [configured_issuer] = policy.authorized_issuers() else {
-        return Err("authorization_unavailable");
-    };
-    if !policy.is_bindable(host) || configured_issuer != issuer {
-        return Err("issuer_conflict");
-    }
-    if state
-        .config
-        .nip_fi
-        .registry
-        .policy_for_issuer(issuer)
-        .is_none()
-    {
-        return Err("authorization_unavailable");
-    }
-    Ok(())
-}
-
-fn upgrade_response(
-    state: &AppState,
-    mut record: buzz_db::community_auth::UpgradeRecord,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    if upgrade_configured_trust(state, &record.expected_host, &record.expected_issuer).is_err() {
-        record.state = "unavailable".to_owned();
-    }
-    let mut response = Json(record).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
-    response
-}
-
-/// Accept or recover a monotonic FI upgrade through the existing operator plane.
-/// The NIP-98 principal is the trusted mediator; the request actor is the owner
-/// authenticated by that mediator. No public user credential can select it.
-pub async fn enable_community_nip_fi(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
-    let operator = authorize_operator_request(
-        &state,
-        &headers,
-        "POST",
-        "/operator/communities/nip-fi-upgrade",
-        None,
-        Some(&body),
-    )
-    .await?;
-    let request: CommunityAuthUpgradeRequest = serde_json::from_slice(&body).map_err(|_| {
-        coded_api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "invalid upgrade request",
-        )
-    })?;
-    let invalid = || {
-        coded_api_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "invalid upgrade request",
-        )
-    };
-    if request.operation_id.is_nil() || request.community_id.is_nil() {
-        return Err(invalid());
-    }
-    let host = normalize_candidate_host(&request.expected_host).map_err(|_| invalid())?;
-    let actor = validate_pubkey_hex(&request.actor_pubkey).ok_or_else(invalid)?;
-    let owner = validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(invalid)?;
-    let trust = upgrade_configured_trust(&state, &host, &request.expected_issuer);
-    let tuple = buzz_db::community_auth::UpgradeRequest {
-        operation_id: request.operation_id,
-        community_id: request.community_id,
-        expected_host: host,
-        actor_pubkey: actor,
-        expected_owner_pubkey: owner,
-        expected_issuer: request.expected_issuer,
-        operator_pubkey: operator.to_hex(),
-    };
-    let outcome = state
-        .db
-        .enable_community_nip_fi(&tuple, trust)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "community auth upgrade unavailable");
-            coded_api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "authorization_unavailable",
-                "authorization unavailable",
-            )
-        })?;
-    match outcome {
-        buzz_db::community_auth::UpgradeOutcome::Accepted(record) => {
-            Ok(upgrade_response(&state, record))
-        }
-        buzz_db::community_auth::UpgradeOutcome::Refused(code) => {
-            let status = match code {
-                "community_not_found" => StatusCode::NOT_FOUND,
-                "authorization_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
-                _ => StatusCode::CONFLICT,
-            };
-            Err(coded_api_error(status, code, code))
-        }
-    }
-}
-
-/// Recover the original operator's exact durable tuple with truthful state.
-/// A fresh NIP-98 signature is required for every status read and POST retry.
-pub async fn community_nip_fi_upgrade_status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    Query(query): Query<CommunityAuthUpgradeQuery>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
-    let operator = authorize_operator_request(
-        &state,
-        &headers,
-        "GET",
-        "/operator/communities/nip-fi-upgrade",
-        raw_query.as_deref(),
-        None,
-    )
-    .await?;
-    let record = state
-        .db
-        .community_auth_upgrade_status(query.operation_id, &operator.to_hex())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "community auth upgrade status unavailable");
-            coded_api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "authorization_unavailable",
-                "authorization unavailable",
-            )
-        })?
-        .ok_or_else(|| {
-            coded_api_error(
-                StatusCode::NOT_FOUND,
-                "operation_not_found",
-                "operation not found",
-            )
-        })?;
-    Ok(upgrade_response(&state, record))
-}
-
-/// Keep all upgrade responses, including auth and dependency errors, out of caches.
-pub async fn no_store_upgrade_response(
-    mut response: axum::response::Response,
-) -> axum::response::Response {
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
-    response
 }

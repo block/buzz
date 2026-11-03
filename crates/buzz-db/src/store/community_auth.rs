@@ -5,15 +5,14 @@
 
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::{FromRow, Row};
 use uuid::Uuid;
 
 use crate::{Db, Result};
 
 /// Canonical request tuple, with the authenticated operator added by the relay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeRequest {
     /// Caller-generated, deployment-global idempotency UUID.
     pub operation_id: Uuid,

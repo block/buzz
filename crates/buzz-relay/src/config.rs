@@ -414,6 +414,10 @@ pub struct Config {
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
 
+    /// Permit new irreversible FI upgrade acceptances. Default off; receipt
+    /// recovery/status remain available (`BUZZ_NIP_FI_UPGRADES_ENABLED`).
+    pub nip_fi_upgrades_enabled: bool,
+
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
     /// fails the deploy that sets it, not the later switch to shadow.
@@ -1524,6 +1528,9 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_upgrades_enabled: std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED")
+                .map(|value| value == "true")
+                .unwrap_or(false),
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1594,6 +1601,22 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
+    }
+
+    #[test]
+    fn nip_fi_upgrade_acceptance_is_explicitly_default_off() {
+        let (_fi, _cfg) = env_guards();
+        let before = std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED").ok();
+        std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED");
+        assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "true");
+        assert!(Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "false");
+        assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        match before {
+            Some(value) => std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value),
+            None => std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED"),
+        }
     }
 
     // The three `source=database` startup guards. Mutation: dropping any one

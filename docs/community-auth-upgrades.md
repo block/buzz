@@ -14,6 +14,13 @@ method, URL (including query), and POST body hash. Each attempt needs a fresh
 signature; operation idempotency does not bypass transport replay protection.
 Responses use `Cache-Control: no-store`.
 
+`BUZZ_NIP_FI_UPGRADES_ENABLED` defaults to `false`. While disabled, new
+acceptances return 503 `authorization_unavailable` with no policy mutation or
+receipt. Authorized GET and identical POST receipt recovery remain available;
+principal checks and payload conflicts are unchanged. Enabling this deployment
+switch is an explicit operator action after the enforcement and activation fleet
+baseline is verified; caller release discipline alone cannot enable acceptance.
+
 ## Enable
 
 `POST /operator/communities/nip-fi-upgrade`
@@ -80,6 +87,8 @@ trusted issuer configuration is no longer applicable. A missing database respons
 is HTTP 503, never a fabricated receipt. A receipt is not proof of current service
 health. No response in this version reports `active`.
 
+`pending_reasons` applies only while `state` is `pending`; clients must ignore
+those obligations when state is `unavailable`, which always takes precedence.
 `pending_reasons` is extensible. Clients must preserve pending on unknown values.
 `registry_baseline_unverified` prevents completion until BUZZ-512 verifies fleet
 membership. That ticket may add `boot_application_pending`, `boot_drain_pending`
@@ -118,8 +127,9 @@ Do not infer requirements from issuer rows, backfill free communities, or remove
 the enterprise enforce floor as part of this migration.
 
 Apply schema before new code. Desired-state and migration definitions match;
-pgschema callers must also run the reconciliation script to register the new
-operator-global receipt table. Receipts intentionally survive community purge:
+The registry entry is static lint metadata, so it is present in the migration
+and `schema/seeds/`, not the pgschema reconciliation script (database.md Rule 3).
+This follows the other operator-global registry entries. Receipts intentionally survive community purge:
 the target ID/host/owner tuple prevents reusing a lost-response UUID for another
 community, including after deletion. They are operator-only recovery evidence.
 No tenant serving writer owns this table and no fence trigger is attached.
@@ -128,3 +138,21 @@ The active-community primary accessor is
 `Db::community_auth_policy(CommunityId) -> Result<Option<CommunityAuthPolicy>>`.
 `None` means no active target; errors must fail closed. BUZZ-511 must combine
 its stored requirement with global enforce and honor repair denial first.
+
+## Mistaken acceptance and containment
+
+Stop the initiating caller and set `BUZZ_NIP_FI_UPGRADES_ENABLED=false` to prevent
+new acceptances. Keep authenticated status/readback available. Record the exact
+operation, target and generation for operator-led incident assessment and recovery.
+Preserve the durable requirement, issuer trust and receipts while restoring a
+working FI path or containing the affected community through the established
+archive/lifecycle controls. Coordinate any necessary issuer/configuration repair
+through its existing operator procedure; never broaden trust to make a probe pass.
+
+Disabling calls or rolling back code does not undo acceptance. Never restore a
+serving binary that ignores the durable requirement; retain effective enforcement
+or contain the community while repairing the FI path. There is no
+clear-policy API or routine SQL reset, and neither a timeout nor a mistaken call
+is permission to return the community to free admission. Recovery must retain
+the accepted requirement and operation evidence. No fleet-wide drain or deployment
+is an automatic fallback.

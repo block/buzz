@@ -157,79 +157,169 @@ async fn failed_preconditions_leave_free_policy_and_no_receipt() {
         .is_none());
 }
 
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn transfer_and_enable_have_a_serial_order_and_receipt_survives_transfer() {
-    let (db, request, keys) = fixture().await;
-    let new_owner = Keys::generate().public_key().to_hex();
-    let community = CommunityId::from_uuid(request.community_id);
-    let (upgrade, transfer) = tokio::join!(
-        db.enable_community_nip_fi(&request, Ok(())),
-        db.transfer_ownership(community, &new_owner, &request.expected_owner_pubkey, &keys)
+// Observe the actual PostgreSQL blocker and statement, rather than treating
+// elapsed time or either possible race outcome as evidence of serialization.
+async fn blocked_upgrade(
+    db: &Db,
+    request: &UpgradeRequest,
+    locker_pid: i32,
+    statement: &str,
+) -> tokio::task::JoinHandle<Result<UpgradeOutcome>> {
+    use std::str::FromStr;
+    let application = format!("upgrade-lock-{}", request.operation_id.simple());
+    let options = sqlx::postgres::PgConnectOptions::from_str(&crate::test_support::database_url())
+        .unwrap()
+        .application_name(&application);
+    let upgrade_db = Db::from_pool(
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap(),
     );
-    let _ = transfer.unwrap();
-    match upgrade.unwrap() {
-        UpgradeOutcome::Accepted(record) => {
-            assert_eq!(accepted(&db, &request).await, record);
-            let mut fresh = request.clone();
-            fresh.operation_id = Uuid::new_v4();
-            assert_eq!(
-                db.enable_community_nip_fi(&fresh, Ok(())).await.unwrap(),
-                UpgradeOutcome::Refused("owner_conflict")
+    let request = request.clone();
+    let task =
+        tokio::spawn(async move { upgrade_db.enable_community_nip_fi(&request, Ok(())).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            assert!(
+                !task.is_finished(),
+                "enable escaped before taking its precondition lock"
             );
+            let row: Option<(String, Vec<i32>)> = sqlx::query_as(
+                "SELECT query, pg_blocking_pids(pid) FROM pg_stat_activity
+                 WHERE application_name = $1 AND wait_event_type = 'Lock'",
+            )
+            .bind(&application)
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+            if let Some((query, blockers)) = row {
+                if blockers.contains(&locker_pid) {
+                    let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+                    assert!(
+                        query.starts_with(statement),
+                        "enable reached a later statement without the precondition lock: {query}"
+                    );
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
         }
-        refused => assert_eq!(refused, UpgradeOutcome::Refused("owner_conflict")),
-    }
+    })
+    .await
+    .expect("observe the enable statement blocked by the held transaction");
+    task
+}
+
+async fn assert_refused_without_mutation(
+    db: &Db,
+    request: &UpgradeRequest,
+    task: tokio::task::JoinHandle<Result<UpgradeOutcome>>,
+    code: &'static str,
+) {
+    assert_eq!(task.await.unwrap().unwrap(), UpgradeOutcome::Refused(code));
+    assert!(db
+        .community_auth_upgrade_status(request.operation_id, &request.operator_pubkey)
+        .await
+        .unwrap()
+        .is_none());
+    let policy: (bool, i64) =
+        sqlx::query_as("SELECT requires_nip_fi, policy_generation FROM communities WHERE id = $1")
+            .bind(request.community_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(policy, (false, 0));
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn archive_race_and_lifecycle_readback_never_claim_active() {
+async fn owner_lock_blocks_uncommitted_owner_change_then_refuses_enable() {
     let (db, request, _) = fixture().await;
-    let (upgrade, archive) = tokio::join!(
-        db.enable_community_nip_fi(&request, Ok(())),
-        db.archive_community_owned_by(
-            &request.expected_host,
+    let mut locker = db.pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *locker)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE relay_members SET role = 'member' WHERE community_id = $1 AND pubkey = $2")
+        .bind(request.community_id)
+        .bind(&request.expected_owner_pubkey)
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let task = blocked_upgrade(&db, &request, pid, "SELECT pubkey FROM relay_members").await;
+    locker.commit().await.unwrap();
+    assert_refused_without_mutation(&db, &request, task, "owner_conflict").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn community_lock_blocks_uncommitted_archive_then_refuses_enable() {
+    let (db, request, _) = fixture().await;
+    let mut locker = db.pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *locker)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+        .bind(request.community_id)
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let task = blocked_upgrade(&db, &request, pid, "SELECT host, archived_at").await;
+    locker.commit().await.unwrap();
+    assert_refused_without_mutation(&db, &request, task, "lifecycle_conflict").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn issuer_lock_blocks_uncommitted_unbind_then_refuses_enable() {
+    let (db, request, _) = fixture().await;
+    let mut locker = db.pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *locker)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM community_nip_fi_issuers WHERE community_id = $1 AND issuer = $2")
+        .bind(request.community_id)
+        .bind(ISSUER)
+        .execute(&mut *locker)
+        .await
+        .unwrap();
+    let task = blocked_upgrade(
+        &db,
+        &request,
+        pid,
+        "SELECT issuer FROM community_nip_fi_issuers",
+    )
+    .await;
+    locker.commit().await.unwrap();
+    assert_refused_without_mutation(&db, &request, task, "issuer_conflict").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn accepted_receipt_survives_transfer_without_granting_fresh_owner_authority() {
+    let (db, request, keys) = fixture().await;
+    let first = accepted(&db, &request).await;
+    let new_owner = Keys::generate().public_key().to_hex();
+    let _ = db
+        .transfer_ownership(
+            CommunityId::from_uuid(request.community_id),
+            &new_owner,
             &request.expected_owner_pubkey,
-            "reserved.example"
+            &keys,
         )
-    );
-    assert!(archive.unwrap().is_some());
-    match upgrade.unwrap() {
-        UpgradeOutcome::Accepted(_) => {
-            let recovered = accepted(&db, &request).await;
-            assert_eq!(recovered.state, "unavailable");
-            assert!(recovered.requires_nip_fi);
-        }
-        refused => assert_eq!(refused, UpgradeOutcome::Refused("lifecycle_conflict")),
-    }
+        .await
+        .unwrap();
+    assert_eq!(accepted(&db, &request).await, first);
     let mut fresh = request.clone();
     fresh.operation_id = Uuid::new_v4();
     assert_eq!(
         db.enable_community_nip_fi(&fresh, Ok(())).await.unwrap(),
-        UpgradeOutcome::Refused("lifecycle_conflict")
+        UpgradeOutcome::Refused("owner_conflict")
     );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn issuer_unbind_race_serializes_with_acceptance_and_never_relaxes_policy() {
-    let (db, request, _) = fixture().await;
-    let (upgrade, unbind) = tokio::join!(
-        db.enable_community_nip_fi(&request, Ok(())),
-        db.unbind_nip_fi_issuer(CommunityId::from_uuid(request.community_id), ISSUER, true)
-    );
-    unbind.unwrap();
-    match upgrade.unwrap() {
-        UpgradeOutcome::Accepted(_) => {
-            assert_eq!(accepted(&db, &request).await.state, "unavailable");
-            assert!(policy(&db, &request).await.requires_nip_fi);
-        }
-        refused => {
-            assert_eq!(refused, UpgradeOutcome::Refused("issuer_conflict"));
-            assert!(!policy(&db, &request).await.requires_nip_fi);
-        }
-    }
 }
 
 #[tokio::test]
