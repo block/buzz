@@ -2860,6 +2860,9 @@ async fn handle_create_group(
     Ok(())
 }
 
+/// Concurrent 44101 notices a channel delete sends to its members.
+const DELETE_NOTICE_CONCURRENCY: usize = 8;
+
 async fn handle_delete_group(
     tenant: &TenantContext,
     event: &Event,
@@ -2898,6 +2901,36 @@ async fn handle_delete_group(
     // Stale is_member=true entries would bypass the DB's deleted_at guard.
     state.invalidate_channel_deleted(tenant);
 
+    // Notify every member only after the delete and discovery cleanup, so a
+    // client that re-reads on the notice no longer sees the channel. The
+    // notices run off the request path, bounded like `handle_req`'s filter
+    // reads, so a large channel neither holds the OK nor depends on the
+    // system message below.
+    if let Some(deleted) = deleted {
+        let (tenant, state, actor_bytes) = (tenant.clone(), state.clone(), actor_bytes.clone());
+        tokio::spawn(async move {
+            use futures_util::stream::{self, StreamExt};
+            stream::iter(&deleted.members)
+                .for_each_concurrent(DELETE_NOTICE_CONCURRENCY, |member| async {
+                    if let Err(e) = emit_typed_membership_notification(
+                        &tenant,
+                        &state,
+                        channel_id,
+                        &deleted.channel_type,
+                        member,
+                        &actor_bytes,
+                        KIND_MEMBER_REMOVED_NOTIFICATION,
+                        &[],
+                    )
+                    .await
+                    {
+                        warn!(channel = %channel_id, error = %e, "membership notification emission failed");
+                    }
+                })
+                .await;
+        });
+    }
+
     let actor_hex = hex::encode(&actor_bytes);
     emit_system_message(
         tenant,
@@ -2909,27 +2942,6 @@ async fn handle_delete_group(
         chrono::Utc::now(),
     )
     .await?;
-
-    // Notify every member only after the delete and discovery cleanup, so a
-    // client that re-reads on the notice no longer sees the channel.
-    if let Some(deleted) = deleted {
-        for member in &deleted.members {
-            if let Err(e) = emit_typed_membership_notification(
-                tenant,
-                state,
-                channel_id,
-                &deleted.channel_type,
-                member,
-                &actor_bytes,
-                KIND_MEMBER_REMOVED_NOTIFICATION,
-                &[],
-            )
-            .await
-            {
-                warn!(channel = %channel_id, error = %e, "membership notification emission failed");
-            }
-        }
-    }
 
     info!(channel = %channel_id, "NIP-29 DELETE_GROUP processed");
     Ok(())

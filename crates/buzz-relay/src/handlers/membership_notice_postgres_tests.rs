@@ -122,6 +122,22 @@ fn notices(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, String)> 
         .collect()
 }
 
+/// The notices delivered once at least one arrives, for notices sent off
+/// the request path.
+async fn next_notices(rx: &mut Receiver<axum::extract::ws::Message>) -> Vec<(u64, String)> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let delivered = notices(rx);
+            if !delivered.is_empty() {
+                return delivered;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("no notice delivered")
+}
+
 fn tag_values(event: &Value, name: &str) -> Vec<String> {
     event["tags"]
         .as_array()
@@ -214,21 +230,23 @@ async fn channel_delete_notifies_every_member_after_cleanup() {
     let mut member_rx = subscribe_notices(&state, &tenant, &member);
     let mut barrier = notice_barrier::install(&member.public_key().to_bytes());
 
-    let delete = tokio::spawn({
-        let (state, tenant, owner, h) = (state.clone(), tenant.clone(), owner.clone(), h.clone());
-        async move { publish(&state, &tenant, &owner, 9008, &[&["h", &h]]).await }
-    });
+    // The 9008 is accepted while the member's notice is still held, so the
+    // notices are off the request path.
+    publish(&state, &tenant, &owner, 9008, &[&["h", &h]]).await;
+    assert!(
+        notices(&mut member_rx).is_empty(),
+        "notice delivered before the OK"
+    );
     let (noticed, listed) = at_receipt(&mut barrier, async |_| {
         listed_channels(&state, &tenant, &member).await
     })
     .await;
-    delete.await.expect("delete");
 
     assert_eq!(noticed, h);
     assert!(!listed.contains(&h), "notice sent before discovery cleanup");
     for rx in [&mut owner_rx, &mut member_rx] {
         assert_eq!(
-            notices(rx),
+            next_notices(rx).await,
             vec![(KIND_MEMBER_REMOVED_NOTIFICATION as u64, h.clone())]
         );
     }

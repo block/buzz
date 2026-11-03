@@ -9467,14 +9467,6 @@ mod postgres_tests {
 
     // ── Kick live side effects: crash-recovery and re-add race ────────────────
 
-    /// Recovery seam: commit kick marker, simulate crash, re-drive via the real
-    /// recovery worker entry point and assert all three live side effects fire:
-    /// membership cache cleared, channel subscription evicted, workflow disabled.
-    ///
-    /// The test is falsifiable: deleting the convergence-point call to
-    /// `apply_kick_live_side_effects` in `drive_enforcement` would leave the
-    /// helper-direct test green but fail this test (recovery would finalize
-    /// without clearing cache, evicting, or disabling).
     /// A channel deleted between a committed kick and its recovery leaves no
     /// roster to refresh. Recovery must treat that as convergence and finalize,
     /// without running the removal again.
@@ -9659,6 +9651,14 @@ mod postgres_tests {
         );
     }
 
+    /// Recovery seam: commit kick marker, simulate crash, re-drive via the real
+    /// recovery worker entry point and assert all three live side effects fire:
+    /// membership cache cleared, channel subscription evicted, workflow disabled.
+    ///
+    /// The test is falsifiable: deleting the convergence-point call to
+    /// `apply_kick_live_side_effects` in `drive_enforcement` would leave the
+    /// helper-direct test green but fail this test (recovery would finalize
+    /// without clearing cache, evicting, or disabling).
     #[tokio::test]
     #[ignore = "requires Postgres — crash recovery re-drive fires all three kick live side effects"]
     async fn crash_recovery_redrive_fires_kick_live_side_effects() {
