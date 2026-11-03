@@ -181,7 +181,7 @@ impl Credentials {
     /// Credentials backed by the Buzz desktop: it signs, encrypts and supplies
     /// NIP-FI evidence; the private key never reaches this process.
     #[cfg(unix)]
-    async fn from_desktop(
+    pub(crate) async fn from_desktop(
         provider: Arc<crate::desktop_provider::Provider>,
     ) -> Result<Self, CliError> {
         let public_key = provider.public_key();
@@ -283,7 +283,7 @@ impl Credentials {
     pub async fn evidence(&self, relay_url: &str) -> Result<Option<String>, CliError> {
         #[cfg(unix)]
         if let Some(provider) = &self.desktop {
-            let relay_url = crate::federated_identity::canonical_relay_url(relay_url)?;
+            let relay_url = crate::desktop_provider::provider_relay_url(relay_url)?;
             return provider.federated_identity(&relay_url).await;
         }
         match &self.evidence {
@@ -324,8 +324,9 @@ impl Credentials {
     /// NIP-44 decrypt `payload` from `peer` as this identity.
     /// NIP-44 decrypt `payload` from `peer`. `Ok(None)` means the payload is
     /// not valid ciphertext for this key; `Err` means the signer itself failed.
-    /// A local key decides that itself; any other signer's failure is `Err`,
-    /// since it cannot be told apart from an unavailable credential.
+    /// A local key decides that itself, and the desktop reports it as
+    /// `invalid_request`; any other signer's failure is `Err`, since it cannot
+    /// be told apart from an unavailable credential.
     pub async fn nip44_decrypt(
         &self,
         peer: &PublicKey,
@@ -333,6 +334,10 @@ impl Credentials {
     ) -> Result<Option<String>, CliError> {
         if let Some(keys) = &self.local_keys {
             return Ok(nostr::nips::nip44::decrypt(keys.secret_key(), peer, payload).ok());
+        }
+        #[cfg(unix)]
+        if let Some(provider) = &self.desktop {
+            return provider.nip44_decrypt(peer, payload).await;
         }
         self.signer
             .nip44_decrypt(peer, payload)

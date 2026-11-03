@@ -19,7 +19,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use crate::error::CliError;
-use crate::federated_identity::canonical_relay_url;
 
 pub const PROVIDER_ENV: &str = "BUZZ_CREDENTIAL_PROVIDER";
 
@@ -253,6 +252,10 @@ async fn connect(port: u16, check: bool) -> Result<TcpStream, ProviderError> {
 }
 
 fn current_uid() -> u32 {
+    #[cfg(test)]
+    if let Ok(uid) = tests::CALLER_UID.try_with(|uid| *uid) {
+        return uid;
+    }
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }
 }
@@ -423,6 +426,36 @@ pub enum Skip {
     Revoked,
     /// The provider does not apply (relay not bound, no common version).
     NotApplicable,
+    /// The endpoint could not be reached or confirmed: nothing was decided.
+    Unreachable,
+}
+
+/// A relay URL as the local provider binds it: `http`/`https` read as
+/// `ws`/`wss`, then URL normalization (lowercase host, no default port, `/`
+/// for an empty path). The path and query count: one host can serve several
+/// communities. This is not NIP-FA's audience form; the desktop derives that.
+pub fn provider_relay_url(raw: &str) -> Result<String, CliError> {
+    let invalid = || CliError::Usage(format!("invalid relay URL: {raw}"));
+    let mut url = url::Url::parse(raw).map_err(|_| invalid())?;
+    let scheme = match url.scheme() {
+        "http" | "ws" => "ws",
+        "https" | "wss" => "wss",
+        _ => return Err(invalid()),
+    };
+    if !url.username().is_empty() || url.password().is_some() || url.host().is_none() {
+        return Err(invalid());
+    }
+    url.set_fragment(None);
+    // Changing between special schemes keeps host, port and path.
+    url.set_scheme(scheme).map_err(|()| invalid())?;
+    // Re-parse so a default port for the new scheme is dropped.
+    url::Url::parse(url.as_str())
+        .map(|u| u.to_string())
+        .map_err(|_| invalid())
+}
+
+fn same_relay(a: &str, b: &str) -> bool {
+    provider_relay_url(b).is_ok_and(|b| b == a)
 }
 
 impl Provider {
@@ -437,18 +470,15 @@ impl Provider {
             Ok(raw) => raw,
             Err(ProviderError::Revoked) => return Ok(Err(Skip::Revoked)),
             Err(ProviderError::NoCommonVersion) => return Ok(Err(Skip::NotApplicable)),
+            Err(ProviderError::Transport(_)) => return Ok(Err(Skip::Unreachable)),
             Err(e) => return Err(e.into_cli("describe")),
         };
         let describe: Describe = serde_json::from_str(&raw)
             .map_err(|_| CliError::Auth("Buzz desktop: unreadable `describe` answer".into()))?;
         let public_key = PublicKey::from_hex(&describe.pubkey)
             .map_err(|_| CliError::Auth("Buzz desktop: invalid identity public key".into()))?;
-        let relay = canonical_relay_url(relay_url)?;
-        let bound = describe
-            .relays
-            .iter()
-            .any(|r| canonical_relay_url(r).is_ok_and(|r| r == relay));
-        if !bound {
+        let relay = provider_relay_url(relay_url)?;
+        if !describe.relays.iter().any(|r| same_relay(&relay, r)) {
             return Ok(Err(Skip::NotApplicable));
         }
         Ok(Ok(Arc::new(Self {
@@ -537,6 +567,33 @@ impl Provider {
             refresh_at,
         });
         Ok(assertion)
+    }
+
+    /// NIP-44 decrypt `payload` from `peer`. `Ok(None)` when the desktop
+    /// answers `invalid_request`: the payload is not valid ciphertext for this
+    /// identity (the CLI's params are always well formed). Any other failure,
+    /// such as revoked, denied or unreachable, is an error.
+    pub async fn nip44_decrypt(
+        &self,
+        peer: &PublicKey,
+        payload: &str,
+    ) -> Result<Option<String>, CliError> {
+        match call(
+            &self.endpoint,
+            Some(&self.token),
+            self.same_user,
+            "nip44_decrypt",
+            &[peer.to_hex(), payload.to_owned()],
+        )
+        .await
+        {
+            Ok(plaintext) => Ok(Some(plaintext)),
+            Err(ProviderError::Code {
+                code: "invalid_request",
+                ..
+            }) => Ok(None),
+            Err(e) => Err(e.into_cli("nip44_decrypt")),
+        }
     }
 
     /// The NIP-AE `d` tag for `slug`, derived by the desktop.
@@ -750,9 +807,21 @@ struct Pairing {
     relays: Vec<String>,
 }
 
-fn keychain() -> Result<keyring::Entry, keyring::Error> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+/// A held lock; dropping it releases the lock.
+trait Held {}
+impl<T> Held for T {}
+
+/// Where the pairing map lives. Every change goes through [`update`], which
+/// holds `lock` only for one reload-change-write.
+trait PairingStore: Send + Sync {
+    fn read(&self) -> Result<Option<String>, CliError>;
+    /// Write `json`, or delete the entry for `None`.
+    fn write(&self, json: Option<&str>) -> Result<(), CliError>;
+    /// A cross-process lock, released when the guard drops.
+    fn lock(&self) -> Result<Box<dyn Held + '_>, CliError>;
 }
+
+struct Keychain;
 
 fn no_keychain(e: keyring::Error) -> CliError {
     CliError::Auth(format!(
@@ -761,78 +830,192 @@ fn no_keychain(e: keyring::Error) -> CliError {
     ))
 }
 
-fn load_pairings() -> Result<Pairings, CliError> {
-    match keychain().and_then(|entry| entry.get_password()) {
-        Ok(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
-        Err(keyring::Error::NoEntry) => Ok(Pairings::default()),
-        Err(e) => Err(no_keychain(e)),
+impl Keychain {
+    fn entry() -> Result<keyring::Entry, CliError> {
+        keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(no_keychain)
     }
 }
 
-fn save_pairings(pairings: &Pairings) -> Result<(), CliError> {
-    let entry = keychain().map_err(no_keychain)?;
-    if pairings.0.is_empty() {
-        return match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+impl PairingStore for Keychain {
+    fn read(&self) -> Result<Option<String>, CliError> {
+        match Self::entry()?.get_password() {
+            Ok(json) => Ok(Some(json)),
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(no_keychain(e)),
-        };
+        }
     }
-    let json = serde_json::to_string(pairings)
-        .map_err(|e| CliError::Other(format!("pairing serialization failed: {e}")))?;
-    entry.set_password(&json).map_err(no_keychain)
+
+    fn write(&self, json: Option<&str>) -> Result<(), CliError> {
+        let entry = Self::entry()?;
+        match json {
+            Some(json) => entry.set_password(json).map_err(no_keychain),
+            None => match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(no_keychain(e)),
+            },
+        }
+    }
+
+    /// `flock` on `~/.buzz-foundation/cli-pairings.lock` (no secret in it).
+    fn lock(&self) -> Result<Box<dyn Held + '_>, CliError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::DirBuilderExt;
+        let failed = |e: std::io::Error| CliError::Other(format!("pairing lock failed: {e}"));
+        let dir = advertisement_dir()
+            .and_then(|d| d.parent().map(std::path::Path::to_path_buf))
+            .ok_or_else(|| CliError::Other("HOME is not set".into()))?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(failed)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("cli-pairings.lock"))
+            .map_err(failed)?;
+        // SAFETY: a valid open descriptor; flock has no other preconditions.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(failed(std::io::Error::last_os_error()));
+        }
+        Ok(Box::new(file))
+    }
+}
+
+/// The stored map. An unreadable entry is refused, never treated as empty,
+/// so no write can replace it with less.
+fn parse_pairings(json: Option<String>) -> Result<Pairings, CliError> {
+    match json {
+        None => Ok(Pairings::default()),
+        Some(json) => serde_json::from_str(&json).map_err(|_| {
+            CliError::Auth(
+                "the CLI's paired tokens in the OS keychain are unreadable; \
+                 run `buzz auth desktop unpair` to clear them, then pair again"
+                    .into(),
+            )
+        }),
+    }
+}
+
+/// Reload the map under the lock, apply `change`, and write it back.
+fn update<R>(
+    store: &dyn PairingStore,
+    change: impl FnOnce(&mut Pairings) -> R,
+) -> Result<R, CliError> {
+    let _guard = store.lock()?;
+    let mut pairings = parse_pairings(store.read()?)?;
+    let result = change(&mut pairings);
+    if pairings.0.is_empty() {
+        store.write(None)?;
+    } else {
+        let json = serde_json::to_string(&pairings)
+            .map_err(|e| CliError::Other(format!("pairing serialization failed: {e}")))?;
+        store.write(Some(&json))?;
+    }
+    Ok(result)
+}
+
+/// Drop each revoked pairing, unless it was replaced since it was read.
+fn forget_revoked(store: &dyn PairingStore, revoked: &[(String, String)]) {
+    if revoked.is_empty() {
+        return;
+    }
+    let _ = update(store, |pairings| {
+        for (instance, token) in revoked {
+            if pairings.0.get(instance).is_some_and(|p| &p.token == token) {
+                pairings.0.remove(instance);
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
 // The chain link, and pairing
 // ---------------------------------------------------------------------------
 
-/// The desktop link for `relay_url`: the inherited token first, then a paired
-/// token whose instance is advertised. `None` when neither applies, so the
-/// chain moves on.
+/// The desktop link for `relay_url`. An inherited token decides the identity:
+/// when it cannot serve, the command fails, and a paired token (which acts as
+/// the human) is never tried, so an agent never acts as its owner. Without an
+/// inherited token, the first paired token whose instance is advertised.
+/// `None` when no paired token applies, so the chain moves on.
 pub async fn discover(relay_url: &str) -> Result<Option<Arc<Provider>>, CliError> {
-    if let Some((endpoint, token)) = inherited()? {
-        match Provider::open(endpoint, token, false, relay_url).await? {
-            Ok(provider) => return Ok(Some(provider)),
-            Err(Skip::Revoked | Skip::NotApplicable) => {}
-        }
+    discover_with(inherited()?, &Keychain, advertisements, relay_url).await
+}
+
+async fn discover_with(
+    inherited: Option<(Endpoint, String)>,
+    store: &dyn PairingStore,
+    advertised: impl FnOnce() -> Vec<(String, Endpoint)>,
+    relay_url: &str,
+) -> Result<Option<Arc<Provider>>, CliError> {
+    match inherited {
+        Some((endpoint, token)) => inherited_link(endpoint, token, relay_url).await.map(Some),
+        None => paired_link(store, advertised(), relay_url).await,
     }
+}
+
+async fn inherited_link(
+    endpoint: Endpoint,
+    token: String,
+    relay_url: &str,
+) -> Result<Arc<Provider>, CliError> {
+    match Provider::open(endpoint, token, false, relay_url).await? {
+        Ok(provider) => Ok(provider),
+        Err(Skip::Revoked) => Err(CliError::Auth(
+            "the Buzz desktop revoked this agent's credential; restart the agent in Buzz".into(),
+        )),
+        Err(Skip::NotApplicable) => Err(CliError::Auth(format!(
+            "this agent's Buzz credential does not act on {relay_url}"
+        ))),
+        Err(Skip::Unreachable) => Err(CliError::Auth(
+            "the Buzz desktop that launched this agent is not reachable".into(),
+        )),
+    }
+}
+
+async fn paired_link(
+    store: &dyn PairingStore,
+    advertised: Vec<(String, Endpoint)>,
+    relay_url: &str,
+) -> Result<Option<Arc<Provider>>, CliError> {
     // A missing keychain only means there are no paired tokens to use here.
-    let Ok(mut pairings) = load_pairings() else {
+    let Ok(Ok(pairings)) = store.read().map(parse_pairings) else {
         return Ok(None);
     };
-    let relay = canonical_relay_url(relay_url)?;
-    let mut revoked = false;
-    for (instance, endpoint) in advertisements() {
-        let Some(pairing) = pairings.0.get(&instance).cloned() else {
+    let relay = provider_relay_url(relay_url)?;
+    let mut revoked = Vec::new();
+    let mut found = Ok(None);
+    for (instance, endpoint) in advertised {
+        let Some(pairing) = pairings.0.get(&instance) else {
             continue;
         };
-        let bound = pairing
-            .relays
-            .iter()
-            .any(|r| canonical_relay_url(r).is_ok_and(|r| r == relay));
-        if !bound {
+        if !pairing.relays.iter().any(|r| same_relay(&relay, r)) {
             continue;
         }
-        match Provider::open(endpoint, pairing.token, true, relay_url).await {
-            Ok(Ok(provider)) => return Ok(Some(provider)),
+        match Provider::open(endpoint, pairing.token.clone(), true, relay_url).await {
+            Ok(Ok(provider)) => {
+                found = Ok(Some(provider));
+                break;
+            }
             Ok(Err(Skip::Revoked)) => {
-                pairings.0.remove(&instance);
-                revoked = true;
+                revoked.push((instance.clone(), pairing.token.clone()));
                 eprintln!(
                     "warning: Buzz ({instance}) revoked this CLI's pairing; \
                      run `buzz auth desktop pair` to pair again"
                 );
             }
-            Ok(Err(Skip::NotApplicable)) => {}
-            // An advertised desktop that cannot be confirmed or reached is
-            // skipped: the chain moves on rather than failing every command.
-            Err(_) => {}
+            // A stale or unconfirmed advertisement decides nothing: skip it.
+            Ok(Err(Skip::NotApplicable | Skip::Unreachable)) => {}
+            // The desktop answered (denied, unavailable, ...): that is final.
+            Err(e) => {
+                found = Err(e);
+                break;
+            }
         }
     }
-    if revoked {
-        let _ = save_pairings(&pairings);
-    }
-    Ok(None)
+    forget_revoked(store, &revoked);
+    found
 }
 
 #[derive(serde::Deserialize)]
@@ -869,15 +1052,25 @@ pub async fn pair(
             )));
         }
     };
-    // Fail on a missing keychain before asking the person to approve.
-    let mut pairings = load_pairings()?;
-    let relay = canonical_relay_url(relay_url)?;
+    pair_with(&Keychain, instance, endpoint, relay_url, client_name).await
+}
+
+async fn pair_with(
+    store: &dyn PairingStore,
+    instance: String,
+    endpoint: Endpoint,
+    relay_url: &str,
+    client_name: &str,
+) -> Result<serde_json::Value, CliError> {
+    // Fail on a missing or unreadable keychain before asking for approval.
+    parse_pairings(store.read()?)?;
+    let relay = provider_relay_url(relay_url)?;
     let raw = call(
         &endpoint,
         None,
         true,
         "pair",
-        &[client_name.to_owned(), relay.clone()],
+        &[client_name.to_owned(), relay],
     )
     .await
     .map_err(|e| e.into_cli("pair"))?;
@@ -896,37 +1089,62 @@ pub async fn pair(
         "pubkey": paired.pubkey,
         "relays": paired.relays,
     });
-    // A new pairing for an instance replaces its old token.
-    pairings.0.insert(
-        instance,
-        Pairing {
-            token: paired.token,
-            pubkey: paired.pubkey,
-            relays: paired.relays,
-        },
-    );
-    save_pairings(&pairings)?;
+    // Reload at commit time: only this instance changes, and a new pairing
+    // replaces its old token.
+    update(store, |pairings| {
+        pairings.0.insert(
+            instance,
+            Pairing {
+                token: paired.token,
+                pubkey: paired.pubkey,
+                relays: paired.relays,
+            },
+        );
+    })?;
     Ok(summary)
 }
 
 /// Forget paired tokens: one instance's, or all of them. Local only.
 pub fn unpair(instance: Option<&str>) -> Result<serde_json::Value, CliError> {
-    let mut pairings = load_pairings()?;
-    let removed: Vec<String> = match instance {
-        Some(i) => pairings
-            .0
-            .remove(i)
-            .map(|_| vec![i.to_owned()])
-            .unwrap_or_default(),
-        None => std::mem::take(&mut pairings.0).into_keys().collect(),
+    unpair_with(&Keychain, instance)
+}
+
+fn unpair_with(
+    store: &dyn PairingStore,
+    instance: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    let removed = match instance {
+        Some(i) => update(store, |pairings| {
+            pairings
+                .0
+                .remove(i)
+                .map(|_| vec![i.to_owned()])
+                .unwrap_or_default()
+        })?,
+        // Clearing everything needs no read, so it also clears an unreadable entry.
+        None => {
+            let _guard = store.lock()?;
+            let removed = store
+                .read()?
+                .map(|json| parse_pairings(Some(json)).map(|p| p.0.into_keys().collect()))
+                .transpose()
+                .unwrap_or_default()
+                .unwrap_or_default();
+            store.write(None)?;
+            removed
+        }
     };
-    save_pairings(&pairings)?;
     Ok(serde_json::json!({ "removed": removed }))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    tokio::task_local! {
+        /// Pretend the caller runs as this user ID.
+        pub(crate) static CALLER_UID: u32;
+    }
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -1027,10 +1245,10 @@ mod tests {
     // Against a mock provider
     // -----------------------------------------------------------------------
 
-    type Seen = Arc<StdMutex<Vec<(Option<String>, String, serde_json::Value)>>>;
+    pub(crate) type Seen = Arc<StdMutex<Vec<(Option<String>, String, serde_json::Value)>>>;
 
     /// A provider answering each envelope with `respond(version, request)`.
-    async fn provider<F>(respond: F) -> (Endpoint, Seen)
+    pub(crate) async fn provider<F>(respond: F) -> (Endpoint, Seen)
     where
         F: Fn(&str, &serde_json::Value) -> serde_json::Value + Send + Sync + 'static,
     {
@@ -1137,5 +1355,414 @@ mod tests {
             .await
             .unwrap();
         assert!(opened.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // A desktop holding a real key, and an in-memory pairing store
+    // -----------------------------------------------------------------------
+
+    /// The assertion the mock desktop hands out for any relay.
+    pub(crate) fn mock_assertion() -> String {
+        use base64::Engine;
+        let b64 = |v: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        format!(
+            "{}.{}.c2ln",
+            b64(serde_json::json!({"alg": "ES256", "typ": "nip-fi+jwt"})),
+            b64(serde_json::json!({"exp": unix_now() + 600}))
+        )
+    }
+
+    /// A desktop acting as `keys` for `relays`: it signs, encrypts, decrypts
+    /// (answering `invalid_request` for bad ciphertext, as #2260 does),
+    /// derives engram `d` tags and hands out [`mock_assertion`].
+    pub(crate) async fn desktop(keys: nostr::Keys, relays: Vec<String>) -> (Endpoint, Seen) {
+        provider(move |_, request| {
+            let params: Vec<String> =
+                serde_json::from_value(request["params"].clone()).unwrap_or_default();
+            let peer = || PublicKey::from_hex(&params[0]).unwrap();
+            let ok = |result: String| serde_json::json!({ "result": result });
+            match request["method"].as_str().unwrap_or_default() {
+                "describe" => ok(serde_json::json!({
+                    "instance": "xyz.block.buzz", "pubkey": keys.public_key().to_hex(),
+                    "role": "owner", "relays": relays,
+                    "methods": ["sign_event", "nip44_decrypt", "federated_identity"],
+                })
+                .to_string()),
+                "sign_event" => {
+                    let unsigned = UnsignedEvent::from_json(&params[0]).unwrap();
+                    ok(unsigned.sign_with_keys(&keys).unwrap().as_json())
+                }
+                "nip44_encrypt" => ok(nostr::nips::nip44::encrypt(
+                    keys.secret_key(),
+                    &peer(),
+                    &params[1],
+                    nostr::nips::nip44::Version::V2,
+                )
+                .unwrap()),
+                "nip44_decrypt" => {
+                    match nostr::nips::nip44::decrypt(keys.secret_key(), &peer(), &params[1]) {
+                        Ok(plain) => ok(plain),
+                        Err(_) => serde_json::json!({"result": "", "error": "invalid_request"}),
+                    }
+                }
+                "engram_d_tag" => {
+                    let k_c = buzz_core::engram::conversation_key(keys.secret_key(), &peer());
+                    ok(buzz_core::engram::d_tag(&k_c, &params[1]))
+                }
+                "federated_identity" => ok(mock_assertion()),
+                _ => serde_json::json!({"result": "", "error": "unknown_method"}),
+            }
+        })
+        .await
+    }
+
+    #[derive(Default)]
+    struct MemoryStore {
+        json: StdMutex<Option<String>>,
+        lock: StdMutex<()>,
+    }
+
+    impl MemoryStore {
+        fn with(pairings: &[(&str, &str, &[&str])]) -> Self {
+            let map: std::collections::BTreeMap<_, _> = pairings
+                .iter()
+                .map(|(instance, token, relays)| {
+                    let pairing = Pairing {
+                        token: (*token).into(),
+                        pubkey: nostr::Keys::generate().public_key().to_hex(),
+                        relays: relays.iter().map(|r| (*r).to_owned()).collect(),
+                    };
+                    ((*instance).to_owned(), pairing)
+                })
+                .collect();
+            let store = Self::default();
+            *store.json.lock().unwrap() = Some(serde_json::to_string(&Pairings(map)).unwrap());
+            store
+        }
+
+        fn instances(&self) -> Vec<String> {
+            parse_pairings(self.json.lock().unwrap().clone())
+                .unwrap()
+                .0
+                .into_keys()
+                .collect()
+        }
+    }
+
+    impl PairingStore for MemoryStore {
+        fn read(&self) -> Result<Option<String>, CliError> {
+            Ok(self.json.lock().unwrap().clone())
+        }
+        fn write(&self, json: Option<&str>) -> Result<(), CliError> {
+            *self.json.lock().unwrap() = json.map(str::to_owned);
+            Ok(())
+        }
+        fn lock(&self) -> Result<Box<dyn Held + '_>, CliError> {
+            Ok(Box::new(self.lock.lock().unwrap()))
+        }
+    }
+
+    fn methods(seen: &Seen) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, r)| r["method"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// An agent whose inherited token is revoked or not bound to the relay
+    /// fails, even with a valid owner pairing advertised: the owner's
+    /// desktop gets no request at all.
+    #[tokio::test]
+    async fn an_agent_never_falls_back_to_the_owner_pairing() {
+        let (owner, owner_seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let store = MemoryStore::with(&[("xyz.block.buzz", "owner-token", &[RELAY])]);
+        let (revoked, _) =
+            provider(|_, _| serde_json::json!({"result": "", "error": "revoked"})).await;
+        let (unbound, _) = provider(|_, _| describe(&["wss://other.example"])).await;
+        for agent in [revoked, unbound] {
+            let ads = || vec![("xyz.block.buzz".to_owned(), owner.clone())];
+            let result = discover_with(Some((agent, "agent".into())), &store, ads, RELAY).await;
+            assert!(matches!(result, Err(CliError::Auth(_))), "{result:?}");
+        }
+        assert!(owner_seen.lock().unwrap().is_empty(), "the owner was asked");
+        // Without an inherited token the same pairing is used.
+        let ads = || vec![("xyz.block.buzz".to_owned(), owner.clone())];
+        assert!(discover_with(None, &store, ads, RELAY)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            owner_seen.lock().unwrap()[0].0.as_deref(),
+            Some("Bearer owner-token")
+        );
+    }
+
+    #[test]
+    fn relay_urls_bind_whole_after_normalization() {
+        let norm = |u: &str| provider_relay_url(u).unwrap();
+        assert_eq!(norm("https://Host.example"), "wss://host.example/");
+        assert_eq!(norm("wss://host.example:443/"), "wss://host.example/");
+        assert_eq!(norm("http://127.0.0.1:3000"), "ws://127.0.0.1:3000/");
+        assert_eq!(norm("ws://127.0.0.1:80/a"), "ws://127.0.0.1/a");
+        assert_eq!(norm("wss://host.example/a?x=1"), "wss://host.example/a?x=1");
+        assert_ne!(norm("wss://host.example/a"), norm("wss://host.example/b"));
+        assert_ne!(norm("ws://host.example"), norm("wss://host.example"));
+        assert!(provider_relay_url("ftp://host.example").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_token_binds_its_relay_path_and_plain_ws() {
+        let bound = vec![
+            "wss://host.example/a".to_owned(),
+            "ws://127.0.0.1:7000".to_owned(),
+        ];
+        let (endpoint, _) = desktop(nostr::Keys::generate(), bound).await;
+        let open = |relay: &'static str| {
+            let endpoint = endpoint.clone();
+            async move {
+                Provider::open(endpoint, "t".into(), false, relay)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(open("https://host.example/a").await.is_ok());
+        assert!(matches!(
+            open("https://host.example/b").await,
+            Err(Skip::NotApplicable)
+        ));
+        assert!(matches!(
+            open("https://host.example").await,
+            Err(Skip::NotApplicable)
+        ));
+        assert!(open("http://127.0.0.1:7000/").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bad_ciphertext_is_invalid_but_a_credential_failure_is_an_error() {
+        let keys = nostr::Keys::generate();
+        let peer = nostr::Keys::generate();
+        let (endpoint, _) = desktop(keys.clone(), vec![RELAY.into()]).await;
+        let p = Provider::open(endpoint, "t".into(), false, RELAY)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let good = nostr::nips::nip44::encrypt(
+            peer.secret_key(),
+            &keys.public_key(),
+            "hi",
+            nostr::nips::nip44::Version::V2,
+        )
+        .unwrap();
+        let plain = p.nip44_decrypt(&peer.public_key(), &good).await.unwrap();
+        assert_eq!(plain.as_deref(), Some("hi"));
+        assert!(p
+            .nip44_decrypt(&peer.public_key(), "AAAA")
+            .await
+            .unwrap()
+            .is_none());
+        for code in ["revoked", "denied", "unavailable"] {
+            let (endpoint, _) = provider(move |_, r| match r["method"].as_str() {
+                Some("describe") => describe(&[RELAY]),
+                _ => serde_json::json!({"result": "", "error": code}),
+            })
+            .await;
+            let p = Provider::open(endpoint, "t".into(), false, RELAY)
+                .await
+                .unwrap()
+                .ok()
+                .unwrap();
+            assert!(
+                p.nip44_decrypt(&peer.public_key(), &good).await.is_err(),
+                "{code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_desktop_that_refuses_fails_and_revoked_entries_are_forgotten() {
+        let (denied, _) =
+            provider(|_, _| serde_json::json!({"result": "", "error": "denied"})).await;
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let ads = || vec![("a".to_owned(), denied)];
+        assert!(discover_with(None, &store, ads, RELAY).await.is_err());
+
+        let (revoked, _) =
+            provider(|_, _| serde_json::json!({"result": "", "error": "revoked"})).await;
+        let (good, _) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
+        let ads = || vec![("a".to_owned(), revoked), ("b".to_owned(), good)];
+        assert!(discover_with(None, &store, ads, RELAY)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(store.instances(), ["b"]);
+    }
+
+    /// A pairing waiting for approval does not hold the store, and its commit
+    /// reloads: a concurrent unpair stays unpaired and a concurrent pairing
+    /// is kept.
+    #[tokio::test]
+    async fn concurrent_pair_and_unpair_keep_each_others_changes() {
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let (slow, _) = provider(move |_, _| {
+            std::thread::sleep(Duration::from_millis(300));
+            serde_json::json!({"result": serde_json::json!({
+                "token": "tb", "instance": "b", "pubkey": pubkey, "relays": [RELAY],
+            }).to_string()})
+        })
+        .await;
+        let store = Arc::new(MemoryStore::with(&[("a", "ta", &[RELAY])]));
+        let pairing = {
+            let store = store.clone();
+            tokio::spawn(
+                async move { pair_with(store.as_ref(), "b".into(), slow, RELAY, "cli").await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        unpair_with(store.as_ref(), Some("a")).unwrap();
+        update(store.as_ref(), |p| {
+            let c = p.0.get("b").cloned();
+            assert!(c.is_none());
+            p.0.insert(
+                "c".into(),
+                Pairing {
+                    token: "tc".into(),
+                    pubkey: String::new(),
+                    relays: vec![],
+                },
+            );
+        })
+        .unwrap();
+        pairing.await.unwrap().unwrap();
+        assert_eq!(store.instances(), ["b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_store_is_refused_not_overwritten() {
+        let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let store = MemoryStore::default();
+        *store.json.lock().unwrap() = Some("not json".into());
+        assert!(
+            pair_with(&store, "xyz.block.buzz".into(), endpoint, RELAY, "cli")
+                .await
+                .is_err()
+        );
+        assert!(seen.lock().unwrap().is_empty(), "approval was requested");
+        assert!(unpair_with(&store, Some("a")).is_err());
+        assert_eq!(store.json.lock().unwrap().as_deref(), Some("not json"));
+        unpair_with(&store, None).unwrap();
+        assert!(store.json.lock().unwrap().is_none());
+    }
+
+    /// `pair` sends the whole bound URL, and the token it gets back is stored.
+    #[tokio::test]
+    async fn pair_sends_the_bound_url_and_stores_the_token() {
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let (endpoint, seen) = provider(move |_, _| {
+            serde_json::json!({"result": serde_json::json!({
+                "token": "tok", "instance": "i", "pubkey": pubkey,
+                "relays": ["wss://host.example/a"],
+            }).to_string()})
+        })
+        .await;
+        let store = MemoryStore::default();
+        pair_with(
+            &store,
+            "i".into(),
+            endpoint,
+            "https://host.example/a",
+            "cli",
+        )
+        .await
+        .unwrap();
+        let request = seen.lock().unwrap()[0].2.clone();
+        assert_eq!(
+            request["params"],
+            serde_json::json!(["cli", "wss://host.example/a"])
+        );
+        assert_eq!(store.instances(), ["i"]);
+        unpair_with(&store, Some("i")).unwrap();
+        assert!(store.json.lock().unwrap().is_none());
+    }
+
+    /// When this user cannot be confirmed on the server side, not one byte
+    /// (so no token) reaches the endpoint.
+    #[tokio::test]
+    async fn an_unconfirmed_user_gets_nothing_sent() {
+        let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let opened = CALLER_UID
+            .scope(
+                u32::MAX - 1,
+                Provider::open(endpoint, "secret".into(), true, RELAY),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(opened, Err(Skip::Unreachable)));
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn signing_goes_through_the_desktop_and_is_verified() {
+        use nostr::NostrSigner;
+        let keys = nostr::Keys::generate();
+        let (endpoint, seen) = desktop(keys.clone(), vec![RELAY.into()]).await;
+        let p = Provider::open(endpoint, "t".into(), false, RELAY)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let unsigned =
+            nostr::EventBuilder::new(nostr::Kind::Custom(9), "hi").build(keys.public_key());
+        let event = p.sign_event(unsigned).await.unwrap();
+        assert!(event.verify().is_ok() && event.pubkey == keys.public_key());
+        assert_eq!(methods(&seen), ["describe", "sign_event"]);
+    }
+
+    /// The desktop's bare compact assertion reaches the relay with exactly
+    /// one `Bearer` scheme (the shape #2260's `federated_identity` returns).
+    #[tokio::test]
+    async fn the_desktop_assertion_is_sent_with_one_bearer_prefix() {
+        use axum::http::HeaderMap;
+        let seen: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: HeaderMap| {
+            let log = log.clone();
+            async move {
+                let value = headers
+                    .get("nostr-federated-identity")
+                    .and_then(|v| v.to_str().ok());
+                log.lock()
+                    .unwrap()
+                    .push(value.unwrap_or_default().to_owned());
+                axum::Json(serde_json::json!([]))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (endpoint, _) = desktop(nostr::Keys::generate(), vec![relay.clone()]).await;
+        let p = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(p)
+            .await
+            .unwrap();
+        let client = crate::client::BuzzClient::new(relay, credentials).unwrap();
+        client
+            .query(&serde_json::json!({"kinds": [9]}))
+            .await
+            .unwrap();
+        let header = seen.lock().unwrap()[0].clone();
+        assert_eq!(header.matches("Bearer").count(), 1, "{header}");
+        assert_eq!(
+            header.strip_prefix("Bearer ").unwrap().split('.').count(),
+            3
+        );
     }
 }

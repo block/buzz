@@ -43,12 +43,22 @@ interoperates with both.
 - **Instance**: one installed desktop build, named by a stable identifier such
   as its bundle identifier. Production and staging builds are separate
   instances and issue separate tokens.
-- **Bound relay**: a community relay URL a token may act on.
+- **Bound relay**: a community relay URL a token may act on. Relay URLs are
+  compared whole after URL normalization: `http`/`https` read as `ws`/`wss`,
+  lowercase host, no default port, `/` for an empty path. The path and query
+  count, because one host can serve several communities. A caller sends the
+  bound URL itself in `pair` and `federated_identity`; NIP-FA audience
+  canonicalization is the provider's job.
 
 ## Discovery
 
 A caller looks for a provider in this order. The first source that yields a
 token and a reachable endpoint is used.
+
+An inherited token decides the identity. A caller that has one MUST use only
+it: when it is revoked, does not apply to the relay or fails, the caller fails.
+It MUST NOT go on to a paired token, which acts as the human, so an agent never
+acts as its owner.
 
 ### 1. Inherited token
 
@@ -82,7 +92,12 @@ token by [pairing](#pairing). The caller stores the token in the OS keychain
 
 - The CLI keeps one keychain entry, service `buzz-cli` and account
   `desktop-pairings`, that maps each instance to its token, identity and bound
-  relays.
+  relays. Each change reloads the entry under a short cross-process lock and
+  touches only its own instance; the lock is never held across an approval
+  wait. An entry that cannot be read is refused, never overwritten.
+- A paired caller only tries a paired token when no inherited token is set.
+  A desktop that answers `denied` or `unavailable` fails the command; only an
+  unreachable or unconfirmed advertisement is skipped.
 - When no keychain is reachable, pairing MUST fail with an error that says so.
   A caller MUST NOT fall back to writing the token to disk.
 - A paired token survives a desktop restart. The desktop keeps it until it is
@@ -331,11 +346,11 @@ paired token SHOULD delete it and tell the human to pair again.
 | `approval_required` | 403 | A person must approve and did not decide in time | Tell the human to approve in Buzz, then retry |
 | `denied` | 403 | Policy or the human refused | Fail; do not retry |
 | `rate_limited` | 429 | Too many requests | Wait `retry_after` seconds |
-| `revoked` | 401 | Token revoked, expired or unknown | Drop the token; fall through to the next source |
+| `revoked` | 401 | Token revoked, expired or unknown | Drop a paired token and try the next paired one; with an inherited token, fail (see [Discovery](#discovery)) |
 | `unavailable` | 503 | The desktop cannot act now, for example signed out or its sign-in session lapsed | Fail with the message |
 | `unsupported_version` | 400 | See [Versions](#versions) | Retry with a common version |
 | `unknown_method` | 400 | The provider does not implement the method | Degrade (see below) |
-| `invalid_request` | 400 | Malformed envelope or params | Fail |
+| `invalid_request` | 400 | Malformed envelope or params. For `nip44_decrypt`, also a payload that is not valid ciphertext for this identity | Fail; for `nip44_decrypt`, treat the payload as invalid (NIP-AE filters it) |
 
 Callers MUST decide on `error`, not on the HTTP status, and MUST treat an
 unrecognized code as `denied`.

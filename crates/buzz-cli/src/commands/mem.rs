@@ -813,6 +813,63 @@ mod tests {
     // verify base-hash from the shell. Hard-coded vectors from the NIST and
     // common quick-check inputs.
 
+    /// Through the desktop, an engram with bad ciphertext is skipped while
+    /// a valid one opens; a credential failure aborts instead of reading as
+    /// "no entries".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_desktop_skips_bad_ciphertext_but_aborts_on_credential_failure() {
+        use crate::desktop_provider::{tests as dp, Provider};
+        const RELAY: &str = "wss://community.example";
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let body = Body::Memory {
+            slug: "mem/a".into(),
+            value: Some("v".into()),
+        };
+        let valid = engram::build_event(&agent, &owner.public_key(), &body, 1).unwrap();
+        let k_c = engram::conversation_key(agent.secret_key(), &owner.public_key());
+        let corrupt = engram::event_builder(
+            &owner.public_key(),
+            &engram::d_tag(&k_c, "mem/a"),
+            "AAAA".into(),
+            2,
+        )
+        .unwrap()
+        .sign_with_keys(&agent)
+        .unwrap();
+        let open = |endpoint| async move {
+            let p = Provider::open(endpoint, "t".into(), false, RELAY)
+                .await
+                .unwrap()
+                .ok()
+                .unwrap();
+            let credentials = crate::credentials::Credentials::from_desktop(p)
+                .await
+                .unwrap();
+            BuzzClient::new("http://127.0.0.1:9".into(), credentials).unwrap()
+        };
+        let (endpoint, _) = dp::desktop(owner.clone(), vec![RELAY.into()]).await;
+        let client = open(endpoint).await;
+        let (a, o) = (agent.public_key(), owner.public_key());
+        let opened = open_engram(&client, &valid, &a, &o, &a).await.unwrap();
+        assert!(matches!(opened, Some(Body::Memory { .. })));
+        assert!(open_engram(&client, &corrupt, &a, &o, &a)
+            .await
+            .unwrap()
+            .is_none());
+
+        let (endpoint, _) = dp::provider(move |_, r| match r["method"].as_str() {
+            Some("describe") => serde_json::json!({"result": serde_json::json!({
+                "pubkey": owner.public_key().to_hex(), "relays": [RELAY], "methods": [],
+            }).to_string()}),
+            _ => serde_json::json!({"result": "", "error": "unavailable"}),
+        })
+        .await;
+        let client = open(endpoint).await;
+        assert!(open_engram(&client, &valid, &a, &o, &a).await.is_err());
+    }
+
     fn test_client(keys: nostr::Keys) -> BuzzClient {
         BuzzClient::new(
             "http://127.0.0.1:9".into(),
