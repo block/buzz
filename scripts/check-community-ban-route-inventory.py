@@ -430,6 +430,11 @@ def collect_registered_routes() -> Counter:
                         f"{location}: production .{call} registration is not classified; "
                         "use .route with an HTTP method or allow-list it"
                     )
+                elif call == "merge" and prefixes.get(builder):
+                    errors.append(
+                        f"{location}: allow-listed .merge in a nested builder "
+                        "is not classified; merged routes need the parent's prefix"
+                    )
                 elif registration in unrouted_seen:
                     errors.append(
                         f"{location}: allow-listed .{call} registration appears more than once"
