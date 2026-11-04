@@ -2274,16 +2274,29 @@ pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
-/// The HTTP request base, and the community itself as configured. A desktop
-/// binds the whole community URL, trailing slash included, which the request
-/// base trims; discovery, pairing and evidence take the community.
-pub(crate) fn relay_inputs(configured: &str) -> (String, &str) {
-    (client::normalize_relay_url(configured), configured)
+/// Binds the configured community: `auth` pairs it, anything else builds
+/// the client. A desktop binds the whole community URL, trailing slash
+/// included, so pairing and the credential chain take it as configured; only
+/// requests use the trimmed base. The two steps are parameters so a test can
+/// run them against a fake desktop.
+pub(crate) async fn connect(
+    configured: &str,
+    command: Cmd,
+    pair: impl AsyncFnOnce(AuthCmd, &str) -> Result<(), CliError>,
+    credentials: impl AsyncFnOnce(&str) -> Result<credentials::Credentials, CliError>,
+) -> Result<Option<(Cmd, BuzzClient)>, CliError> {
+    let relay_url = client::normalize_relay_url(configured);
+    // Pairing runs before any credential exists.
+    if let Cmd::Auth(sub) = command {
+        pair(sub, configured).await?;
+        return Ok(None);
+    }
+    let credentials = credentials(configured).await?;
+    let client = BuzzClient::new(relay_url, credentials)?;
+    Ok(Some((command, client)))
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let (relay_url, relay) = relay_inputs(&cli.relay);
-
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
@@ -2292,26 +2305,23 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Pairing runs before any credential exists.
-    if let Cmd::Auth(sub) = cli.command {
-        return run_auth(sub, relay).await;
-    }
-
     // Credential chain: the first link that applies to this relay is the
     // identity (see `credentials`).
-    let credentials = credentials::resolve(
-        credentials::Settings {
-            private_key: cli.private_key,
-            auth_tag: cli.auth_tag,
-            ..Default::default()
-        }
-        .with_env_evidence(),
-        relay,
-    )
-    .await?;
-    let client = BuzzClient::new(relay_url, credentials)?;
+    let settings = credentials::Settings {
+        private_key: cli.private_key,
+        auth_tag: cli.auth_tag,
+        ..Default::default()
+    }
+    .with_env_evidence();
+    let Some((command, client)) = connect(&cli.relay, cli.command, run_auth, async |relay| {
+        credentials::resolve(settings, relay).await
+    })
+    .await?
+    else {
+        return Ok(());
+    };
 
-    match cli.command {
+    match command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,

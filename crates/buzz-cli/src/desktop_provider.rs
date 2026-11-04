@@ -1653,20 +1653,32 @@ pub(crate) mod tests {
         assert_eq!(store.instances(), ["b", "c"]);
     }
 
-    /// Through the CLI's own relay inputs, a community ending in a slash
-    /// reaches the desktop exactly as configured, for inherited discovery,
-    /// evidence and pairing.
+    /// Through the CLI's own wiring of `--relay`, a community ending in a
+    /// slash reaches the desktop exactly as configured, for inherited
+    /// discovery, evidence and pairing.
     #[tokio::test]
     async fn a_non_root_trailing_slash_relay_reaches_the_desktop_unchanged() {
+        use clap::Parser;
         const TEAM: &str = "wss://host.example/team/";
-        let (_, relay) = crate::relay_inputs(TEAM);
-        let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![TEAM.into()]).await;
+        let parse = |args: &[&str]| crate::Cli::try_parse_from(args).unwrap();
         let store = MemoryStore::default();
-        let inherited = discover_with(Some((endpoint, "agent".into())), &store, Vec::new, relay)
-            .await
-            .unwrap()
-            .unwrap();
-        inherited.federated_identity().await.unwrap();
+
+        let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![TEAM.into()]).await;
+        let cli = parse(&["buzz", "--relay", TEAM, "users", "get"]);
+        let (_, client) = crate::connect(&cli.relay, cli.command, async |_, _| unreachable!(), {
+            let store = &store;
+            async move |relay| {
+                let provider =
+                    discover_with(Some((endpoint, "agent".into())), store, Vec::new, relay)
+                        .await?
+                        .unwrap();
+                crate::credentials::Credentials::from_desktop(provider).await
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        client.credentials().evidence(TEAM).await.unwrap();
         let asked = seen.lock().unwrap().last().unwrap().2.clone();
         assert_eq!(asked["params"], serde_json::json!([TEAM]));
 
@@ -1677,9 +1689,25 @@ pub(crate) mod tests {
             }).to_string()})
         })
         .await;
-        pair_with(&store, "i".into(), endpoint, relay, "cli")
-            .await
-            .unwrap();
+        let cli = parse(&[
+            "buzz", "--relay", TEAM, "auth", "desktop", "pair", "--name", "cli",
+        ]);
+        let paired = crate::connect(
+            &cli.relay,
+            cli.command,
+            async |sub, relay| {
+                let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, .. }) = sub else {
+                    unreachable!()
+                };
+                pair_with(&store, "i".into(), endpoint, relay, &name)
+                    .await
+                    .map(drop)
+            },
+            async |_| unreachable!(),
+        )
+        .await
+        .unwrap();
+        assert!(paired.is_none());
         let asked = seen.lock().unwrap()[0].2.clone();
         assert_eq!(asked["params"], serde_json::json!(["cli", TEAM]));
     }
