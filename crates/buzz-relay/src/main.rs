@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::{error, info, warn};
@@ -7,7 +6,6 @@ use tracing_subscriber::{fmt, prelude::*};
 fn log_filter<S>(rust_log: Option<&str>) -> telemetry::DirectiveFilter<S> {
     telemetry::directive_filter(rust_log.unwrap_or("buzz_relay=info"))
 }
-use uuid::Uuid;
 
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
@@ -75,54 +73,6 @@ fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<
         )
     })?;
     nostr::Keys::parse(hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))
-}
-
-/// Controls whether the usage poller emits per-community gauge series.
-///
-/// Datadog cost is proportional to the number of unique time-series, so
-/// per-community series (in-memory connection, subscription, and online-user
-/// gauges, plus storage attribution) are off by default. Fleet-wide totals are
-/// independent of this mode.
-///
-/// Set via `BUZZ_USAGE_METRICS_PER_COMMUNITY`:
-///   - `off` — suppress all per-community series; fleet totals only (default)
-///   - `all` — emit per-community series for every community
-#[derive(Debug, Clone)]
-enum EmissionScope {
-    All,
-    Off,
-}
-
-impl EmissionScope {
-    fn from_env() -> Self {
-        let raw = std::env::var("BUZZ_USAGE_METRICS_PER_COMMUNITY")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        Self::parse(&raw)
-    }
-
-    fn parse(raw: &str) -> Self {
-        match raw {
-            "all" => EmissionScope::All,
-            "" | "off" => EmissionScope::Off,
-            other => {
-                warn!(
-                    value = other,
-                    "BUZZ_USAGE_METRICS_PER_COMMUNITY: unknown value — defaulting to off"
-                );
-                EmissionScope::Off
-            }
-        }
-    }
-
-    fn allows(&self, _community_id: &Uuid) -> bool {
-        matches!(self, Self::All)
-    }
-
-    fn includes_per_community(&self) -> bool {
-        matches!(self, Self::All)
-    }
 }
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
@@ -1565,10 +1515,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     //   In-memory: each pod exports its partition → dashboard uses sum().
     {
         let usage_state = Arc::clone(&state);
-        let emission_scope = EmissionScope::from_env();
         let interval_secs = usage_interval_secs;
         let mut leader = None;
-        let mut emitted_in_memory = HashSet::new();
         tokio::spawn(async move {
             // Jitter the first tick by a random fraction of the interval so
             // that a rolling deploy with N pods doesn't hammer the DB
@@ -1585,14 +1533,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Err(e) = run_usage_metrics_tick(
-                    &usage_state,
-                    &emission_scope,
-                    &mut leader,
-                    &mut emitted_in_memory,
-                )
-                .await
-                {
+                if let Err(e) = run_usage_metrics_tick(&usage_state, &mut leader).await {
                     error!(error = %e, "Usage metrics tick failed — skipping");
                 }
                 metrics::gauge!("buzz_usage_poller_is_leader").set(if leader.is_some() {
@@ -2334,32 +2275,6 @@ fn idle_timeout_secs(configured: Option<u64>, interval_secs: u64) -> u64 {
         .max(interval_secs.saturating_mul(3))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum InMemoryMetricKey {
-    WsConnections(String),
-    UsersOnline(String),
-    Subscriptions(String),
-}
-
-impl InMemoryMetricKey {
-    fn set(&self, value: f64) {
-        match self {
-            Self::WsConnections(community) => {
-                metrics::gauge!("buzz_community_ws_connections", "community" => community.clone())
-                    .set(value);
-            }
-            Self::UsersOnline(community) => {
-                metrics::gauge!("buzz_community_users_online_pod", "community" => community.clone())
-                    .set(value);
-            }
-            Self::Subscriptions(community) => {
-                metrics::gauge!("buzz_community_subscriptions", "community" => community.clone())
-                    .set(value);
-            }
-        }
-    }
-}
-
 /// Refresh the exporter recency for legacy event-driven gauges without changing
 /// their values.
 ///
@@ -2373,99 +2288,37 @@ fn refresh_legacy_active_gauge_recency() {
     metrics::gauge!("buzz_subscriptions_active").increment(0.0);
 }
 
-/// Emit pod-local gauges and zero only label keys that disappeared since the
-/// preceding tick. The key stores the resolved host label so a removed or
-/// renamed community can still receive its final zero.
-fn emit_in_memory_usage_metrics(
-    state: &AppState,
-    emission_scope: &EmissionScope,
-    host_map: Option<&HashMap<Uuid, String>>,
-    previously_emitted: &mut HashSet<InMemoryMetricKey>,
-) {
-    let connections = state.conn_manager.per_community_ws_connections();
-    let users_online = state.conn_manager.per_community_users_online();
-    let subscriptions = state.sub_registry.per_community_subscriptions();
-    let total_connections = connections.values().sum::<u64>();
-    let total_subscriptions = subscriptions.values().sum::<u64>();
+/// Emit pod-local fleet totals from live in-memory state.
+fn emit_in_memory_usage_metrics(state: &AppState) {
+    let total_connections = state
+        .conn_manager
+        .per_community_ws_connections()
+        .values()
+        .sum::<u64>();
+    let users_online = state
+        .conn_manager
+        .per_community_users_online()
+        .values()
+        .sum::<u64>();
+    let total_subscriptions = state
+        .sub_registry
+        .per_community_subscriptions()
+        .values()
+        .sum::<u64>();
 
     metrics::gauge!("buzz_total_ws_connections").set(total_connections as f64);
-    metrics::gauge!("buzz_total_users_online_pod").set(users_online.values().sum::<u64>() as f64);
+    metrics::gauge!("buzz_total_users_online_pod").set(users_online as f64);
     metrics::gauge!("buzz_total_subscriptions").set(total_subscriptions as f64);
     refresh_legacy_active_gauge_recency();
-
-    let Some(host_map) = host_map else {
-        return;
-    };
-
-    let mut current = HashSet::new();
-    for (id, host) in host_map {
-        if !emission_scope.allows(id) {
-            continue;
-        }
-        let community_id = CommunityId::from_uuid(*id);
-        let keys_and_values = [
-            (
-                InMemoryMetricKey::WsConnections(host.clone()),
-                connections.get(&community_id).copied(),
-            ),
-            (
-                InMemoryMetricKey::UsersOnline(host.clone()),
-                users_online.get(&community_id).copied(),
-            ),
-            (
-                InMemoryMetricKey::Subscriptions(host.clone()),
-                subscriptions.get(&community_id).copied(),
-            ),
-        ];
-        for (key, value) in keys_and_values {
-            if let Some(value) = value {
-                key.set(value as f64);
-                current.insert(key);
-            }
-        }
-    }
-
-    for key in dropped_in_memory_keys(previously_emitted, &current) {
-        key.set(0.0);
-    }
-    *previously_emitted = current;
-}
-
-fn dropped_in_memory_keys(
-    previously_emitted: &HashSet<InMemoryMetricKey>,
-    current: &HashSet<InMemoryMetricKey>,
-) -> Vec<InMemoryMetricKey> {
-    previously_emitted.difference(current).cloned().collect()
 }
 
 /// Run one usage-metrics tick. Every pod emits its own in-memory gauges, while
 /// one leader reaps expired invites and publishes the stored storage snapshot.
 async fn run_usage_metrics_tick(
     state: &AppState,
-    emission_scope: &EmissionScope,
     leader: &mut Option<buzz_db::SessionLeader>,
-    emitted_in_memory: &mut HashSet<InMemoryMetricKey>,
 ) -> anyhow::Result<()> {
-    let host_map: HashMap<Uuid, String> = if emission_scope.includes_per_community() {
-        match state.db.usage_community_hosts().await {
-            Ok(hosts) => hosts
-                .into_iter()
-                .map(|community| (community.id, community.host))
-                .collect(),
-            Err(error) => {
-                emit_in_memory_usage_metrics(state, emission_scope, None, emitted_in_memory);
-                return Err(error.into());
-            }
-        }
-    } else {
-        HashMap::new()
-    };
-    emit_in_memory_usage_metrics(
-        state,
-        emission_scope,
-        emission_scope.includes_per_community().then_some(&host_map),
-        emitted_in_memory,
-    );
+    emit_in_memory_usage_metrics(state);
 
     let mut demoted = false;
     if let Some(leader_guard) = leader.as_mut() {
@@ -2499,34 +2352,19 @@ async fn run_usage_metrics_tick(
                 warn!(error = %error, "failed to reap expired relay invites");
             }
         }
-        run_storage_sweep_tick(
-            state,
-            emission_scope,
-            emission_scope.includes_per_community().then_some(&host_map),
-        )
-        .await;
+        run_storage_sweep_tick(state).await;
     }
 
     Ok(())
 }
 
 /// Read worker storage snapshots only on the existing leader metrics tick.
-async fn run_storage_sweep_tick(
-    state: &AppState,
-    emission_scope: &EmissionScope,
-    host_map: Option<&HashMap<Uuid, String>>,
-) {
+async fn run_storage_sweep_tick(state: &AppState) {
     static MODE: std::sync::OnceLock<storage_sweep::StorageMetricsMode> =
         std::sync::OnceLock::new();
     let mode = *MODE.get_or_init(storage_sweep::StorageMetricsMode::from_env);
-    if let Err(error) = storage_sweep::run_storage_metrics_tick(
-        &state.db,
-        &state.storage_sweep,
-        mode,
-        host_map,
-        |id| emission_scope.allows(id),
-    )
-    .await
+    if let Err(error) =
+        storage_sweep::run_storage_metrics_tick(&state.db, &state.storage_sweep, mode).await
     {
         warn!(error = %error, "failed to load stored storage snapshot; retrying next usage tick");
     }
@@ -2534,7 +2372,6 @@ async fn run_storage_sweep_tick(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -2543,11 +2380,10 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, connect_audit_pool, connect_search_pool,
-        counted_partition_audit, dropped_in_memory_keys, idle_timeout_secs,
-        jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
-        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        counted_partition_audit, idle_timeout_secs, jwks_next_retry_after_failed_refresh,
+        nip_fi_jwks_refresh_loop, refresh_legacy_active_gauge_recency, relay_keypair_from_config,
         run_jwks_refresh_supervisor, run_periodic_until_cancelled, startup_partition_audit,
-        EmissionScope, InMemoryMetricKey, PartitionAuditSchedule,
+        PartitionAuditSchedule,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -2955,38 +2791,6 @@ mod tests {
         let result = relay_keypair_from_config(None);
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_emission_scope_off_disallows_every_community() {
-        assert!(EmissionScope::All.allows(&Uuid::new_v4()));
-        assert!(!EmissionScope::Off.allows(&Uuid::new_v4()));
-    }
-
-    #[test]
-    fn usage_metrics_default_to_fleet_only() {
-        assert!(matches!(EmissionScope::parse(""), EmissionScope::Off));
-        assert!(matches!(
-            EmissionScope::parse("not-a-mode"),
-            EmissionScope::Off
-        ));
-        assert!(matches!(EmissionScope::parse("all"), EmissionScope::All));
-    }
-
-    #[test]
-    fn test_dropped_in_memory_keys_preserves_resolved_host_label() {
-        let previous = HashSet::from([
-            InMemoryMetricKey::WsConnections("removed.example".to_owned()),
-            InMemoryMetricKey::UsersOnline("live.example".to_owned()),
-        ]);
-        let current = HashSet::from([InMemoryMetricKey::UsersOnline("live.example".to_owned())]);
-
-        assert_eq!(
-            dropped_in_memory_keys(&previous, &current),
-            vec![InMemoryMetricKey::WsConnections(
-                "removed.example".to_owned()
-            )]
-        );
     }
 
     #[test]

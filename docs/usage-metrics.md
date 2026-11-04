@@ -1,15 +1,10 @@
 # Usage metrics operations
 
-The relay runs no database aggregate queries for usage telemetry. Its usage
-poller emits pod-local in-memory gauges and republishes the stored storage
-snapshot. Fleet counts of users, channels, members, workflows, repositories, and
-active users are not relay metrics.
-
-The poller is bounded-cardinality by default:
-
-```text
-BUZZ_USAGE_METRICS_PER_COMMUNITY=off
-```
+The relay runs no database aggregate queries for usage telemetry, and it emits
+no per-community usage series. Its usage poller emits pod-local in-memory
+gauges and republishes fleet totals from the stored storage snapshot. Fleet
+counts of users, channels, members, workflows, repositories, and active users
+are not relay metrics.
 
 ## In-memory gauges
 
@@ -21,20 +16,10 @@ live process state, so dashboards aggregate them with `sum()` across pods.
 
 Storage totals come from the `buzz-admin` worker snapshot and carry their own
 `buzz_storage_snapshot_load_ok` and `buzz_storage_snapshot_age_seconds` health
-gauges. Storage gauges are leader-only: in a multi-pod deployment, first filter
-them to the pod where `buzz_usage_poller_is_leader == 1`; do not take an
-unfiltered maximum across pods. In fleet-only mode the relay does not attribute
-storage to communities, so it emits neither `buzz_community_storage_*` series
-nor `buzz_storage_unmapped_community_bytes`.
-
-## Per-community series
-
-`BUZZ_USAGE_METRICS_PER_COMMUNITY=all` adds per-community in-memory series
-(`buzz_community_ws_connections`, `buzz_community_users_online_pod`,
-`buzz_community_subscriptions`) and per-community storage attribution. Each
-tick reads the community id → host map to label them. This multiplies
-monitoring cardinality by the community count, so it is not the steady-state
-configuration.
+gauges; see [storage-accounting.md](storage-accounting.md). Storage gauges are
+leader-only: in a multi-pod deployment, first filter them to the pod where
+`buzz_usage_poller_is_leader == 1`; do not take an unfiltered maximum across
+pods.
 
 ## Leader election
 

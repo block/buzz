@@ -457,37 +457,17 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(!replica_fence_production.contains("writer.acquire().await"));
     assert!(!replica_fence_production.contains("fetch_optional(writer)"));
 
-    let usage = include_str!("../src/store/usage.rs");
-    let usage_production = usage
+    let leader_lock = include_str!("../src/store/leader_lock.rs");
+    let leader_lock_production = leader_lock
         .split("\n#[cfg(test)]")
         .next()
-        .expect("usage production source");
-    let usage_leader_lock = usage_production
+        .expect("leader-lock production source");
+    let leader_lock_acquisition = leader_lock_production
         .split_once("pub async fn try_lock_session_leader(")
-        .expect("usage store must expose the legacy leader-lock acquisition")
-        .1
-        .split_once("pub async fn usage_community_hosts(")
-        .expect("usage leader lock must precede the host-map read")
-        .0;
-    assert!(usage_leader_lock.contains("acquire_writer_with_legacy_metrics("));
-    assert!(
-        usage_production
-            .matches("WriterOperation::Maintenance")
-            .count()
-            >= 2,
-        "every periodic usage checkout must be maintenance-attributed"
-    );
-    for bypass in [
-        ".fetch_one(pool)",
-        ".fetch_all(pool)",
-        ".fetch_optional(pool)",
-        ".execute(pool)",
-    ] {
-        assert!(
-            !usage_production.contains(bypass),
-            "usage production path bypasses operation attribution with {bypass}"
-        );
-    }
+        .expect("leader-lock store must expose the legacy leader-lock acquisition")
+        .1;
+    assert!(leader_lock_acquisition.contains("acquire_writer_with_legacy_metrics("));
+    assert!(leader_lock_acquisition.contains("WriterOperation::Maintenance"));
 
     let channel_reaper = channel
         .split_once("pub async fn reap_expired_ephemeral_channels(pool:")

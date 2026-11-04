@@ -50,9 +50,8 @@ the cache and stops refreshing storage series. Existing exported series expire
 through the metrics exporter's idle timeout; absence is never reported as zero
 bytes. A valid empty snapshot can report zero bytes.
 
-The reader preserves leader-only emission, community scope filtering, and
-cleanup of series for renamed or removed communities. It does not need S3
-listing permission. The worker still needs that permission and its database
+The reader emits fleet totals from the leader only; per-community storage is
+not a relay metric. It does not need S3 listing permission. The worker still needs that permission and its database
 configuration.
 
 ## Usage delivery

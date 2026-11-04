@@ -1544,7 +1544,6 @@ mod tests {
         let _ = writer_db
             .with_inactive_community_fence(test_scope, |_| ())
             .await;
-        let _ = writer_db.usage_community_hosts().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
         let deletion_store = writer_db.deletion_store();
         let _ = deletion_store.reap_expired_serving_write_leases(1).await;
