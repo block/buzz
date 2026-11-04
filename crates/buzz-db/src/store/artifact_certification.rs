@@ -95,7 +95,7 @@ async fn certify_pending(
              ORDER BY p.community_id,p.earliest_at,p.operation_id \
              LIMIT $3 FOR UPDATE OF p SKIP LOCKED \
          ), observed AS MATERIALIZED ( \
-             SELECT clock_timestamp() AS now FROM (SELECT count(*) FROM pending) ready \
+             SELECT clock_timestamp() AS now FROM pending HAVING count(*) >= 0 \
          ), resets AS ( \
              UPDATE communities c SET artifact_policy_modified_at=GREATEST( \
                  clock_timestamp(),c.artifact_policy_modified_at + interval '1 microsecond') \
@@ -165,6 +165,10 @@ impl Db {
             .bind(BATCH)
             .fetch_all(&mut *tx)
             .await?;
+            if candidates.is_empty() {
+                tx.commit().await?;
+                return Ok((0, None));
+            }
             let next = candidates.last().copied();
             let admitted: Vec<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM unnest($1::uuid[]) id \
