@@ -408,7 +408,13 @@ impl CommunityConnectionControl {
             CommunityDisconnectReason::AuthorizationDenied
         };
         let won = self.reason_tx.send_if_modified(|current| match current {
-            None | Some(CommunityDisconnectReason::Removed) => {
+            None => {
+                *current = Some(reason);
+                true
+            }
+            Some(CommunityDisconnectReason::Removed)
+                if class == buzz_auth::DenialClass::AuthorizationDenied =>
+            {
                 *current = Some(reason);
                 true
             }
@@ -460,6 +466,7 @@ impl CommunityConnectionControl {
         self.manager_disconnect_nip_fi_with_class(
             frame_tx,
             buzz_auth::DenialClass::AuthorizationDenied,
+            crate::nip_fi_shadow::EnforceSession::revoke,
         );
     }
 
@@ -467,12 +474,13 @@ impl CommunityConnectionControl {
         &self,
         frame_tx: &mpsc::Sender<WsMessage>,
         class: buzz_auth::DenialClass,
+        enforce: fn(&crate::nip_fi_shadow::EnforceSession),
     ) {
         self.publish_nip_fi_denial(
             crate::nip_fi_session::NipFiWsRoute::Root,
             class,
             Some(frame_tx),
-            crate::nip_fi_shadow::EnforceSession::revoke,
+            enforce,
         );
         self.cancel.cancel();
     }
@@ -1648,7 +1656,7 @@ impl ConnectionManager {
         if nip_fi {
             entry
                 .community_control
-                .manager_disconnect_nip_fi_with_class(&entry.terminal_ctrl_tx, class);
+                .manager_disconnect_nip_fi_with_class(&entry.terminal_ctrl_tx, class, |_| {});
         } else {
             entry
                 .community_control
@@ -3803,6 +3811,74 @@ pub(crate) mod tests {
             text.contains("authorization denied"),
             "denial frame must contain 'authorization denied'; got: {text}"
         );
+    }
+
+    /// Live policy failures close root sockets without attributing them to
+    /// the NIP-FI deny set, just as the audio registry does.
+    #[test]
+    fn live_revalidation_does_not_record_deny_set_revocation() {
+        for class in [
+            buzz_auth::DenialClass::AuthorizationDenied,
+            buzz_auth::DenialClass::AuthorizationUnavailable,
+        ] {
+            let (records, lines, _, ()) =
+                crate::nip_fi_shadow::tests::enforce_observed(async {}, |()| async move {
+                    let manager = ConnectionManager::new();
+                    let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+                    let conn_id = Uuid::new_v4();
+                    let key = nostr::Keys::generate().public_key();
+                    let (tx, _rx) = mpsc::channel(8);
+                    let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                    let (terminal_tx, mut terminal_rx) = mpsc::channel(1);
+                    let cancel = CancellationToken::new();
+                    let control = CommunityConnectionControl::new(cancel.clone());
+                    let reason = control.disconnect_reason();
+                    control.attach_nip_fi_enforce(crate::nip_fi_shadow::EnforceSession::new(
+                        "ws",
+                        crate::nip_fi_shadow::BOUND.into(),
+                        Some(key),
+                    ));
+                    control.nip_fi_enforce().expect("attached").admit(key);
+                    manager.register(
+                        conn_id,
+                        tx,
+                        ctrl_tx,
+                        terminal_tx,
+                        None,
+                        cancel.clone(),
+                        community,
+                        Arc::new(AtomicU8::new(0)),
+                        Arc::new(Mutex::new(HashMap::new())),
+                        3,
+                        control,
+                    );
+                    manager.set_authenticated_identity(
+                        conn_id,
+                        key.to_bytes().to_vec(),
+                        Some(NipFiSession::new("test-issuer", None)),
+                    );
+                    assert!(manager.disconnect_live_authorization(community, conn_id, class));
+                    assert!(cancel.is_cancelled());
+                    assert_eq!(
+                        *reason.borrow(),
+                        Some(
+                            if class == buzz_auth::DenialClass::AuthorizationUnavailable {
+                                CommunityDisconnectReason::AuthorizationUnavailable
+                            } else {
+                                CommunityDisconnectReason::AuthorizationDenied
+                            }
+                        ),
+                    );
+                    assert!(terminal_rx.try_recv().is_ok(), "terminal denial frame");
+                });
+            assert_eq!(records.iter().filter(|r| *r == "ws admit/admit").count(), 1);
+            assert!(
+                records
+                    .iter()
+                    .all(|r| !r.contains("end/") && !r.contains("deny/")),
+                "{class:?} must not be attributed to the deny set: {lines:?}"
+            );
+        }
     }
 
     #[test]

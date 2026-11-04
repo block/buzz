@@ -1127,6 +1127,12 @@ async fn run_active_audio_connection(
     let admitted_owner = match admitted_owner {
         Ok(owner) => owner,
         Err(denial) => {
+            crate::handlers::auth::record_enforce_refusal(
+                &control,
+                Some(&denial),
+                nip_fi_assertion.as_ref(),
+            );
+            auth_line.finish(AuthResult::from_outcome(denial.outcome));
             shadow_attempt.refused();
             exit_authorization_refusal(
                 &mut ws_send,
