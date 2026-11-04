@@ -870,7 +870,8 @@ fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
 
 /// Whether `id` is itself a recorded reply. Its own replies are recorded under
 /// the thread's root, so a read for them must take the generic path. One
-/// probe of `idx_thread_metadata_event_id`.
+/// probe of `idx_thread_metadata_event_id`. A root that has replies also has
+/// a row, the depth-0 stub with no root of its own, which is not a reply.
 async fn is_recorded_reply(
     conn: &mut sqlx::PgConnection,
     q: &EventQuery,
@@ -881,7 +882,7 @@ async fn is_recorded_reply(
     qb.push_bind(q.community_id.as_uuid())
         .push(" AND event_id = ")
         .push_bind(id.to_vec())
-        .push(" LIMIT 1");
+        .push(" AND root_event_id IS NOT NULL LIMIT 1");
     Ok(!fetch_with_read_deadline(conn, &mut qb, true, deadline)
         .await?
         .is_empty())
@@ -3737,6 +3738,22 @@ mod postgres_tests {
             with_unrecorded
         );
 
+        // The root has its depth-0 stub row yet is not a reply; P is.
+        let mut conn = pool.acquire().await.expect("acquire");
+        let stub: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM thread_metadata WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(root_id.to_vec())
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(stub, 1, "ingest leaves a stub row for the root");
+        for (id, reply) in [(root_id, false), (first.id.as_bytes(), true)] {
+            let got = is_recorded_reply(&mut conn, &q, id, ReadDeadline::PerRead).await;
+            assert_eq!(got.unwrap(), reply);
+        }
+
         // A nested parent's replies are recorded under the root, so reading
         // them falls back to the generic path and still finds them.
         let mut nested_parent = q.clone();
@@ -3761,7 +3778,6 @@ mod postgres_tests {
         }
         assert_eq!(paged, expected);
 
-        let mut conn = pool.acquire().await.expect("acquire");
         sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
