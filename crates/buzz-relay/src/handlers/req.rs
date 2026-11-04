@@ -1104,11 +1104,13 @@ pub async fn build_event_query_from_filter(
 /// returning a truncated count.
 pub(crate) const COUNT_FALLBACK_CANDIDATE_LIMIT: i64 = 5_000;
 
-/// Apply the bounded candidate budget used by COUNT post-filter fallbacks.
-pub(crate) fn apply_count_fallback_limit(query: &mut EventQuery) {
+/// Prepare a COUNT post-filter fallback query: the bounded candidate budget,
+/// and exact NIP-01 matching so it counts what the SQL COUNT path would.
+pub(crate) fn prepare_count_fallback(query: &mut EventQuery) {
     let fetch_limit = COUNT_FALLBACK_CANDIDATE_LIMIT + 1;
     query.limit = Some(fetch_limit);
     query.max_limit = Some(fetch_limit);
+    query.exact_match = true;
 }
 
 /// Return whether a COUNT fallback query exceeded its exact-count budget.
@@ -3003,7 +3005,11 @@ mod tests {
     fn count_fallback_fetches_one_extra_candidate() {
         let mut query =
             EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()));
-        apply_count_fallback_limit(&mut query);
+        prepare_count_fallback(&mut query);
+        assert!(
+            query.exact_match,
+            "COUNT fallbacks never take the thread route"
+        );
         assert_eq!(query.limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
         assert_eq!(query.max_limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
         assert!(!count_fallback_exceeded(

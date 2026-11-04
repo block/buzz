@@ -131,6 +131,10 @@ pub struct EventQuery {
     /// types only, so a read path that does not set it never returns a notice
     /// about a type added later, such as a system channel (NIP-CL).
     pub notice_channel_types: Option<Vec<String>>,
+    /// Match every event NIP-01 would, never through the narrowed
+    /// thread-reply route (see `docs/nips/NIP-CW.md`). Set by reads whose rows
+    /// feed an exact COUNT, which must agree with the SQL COUNT path.
+    pub exact_match: bool,
 }
 
 impl EventQuery {
@@ -165,6 +169,7 @@ impl EventQuery {
             max_limit: None,
             shared_gated_reader: None,
             notice_channel_types: None,
+            exact_match: false,
         }
     }
 }
@@ -842,7 +847,8 @@ const THREAD_REPLY_KINDS: [i32; 2] = [
 
 /// The candidate thread root of a "replies to this message" read: one channel,
 /// one lowercase-hex `#e` value, only [`THREAD_REPLY_KINDS`], and no `#p`
-/// join. [`query_events_on`] takes the thread route only when the target is
+/// join, and not an [`EventQuery::exact_match`] read. [`query_events_on`]
+/// takes the thread route only when the target is
 /// not itself a recorded reply (see [`is_recorded_reply`]).
 ///
 /// The generic `#e` read gathers every event that tags the root before it can
@@ -860,6 +866,7 @@ fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
     };
     let kinds = q.kinds.as_deref()?;
     let routable = q.channel_id.is_some()
+        && !q.exact_match
         && q.p_tag_hex.is_none()
         && !kinds.is_empty()
         && kinds.iter().all(|k| THREAD_REPLY_KINDS.contains(k))
@@ -3180,7 +3187,7 @@ mod e_tag_filter_shape_tests {
         assert!(sql.contains("ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT "));
 
         type Change = fn(&mut EventQuery);
-        let generic: [(&str, Change); 6] = [
+        let generic: [(&str, Change); 7] = [
             ("two roots", |q| {
                 q.e_tags = Some(vec!["ab".repeat(32), "cd".repeat(32)])
             }),
@@ -3189,6 +3196,7 @@ mod e_tag_filter_shape_tests {
             ("no channel", |q| q.channel_id = None),
             ("uppercase root", |q| q.e_tags = Some(vec!["AB".repeat(32)])),
             ("p join", |q| q.p_tag_hex = Some("cd".repeat(32))),
+            ("exact match", |q| q.exact_match = true),
         ];
         for (label, change) in generic {
             let mut q = routed();
@@ -3757,6 +3765,13 @@ mod postgres_tests {
         let with_unrecorded = [unrecorded, expected.clone()].concat();
         assert_eq!(
             ids(query_events(&pool, &generic).await.unwrap()),
+            with_unrecorded
+        );
+        // A COUNT fallback must see the same set as the SQL COUNT path.
+        let mut exact = q.clone();
+        exact.exact_match = true;
+        assert_eq!(
+            ids(query_events(&pool, &exact).await.unwrap()),
             with_unrecorded
         );
 

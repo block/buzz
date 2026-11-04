@@ -232,6 +232,7 @@ message of those kinds that names the root only in a bare, `mention`, or lone
 `root` `e` tag matches the filter under NIP-01 but is **not** returned by this
 read, though live subscriptions still deliver it. Clients that need such
 references SHOULD add another kind to the filter, which takes the generic path.
+COUNT is unaffected: it counts every event that matches under NIP-01.
 
 ## Thread Mode
 

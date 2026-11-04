@@ -2527,7 +2527,7 @@ async fn count_member_events(
             } else {
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
-                crate::handlers::req::apply_count_fallback_limit(&mut q);
+                crate::handlers::req::prepare_count_fallback(&mut q);
                 match state
                     .db
                     .query_events_routed_bounded("bridge_count_fallback", &q)
@@ -2600,7 +2600,7 @@ async fn count_member_events(
                 }
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
-                crate::handlers::req::apply_count_fallback_limit(&mut query);
+                crate::handlers::req::prepare_count_fallback(&mut query);
                 match state
                     .db
                     .query_events_routed_bounded("bridge_count_fallback", &query)
