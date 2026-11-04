@@ -370,7 +370,7 @@ async fn migration_schema_expansion_preserves_existing_optional_rows_with_and_wi
     let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
-    crate::migration::run_migrations_through(&pool, 80)
+    crate::migration::run_migrations_through(&pool, 81)
         .await
         .unwrap();
     let db = Db::from_pool(pool.clone());

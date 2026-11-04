@@ -136,7 +136,7 @@ signature replay uses the existing operator replay error independently of this t
 
 ## Schema and rollout
 
-Migration 0081 is additive: legacy rows keep `requires_nip_fi=false` and generation
+Migration 0082 is additive: legacy rows keep `requires_nip_fi=false` and generation
 zero. It adds no trigger, function, procedure, rule or foreign key and rewrites no
 existing rows. Lock and statement budgets are 5 and 30 seconds. Existing global
 `enforce` remains an additional floor; this ticket changes no data-plane gate.
