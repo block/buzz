@@ -53,11 +53,17 @@ void _useComposerChannelNames(
 
 const _typingThrottleMs = 3000;
 
+/// How long a keyboard that was up before an inactive spell may take to come
+/// back after the app resumes. iOS restores it natively a few hundred
+/// milliseconds after `resumed` (flutter/flutter#189051 logs about 0.4 s).
+const _composerKeyboardRestoreGrace = Duration(seconds: 1);
+
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
+  Timer? _restoreGrace;
 
   _ComposerKeyboardMetricsObserver({
     required this.view,
@@ -65,8 +71,47 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
+  // iOS drops the keyboard inset while the app is inactive (Control Center,
+  // the app switcher) and restores the keyboard natively after it resumes.
+  // Treating that drop as a dismissal collapsed the composer and left the
+  // restored keyboard attached to no field. So ignore metrics until the app
+  // resumes, and give a keyboard that was up the restore grace to return
+  // before deciding it was dismissed.
   @override
   void didChangeMetrics() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    if (_restoreGrace != null) {
+      if (view.viewInsets.bottom <= 0) return;
+      _cancelRestoreGrace();
+    }
+    _reconcile();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _cancelRestoreGrace();
+      return;
+    }
+    if (_wasVisible && view.viewInsets.bottom <= 0) {
+      _restoreGrace ??= Timer(_composerKeyboardRestoreGrace, () {
+        _restoreGrace = null;
+        _reconcile();
+      });
+      return;
+    }
+    _reconcile();
+  }
+
+  void dispose() => _cancelRestoreGrace();
+
+  void _cancelRestoreGrace() {
+    _restoreGrace?.cancel();
+    _restoreGrace = null;
+  }
+
+  void _reconcile() {
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
