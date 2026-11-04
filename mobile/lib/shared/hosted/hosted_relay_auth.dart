@@ -154,6 +154,8 @@ class HostedRelayAuth extends ChangeNotifier {
 
   static bool _isRelayOrigin(RelayConfig config, Uri url) =>
       (url.scheme == 'http' || url.scheme == 'https') &&
+      // `Uri.origin` throws for a hostless URI, which a community can supply.
+      url.host.isNotEmpty &&
       url.origin == Uri.parse(config.baseUrl).origin;
 
   Future<Map<String, String>> headers(RelayConfig config) async {

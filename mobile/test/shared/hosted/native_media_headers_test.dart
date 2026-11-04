@@ -48,6 +48,9 @@ void main() {
       'https://cdn.example/a.png',
       'https://team.relay.example/media/a.png',
       'http://relay.example/media/a.png',
+      'https:///media/a.png',
+      'http:///media/a.png',
+      'https://',
     ]) {
       expect(headersFor(other), isNot(contains('Nostr-Federated-Identity')));
     }
