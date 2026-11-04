@@ -133,6 +133,8 @@ class _ToastBubble extends HookWidget {
     this.visible = true,
     this.persistent = false,
     this.actionLabel = 'Retry',
+    this.destructiveAction = false,
+    this.secondaryAction,
   });
 
   final String message;
@@ -143,10 +145,16 @@ class _ToastBubble extends HookWidget {
   final bool visible;
   final bool persistent;
   final String actionLabel;
+  final bool destructiveAction;
+  final ({String label, VoidCallback onPressed})? secondaryAction;
 
   @override
   Widget build(BuildContext context) {
-    final origin = islandOrigin ?? _toastIslandOrigin(context);
+    // The taller two-action card uses the standard toast entrance rather than
+    // morphing from a capsule-shaped Dynamic Island.
+    final origin = secondaryAction == null
+        ? islandOrigin ?? _toastIslandOrigin(context)
+        : null;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final accessible = MediaQuery.accessibleNavigationOf(context);
     final program = useFuture(
@@ -286,7 +294,12 @@ class _ToastBubble extends HookWidget {
                           progress: progress,
                         ),
                   child: PhysicalShape(
-                    clipper: _ToastRevealClipper(reveal),
+                    clipper: _ToastRevealClipper(
+                      reveal,
+                      radius: secondaryAction == null
+                          ? null
+                          : Radii.navigationCapsule,
+                    ),
                     clipBehavior: Clip.antiAlias,
                     color: island != null && shader != null
                         ? Colors.transparent
@@ -299,6 +312,8 @@ class _ToastBubble extends HookWidget {
                         message: message,
                         foreground: foreground,
                         actionLabel: actionLabel,
+                        destructiveAction: destructiveAction,
+                        secondaryAction: secondaryAction,
                         onAction: onRetry,
                       ),
                     ),
@@ -314,16 +329,17 @@ class _ToastBubble extends HookWidget {
 }
 
 class _ToastRevealClipper extends CustomClipper<Path> {
-  const _ToastRevealClipper(this.progress);
+  const _ToastRevealClipper(this.progress, {this.radius});
 
   final double progress;
+  final double? radius;
 
   @override
   Path getClip(Size size) {
     final collapsedWidth = size.height.clamp(0.0, size.width);
     final width = collapsedWidth + (size.width - collapsedWidth) * progress;
     return RoundedSuperellipseBorder(
-      borderRadius: BorderRadius.circular(size.height / 2),
+      borderRadius: BorderRadius.circular(radius ?? size.height / 2),
     ).getOuterPath(
       Rect.fromCenter(
         center: size.center(Offset.zero),
@@ -335,5 +351,5 @@ class _ToastRevealClipper extends CustomClipper<Path> {
 
   @override
   bool shouldReclip(_ToastRevealClipper oldClipper) =>
-      oldClipper.progress != progress;
+      oldClipper.progress != progress || oldClipper.radius != radius;
 }
