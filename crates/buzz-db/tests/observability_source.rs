@@ -588,7 +588,7 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
             "relay_operators",
             include_str!("../src/store/relay_operators.rs"),
         ),
-        ("usage", usage),
+        ("leader_lock", leader_lock),
     ] {
         let production = source.split("\n#[cfg(test)]").next().unwrap_or(source);
         for bypass in [
