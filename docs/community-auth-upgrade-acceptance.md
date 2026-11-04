@@ -274,8 +274,8 @@ an unsupported rollback binary or policy reset. Off preserves policy, generation
 and receipts while bypassing FI admission; it cannot claim active enforcement.
 Abort is not automatic permission to switch to Off. Record an explicitly
 reviewed containment/recovery choice, preserving durable state and issuer trust.
-Until the upstream correction is reviewed, E4 and live use of the abort/recovery
-guidance remain blocked.
+Until the upstream correction is reviewed, every live matrix row is blocked:
+all rows depend on consistent abort/recovery guidance, including E4.
 
 ## Failure injection and recovery
 
@@ -283,8 +283,9 @@ Before each injection, record its target boot, affected connection, operation an
 generation, the exact injector command, its scope and its inverse. Use isolated
 test infrastructure for shared DB/Redis faults unless staging has a reviewed way
 to constrain the fault. Deployment-wide setting changes are confined to the
-dedicated staging scope above; do not change shared-fleet policy or drain unrelated communities as a
-fallback. If an injector cannot preserve these boundaries,
+dedicated staging scope above; do not change shared-fleet policy or drain
+unrelated communities as a fallback. If an injector cannot preserve these
+boundaries,
 record the scenario blocked and use a deterministic local integration fixture.
 The local fixture supplies supplemental evidence only. Every matrix row is
 mandatory for this ticket, including the required staging fault observations.
@@ -317,7 +318,8 @@ control deviates from its authorized mode-specific baseline, a community outside
 the dedicated allowlist drains, scope no longer matches the allowlist, or evidence
 shows a false active result. Only the explicitly predicted fixture effects of an
 authorized mode transition are exempt; shared staging regressions never are.
-Apply the recorded inverse of each reversible fault, stop the fixture traffic and record the run as failed.
+Apply the recorded inverse of each reversible fault, stop the fixture traffic
+and record the run as failed.
 Notify the operator and reviewer with affected scope, operation/generation and
 the current recovery status. Recovery does not erase the failed observation.
 If the inverse fails, preserve its error and escalate the unresolved fault;
