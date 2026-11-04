@@ -106,6 +106,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/message_list_thread_footer.dart';
 part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
 part 'channel_detail_page/hidden_history_paging.dart';

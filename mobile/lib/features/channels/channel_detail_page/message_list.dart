@@ -1114,26 +1114,7 @@ class _MessageList extends HookConsumerWidget {
                             ),
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
-                            replyFooter:
-                                entry.summary == null &&
-                                    !threadWorking.containsKey(
-                                      message.id.toLowerCase(),
-                                    )
-                                ? null
-                                : _ThreadSummaryRow(
-                                    summary: entry.summary,
-                                    working:
-                                        threadWorking[message.id
-                                            .toLowerCase()] ??
-                                        const [],
-                                    message: message,
-                                    allMessages: allMessages,
-                                    channelId: channelId,
-                                    currentPubkey: currentPubkey,
-                                    isMember: isMember,
-                                    canContribute: mayContribute,
-                                    isArchived: isArchived,
-                                  ),
+                            replyFooter: _buildThreadReplyFooter(this, entry),
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
