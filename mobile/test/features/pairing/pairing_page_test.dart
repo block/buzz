@@ -126,6 +126,7 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();
       }
+      debugDefaultTargetPlatformOverride = null;
     });
 
     testWidgets(
