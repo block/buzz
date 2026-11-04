@@ -56,6 +56,9 @@ class _AdmissionRelay extends RelaySessionNotifier {
   final changes = <List<List<String>>>[];
   final ids = <String>[];
 
+  /// Events the app signed; a resend must not sign again.
+  int signs = 0;
+
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
@@ -155,6 +158,31 @@ class _AdmissionRelay extends RelaySessionNotifier {
   }
 }
 
+/// The real signer, counting how many events the app signs.
+class _CountingSigner extends SignedEventRelay {
+  _CountingSigner(this.relay, String nsec) : super(session: relay, nsec: nsec);
+
+  final _AdmissionRelay relay;
+
+  @override
+  Future<NostrEvent> submit({
+    required int kind,
+    required String content,
+    required List<List<String>> tags,
+    int? createdAt,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+  }) {
+    relay.signs++;
+    return super.submit(
+      kind: kind,
+      content: content,
+      tags: tags,
+      createdAt: createdAt,
+      onSigned: onSigned,
+    );
+  }
+}
+
 class _Sections extends ChannelSectionsNotifier {
   @override
   ChannelSectionsState build() => const ChannelSectionsState(
@@ -213,7 +241,7 @@ Widget _app({
         (ref) => ChannelActions(
           ref: ref,
           session: relay,
-          signedEventRelay: SignedEventRelay(session: relay, nsec: keys.nsec),
+          signedEventRelay: _CountingSigner(relay, keys.nsec),
           currentPubkey: keys.public,
         ),
       ),
@@ -414,9 +442,13 @@ void main() {
     relay.drops = false;
     await _checkStatus(tester);
     expect(_checkRow, findsOneWidget);
+    final signs = relay.signs;
     await _tapCentred(tester, _resendRow);
     expect(relay.changes, hasLength(7));
+    // The exact event, not a fresh signature: one signed later would carry a
+    // new id the relay would apply again.
     expect(relay.ids.last, relay.ids[5]);
+    expect(relay.signs, signs);
     expect(_checkRow, findsNothing);
     expect(_resendRow, findsNothing);
     expect(_defaultSwitch(tester).value, isFalse);
