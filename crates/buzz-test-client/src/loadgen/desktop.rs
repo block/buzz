@@ -3161,19 +3161,21 @@ hold_secs = 1
 
     #[tokio::test]
     async fn a_probe_answered_late_behind_a_slow_ok_reconnects() {
-        // Ticks every 0.25 s; a heartbeat every 2 s waits 1.5 s for its OK.
-        // The tick after an OK hears it, so the next one probes, 0.25 s
-        // before the next heartbeat. On the first connection, the probe's
-        // EOSE comes 1.3 s after it, past its 1 s deadline, while that
-        // heartbeat waits; the OK itself comes later still. Neither answers.
+        // Ticks every 0.25 s; a heartbeat every 1 s waits 0.6 s for its OK.
+        // The tick after an OK hears it, so the next one probes, 0.15 s
+        // before the next heartbeat. The first probe may come before any
+        // heartbeat and is answered at once. On the first connection, every
+        // later probe's EOSE comes 0.6 s after it, past its 0.4 s deadline,
+        // while that heartbeat waits; the OK itself comes later still.
+        // Neither answers.
         let mut rig = solo(5, "mode = \"current\"");
         rig.tick_secs = Some(0.25);
-        rig.presence_secs = 2.0;
-        rig.ok_delay = Duration::from_millis(1_500);
-        rig.req_timeout = Duration::from_secs(1);
+        rig.presence_secs = 1.0;
+        rig.ok_delay = Duration::from_millis(600);
+        rig.req_timeout = Duration::from_millis(400);
         rig.plan = Arc::new(|conn, id| {
-            let late = conn == 0 && id.starts_with("probe-");
-            (0, Duration::from_millis(if late { 1_300 } else { 0 }))
+            let late = conn == 0 && id.starts_with("probe-") && id != "probe-1";
+            (0, Duration::from_millis(if late { 600 } else { 0 }))
         });
         let out = drive(rig, Duration::ZERO, |o| {
             o.errors("desktop_probe") >= 1 && o.count("ws_connect_auth") >= 2
@@ -3182,7 +3184,7 @@ hold_secs = 1
         assert_eq!(out.errors("desktop_probe"), 1, "{:?}", out.ops);
         // The probe that failed went out before a heartbeat on its
         // connection, whose OK wait held its EOSE.
-        let first = out.at("REQ", "probe-1").expect("probe-1 was sent");
+        let first = out.at("REQ", "probe-2").expect("probe-2 was sent");
         assert!(
             out.frames[first..]
                 .iter()
