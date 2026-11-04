@@ -8657,6 +8657,21 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .unwrap()
             .approvals;
+        // Upgrade receipts are operator recovery evidence, intentionally retained
+        // through purge so their UUID cannot be rebound to another community.
+        let upgrade_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO community_auth_upgrades
+            (operation_id, target_community_id, expected_host, actor_pubkey,
+             expected_owner_pubkey, expected_issuer, operator_pubkey, policy_generation)
+            VALUES ($1,$2,$3,'owner','owner','https://issuer.example','operator',1)",
+        )
+        .bind(upgrade_id)
+        .bind(community)
+        .bind(&request.community_host)
+        .execute(&db.pool)
+        .await
+        .unwrap();
         let history_id: Uuid = sqlx::query_scalar(
             "INSERT INTO entity_deletion_stage_history
              (request_id, target_community_id, stage, is_current)
@@ -8700,6 +8715,13 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
 
+        let upgrade = db
+            .community_auth_upgrade_status(upgrade_id, "operator")
+            .await
+            .unwrap()
+            .expect("receipt survives purge");
+        assert_eq!(upgrade.community_id, community);
+        assert_eq!(upgrade.state, "unavailable");
         let retained: Uuid = sqlx::query_scalar(
             "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",
         )
