@@ -85,6 +85,39 @@ void main() {
       expect(counting.crypto.retainedLength, lessThanOrEqualTo(bound));
     });
 
+    test('replaying 27 full slots twice decrypts each slot once', () {
+      // A measured account: 27 slots near the 40 KiB plaintext budget, all
+      // replayed on every resume. Their total (about 2.6M code units) is
+      // more than an oldest-first memo of 2M can hold, which made every
+      // replay miss.
+      final counting = _CountingCrypto(keys);
+      final otherDevice = ReadStateCrypto.forTesting(_key(keys));
+      final slots = <String>[
+        for (var i = 0; i < 27; i++)
+          otherDevice.encrypt('$i${'z' * (readStatePlaintextBytes - 8)}'),
+      ];
+
+      for (var pass = 0; pass < 2; pass++) {
+        for (final ciphertext in slots) {
+          counting.crypto.decrypt(ciphertext);
+        }
+      }
+      expect(counting.decrypts, slots.length);
+    });
+
+    test('a hit keeps an entry ahead of unused ones for eviction', () {
+      const bound = 3000;
+      final counting = _CountingCrypto(keys, maxRetainedLength: bound);
+      final plain = 'x' * 400;
+      final live = counting.crypto.encrypt('live$plain');
+      // Our own superseded blobs: each publish adds one and never reads it.
+      for (var i = 0; i < 20; i++) {
+        counting.crypto.encrypt('$i$plain');
+        expect(counting.crypto.decrypt(live), 'live$plain');
+      }
+      expect(counting.decrypts, 0);
+    });
+
     test('a blob larger than the whole bound is not retained', () {
       final counting = _CountingCrypto(keys, maxRetainedLength: 100);
       final ciphertext = counting.crypto.encrypt('y' * 200);

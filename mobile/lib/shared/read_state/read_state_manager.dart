@@ -17,20 +17,26 @@ class ReadStateCrypto {
   final String Function(Uint8List conversationKey, String ciphertext) _decrypt;
   final int _maxRetainedLength;
 
-  /// Plaintext by ciphertext, oldest first. NIP-44 payloads carry a random
-  /// nonce and a MAC, so under this one conversation key the same ciphertext
-  /// always decrypts to the same plaintext. Every publish re-reads up to
-  /// [readStateFetchLimit] of our own blobs and the relay echoes each publish
-  /// back, so most decrypts here repeat a ciphertext this instance already
-  /// decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC on the
-  /// UI isolate, so repeats are served from this memo.
+  /// Plaintext by ciphertext, least recently used first. NIP-44 payloads
+  /// carry a random nonce and a MAC, so under this one conversation key the
+  /// same ciphertext always decrypts to the same plaintext. Every publish
+  /// re-reads up to [readStateFetchLimit] of our own blobs, every resume
+  /// replays them on the live subscription, and the relay echoes each
+  /// publish back, so most decrypts here repeat a ciphertext this instance
+  /// already decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC
+  /// on the UI isolate, so repeats are served from this memo.
   final Map<String, String> _plaintextByCiphertext = {};
   int _retainedLength = 0;
 
   /// Upper bound on the code units the memo retains, counting each ciphertext
   /// key and its plaintext, so it cannot grow without limit however large the
-  /// blobs get (about 2 MB of one-byte strings at the default).
-  static const defaultMaxRetainedLength = 2000000;
+  /// blobs get (about 8 MB of one-byte strings at the default). Each slot's
+  /// current blob costs up to about 95,000 (a 40 KiB plaintext and its
+  /// base64 ciphertext), so this holds about 80 slots. The replay walks every
+  /// slot in turn, so a bound below the live slots' total evicts each entry
+  /// before its next use and nothing hits; an account with 27 slots measured
+  /// about 2.6M.
+  static const defaultMaxRetainedLength = 8000000;
 
   ReadStateCrypto._(
     this.conversationKey, {
@@ -79,8 +85,12 @@ class ReadStateCrypto {
   /// Throws on a ciphertext that does not decrypt, every time: failures are
   /// never memoized.
   String decrypt(String ciphertext) {
-    final known = _plaintextByCiphertext[ciphertext];
-    if (known != null) return known;
+    final known = _plaintextByCiphertext.remove(ciphertext);
+    if (known != null) {
+      // Most recently used goes last, so superseded blobs are evicted first.
+      _plaintextByCiphertext[ciphertext] = known;
+      return known;
+    }
     final plaintext = _decrypt(conversationKey, ciphertext);
     _remember(ciphertext, plaintext);
     return plaintext;
