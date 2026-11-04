@@ -73,6 +73,23 @@ void main() {
     );
     await aborted.future.timeout(const Duration(seconds: 5));
   });
+
+  test('a timed-out bounded request is aborted, not left running', () async {
+    final aborted = Completer<void>();
+    final client = RelayHttpQueryClient(
+      client: _HangingClient(onAbort: aborted.complete),
+    );
+
+    await expectLater(
+      client.sendBounded(
+        http.Request('GET', Uri.parse('https://relay.example/')),
+        maxBytes: 1024,
+        timeout: const Duration(milliseconds: 10),
+      ),
+      throwsA(isA<TimeoutException>()),
+    );
+    await aborted.future.timeout(const Duration(seconds: 5));
+  });
 }
 
 /// Never responds; reports when the request's abort trigger fires.
