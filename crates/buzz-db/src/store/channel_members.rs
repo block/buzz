@@ -2349,6 +2349,29 @@ impl Db {
             tx.rollback().await?;
             return Ok(None);
         }
+        // The first event is the durable per-channel delivery identity. A
+        // retry uses its admission tag instead of minting a new timestamp/ID.
+        // Check under the same membership lock as the insert, so concurrent
+        // workers cannot both create the first notice. Include deleted rows:
+        // recovery must not resurrect a notice deliberately removed later.
+        let recorded: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM events \
+             WHERE community_id = $1 AND pubkey = $2 AND kind = $3 AND tags @> $4)",
+        )
+        .bind(community.as_uuid())
+        .bind(event.pubkey.to_bytes().as_slice())
+        .bind(buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32)
+        .bind(serde_json::json!([
+            ["admission", pending.to_string()],
+            ["h", channel.to_string()],
+            ["p", hex::encode(pubkey)],
+        ]))
+        .fetch_one(tx.conn())
+        .await?;
+        if recorded {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         let stored = crate::event::insert_event_in_transaction(&mut tx, event, None).await?;
         if stored.1 {
             crate::insert_mentions_in_transaction(&mut tx, event, None).await?;

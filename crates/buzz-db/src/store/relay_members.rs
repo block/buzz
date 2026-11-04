@@ -1195,8 +1195,6 @@ pub struct PendingDefaultChannelJoin {
     pub token: Uuid,
     /// Original actor; `invite` denotes a self-claim.
     pub added_by: Option<String>,
-    /// Stable timestamp for this admission's idempotent notifications.
-    pub admitted_at: DateTime<Utc>,
 }
 
 impl Db {
@@ -1213,7 +1211,7 @@ impl Db {
         )
         .await?;
         Ok(sqlx::query_as(
-            "SELECT auto_join_pending AS token, added_by, created_at AS admitted_at FROM relay_members \
+            "SELECT auto_join_pending AS token, added_by FROM relay_members \
              WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending IS NOT NULL",
         )
         .bind(community.as_uuid())

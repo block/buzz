@@ -231,6 +231,18 @@ mod postgres_tests {
         let (state, tenant, _, member, channels) = recovery_fixture("notice-retry", 2).await;
         let community = tenant.community();
         let member_hex = member.public_key().to_hex();
+        let first_clock = nostr::Timestamp::now().as_secs();
+        sqlx::query(
+            "UPDATE relay_members SET created_at = $3 WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&member_hex)
+        .bind(
+            chrono::DateTime::<chrono::Utc>::from_timestamp(first_clock as i64 - 7200, 0).unwrap(),
+        )
+        .execute(state.db.pool())
+        .await
+        .unwrap();
         let pending = state
             .db
             .pending_default_channel_join(community, &member_hex)
@@ -238,7 +250,6 @@ mod postgres_tests {
             .unwrap()
             .unwrap();
         let mut barrier = notice_barrier::install(&member.public_key().to_bytes());
-        let first_clock = pending.admitted_at.timestamp() as u64 + 60;
         barrier.pin_created_at(first_clock);
         let mut blocker = state.db.pool().begin().await.unwrap();
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -272,6 +283,19 @@ mod postgres_tests {
             .unwrap();
         let before = added_notifications(&state, community, &member_hex).await;
         assert_eq!(before.len(), 1);
+        let membership_filter: nostr::Filter = serde_json::from_value(serde_json::json!({
+            "kinds": [buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION, buzz_core::kind::KIND_MEMBER_REMOVED_NOTIFICATION],
+            "#p": [member_hex],
+            "since": first_clock,
+        })).unwrap();
+        assert!(
+            buzz_core::filter::filters_match(
+                &[membership_filter],
+                &buzz_core::StoredEvent::new(before[0].clone(), None),
+            ),
+            "a recovered notice must reach the membership subscription started after admission",
+        );
+        assert_eq!(before[0].created_at.as_secs(), first_clock);
         assert_eq!(
             state
                 .db
@@ -304,26 +328,29 @@ mod postgres_tests {
             "retry must not persist another first-channel notice"
         );
         assert!(after.iter().any(|notice| notice.id == before[0].id));
-        for channel in &channels {
+        for (index, channel) in channels.iter().enumerate() {
             let channel = channel.to_string();
-            assert_eq!(
-                after
-                    .iter()
-                    .filter(|notice| notice
+            let notices = after
+                .iter()
+                .filter(|notice| {
+                    notice
                         .tags
                         .iter()
-                        .any(|tag| tag.as_slice() == ["h", channel.as_str()]))
-                    .count(),
+                        .any(|tag| tag.as_slice() == ["h", channel.as_str()])
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                notices.len(),
                 1,
                 "each default channel needs exactly one persisted notice",
+            );
+            assert_eq!(
+                notices[0].created_at.as_secs(),
+                first_clock + index as u64 * 3600
             );
         }
         let token = pending.token.to_string();
         for notice in after {
-            assert_eq!(
-                notice.created_at.as_secs(),
-                pending.admitted_at.timestamp() as u64
-            );
             assert!(notice
                 .tags
                 .iter()

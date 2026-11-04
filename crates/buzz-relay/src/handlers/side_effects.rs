@@ -1401,11 +1401,7 @@ async fn emit_typed_membership_notification(
         None => builder,
     };
     let builder = if let Some(admission) = admission {
-        builder
-            .custom_created_at(nostr::Timestamp::from(
-                admission.admitted_at.timestamp() as u64
-            ))
-            .tags([Tag::parse(["admission", &admission.token.to_string()])?])
+        builder.tags([Tag::parse(["admission", &admission.token.to_string()])?])
     } else {
         builder
     };
