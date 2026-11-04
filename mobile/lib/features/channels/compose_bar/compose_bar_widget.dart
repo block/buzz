@@ -256,7 +256,7 @@ class ComposeBar extends HookConsumerWidget {
     final mentionStartIdx = useState(-1);
     // Counts chooser openings: a new `@` starts fresh rows and searches.
     final mentionOpening = useRef(0);
-    final deadMention = useRef<_DeadMention?>(null);
+    final prose = useRef<_DeadMention?>(null);
     final shownMentions = useRef<_MentionRows>((
       rows: const [],
       unavailable: const {},
@@ -335,6 +335,7 @@ class ComposeBar extends HookConsumerWidget {
     final lastTypingSentMs = useRef(0);
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
+    final typed = useRef(<int>{}); // see [_openMentionQuery]
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
@@ -362,6 +363,7 @@ class ComposeBar extends HookConsumerWidget {
         isModifyingText.value = false;
       }
       mentionQuery.value = null;
+      typed.value.remove(start);
     }
 
     // Detect @mention query and broadcast typing on text / selection change.
@@ -371,7 +373,7 @@ class ComposeBar extends HookConsumerWidget {
         final editingValue = controller.value;
         final previousValue = lastObservedEditingValue.value;
         lastObservedEditingValue.value = editingValue;
-        _rebaseDeadMention(deadMention, previousValue.text, editingValue.text);
+        _rebaseMentions(typed, prose, previousValue.text, editingValue.text);
         if (isModifyingText.value || editingValue == previousValue) return;
         final text = editingValue.text;
         final sel = editingValue.selection;
@@ -403,18 +405,14 @@ class ComposeBar extends HookConsumerWidget {
           return;
         }
 
-        var open = findMentionQuery(text, cursor);
-        final closed =
-            open != null &&
-            _mentionQueryStaysClosed(
-              open,
-              before: previousValue.text,
-              text: text,
-              openAt: mentionQuery.value == null ? null : mentionStartIdx.value,
-              selected: mentionMap.value.keys,
-              dead: deadMention.value,
-            );
-        if (closed) open = null;
+        final open = _openMentionQuery(
+          findMentionQuery(text, cursor),
+          before: previousValue.text,
+          text: text,
+          typed: typed.value,
+          selected: mentionMap.value.keys,
+          dead: prose.value,
+        );
 
         // Space after an exact, unique name selects it (section 5).
         final previousQuery = mentionQuery.value;
@@ -444,6 +442,7 @@ class ComposeBar extends HookConsumerWidget {
           }
           mentionQuery.value = open.query;
           mentionStartIdx.value = open.start;
+          typed.value.add(open.start);
           channelQuery.value = null;
         } else {
           mentionQuery.value = null;
@@ -476,7 +475,7 @@ class ComposeBar extends HookConsumerWidget {
       query: mentionQuery.value,
       opening: mentionOpening.value,
       start: mentionStartIdx.value,
-      dead: _mentionSourcesSettled(ref, membersAsync) ? deadMention : null,
+      dead: _mentionSourcesSettled(ref, membersAsync) ? prose : null,
     );
     shownMentions.value = mentionRows;
     final suggestions = mentionRows.rows;
@@ -537,7 +536,6 @@ class ComposeBar extends HookConsumerWidget {
       attachments.value = [];
       mentionMap.value.clear();
       mentionQuery.value = null;
-      deadMention.value = null;
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;

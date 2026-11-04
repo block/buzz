@@ -1968,7 +1968,21 @@ void main() {
         await tester.pump();
         expect(find.text('Alice Smith'), findsOneWidget);
 
-        // So does a pasted `@Alice Smith`, which arrives in one edit.
+        // Moving the caret away and back keeps the typed `@` open, while the
+        // selected one stays closed.
+        controller.selection = const TextSelection.collapsed(offset: 0);
+        await tester.pump();
+        expect(popover(), findsNothing);
+        controller.selection = const TextSelection.collapsed(offset: 9);
+        await tester.pump();
+        expect(popover(), findsNothing);
+        controller.selection = TextSelection.collapsed(
+          offset: controller.text.length,
+        );
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+
+        // A pasted `@Alice Smith`, which arrives in one edit, opens too.
         await tester.enterText(find.byType(TextField), 'hi @Alice and ');
         await tester.pump();
         expect(popover(), findsNothing);

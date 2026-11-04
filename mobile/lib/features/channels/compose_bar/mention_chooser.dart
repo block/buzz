@@ -128,6 +128,24 @@ final _nameContinuation = RegExp(r'[\p{L}\p{N}_]', unicode: true);
   );
 }
 
+/// Moves each text offset in [offsets] across the edit from [before] to
+/// [after]: offsets before the edited span stay, offsets after it shift by
+/// the length change, and offsets inside it are dropped.
+void _rebaseOffsets(Set<int> offsets, String before, String after) {
+  if (offsets.isEmpty || before == after) return;
+  final span = _editSpan(before, after);
+  final moved = {
+    for (final offset in offsets)
+      if (offset < span.prefix)
+        offset
+      else if (offset >= span.beforeEnd)
+        offset + after.length - before.length,
+  };
+  offsets
+    ..clear()
+    ..addAll(moved);
+}
+
 /// Whether the edit from [before] to [after] inserted the character at
 /// [index] of [after], so an `@` there was pasted or typed just now.
 bool _insertedByEdit(String before, String after, int index) {
@@ -135,15 +153,17 @@ bool _insertedByEdit(String before, String after, int index) {
   return index >= span.prefix && index < span.afterEnd;
 }
 
-/// Moves [dead] with its `@` after an edit from [before] to [after] wholly
-/// before it, and drops it when the edit replaced that `@` or no longer
-/// leaves the dead query after it. Every edit,
-/// including chip insertion, passes through here.
-void _rebaseDeadMention(
+/// Moves the [typed] `@` offsets and the [dead] query across the edit from
+/// [before] to [after]; every edit, including chip insertion, passes here.
+/// [dead] moves with its `@` when the edit is wholly before it, and drops
+/// when the edit replaced that `@` or no longer leaves the dead query.
+void _rebaseMentions(
+  ObjectRef<Set<int>> typed,
   ObjectRef<_DeadMention?> dead,
   String before,
   String after,
 ) {
+  _rebaseOffsets(typed.value, before, after);
   final current = dead.value;
   if (current == null || before == after) return;
   final span = _editSpan(before, after);
@@ -177,29 +197,31 @@ bool _mentionSourcesSettled(
 /// The `@` position and lowercased query of a query that settled as prose.
 typedef _DeadMention = ({int start, String query});
 
-/// Whether the mention query [open] should stay closed.
+/// [open], or null when that mention query should stay closed.
 ///
-/// A selected mention's `@` does not reopen a query. A query already open at
-/// this `@` ([openAt] is the open query's `@`, or null) stays open, and so does one whose `@` this edit
-/// inserted (a paste), so a new `@Alice Smith` can still reach "Alice Smith"
-/// when an earlier `@Alice` was selected. A query that already settled as
-/// prose ([dead]) stays closed while it grows.
-bool _mentionQueryStaysClosed(
-  MentionQuery open, {
+/// A selected mention's `@` does not reopen a query. One that already opened
+/// a query ([typed]) stays open, and so does one this edit inserted (a
+/// paste), so a new `@Alice Smith` can still reach "Alice Smith" when an
+/// earlier `@Alice` was selected. A query that already settled as prose
+/// ([dead]) stays closed while it grows.
+MentionQuery? _openMentionQuery(
+  MentionQuery? open, {
   required String before,
   required String text,
-  required int? openAt,
+  required Set<int> typed,
   required Iterable<String> selected,
   required _DeadMention? dead,
 }) {
-  if (openAt != open.start &&
+  if (open == null) return null;
+  final selectedAt =
+      !typed.contains(open.start) &&
       !_insertedByEdit(before, text, open.start) &&
-      _startsSelectedMention(text, open.start, selected)) {
-    return true;
-  }
-  return dead != null &&
+      _startsSelectedMention(text, open.start, selected);
+  final prose =
+      dead != null &&
       open.start == dead.start &&
       open.query.toLowerCase().startsWith(dead.query);
+  return selectedAt || prose ? null : open;
 }
 
 /// The dead query after [rows] settle for [query] at [start].
