@@ -59,25 +59,49 @@ Map<String, dynamic>? _tryDecodeJsonMap(String content) {
   }
 }
 
+/// The agent directory and owners last read over a live connection.
+class _AgentDirectoryMemo {
+  List<AgentDirectoryEntry>? agents;
+  Map<String, String>? owners;
+}
+
+/// One memo per community, so nothing read in one reaches another.
+final _agentDirectoryMemoProvider = Provider<_AgentDirectoryMemo>((ref) {
+  ref.watch(relayConfigProvider);
+  return _AgentDirectoryMemo();
+});
+
 /// Relay agent directory from kind:10100 agent-profile events.
 ///
 /// Watches the session and only fetches after the WebSocket connects.
+/// While it reconnects, the directory last read in this community stands,
+/// so agents already found stay eligible.
 final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {
+  final memo = ref.watch(_agentDirectoryMemoProvider);
   final sessionState = ref.watch(relaySessionProvider);
-  if (sessionState.status != SessionStatus.connected) return const [];
+  if (sessionState.status != SessionStatus.connected) {
+    return memo.agents ?? const [];
+  }
   final session = ref.read(relaySessionProvider.notifier);
   final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  return [for (final event in events) AgentDirectoryEntry.fromEvent(event)];
+  return memo.agents = [
+    for (final event in events) AgentDirectoryEntry.fromEvent(event),
+  ];
 });
 
 /// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
 /// profiles. An entry exists only when the `auth` tag verifies — mirrors
 /// desktop's `profile_valid_oa_owner_pubkey`.
 final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
+  final memo = ref.watch(_agentDirectoryMemoProvider);
   final agents = await ref.watch(agentDirectoryProvider.future);
   if (agents.isEmpty) return const {};
+  // While the session reconnects, the owners last read stand with the
+  // directory they belong to.
+  final status = ref.read(relaySessionProvider).status;
+  if (status != SessionStatus.connected) return memo.owners ?? const {};
   final session = ref.read(relaySessionProvider.notifier);
   final events = await session.fetchHistory(
     NostrFilters.profilesBatch([for (final agent in agents) agent.pubkey]),
@@ -87,7 +111,7 @@ final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
     final owner = verifiedOaOwnerPubkey(event.tags, event.pubkey);
     if (owner != null) owners[event.pubkey.toLowerCase()] = owner;
   }
-  return owners;
+  return memo.owners = owners;
 });
 
 /// Pubkeys currently known to represent agents across the active relay.

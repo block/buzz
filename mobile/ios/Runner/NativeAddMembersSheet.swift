@@ -99,6 +99,13 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
+  /// The app theme's error color, which keeps 4.5:1 contrast on the sheet
+  /// where `.systemRed` does not.
+  private static let errorColor = UIColor { traits in
+    traits.userInterfaceStyle == .dark
+      ? UIColor(red: 0xFF / 255, green: 0x95 / 255, blue: 0x92 / 255, alpha: 1)
+      : UIColor(red: 0xCE / 255, green: 0x2C / 255, blue: 0x31 / 255, alpha: 1)
+  }
   private var selected: [[String: Any]] { state["selected"] as? [[String: Any]] ?? [] }
   private var users: [[String: Any]] {
     let selectedKeys = Set(selected.compactMap { $0["pubkey"] as? String })
@@ -188,7 +195,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     } else {
       let label = UILabel()
       label.text = error
-      label.textColor = .systemRed
+      label.textColor = Self.errorColor
       label.font = .preferredFont(forTextStyle: .footnote)
       label.adjustsFontForContentSizeCategory = true
       label.numberOfLines = 0
@@ -247,7 +254,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     var memberLabel: String?
     if isStatus(indexPath) {
       content.text = status
-      content.textProperties.color = loadError && !atLimit ? .systemRed : .secondaryLabel
+      content.textProperties.color = loadError && !atLimit ? Self.errorColor : .secondaryLabel
       content.textProperties.numberOfLines = 0
       cell.selectionStyle = loadError && !atLimit ? .default : .none
       if loadError && !atLimit { cell.accessibilityTraits.insert(.button) }

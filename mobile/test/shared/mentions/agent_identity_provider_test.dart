@@ -212,6 +212,34 @@ void main() {
     },
   );
 
+  test('keeps the agent directory while the session reconnects', () async {
+    final session = _DirectorySession();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final sub = container.listen(agentDirectoryProvider, (_, _) {});
+    addTearDown(sub.close);
+    final agent = 'a' * 64;
+
+    expect(
+      [
+        for (final entry in await container.read(agentDirectoryProvider.future))
+          entry.pubkey,
+      ],
+      [agent],
+    );
+    session.drop();
+    expect(
+      [
+        for (final entry in await container.read(agentDirectoryProvider.future))
+          entry.pubkey,
+      ],
+      [agent],
+    );
+    expect(session.fetches, 1);
+  });
+
   test('blank profile labels defer to the directory label', () {
     const pubkey = 'deadbeef0123456789';
 
@@ -344,4 +372,34 @@ bool _matches(NostrFilter filter, NostrEvent event) {
           tag.skip(1).any(entry.value.contains),
     );
   });
+}
+
+/// A session whose directory read finds one agent, and which can drop.
+class _DirectorySession extends RelaySessionNotifier {
+  var fetches = 0;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  void drop() => state = const SessionState(status: SessionStatus.disconnected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (state.status != SessionStatus.connected) throw StateError('offline');
+    fetches++;
+    return [
+      NostrEvent(
+        id: 'agent-profile',
+        pubkey: 'a' * 64,
+        createdAt: 1700000000,
+        kind: 10100,
+        tags: const [],
+        content: '{"display_name":"Helper","respond_to":"anyone"}',
+        sig: 'sig',
+      ),
+    ];
+  }
 }

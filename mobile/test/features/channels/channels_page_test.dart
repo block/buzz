@@ -3333,7 +3333,8 @@ void main() {
       await tester.tap(find.byKey(Key('new-dm-selected-$bob')));
       await tester.pump();
       expect(find.byKey(Key('new-dm-selected-$bob')), findsNothing);
-      await _searchDm(tester, 'bo');
+      // A Space never picks here: a full name with edge spaces still finds.
+      await _searchDm(tester, ' Bob ');
       expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
       expect(
         tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,

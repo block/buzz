@@ -316,9 +316,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
 
     // The same candidates, ranking, debounce and search cache as mention
     // autocomplete, so a name finds the same people and agents in both.
-    final ranked = ref.watch(newDmCandidatesProvider(query.value));
-    final searching = ref.watch(newDmSearchPendingProvider(query.value));
-    final searchFailed = ref.watch(newDmSearchFailedProvider(query.value));
+    // A Space never picks here, so a search ignores its edge spaces where a
+    // composer query would end at one.
+    final search = query.value.trim();
+    final ranked = ref.watch(newDmCandidatesProvider(search));
+    final searching = ref.watch(newDmSearchPendingProvider(search));
+    final searchFailed = ref.watch(newDmSearchFailedProvider(search));
     final selectedPubkeys = {
       for (final user in selectedUsers.value) user.pubkey,
     };
@@ -327,7 +330,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         for (final candidate in ranked)
           if (!selectedPubkeys.contains(candidate.pubkey)) candidate,
       ],
-      query: query.value,
+      query: search,
       opening: opening.value,
       pending: searching,
     );
@@ -343,7 +346,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           .remember(newDmMentionHistoryKey, user.pubkey);
     }
 
-    void retry() => ref.invalidate(mentionUserSearchProvider(query.value));
+    void retry() => ref.invalidate(mentionUserSearchProvider(search));
     final canSubmit = !isSubmitting.value && selectedUsers.value.isNotEmpty;
 
     Future<void> submit() async {
