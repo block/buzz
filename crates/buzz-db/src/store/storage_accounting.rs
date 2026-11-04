@@ -471,8 +471,15 @@ mod postgres_tests {
             .await
             .expect("lock community for fence");
         sqlx::query(
-            "UPDATE communities SET deletion_state = 'fenced', \
-                    deletion_fence_generation = deletion_fence_generation + 1 \
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '1', true)",
+        )
+        .bind(fencing.to_string())
+        .execute(&mut *fence)
+        .await
+        .expect("authorize fence transition");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'fenced', deletion_fence_generation = 1 \
              WHERE id = $1",
         )
         .bind(fencing)
