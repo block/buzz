@@ -82,8 +82,8 @@ extension _ChannelNotices on ChannelMessagesNotifier {
         }
         // Short bounded ranges can leave a partial page's worth of room.
         // Count unique additions, keep the newest, and exclude overflow
-        // before fetching auxiliary events. Re-read cached boundary notices
-        // without charging their ids to the remaining budget again.
+        // before fetching auxiliary events. Cached notices and their aux
+        // already come from _windowEvents when an older page reveals them.
         final fresh =
             {
               for (final event in page)
@@ -91,16 +91,7 @@ extension _ChannelNotices on ChannelMessagesNotifier {
             }.values.toList()..sort(
               (a, b) => compareChannelTimelineEventsChronologically(b, a),
             );
-        final admitted = fresh
-            .take(_maxNotices - _notices.length)
-            .map((event) => event.id)
-            .toSet();
-        final events = page
-            .where(
-              (event) =>
-                  _notices.containsKey(event.id) || admitted.contains(event.id),
-            )
-            .toList();
+        final events = fresh.take(_maxNotices - _notices.length).toList();
         // Pages carry their rows' reactions; notices read apart need their
         // own. Read them before the notices count as read, so a failure
         // reads the whole page again.

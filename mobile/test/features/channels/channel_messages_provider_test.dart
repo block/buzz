@@ -514,6 +514,8 @@ void main() {
   });
 
   test('notices read apart keep their reactions', () async {
+    const id = _paddedId;
+    final joinedId = id('20');
     NostrEvent aux(
       String id,
       int kind,
@@ -534,14 +536,24 @@ void main() {
     );
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
-        [_event(id: 'message', createdAt: 10), _bounds()],
+        [
+          _event(id: id('10'), createdAt: 50),
+          _bounds(hasMore: true, cursorCreatedAt: 50, cursorId: id('10')),
+        ],
+        [
+          _event(id: id('30'), createdAt: 50),
+          _bounds(dTag: '${_channelId.toLowerCase()}:50:${id('10')}'),
+        ],
       ],
     );
-    relaySession.noticeResults.add([_joinNotice('joined', 20)]);
+    relaySession.noticeResults.addAll([
+      [_joinNotice(joinedId, 50)],
+      [_joinNotice(joinedId, 50)],
+    ]);
     relaySession.auxEvents.addAll([
-      aux('kept', EventKind.reaction, 'joined', content: '👍'),
-      aux('removed', EventKind.reaction, 'joined', content: '🎉'),
-      aux('unreacted', EventKind.reaction, 'joined', content: '👀'),
+      aux('kept', EventKind.reaction, joinedId, content: '👍'),
+      aux('removed', EventKind.reaction, joinedId, content: '🎉'),
+      aux('unreacted', EventKind.reaction, joinedId, content: '👀'),
       aux('removal', EventKind.deletion, 'removed'),
       aux('channel-less', EventKind.deletion, 'unreacted', inChannel: false),
     ]);
@@ -564,7 +576,7 @@ void main() {
         null,
       ],
     );
-    expect(reads[0].tags['#e'], ['joined']);
+    expect(reads[0].tags['#e'], [joinedId]);
     expect(
       reads[2].tags['#e'],
       unorderedEquals(['kept', 'removed', 'unreacted']),
@@ -572,10 +584,43 @@ void main() {
     for (final read in reads.skip(1)) {
       expect(read.kinds, isNot(contains(EventKind.reaction)));
     }
+    // The notice is cached below the current same-second message floor.
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .requireValue
+          .where((event) => event.id == joinedId),
+      isEmpty,
+    );
+    relaySession.emit(aux('live', EventKind.reaction, joinedId, content: '🔥'));
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(await notifier.fetchOlder(), isTrue);
+    await _pumpEventQueue();
+    expect(
+      reads,
+      hasLength(4),
+      reason: 'cached notices need no auxiliary reread',
+    );
     final joined = formatTimeline(
       container.read(channelMessagesProvider(_channelId)).value!,
-    ).singleWhere((message) => message.id == 'joined');
-    expect(joined.reactions.map((reaction) => reaction.emoji), ['👍']);
+    ).singleWhere((message) => message.id == joinedId);
+    expect(
+      joined.reactions.map((reaction) => reaction.emoji),
+      unorderedEquals(['👍', '🔥']),
+    );
+    relaySession.emit(aux('live-removal', EventKind.deletion, 'kept'));
+    await _pumpEventQueue();
+    expect(
+      formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).requireValue,
+          )
+          .singleWhere((message) => message.id == joinedId)
+          .reactions
+          .map((reaction) => reaction.emoji),
+      ['🔥'],
+    );
   });
 
   test('notice reactions are read past one page', () async {
