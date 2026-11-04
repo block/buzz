@@ -568,7 +568,10 @@ pub(crate) async fn query_events_on(
     }
 
     let mut qb = build_query_events_sql(q);
-    let rows = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q), deadline).await?;
+    // Thread-reply reads must be planned with their root: a cached generic
+    // plan sorts every reply of a large thread. Tag matches likewise.
+    let persistent = !has_tag_values(q) && thread_reply_root(q).is_none();
+    let rows = fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -616,6 +619,9 @@ fn page_limit(q: &EventQuery) -> i64 {
 
 /// SQL for [`query_events_on`], after [`answer_without_db`].
 fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
+    if let Some(root) = thread_reply_root(q) {
+        return build_thread_reply_sql(q, root);
+    }
     let limit_val = page_limit(q);
     let offset_val = q.offset.unwrap_or(0);
 
@@ -657,13 +663,37 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
 
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    push_event_filters(&mut qb, col_prefix, q);
+
+    // Composite ordering for deterministic pagination across ALL callers of
+    // query_events (WebSocket REQ, REST endpoints, canvas, notes, etc.).
+    // The `id ASC` tiebreaker ensures stable results when events share the
+    // same second.  No existing index covers this trailing column — Postgres
+    // sorts in memory, which is fine at current scale.  If query performance
+    // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
+    if e_tag_fence {
+        qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
+    } else {
+        qb.push(format!(
+            " ORDER BY {col_prefix}created_at DESC, {col_prefix}id ASC LIMIT "
+        ));
+    }
+    qb.push_bind(limit_val);
+    qb.push(" OFFSET ").push_bind(offset_val);
+    qb
+}
+
+/// AND every [`EventQuery`] predicate except the community, the `deleted_at`
+/// test and the `#p` join, on columns qualified by `col_prefix` (`""` or
+/// `"e."`).
+fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
-        let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
+        let table = col_prefix.strip_suffix('.').unwrap_or("events");
         qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
-    push_notice_visibility(&mut qb, col_prefix, q);
+    push_notice_visibility(qb, col_prefix, q);
 
     if let Some(ch) = q.channel_id {
         qb.push(format!(" AND {col_prefix}channel_id = "))
@@ -672,7 +702,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    push_channel_scope(&mut qb, col_prefix, q);
+    push_channel_scope(qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -720,20 +750,20 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_exact_tag_match(&mut qb, col_prefix, "e", e_tags);
+            push_exact_tag_match(qb, col_prefix, "e", e_tags);
         }
     }
 
     if let Some(ref values) = q.d_tag_values {
-        push_artifact_d_tag_predicate(&mut qb, col_prefix, values);
+        push_artifact_d_tag_predicate(qb, col_prefix, values);
     }
 
     if let Some((ref name, ref value)) = q.custom_tag {
         qb.push(" AND ");
-        push_exact_tag_match(&mut qb, col_prefix, name, std::slice::from_ref(value));
+        push_exact_tag_match(qb, col_prefix, name, std::slice::from_ref(value));
     }
 
-    push_tag_value_filters(&mut qb, col_prefix, &q.tag_values);
+    push_tag_value_filters(qb, col_prefix, &q.tag_values);
 
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
@@ -791,25 +821,72 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(") OR {col_prefix}pubkey = "));
         qb.push_bind(reader_bytes.clone());
         qb.push(" OR ");
-        push_exact_tag_match(&mut qb, col_prefix, "shared", &["true".to_owned()]);
+        push_exact_tag_match(qb, col_prefix, "shared", &["true".to_owned()]);
         qb.push(")");
     }
+}
 
-    // Composite ordering for deterministic pagination across ALL callers of
-    // query_events (WebSocket REQ, REST endpoints, canvas, notes, etc.).
-    // The `id ASC` tiebreaker ensures stable results when events share the
-    // same second.  No existing index covers this trailing column — Postgres
-    // sorts in memory, which is fine at current scale.  If query performance
-    // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
-    if e_tag_fence {
-        qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
-    } else {
-        qb.push(format!(
-            " ORDER BY {col_prefix}created_at DESC, {col_prefix}id ASC LIMIT "
-        ));
+/// Kinds whose single-root `#e` history read is answered from
+/// `thread_metadata`: channel messages, whose clients always mark the root
+/// with NIP-10 `root`/`reply` tags.
+const THREAD_REPLY_KINDS: [i32; 2] = [
+    buzz_core::kind::KIND_STREAM_MESSAGE as i32,
+    buzz_core::kind::KIND_STREAM_MESSAGE_V2 as i32,
+];
+
+/// The thread root of a "replies to this message" read: one channel, one
+/// lowercase-hex `#e` value, only [`THREAD_REPLY_KINDS`], and no `#p` join.
+///
+/// The generic `#e` read gathers every event that tags the root before it can
+/// sort and keep a page, so a root with hundreds of thousands of replies cost
+/// seconds per page. `thread_metadata` lists a root's replies newest-first in
+/// `idx_thread_metadata_window`, so the page costs the same at any thread size.
+///
+/// The relay writes a `thread_metadata` row only for an event whose NIP-10
+/// markers resolve to a valid ancestry. A message that names the root in a
+/// bare or `mention` `e` tag still matches NIP-01 `#e`, but this read omits
+/// it (see `docs/nips/NIP-CW.md`).
+fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
+    let [root] = q.e_tags.as_deref()? else {
+        return None;
+    };
+    let kinds = q.kinds.as_deref()?;
+    let routable = q.channel_id.is_some()
+        && q.p_tag_hex.is_none()
+        && !kinds.is_empty()
+        && kinds.iter().all(|k| THREAD_REPLY_KINDS.contains(k))
+        && root.len() == 64
+        && root.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    routable.then(|| hex::decode(root).ok()).flatten()
+}
+
+/// SQL for [`thread_reply_root`] reads: walk the root's replies newest-first
+/// in `idx_thread_metadata_window`, fetch each event by primary key, and apply
+/// every query predicate (the `#e` match included) before `LIMIT`. The page
+/// is a subset of the generic read's, in the same order.
+fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::Postgres> {
+    let mut qb = QueryBuilder::new(
+        "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, \
+         e.channel_id FROM thread_metadata tm \
+         JOIN LATERAL (SELECT e.community_id, e.id, e.pubkey, e.created_at, e.kind, e.tags, \
+         e.content, e.sig, e.received_at, e.channel_id, e.d_tag, e.deleted_at FROM events e \
+         WHERE e.community_id = tm.community_id AND e.created_at = tm.event_created_at \
+         AND e.id = tm.event_id LIMIT 1) e ON true WHERE tm.community_id = ",
+    );
+    qb.push_bind(q.community_id.as_uuid());
+    qb.push(" AND tm.root_event_id = ").push_bind(root);
+    // Repeat the time window on `tm` so the index scan is a range.
+    if let Some(s) = q.since {
+        qb.push(" AND tm.event_created_at >= ").push_bind(s);
     }
-    qb.push_bind(limit_val);
-    qb.push(" OFFSET ").push_bind(offset_val);
+    if let Some(u) = q.until {
+        qb.push(" AND tm.event_created_at <= ").push_bind(u);
+    }
+    qb.push(" AND e.deleted_at IS NULL");
+    push_event_filters(&mut qb, "e.", q);
+    qb.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ");
+    qb.push_bind(page_limit(q));
+    qb.push(" OFFSET ").push_bind(q.offset.unwrap_or(0));
     qb
 }
 
@@ -3030,6 +3107,41 @@ mod e_tag_filter_shape_tests {
         assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
     }
 
+    /// Only a one-channel, one-root read of channel-message kinds without a
+    /// `#p` join takes the thread route; everything else stays generic.
+    #[test]
+    fn thread_reply_route_admits_only_single_root_message_reads() {
+        let root = "ab".repeat(32);
+        let routed = || {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.channel_id = Some(uuid::Uuid::nil());
+            q.kinds = Some(vec![9, 40002]);
+            q.e_tags = Some(vec![root.clone()]);
+            q
+        };
+        let sql = build_query_events_sql(&routed()).sql().as_str().to_owned();
+        assert!(sql.contains("FROM thread_metadata tm"));
+        assert!(!sql.contains("MATERIALIZED"));
+        assert!(sql.contains("tags @> ANY("), "the #e match still applies");
+        assert!(sql.contains("ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT "));
+
+        let generic: [(&str, fn(&mut EventQuery)); 6] = [
+            ("two roots", |q| q.e_tags = Some(vec!["ab".repeat(32), "cd".repeat(32)])),
+            ("reaction kind", |q| q.kinds = Some(vec![9, 7])),
+            ("no kinds", |q| q.kinds = None),
+            ("no channel", |q| q.channel_id = None),
+            ("uppercase root", |q| q.e_tags = Some(vec!["AB".repeat(32)])),
+            ("p join", |q| q.p_tag_hex = Some("cd".repeat(32))),
+        ];
+        for (label, change) in generic {
+            let mut q = routed();
+            change(&mut q);
+            assert!(thread_reply_root(&q).is_none(), "{label}");
+            let sql = build_query_events_sql(&q).sql().as_str().to_owned();
+            assert!(!sql.contains("thread_metadata"), "{label}");
+        }
+    }
+
     #[test]
     fn non_e_tag_query_is_not_fenced() {
         let q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
@@ -3427,6 +3539,167 @@ mod postgres_tests {
             assert_eq!(rows[0].event.id.as_bytes().to_vec(), real_id, "{label}");
             assert_eq!(count_events(&pool, &q).await.unwrap(), 1, "{label} count");
         }
+    }
+
+    /// A single-root `#e` read for channel messages is served from
+    /// `thread_metadata`: newest first, nested replies and both message kinds
+    /// included, deleted replies excluded, keyset pages exact, never a cached
+    /// statement. A message naming the root in a bare `e` tag has no thread
+    /// row, so it is omitted, while any read the route does not take (here,
+    /// one that also asks for reactions) still returns it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_reply_reads_use_thread_metadata() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let keys = Keys::generate();
+        let now = nostr::Timestamp::now().as_secs() - 1_000;
+        let h = channel.to_string();
+        let message = |kind: u16, tags: Vec<Vec<String>>, at: u64| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let ts = |ev: &nostr::Event| DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).unwrap();
+
+        let root = message(9, vec![vec!["h".into(), h.clone()]], now);
+        insert_event(&pool, community, &root, Some(channel)).await.unwrap();
+        let root_hex = root.id.to_hex();
+        let root_id = root.id.as_bytes();
+
+        // Inserts a reply to `parent` with its thread row; returns its id.
+        let reply = |kind: u16, parent: Option<&nostr::Event>, at: u64| {
+            let mut tags = vec![
+                vec!["h".into(), h.clone()],
+                vec!["e".into(), root_hex.clone(), String::new(), "root".into()],
+            ];
+            if let Some(p) = parent {
+                tags.push(vec!["e".into(), p.id.to_hex(), String::new(), "reply".into()]);
+            }
+            message(kind, tags, at)
+        };
+        let mut expected = Vec::new();
+        let mut first = None;
+        for (i, kind) in [9, 40002, 9, 9, 9].into_iter().enumerate() {
+            let ev = reply(kind, None, now + 1 + i as u64);
+            db.insert_event_with_thread_metadata(
+                community,
+                &ev,
+                Some(channel),
+                Some(ThreadMetadataParams {
+                    event_id: ev.id.as_bytes(),
+                    event_created_at: ts(&ev),
+                    channel_id: channel,
+                    parent_event_id: Some(root_id),
+                    parent_event_created_at: Some(ts(&root)),
+                    root_event_id: Some(root_id),
+                    root_event_created_at: Some(ts(&root)),
+                    depth: 1,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .unwrap();
+            expected.push(ev.id);
+            first.get_or_insert(ev);
+        }
+        let first = first.unwrap();
+        let nested = reply(9, Some(&first), now + 10);
+        db.insert_event_with_thread_metadata(
+            community,
+            &nested,
+            Some(channel),
+            Some(ThreadMetadataParams {
+                event_id: nested.id.as_bytes(),
+                event_created_at: ts(&nested),
+                channel_id: channel,
+                parent_event_id: Some(first.id.as_bytes()),
+                parent_event_created_at: Some(ts(&first)),
+                root_event_id: Some(root_id),
+                root_event_created_at: Some(ts(&root)),
+                depth: 2,
+                broadcast: false,
+            }),
+        )
+        .await
+        .unwrap();
+        expected.push(nested.id);
+        let deleted = reply(9, None, now + 11);
+        db.insert_event_with_thread_metadata(
+            community,
+            &deleted,
+            Some(channel),
+            Some(ThreadMetadataParams {
+                event_id: deleted.id.as_bytes(),
+                event_created_at: ts(&deleted),
+                channel_id: channel,
+                parent_event_id: Some(root_id),
+                parent_event_created_at: Some(ts(&root)),
+                root_event_id: Some(root_id),
+                root_event_created_at: Some(ts(&root)),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .unwrap();
+        soft_delete_event_and_update_thread(
+            &pool,
+            community,
+            deleted.id.as_bytes(),
+            Some(root_id),
+            Some(root_id),
+        )
+        .await
+        .unwrap();
+        let bare = message(9, vec![vec!["h".into(), h.clone()], vec!["e".into(), root_hex.clone()]], now + 12);
+        insert_event(&pool, community, &bare, Some(channel)).await.unwrap();
+        expected.reverse();
+
+        let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
+        let mut q = EventQuery::for_community(community);
+        q.channel_id = Some(channel);
+        q.kinds = Some(vec![9, 40002]);
+        q.e_tags = Some(vec![root_hex.clone()]);
+        q.limit = Some(100);
+        assert!(thread_reply_root(&q).is_some());
+        assert_eq!(ids(query_events(&pool, &q).await.unwrap()), expected);
+
+        let mut generic = q.clone();
+        generic.kinds = Some(vec![9, 40002, 7]);
+        assert!(thread_reply_root(&generic).is_none());
+        let mut with_bare = expected.clone();
+        with_bare.insert(0, bare.id);
+        assert_eq!(ids(query_events(&pool, &generic).await.unwrap()), with_bare);
+
+        // Keyset pages of two cover the same order.
+        let mut paged = Vec::new();
+        let mut page = q.clone();
+        page.limit = Some(2);
+        loop {
+            let rows = query_events(&pool, &page).await.unwrap();
+            let Some(last) = rows.last() else { break };
+            page.until = Some(DateTime::from_timestamp(last.event.created_at.as_secs() as i64, 0).unwrap());
+            page.before_id = Some(last.event.id.as_bytes().to_vec());
+            paged.extend(ids(rows));
+        }
+        assert_eq!(paged, expected);
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        for _ in 0..6 {
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("thread read");
+        }
+        assert_eq!(prepared_like(&mut conn, "%thread_metadata tm%").await, 0);
     }
 
     #[tokio::test]

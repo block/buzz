@@ -215,6 +215,22 @@ A client explicitly falling back from thread windows MUST restart this path
 from the oldest reply with clean pagination state. `until`/`before_id` are not
 legacy thread continuation fields and MUST NOT be reused as such.
 
+## Plain Thread-reply Filters
+
+A plain NIP-01 filter (no `depth_limit`, no `thread_window`) whose `#h` and `#e`
+each hold exactly one value and whose `kinds` are all `9` or `40002` is a
+"newest replies to this message" read. Buzz serves it from stored thread
+metadata rather than by testing every event that tags the root, so a page costs
+the same at any thread size. Ordering, `limit`, `since`, `until`, `before_id`,
+and every other filter field keep their usual meaning.
+
+Thread metadata exists only for a message whose NIP-10 `root`/`reply` markers
+resolve to a valid ancestry. A message of those kinds that names the root only
+in a bare or `mention` `e` tag matches the filter under NIP-01 but is **not**
+returned by this read, though live subscriptions still deliver it. Clients that
+need such references SHOULD add another kind to the filter, which takes the
+generic path.
+
 ## Thread Mode
 
 `thread_window: true` requests a newest-first page of replies to one root. It is
