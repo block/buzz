@@ -12,6 +12,14 @@ public final class BuzzNotificationAvatarLoader {
   private let isCurrent: (BuzzNotificationCacheScope) -> Bool
   private let assertionIssuer: BuzzRelayAssertionIssuer?
   private static let maximumDownloadBytes = 2 * 1024 * 1024
+  /// The network transfer; tests substitute it to observe whether a request would be sent.
+  var startDownload:
+    (URLRequest, URLSessionConfiguration, Int, @escaping (Result<Data, Error>) -> Void) -> Void =
+      { request, configuration, maximumBytes, completion in
+        BuzzNotificationDownload.start(
+          request: request, configuration: configuration, maximumBytes: maximumBytes,
+          completion: completion)
+      }
 
   /// `assertionIssuer` supplies the NIP-FI assertion an organization relay requires on media
   /// reads, as it does for the resolver's `/query`; without it those avatars are refused.
@@ -89,6 +97,12 @@ public final class BuzzNotificationAvatarLoader {
     // The signed request never follows a redirect, so the assertion stays on the relay.
     let signed = request
     assertionIssuer.header(relayURL: relayURL, privateKeyHex: key) { assertion in
+      // The community may have been removed or its key changed while the assertion was issued.
+      // Sending the signed request now would present revoked proofs to the relay.
+      guard self.isCurrent(scope) else {
+        completion(.failure(BuzzNotificationCacheError.revoked))
+        return
+      }
       var request = signed
       if let assertion {
         request.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
@@ -105,9 +119,7 @@ public final class BuzzNotificationAvatarLoader {
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
     configuration.urlCache = httpCache(scope)
-    BuzzNotificationDownload.start(
-      request: request, configuration: configuration, maximumBytes: Self.maximumDownloadBytes
-    ) { result in
+    startDownload(request, configuration, Self.maximumDownloadBytes) { result in
       guard self.isCurrent(scope) else {
         completion(.failure(BuzzNotificationCacheError.revoked))
         return
