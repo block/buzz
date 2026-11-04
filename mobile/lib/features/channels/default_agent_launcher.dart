@@ -144,10 +144,20 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
     }
 
-    return BuzzCallout(
+    return BuzzCallout.card(
       message: 'Create your first agent',
       visible: showCallout,
+      onTap: open,
       onDismiss: () => dismissFirstAgentCallout(ref),
+      artwork: [
+        for (final character in emptyBestieCharacters.take(6))
+          AvatarImageContent(
+            imageUrl: character.url,
+            preferThumbnail: true,
+            fit: BoxFit.contain,
+            fallback: const AgentNavigationIcon(size: 24),
+          ),
+      ],
       child: NavigationButtonSurface(
         child: SizedBox.square(
           dimension: 56,

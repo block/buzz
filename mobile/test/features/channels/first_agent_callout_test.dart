@@ -17,7 +17,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 
-const _tip = 'Create your first agent';
+const _card = 'Create your first agent';
 
 void main() {
   final nsec = nostr.Nip19.encode(
@@ -100,26 +100,27 @@ void main() {
   ) async {
     final semantics = tester.ensureSemantics();
     await pumpHome(tester);
-    expect(find.text(_tip), findsOneWidget);
+    expect(find.text(_card), findsOneWidget);
     expect(
-      tester.getBottomLeft(find.text(_tip)).dy,
+      tester.getBottomLeft(find.text(_card)).dy,
       lessThan(tester.getTopLeft(find.byTooltip('Bestie')).dy),
     );
     expect(
-      tester.getSemantics(find.text(_tip)),
+      tester.getSemantics(find.text(_card)),
       matchesSemantics(
-        label: _tip,
+        label: _card,
         isLiveRegion: true,
+        isButton: true,
         hasDismissAction: true,
         hasTapAction: true,
       ),
     );
-    // The screen underneath still takes the tap that dismisses the tip.
+    // The screen underneath still takes taps, and they leave the card up.
     await tester.tap(find.text('Channel'));
     await tester.pumpAndSettle();
     expect(otherTaps, 1);
-    expect(find.text(_tip), findsNothing);
-    expect(seen('https://a.test'), isTrue);
+    expect(find.text(_card), findsOneWidget);
+    expect(seen('https://a.test'), isFalse);
     semantics.dispose();
   });
 
@@ -138,16 +139,27 @@ void main() {
         .onPressed!();
     await tester.pumpAndSettle();
     expect(choices, 1);
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     expect(seen('https://a.test'), isTrue);
   });
 
-  testWidgets('tapping the tip itself dismisses it', (tester) async {
+  testWidgets('tapping the card starts creation and retires it', (
+    tester,
+  ) async {
     await pumpHome(tester);
-    await tester.tap(find.text(_tip));
+    await tester.tap(find.text(_card));
     await tester.pumpAndSettle();
-    expect(find.text(_tip), findsNothing);
+    expect(choices, 1);
+    expect(find.text(_card), findsNothing);
+    expect(seen('https://a.test'), isTrue);
+  });
+
+  testWidgets('the close button dismisses it without creating', (tester) async {
+    await pumpHome(tester);
+    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.pumpAndSettle();
     expect(choices, 0);
+    expect(find.text(_card), findsNothing);
     expect(seen('https://a.test'), isTrue);
   });
 
@@ -155,11 +167,11 @@ void main() {
     final semantics = tester.ensureSemantics();
     await pumpHome(tester);
     tester.semantics.performAction(
-      find.semantics.byLabel(_tip),
+      find.semantics.byLabel(_card),
       SemanticsAction.dismiss,
     );
     await tester.pumpAndSettle();
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     expect(seen('https://a.test'), isTrue);
     semantics.dispose();
   });
@@ -168,37 +180,37 @@ void main() {
     tester,
   ) async {
     await pumpHome(tester);
-    expect(find.text(_tip), findsOneWidget);
+    expect(find.text(_card), findsOneWidget);
     bestie.add('a' * 64);
     await tester.pumpAndSettle();
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     expect(seen('https://a.test'), isTrue);
     bestie.add(null);
     await tester.pumpAndSettle();
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
   });
 
   testWidgets('once dismissed it never returns in that community', (
     tester,
   ) async {
     await pumpHome(tester);
-    await tester.tap(find.text('Channel'));
+    await tester.tap(find.byTooltip('Dismiss'));
     await tester.pumpAndSettle();
     await pumpHome(tester);
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     // Another community is its own first run.
     await pumpHome(tester, community: 'https://b.test');
-    expect(find.text(_tip), findsOneWidget);
+    expect(find.text(_card), findsOneWidget);
   });
 
   testWidgets('stays hidden for anyone who already has agents', (tester) async {
     await pumpHome(tester, owned: [OwnedAgentDirectoryEntry(pubkey: 'b' * 64)]);
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     await pumpHome(tester, remoteAgents: false);
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     // None of these count as dismissing it.
     await pumpHome(tester);
-    expect(find.text(_tip), findsOneWidget);
+    expect(find.text(_card), findsOneWidget);
   });
 
   testWidgets('hides while anything covers Home, then returns', (tester) async {
@@ -214,10 +226,10 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Channel'), findsOneWidget);
-    expect(find.text(_tip), findsNothing);
+    expect(find.text(_card), findsNothing);
     navigator.pop();
     await tester.pumpAndSettle();
-    expect(find.text(_tip), findsOneWidget);
+    expect(find.text(_card), findsOneWidget);
     expect(seen('https://a.test'), isFalse);
   });
 }
