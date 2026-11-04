@@ -3854,7 +3854,8 @@ mod postgres_tests {
                 .await
                 .expect("thread read");
         }
-        assert_eq!(prepared_like(&mut conn, "%thread_metadata tm%").await, 0);
+        // The routed read is unnamed; the fixed-shape reply probe may be cached.
+        assert_eq!(prepared_like(&mut conn, "%tm.root_event_id = %").await, 0);
     }
 
     #[tokio::test]
