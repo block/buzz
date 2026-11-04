@@ -127,10 +127,21 @@ class HostedRelayAuth extends ChangeNotifier {
   /// native download. Scoped like that client: only the relay's own origin
   /// gets the assertion, so it never reaches a third-party host.
   Future<Map<String, String>> headersForUrl(RelayConfig config, Uri url) async {
-    if (url.scheme != 'http' && url.scheme != 'https') return const {};
-    if (url.origin != Uri.parse(config.baseUrl).origin) return const {};
+    if (!_isRelayOrigin(config, url)) return const {};
     return headers(config);
   }
+
+  /// Synchronous [headersForUrl] for callers that hand headers to native code
+  /// up front. Uses the assertion the live relay session already holds; with
+  /// none cached the request goes out without it and the relay decides.
+  Map<String, String> cachedHeadersForUrl(RelayConfig config, Uri url) {
+    if (!_isRelayOrigin(config, url)) return const {};
+    return cachedHeaders(config) ?? const {};
+  }
+
+  static bool _isRelayOrigin(RelayConfig config, Uri url) =>
+      (url.scheme == 'http' || url.scheme == 'https') &&
+      url.origin == Uri.parse(config.baseUrl).origin;
 
   Future<Map<String, String>> headers(RelayConfig config) async {
     final client = _accountFor(config);

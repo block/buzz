@@ -11,7 +11,7 @@ import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
-import '../../shared/relay/media_auth.dart';
+import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_avatar.dart';
@@ -725,6 +725,7 @@ Future<bool> _showNativeReactionDetails(
   var addRequested = false;
   final handled = await NativeMessagePresentation.withLease(() async {
     final container = ProviderScope.containerOf(context, listen: false);
+    final nativeMediaHeaders = container.read(nativeMediaHeadersProvider);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     List<String> pubkeys() =>
         reactions.value.expand((r) => r.userPubkeys).toSet().toList();
@@ -757,9 +758,7 @@ Future<bool> _showNativeReactionDetails(
             'avatarColor': avatar.colorValue,
           } else if (url != null && !url.startsWith('data:')) ...{
             'url': url,
-            'headers': container
-                .read(mediaGetAuthServiceProvider)
-                .headersFor(url),
+            'headers': nativeMediaHeaders(url),
           },
         };
       }
@@ -818,9 +817,7 @@ Future<bool> _showNativeReactionDetails(
           'users': reaction.userPubkeys.toSet().toList(),
           if (reaction.emojiUrl case final String url) ...{
             'url': url,
-            'headers': container
-                .read(mediaGetAuthServiceProvider)
-                .headersFor(url),
+            'headers': nativeMediaHeaders(url),
           },
         },
     ];

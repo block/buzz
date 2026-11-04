@@ -12,6 +12,7 @@ import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -36,6 +37,9 @@ const _fire = '\u{1F525}';
 
 /// 👀 — a real reaction that is deliberately not in the positive-burst set.
 const _eyes = '\u{1F440}';
+
+const _aliceAvatarUrl = 'https://relay.example/media/alice.png';
+const _customEmojiUrl = 'https://relay.example/media/fire.png';
 
 TimelineReaction _reaction({
   String emoji = _fire,
@@ -297,8 +301,17 @@ void main() {
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             userCacheProvider.overrideWith(
               () => _FakeUserCacheNotifier({
-                _alice: const UserProfile(pubkey: _alice, displayName: 'Honey'),
+                _alice: const UserProfile(
+                  pubkey: _alice,
+                  displayName: 'Honey',
+                  avatarUrl: _aliceAvatarUrl,
+                ),
               }),
+            ),
+            // Native image loads bypass the hosted HTTP client, so the sheet
+            // must carry the relay-auth headers for each image itself.
+            nativeMediaHeadersProvider.overrideWithValue(
+              (url) => {'Nostr-Federated-Identity': 'Bearer $url'},
             ),
             channelIdentityNamesProvider('channel').overrideWith(
               (ref) =>
@@ -316,7 +329,13 @@ void main() {
             messageId: _messageId,
             channelId: 'channel',
             reactions: [
-              _reaction(userPubkeys: [_alice, bot, roster]),
+              TimelineReaction(
+                emoji: _fire,
+                count: 3,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice, bot, roster],
+                emojiUrl: _customEmojiUrl,
+              ),
             ],
             onToggle: (_) {},
           ),
@@ -339,6 +358,14 @@ void main() {
       }
 
       expect(labels(calls.first), ['Honey', 'Honey (agent)', 'Roster name']);
+      final avatar = (calls.first['profiles'] as Map)[_alice] as Map;
+      expect(avatar['headers'], {
+        'Nostr-Federated-Identity': 'Bearer $_aliceAvatarUrl',
+      });
+      final reaction = (calls.first['reactions'] as List).single as Map;
+      expect(reaction['headers'], {
+        'Nostr-Federated-Identity': 'Bearer $_customEmojiUrl',
+      });
       // Directory/roster changes must propagate without a user-cache event.
       directoryName = 'Helper';
       container.invalidate(channelIdentityNamesProvider('channel'));
