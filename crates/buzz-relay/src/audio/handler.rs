@@ -140,6 +140,7 @@ pub async fn ws_audio_handler(
     if bound_mode.restricts() && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
     {
         match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            &slot,
             crate::nip_fi_session::NipFiWsRoute::Audio,
             &headers,
             state.nip_fi_communities(),

@@ -232,13 +232,14 @@ async fn nip_fi_assertion_guard(
     }
     crate::nip_fi_policy::with_policy(
         policy,
-        nip_fi_assertion_guard_with_policy(state, request, next, policy.mode),
+        nip_fi_assertion_guard_with_policy(state, slot, request, next, policy.mode),
     )
     .await
 }
 
 async fn nip_fi_assertion_guard_with_policy(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     request: Request<Body>,
     next: middleware::Next,
     mode: buzz_auth::NipFiMode,
@@ -946,6 +947,7 @@ async fn nip11_or_ws_handler(
         && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
     {
         match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            &slot,
             crate::nip_fi_session::NipFiWsRoute::Root,
             &headers,
             state.nip_fi_communities(),
