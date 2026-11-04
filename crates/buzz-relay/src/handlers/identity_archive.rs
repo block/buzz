@@ -10,7 +10,8 @@ use nostr::{Event, PublicKey};
 use tracing::{info, warn};
 
 use buzz_core::kind::{
-    KIND_IA_ARCHIVED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_PROFILE,
+    KIND_IA_ARCHIVED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVED, KIND_IA_UNARCHIVE_REQUEST,
+    KIND_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
@@ -100,92 +101,90 @@ pub async fn handle_identity_archive_event(
         "identity archive request processed"
     );
 
-    if kind == KIND_IA_UNARCHIVE_REQUEST {
-        if changed {
-            if let Err(e) = publish_nipia_unarchived(
-                tenant,
-                state,
-                &target_hex,
-                consent_path.as_str(),
-                &actor_hex,
-                &request_event_id,
-                &event.content,
-                reason.as_deref(),
-            )
-            .await
-            {
-                warn!(error = %e, "failed to publish NIP-IA delta");
-            }
-            if let Err(e) = publish_nipia_archival_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-IA archival list");
-            }
-        }
-        return Ok(());
-    }
-
-    // The stored row is the archive state its delta reports: a request that
-    // only adds a replacement keeps an earlier reason it does not restate.
-    // Clients read reason and replacement only from the newest delta, and the
-    // snapshot carries neither. A concurrent request can publish a delta for
-    // an older row after ours, and a delta can fail to reach storage. So
-    // re-read the row and the newest delta until the newest one reports the
-    // row; a repeat request republishes a missing delta instead of doing
-    // nothing. This is the same re-check the snapshot uses.
+    // Clients read reason and replacement only from the target's newest
+    // delta, and the snapshot carries neither. A concurrent request can
+    // publish a delta for an older state after ours, and a delta can fail to
+    // reach storage. So, as the snapshot publisher does, re-read the stored
+    // state and the newest delta, and publish again until that delta reports
+    // the state. A repeat request repairs a missing delta this way instead of
+    // doing nothing. An archive delta is built from the stored row, so a
+    // request that only adds a replacement keeps an earlier reason.
+    let unarchive = kind == KIND_IA_UNARCHIVE_REQUEST;
     const MAX_DELTA_ATTEMPTS: usize = 8;
-    let mut must_publish = changed;
+    let mut first = changed;
     for _ in 0..MAX_DELTA_ATTEMPTS {
-        let Some(row) = state
+        let row = state
             .db
             .get_archived(tenant.community(), &target_hex)
             .await
-            .map_err(|e| format!("database error: {e}"))?
-        else {
-            // Unarchived concurrently; that request publishes its own delta.
-            return Ok(());
-        };
-        // Test-only barrier: holds a publisher after it has read the row, so a
-        // test can change the row before this publisher writes its delta.
+            .map_err(|e| format!("database error: {e}"))?;
+        // Test-only barrier: holds a publisher after it has read the state, so
+        // a test can change the state before this publisher writes its delta.
         #[cfg(test)]
         crate::handlers::side_effects::publish_test_hooks::after_reading_archive_state(
             tenant.community(),
         )
         .await;
-        if !must_publish {
+        if row.is_none() && !unarchive {
+            // Unarchived concurrently; that request settles the delta.
+            return Ok(());
+        }
+        if !first {
             let latest = latest_nipia_delta(tenant, state, &target_hex)
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
-            if latest.is_some_and(|delta| delta_reports(&delta, &row)) {
+            let settled = match (&row, &latest) {
+                (Some(row), Some(delta)) => delta_reports(delta, row),
+                (Some(_), None) => false,
+                (None, Some(delta)) => delta.kind.as_u16() as u32 == KIND_IA_UNARCHIVED,
+                (None, None) => true,
+            };
+            if settled {
                 return Ok(());
             }
         }
-        let published = publish_nipia_archived(
-            tenant,
-            state,
-            &row.pubkey,
-            &row.consent_path,
-            &row.actor,
-            &row.request_event_id,
-            if changed && must_publish {
-                event.content.as_str()
-            } else {
-                ""
-            },
-            row.reason.as_deref(),
-            row.replaced_by.as_deref(),
-        )
-        .await;
-        if changed && must_publish {
+        let content = if first { event.content.as_str() } else { "" };
+        let published = match &row {
+            Some(row) => {
+                publish_nipia_archived(
+                    tenant,
+                    state,
+                    &row.pubkey,
+                    &row.consent_path,
+                    &row.actor,
+                    &row.request_event_id,
+                    if unarchive { "" } else { content },
+                    row.reason.as_deref(),
+                    row.replaced_by.as_deref(),
+                )
+                .await
+            }
+            None => {
+                publish_nipia_unarchived(
+                    tenant,
+                    state,
+                    &target_hex,
+                    consent_path.as_str(),
+                    &actor_hex,
+                    &request_event_id,
+                    content,
+                    reason.as_deref(),
+                )
+                .await
+            }
+        };
+        if first {
             if let Err(e) = publish_nipia_archival_list(tenant, state).await {
                 warn!(error = %e, "failed to publish NIP-IA archival list");
             }
         }
         published.map_err(|e| {
             warn!(error = %e, "failed to publish NIP-IA delta");
-            "archive applied but its delta was not published; retry the request".to_string()
+            "change applied but its delta was not published; retry the request".to_string()
         })?;
-        must_publish = false;
+        first = false;
     }
-    Err("archive applied but its delta did not settle; retry the request".to_string())
+    Err("change applied but its delta did not settle; retry the request".to_string())
 }
 
 /// Whether `delta` is an archive delta that carries `row`'s replacement.
@@ -1085,6 +1084,90 @@ mod tests {
             replaced_by,
             Some(successor_hex),
             "the newest delta must report the stored replacement"
+        );
+    }
+
+    /// An unarchive publisher that pauses while the key is archived again
+    /// must not leave its unarchive delta as the newest one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn late_unarchive_publisher_does_not_hide_a_rearchive() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+        let old_keys = Keys::generate();
+        let old_hex = old_keys.public_key().to_hex();
+        let successor_hex = Keys::generate().public_key().to_hex();
+        let request = |kind: u32, replaced_by: Option<&str>| {
+            let mut tags = vec![
+                Tag::parse(["-"]).expect("protected tag"),
+                Tag::parse(["p", old_hex.as_str()]).expect("p tag"),
+            ];
+            if let Some(successor) = replaced_by {
+                tags.push(Tag::parse(["replaced-by", successor]).expect("replaced-by tag"));
+            }
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .allow_self_tagging()
+                .sign_with_keys(&old_keys)
+                .expect("sign request")
+        };
+        handle_identity_archive_event(&tenant, &state, &request(KIND_IA_ARCHIVE_REQUEST, None))
+            .await
+            .expect("self archive accepted");
+
+        // The unarchive removes the row, then waits before its delta.
+        let (reached_hook, release) =
+            crate::handlers::side_effects::publish_test_hooks::arm(tenant.community());
+        let late_tenant = tenant.clone();
+        let late_state = state.clone();
+        let late_request = request(KIND_IA_UNARCHIVE_REQUEST, None);
+        let late = tokio::spawn(async move {
+            handle_identity_archive_event(&late_tenant, &late_state, &late_request).await
+        });
+        reached_hook
+            .await
+            .expect("unarchive publisher reached the post-read hook");
+
+        // The key is archived again, with a replacement, while it waits.
+        handle_identity_archive_event(
+            &tenant,
+            &state,
+            &request(KIND_IA_ARCHIVE_REQUEST, Some(&successor_hex)),
+        )
+        .await
+        .expect("rearchive accepted");
+
+        release.notify_one();
+        late.await
+            .expect("join unarchive publisher")
+            .expect("unarchive publisher settles without error");
+
+        let latest = latest_nipia_delta(&tenant, &state, &old_hex)
+            .await
+            .expect("latest delta")
+            .expect("a delta");
+        assert_eq!(latest.kind.as_u16() as u32, KIND_IA_ARCHIVED);
+        let replaced_by = latest.tags.iter().find_map(|tag| {
+            let fields = tag.as_slice();
+            (fields.first().map(String::as_str) == Some("replaced-by"))
+                .then(|| fields.get(1).cloned())
+                .flatten()
+        });
+        assert_eq!(
+            replaced_by,
+            Some(successor_hex),
+            "the newest delta must report the archive that is stored now"
         );
     }
 }
