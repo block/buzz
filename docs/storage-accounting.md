@@ -98,8 +98,8 @@ GET /operator/storage-usage?after=<cursor>&limit=<1..1000, default 500>
 - Archived or deleting communities that still hold bytes are included.
   `community_host` is the community's current host. Rows for a community with
   no community row, or whose community was deleted (deletion severs their
-  provenance), are skipped, so a page can be shorter than `limit` without
-  being the last.
+  provenance), are skipped before `limit` applies, so a page shorter than
+  `limit` means the consumer has caught up.
 - The relay keeps no delivery state and never calls out. A consumer that
   falls behind catches up on its next poll, as long as it polls within the
   retention window.

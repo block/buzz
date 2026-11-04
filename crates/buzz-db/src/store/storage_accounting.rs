@@ -160,8 +160,8 @@ impl Db {
 
     /// Page the usage history after `after`, oldest first, for communities
     /// that still have a community row. Rows whose community was deleted
-    /// (provenance severed) or never had a row are skipped, so a page can be
-    /// shorter than `limit` without being the last one; an empty page is.
+    /// (provenance severed) or never had a row are skipped before `limit`
+    /// applies, so a page shorter than `limit` means the feed is caught up.
     #[datastore_span(name = "list_storage_usage", system = "postgresql")]
     pub async fn list_storage_usage(
         &self,
