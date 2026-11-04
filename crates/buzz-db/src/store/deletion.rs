@@ -78,6 +78,7 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "nip_fi_profile_heads",
     "api_tokens",
     "archived_identities",
     "artifact_heads",
@@ -129,6 +130,7 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "nip_fi_profile_heads",
     "personal_read_frontiers",
     "personal_read_accounts",
     "workflow_approvals",
@@ -4589,6 +4591,12 @@ mod postgres_tests {
             .await
             .expect("migrate with fence objects present");
         let store = db.deletion_store();
+        let legacy_fenced_tables = store.live_fenced_tables().await.expect("legacy fences");
+        // Include current tables without requiring new application-admitted
+        // tables to acquire legacy database fence triggers.
+        db.migrate()
+            .await
+            .expect("migrate current deletion catalog");
         let community = db
             .ensure_configured_community("optional-fences.example")
             .await
@@ -4657,11 +4665,11 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             let inventory = store.inventory_schema(community).await.expect("inventory");
             assert_eq!(inventory.scoped_tables.len(), EXPECTED_SCOPED_TABLES.len());
             assert_eq!(
-                inventory.fenced_tables.len(),
+                inventory.fenced_tables.into_iter().collect::<BTreeSet<_>>(),
                 if objects_present {
-                    EXPECTED_SCOPED_TABLES.len()
+                    legacy_fenced_tables.clone()
                 } else {
-                    0
+                    BTreeSet::new()
                 }
             );
             let lease = store

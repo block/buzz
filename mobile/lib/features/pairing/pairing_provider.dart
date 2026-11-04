@@ -4,12 +4,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
 import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/hosted/account_identity_store.dart';
 import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/hosted/organization_environment.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
@@ -21,13 +22,6 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'pairing_provider_helpers.dart';
 part 'pairing_state.dart';
-
-/// HTTP client used by [PairingNotifier] for the validation request.
-final pairingHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
-  ref.onDispose(client.close);
-  return client;
-});
 
 typedef PairingSocketFactory =
     PairingSocket Function({
@@ -50,6 +44,7 @@ class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
   final PairingCredentialValidator? _credentialValidator;
   final RelaySocketFactory _validationSocketFactory;
+  final bool Function(Uri relay) _organizationRelay;
   RelaySocket? _validationSocket;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
@@ -63,9 +58,12 @@ class PairingNotifier extends Notifier<PairingState> {
     PairingSocketFactory? socketFactory,
     PairingCredentialValidator? credentialValidator,
     RelaySocketFactory validationSocketFactory = RelaySocket.new,
+    bool Function(Uri relay) organizationRelay =
+        OrganizationEnvironment.protects,
   }) : _socketFactory = socketFactory ?? _createPairingSocket,
        _credentialValidator = credentialValidator,
-       _validationSocketFactory = validationSocketFactory;
+       _validationSocketFactory = validationSocketFactory,
+       _organizationRelay = organizationRelay;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -789,7 +787,9 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: 'Failed to import credentials: $e',
+        errorMessage: e == AccountIdentityFailure.mismatch
+            ? 'This device uses a different identity. Your saved identity has been kept.'
+            : 'Could not import the identity. Try pairing again.',
       );
     }
   }
@@ -887,6 +887,7 @@ class PairingNotifier extends Notifier<PairingState> {
       await validator(relayUrl: community.relayUrl, nsec: community.nsec);
 
       if (generation != _pairingGeneration) return;
+      state = const PairingState(status: PairingStatus.storing);
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(
@@ -931,7 +932,18 @@ class PairingNotifier extends Notifier<PairingState> {
     if (nsec == null || nsec.isEmpty) {
       throw const FormatException('Pairing payload missing nsec');
     }
+    // A malformed key could never connect, and the organization branch below
+    // saves without a relay check, so reject it before anything is stored.
+    try {
+      AccountIdentityStore.publicKeyForNsec(nsec);
+    } on AccountIdentityFailure {
+      throw const FormatException('Pairing payload has an invalid nsec');
+    }
     final uri = Uri.parse(relayUrl);
+    // Organization relays refuse the upgrade until organization sign-in
+    // supplies an assertion, which the saved community's session then offers.
+    // A check here can only fail, so admission is left to that session.
+    if (_organizationRelay(uri)) return;
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 

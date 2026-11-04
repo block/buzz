@@ -1,5 +1,7 @@
 import 'dart:async';
+
 import 'hosted_http_fixture.dart';
+
 import 'dart:convert';
 
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -42,23 +44,119 @@ void main() {
         }
         expect(request.headers['X-BB-Session-Credential'], 'secret');
         return http.Response(
-          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          jsonEncode({
+            'subject': 'account-1',
+            'email': 'owner@example.com',
+            'expires_at': expiry,
+          }),
           200,
         );
       });
-      final client = BuilderlabAccountClient(httpClient: transport);
+      // The notification extension's copy follows every adopt and clear.
+      final shared = <String?>[];
+      var unshareFails = false;
+      var shareFails = true;
+      Future<void> share(String? credential) async {
+        if (credential == null && unshareFails) throw StateError('keychain');
+        if (credential != null && shareFails) throw StateError('keychain');
+        shared.add(credential);
+      }
+
+      final storage = _SessionStorage();
+      final client = BuilderlabAccountClient(
+        httpClient: transport,
+        storage: storage,
+        onSessionChanged: share,
+      );
       expect(
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
         'account-1',
       );
-      final restored = BuilderlabAccountClient(httpClient: transport);
-      expect((await restored.restore())!.subject, 'account-1');
-      expect(requests.length, 3);
+      // A failed share never blocks sign-in, and the next request retries it.
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, isEmpty);
+      shareFails = false;
+      await client.post('/v1/buzz/known-communities/list', {});
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret']);
+      await client.post('/v1/buzz/known-communities/list', {});
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret']);
+      final restored = BuilderlabAccountClient(
+        httpClient: transport,
+        storage: storage,
+        onSessionChanged: share,
+      );
+      final restoredAccount = (await restored.restore())!;
+      expect(restoredAccount.subject, 'account-1');
+      expect(restoredAccount.email, 'owner@example.com');
+      expect(requests.length, 5);
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret', 'secret']);
+      // A failed local deletion fails the sign-out and keeps the account
+      // signed in, so the extension gets its copy back after the removal.
+      storage.failDelete = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(restored.account?.subject, 'account-1');
+      expect(shared, ['secret', 'secret', null, 'secret']);
+      expect(await client.restore(), isNotNull);
+      storage.failDelete = false;
+      // A failed removal fails the sign-out instead of leaving it shared, and
+      // the next restore retries it.
+      unshareFails = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      unshareFails = false;
+      expect(
+        await BuilderlabAccountClient(
+          httpClient: transport,
+          onSessionChanged: share,
+        ).restore(),
+        isNull,
+      );
+      expect(shared.last, isNull);
       await restored.clearLocalSession();
+      expect(shared.last, isNull);
+      expect(restored.account, isNull);
       expect(
         await BuilderlabAccountClient(httpClient: transport).restore(),
         isNull,
       );
+      // A credential adopted while an earlier share is in flight is shared
+      // once that write completes.
+      final gate = Completer<void>();
+      final delayed = <String?>[];
+      var issued = 0;
+      final rotating = BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/exchange')
+                  ? {
+                      'session_credential': 'next-${++issued}',
+                      'expires_at': expiry,
+                    }
+                  : {'subject': 'account-1', 'expires_at': expiry},
+            ),
+            200,
+          ),
+        ),
+        onSessionChanged: (credential) async {
+          await gate.future;
+          delayed.add(credential);
+        },
+      );
+      await rotating.exchange(code: 'one-use', verifier: verifier);
+      await rotating.exchange(code: 'two-use', verifier: verifier);
+      gate.complete();
+      await pumpEventQueue();
+      expect(delayed, ['next-1', 'next-2']);
     },
   );
 
@@ -186,6 +284,31 @@ void main() {
     expect(jsonDecode((await stored())!)['credential'], 'new');
   });
 
+  test('concurrent restores share one adopted account', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    var verifications = 0;
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        verifications++;
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    final first = client.restore();
+    final second = client.restore();
+    final adopted = await first;
+    expect(await second, same(adopted));
+    expect(client.account, same(adopted));
+    expect(verifications, 1);
+    // A later restore still re-verifies, so expiry is detected on retry.
+    await client.restore();
+    expect(verifications, 2);
+  });
+
   test('login for another account keeps the existing session', () async {
     FlutterSecureStorage.setMockInitialValues({
       storageKey: record('account-1', 'old'),
@@ -285,6 +408,34 @@ void main() {
     expect(await stored(), isNull);
   });
 
+  test('only agent listings may exceed the default response bound', () async {
+    // 100 KB: past the 64 KB default, as a few full-length instructions are.
+    final large = jsonEncode({'status': 1, 'padding': 'x' * 100000});
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'secret', 'expires_at': expiry}),
+            200,
+          );
+        }
+        if (request.url.path.contains('/beekeeper/')) {
+          return http.Response(large, 200);
+        }
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    await client.exchange(code: 'one-use', verifier: verifier);
+    expect((await client.post('/v3/beekeeper/list-agents', {}))['status'], 1);
+    await expectLater(
+      client.post('/v3/beekeeper/get-model-catalog', {}),
+      throwsA(anything),
+    );
+  });
+
   test('authenticated post accepts only Buzz account routes', () async {
     final client = BuilderlabAccountClient(
       httpClient: MockClient((_) async => fail('no request expected')),
@@ -304,4 +455,22 @@ void main() {
       throwsA(AccountFailure.signedOut),
     );
   });
+}
+
+class _SessionStorage extends FlutterSecureStorage {
+  bool failDelete = false;
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (failDelete) throw StateError('storage unavailable');
+    await super.delete(key: key);
+  }
 }

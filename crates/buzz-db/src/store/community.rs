@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{relay_members, Db, DbError, Result};
+use crate::{relay_members, Db, DbError, ReadAt, Result};
 
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,16 +110,29 @@ impl Db {
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
     /// request/connection error. buzz-db only reads the durable host map.
-    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
     pub async fn lookup_community_by_host(
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        Ok(self
+            .lookup_community_by_host_read_at(normalized_host)
+            .await?
+            .value)
+    }
+
+    /// [`Self::lookup_community_by_host`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
+    pub async fn lookup_community_by_host_read_at(
+        &self,
+        normalized_host: &str,
+    ) -> Result<ReadAt<Option<CommunityRecord>>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::TenantResolution,
         )
         .await?;
+        let read_at = std::time::Instant::now();
         let row = sqlx::query(
             r#"
             SELECT id, host
@@ -134,16 +147,18 @@ impl Db {
         .fetch_optional(&mut *connection)
         .await?;
 
-        row.map(|row| {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
+        let value = row
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let host: String = row.try_get("host")?;
 
-            Ok(CommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
+                Ok::<_, DbError>(CommunityRecord {
+                    id: CommunityId::from_uuid(id),
+                    host,
+                })
             })
-        })
-        .transpose()
+            .transpose()?;
+        Ok(ReadAt { value, read_at })
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.

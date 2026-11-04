@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/agents/owned_agent_directory.dart';
 import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
@@ -7,6 +8,8 @@ import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/profile/user_profile.dart';
+import '../../../shared/verified_profiles/verified_profile.dart';
+import '../../../shared/verified_profiles/verified_profile_directory.dart';
 import '../channel.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
@@ -25,6 +28,7 @@ const mentionSearchDebounce = Duration(milliseconds: 200);
 ///
 /// Debounced: the provider waits [mentionSearchDebounce] before querying;
 /// keystrokes dispose the stale family member so its request never fires.
+/// Each finished search is kept in [mentionSearchCacheProvider].
 final mentionUserSearchProvider = FutureProvider.autoDispose
     .family<List<UserProfile>, String>((ref, query) async {
       // The session notifier is stable across communities, and two
@@ -56,9 +60,12 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
         }
       }
 
-      return [
+      final people = [
         for (final event in latestByPubkey.values) _profileFromEvent(event),
       ];
+      // A search that outlived its query or community is not kept.
+      if (!disposed) ref.read(mentionSearchCacheProvider).put(trimmed, people);
+      return people;
     });
 
 UserProfile _profileFromEvent(NostrEvent event) {
@@ -76,31 +83,49 @@ UserProfile _profileFromEvent(NostrEvent event) {
 /// One chooser opening: an inline `@` token or one open picker.
 typedef MentionChooserArgs = ({String channelId, String query, int opening});
 
-/// The last finished directory search for each chooser opening. A new query
-/// keeps showing its still-matching people while its own search runs.
-/// Nothing here outlives the relay session or the community, and a new
-/// opening starts empty.
-class _SettledSearches {
-  final _pages = <(String, int), List<UserProfile>>{};
+/// Finished directory searches by query, for the current community and
+/// signer. A query searched before shows its people at once while a fresh
+/// search runs, so typing the same query twice shows the same rows. A
+/// query not searched yet starts from the longest searched query it
+/// continues: a name search for `sa` finds no one that `s` did not.
+class MentionSearchCache {
+  static const limit = 64;
+  final _pages = <String, List<UserProfile>>{};
 
-  List<UserProfile>? last(String channelId, int opening) =>
-      _pages[(channelId, opening)];
+  static String _key(String query) => query.trim().toLowerCase();
 
-  /// Keeps [people] as this opening's last search. A search that found no
-  /// one is not kept, so the next opening searches again.
-  void settle(String channelId, int opening, List<UserProfile> people) {
-    if (people.isEmpty) return;
-    final key = (channelId, opening);
+  /// The finished search for exactly [query], or null.
+  List<UserProfile>? exact(String query) => _pages[_key(query)];
+
+  /// The finished search for [query], else the one for the longest
+  /// searched query that [query] continues, else null.
+  List<UserProfile>? seed(String query) {
+    final key = _key(query);
+    if (key.isEmpty) return null;
+    for (var end = key.length; end > 0; end--) {
+      final page = _pages[key.substring(0, end)];
+      if (page != null) return page;
+    }
+    return null;
+  }
+
+  /// Keeps [people] as the latest search for [query], newest last.
+  void put(String query, List<UserProfile> people) {
+    final key = _key(query);
+    if (key.isEmpty) return;
     _pages.remove(key);
     _pages[key] = people;
-    if (_pages.length > 20) _pages.remove(_pages.keys.first);
+    while (_pages.length > limit) {
+      _pages.remove(_pages.keys.first);
+    }
   }
 }
 
-final _settledSearchesProvider = Provider<_SettledSearches>((ref) {
-  ref.watch(relaySessionProvider.select((s) => s.status));
+/// Nothing in the search cache outlives the community or the signer.
+final mentionSearchCacheProvider = Provider<MentionSearchCache>((ref) {
   ref.watch(relayConfigProvider);
-  return _SettledSearches();
+  ref.watch(currentPubkeyProvider);
+  return MentionSearchCache();
 });
 
 /// Explicit mention choices per channel, newest highest. Memory only,
@@ -159,6 +184,8 @@ final mentionCandidatesProvider = Provider.family
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      // Null while loading or failed: nothing is known to be unlisted.
+      final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
       final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
@@ -166,12 +193,21 @@ final mentionCandidatesProvider = Provider.family
       // Archived channels take no mentions.
       if (channel?.isArchived == true) return const [];
       final directory = channel?.mentionsOutsidePeople ?? false;
-      final settled = ref.watch(_settledSearchesProvider);
+      final searches = ref.watch(mentionSearchCacheProvider);
 
       final sharedChannelIds = {
         for (final channel in channels)
           if (channel.isMember && !channel.isArchived) channel.id,
       };
+
+      // The directory search matches self-declared names only. A person
+      // outside the channel whose cached verified name matches joins the
+      // results, so the name headers show finds them, not only an impostor
+      // who copied it into kind 0.
+      final verified = ref.watch(verifiedProfilesProvider);
+      final verifiedMatches = directory
+          ? verifiedMentionMatches(verified, args.query, userCache)
+          : const <UserProfile>[];
 
       List<MentionCandidate> build(List<UserProfile> searchResults) => [
         for (final candidate in buildMentionCandidates(
@@ -180,8 +216,12 @@ final mentionCandidatesProvider = Provider.family
           sharedChannelIds: sharedChannelIds,
           userCache: userCache,
           ownerByAgentPubkey: owners,
-          searchResults: searchResults,
+          searchResults: [...searchResults, ...verifiedMatches],
           currentPubkey: currentPubkey,
+          ownedAgents: ownedAgents,
+          // Desktop offers the owner's agents where they can be added.
+          offerOwnedAgents:
+              channel != null && (channel.isStream || channel.isForum),
         ))
           if (isMentionKey(candidate.pubkey)) candidate,
       ];
@@ -191,22 +231,25 @@ final mentionCandidatesProvider = Provider.family
       // again with the people it finds (portable mention rules, section 2).
       var candidates = build(
         directory
-            ? settled.last(args.channelId, args.opening) ??
-                  const <UserProfile>[]
+            ? searches.seed(args.query) ?? const <UserProfile>[]
             : const <UserProfile>[],
       );
       if (directory) {
         final search = ref.watch(mentionUserSearchProvider(args.query));
         final page = search.asData?.value;
-        if (page != null) {
-          settled.settle(args.channelId, args.opening, page);
-          candidates = build(page);
-        }
+        if (page != null) candidates = build(page);
       }
-      if (!matchesMentionQuery(args.query, [
+      // A verified name replaces the self-declared one for matching, ranking
+      // and the inserted text, so typing it finds the verified person.
+      candidates = [
         for (final candidate in candidates)
-          if (candidate.displayName?.trim().isNotEmpty == true)
-            candidate.displayName!.trim(),
+          switch (verified[candidate.pubkey.toLowerCase()]) {
+            final profile? => candidate.withVerifiedName(profile.displayName),
+            null => candidate,
+          },
+      ];
+      if (!matchesMentionQuery(args.query, [
+        for (final candidate in candidates) ...candidate.searchNames,
       ])) {
         return const [];
       }
@@ -228,6 +271,30 @@ final mentionCandidatesProvider = Provider.family
         presence: (key) => presence[key] ?? 'unknown',
       );
     });
+
+/// People whose verified name matches a non-empty [query], as directory
+/// search results. Their cached kind 0 profile is kept when known.
+List<UserProfile> verifiedMentionMatches(
+  Map<String, VerifiedProfile> verified,
+  String query,
+  Map<String, UserProfile> userCache,
+) {
+  if (query.trim().isEmpty) return const [];
+  return [
+    for (final MapEntry(:key, :value) in verified.entries)
+      if (rankMentions([
+        MentionChoice(
+          pubkey: key,
+          name: value.displayName,
+          label: value.displayName,
+          aliases: [value.displayName],
+          member: false,
+        ),
+      ], query).isNotEmpty)
+        userCache[key] ??
+            UserProfile(pubkey: key, displayName: value.displayName),
+  ];
+}
 
 /// Picker labels compare every selectable choice, before query ranking
 /// filters them, so a row's label does not change as the query narrows.
@@ -266,4 +333,19 @@ final mentionSearchFailedProvider = Provider.family
       }
       final search = ref.watch(mentionUserSearchProvider(args.query));
       return search.hasError && !search.isLoading;
+    });
+
+/// Whether this chooser's directory search is still running, so people may
+/// still join its rows. A cached query counts too: its refresh can add people
+/// or the retry row below the cached page.
+final mentionSearchPendingProvider = Provider.family
+    .autoDispose<bool, MentionChooserArgs>((ref, args) {
+      final channel = ref.watch(channelByIdProvider(args.channelId));
+      if (channel == null ||
+          channel.isArchived ||
+          !channel.mentionsOutsidePeople ||
+          args.query.trim().isEmpty) {
+        return false;
+      }
+      return ref.watch(mentionUserSearchProvider(args.query)).isLoading;
     });

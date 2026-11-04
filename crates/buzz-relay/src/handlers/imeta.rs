@@ -1,6 +1,7 @@
 //! imeta tag validation helpers — shared between ingest pipeline and bridge.
 
 use buzz_core::tenant::TenantContext;
+use buzz_media::thumbnail::Thumb;
 use buzz_media::validation::mime_to_ext;
 
 /// Validate imeta tags for correctness and safety.
@@ -100,9 +101,8 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     has_size = true;
                 }
                 "thumb" => {
-                    if !is_local_media_url(value, media_base_url) || !value.ends_with(".thumb.jpg")
-                    {
-                        return Err("imeta thumb must be a local .thumb.jpg path".into());
+                    if !is_local_media_url(value, media_base_url) || !value.contains(".thumb.") {
+                        return Err("imeta thumb must be a local thumbnail path".into());
                     }
                     thumb_value = value.to_string();
                 }
@@ -277,7 +277,12 @@ pub async fn verify_imeta_blobs(
 
         // 4. If thumb is claimed, HEAD the thumbnail object too.
         if !thumb_value.is_empty() {
-            let thumb_key = format!("{x_value}.thumb.jpg");
+            let (_, thumb) = thumb_value
+                .rsplit('/')
+                .next()
+                .and_then(Thumb::parse)
+                .ok_or_else(|| format!("imeta thumb is not a thumbnail path: {thumb_value}"))?;
+            let thumb_key = thumb.key(&x_value);
             let thumb_exists = storage
                 .head(&thumb_key)
                 .await
@@ -458,8 +463,7 @@ fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
             let hash = segments[0];
             hash.len() == 64
                 && hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-                && segments[1] == "thumb"
-                && segments[2] == "jpg"
+                && Thumb::parse(path_after_media).is_some()
         }
         _ => false,
     }
@@ -556,6 +560,27 @@ mod tests {
             "size 100".into(),
         ];
         assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_thumb_accepts_stored_variants_only() {
+        let tag = |thumb: &str| {
+            vec![
+                "imeta".into(),
+                format!("url /media/{HASH}.png"),
+                "m image/png".into(),
+                format!("x {HASH}"),
+                "size 100".into(),
+                format!("thumb /media/{HASH}.thumb.{thumb}"),
+            ]
+        };
+        assert!(validate_imeta_tags(&[tag("webp")], BASE).is_ok());
+        assert!(validate_imeta_tags(&[tag("jpg")], BASE).is_ok());
+        let err = validate_imeta_tags(&[tag("png")], BASE).unwrap_err();
+        assert!(
+            err.contains("thumb must be a local thumbnail path"),
+            "{err}"
+        );
     }
 
     #[test]

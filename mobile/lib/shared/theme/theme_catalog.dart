@@ -31,29 +31,6 @@ class ThemeColors {
       .join(' ');
 }
 
-/// Known light theme names — used to show sun/moon icons before loading.
-const lightThemeNames = <String>{
-  'buzz',
-  'catppuccin-latte',
-  'everforest-light',
-  'github-light',
-  'github-light-default',
-  'github-light-high-contrast',
-  'gruvbox-light-hard',
-  'gruvbox-light-medium',
-  'gruvbox-light-soft',
-  'kanagawa-lotus',
-  'light-plus',
-  'material-theme-lighter',
-  'min-light',
-  'one-light',
-  'rose-pine-dawn',
-  'slack-ochin',
-  'snazzy-light',
-  'solarized-light',
-  'vitesse-light',
-};
-
 /// All available color schemes, sorted alphabetically.
 const themeCatalog = <ThemeColors>[
   ThemeColors(

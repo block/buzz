@@ -49,7 +49,7 @@ void main() {
         find.byType(CommunityGridOption),
       );
       expect(tile.relayUrl, relay);
-      expect(fixture.flow.communities.single.name, name);
+      expect(fixture.flow.communities.single.name, expected);
       if (name != expected) expect(find.text(name), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
     }

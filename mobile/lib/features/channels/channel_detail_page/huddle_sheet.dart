@@ -263,8 +263,9 @@ IosNavigationAction _huddleNavigationAction(
               );
             } catch (error) {
               if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showFeedbackSnackBar(
                 SnackBar(content: Text(_huddleActionError(error))),
+                kind: ToastKind.error,
               );
             }
           },
@@ -442,9 +443,10 @@ Future<void> _startMobileHuddleFromChannel({
     );
   } catch (error) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(content: Text(_huddleActionError(error))),
+      kind: ToastKind.error,
+    );
   }
 }
 
@@ -456,8 +458,9 @@ void _openMobileHuddle({
   final config = ref.read(relayConfigProvider);
   final nsec = config.nsec;
   if (nsec == null || nsec.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
       const SnackBar(content: Text('A paired identity is required.')),
+      kind: ToastKind.generic,
     );
     return;
   }
@@ -555,9 +558,10 @@ Future<void> _startReplacementHuddle({
     );
   } catch (error) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(content: Text(_huddleActionError(error))),
+      kind: ToastKind.error,
+    );
   }
 }
 
@@ -770,10 +774,13 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                               )
                               .catchError((Object error) {
                                 if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(
+                                  context,
+                                ).showFeedbackSnackBar(
                                   const SnackBar(
                                     content: Text('Reaction failed'),
                                   ),
+                                  kind: ToastKind.error,
                                 );
                               }),
                         );

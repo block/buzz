@@ -2,7 +2,6 @@ part of 'channel_actions_sheet.dart';
 
 const _channelMemberPreviewLimit = 5;
 const _channelDetailsHeaderFrostScrollDistance = Grid.xxl;
-const _channelDetailsHeaderFrostMaxBlurSigma = 20.0;
 const _channelDetailsSectionPadding = Grid.twelve;
 
 /// Opens the combined mobile channel settings page.
@@ -255,8 +254,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
         if (context.mounted) Navigator.of(context).pop(false);
       } catch (_) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
             const SnackBar(content: Text('Couldn’t join channel. Try again.')),
+            kind: ToastKind.error,
           );
         }
       } finally {
@@ -293,11 +293,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
           ),
         ],
         frosted: headerFrostProgress.value > 0,
-        frostedSurfaceOpacity: 0.5 * headerFrostProgress.value,
-        frostedBlurSigma:
-            _channelDetailsHeaderFrostMaxBlurSigma * headerFrostProgress.value,
-        showBottomDivider: headerFrostProgress.value > 0,
-        bottomDividerOpacity: 0.07 * headerFrostProgress.value,
+
         title: AnimatedSwitcher(
           duration: reducedMotion
               ? Duration.zero
@@ -497,7 +493,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   copyToClipboard(
                     context,
                     resolvedChannel.name,
-                    message: 'Channel name copied to clipboard',
+                    message: 'Channel name copied',
                   );
                 },
               ),
@@ -508,7 +504,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   copyToClipboard(
                     context,
                     resolvedChannel.id,
-                    message: 'Channel ID copied to clipboard',
+                    message: 'Channel ID copied',
                   );
                 },
               ),

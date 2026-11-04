@@ -5,6 +5,7 @@ import UIKit
 struct NativeEmojiPickerView: View {
   let data: NativeEmojiPickerData
   let appearance: NativeEmojiPickerAppearance
+  let largeEmoji: Bool
   let onSelect: (String) -> Void
   let onSkinToneChanged: (Int) -> Void
   let onClose: () -> Void
@@ -13,16 +14,19 @@ struct NativeEmojiPickerView: View {
   @State private var categorySelection: NativeEmojiCategorySelection
   @State private var selectedSkinTone: Int
 
-  private let columns = Array(
-    repeating: GridItem(.flexible(minimum: 36), spacing: 0),
-    count: 8
-  )
+  private var columns: [GridItem] {
+    Array(
+      repeating: GridItem(.flexible(minimum: 36), spacing: 0),
+      count: largeEmoji ? 5 : 8
+    )
+  }
 
   private let sectionListSpace = "buzz.emoji.sectionList"
 
   init(
     data: NativeEmojiPickerData,
     appearance: NativeEmojiPickerAppearance,
+    largeEmoji: Bool = false,
     initialSkinTone: Int,
     onSelect: @escaping (String) -> Void,
     onSkinToneChanged: @escaping (Int) -> Void,
@@ -30,6 +34,7 @@ struct NativeEmojiPickerView: View {
   ) {
     self.data = data
     self.appearance = appearance
+    self.largeEmoji = largeEmoji
     self.onSelect = onSelect
     self.onSkinToneChanged = onSkinToneChanged
     self.onClose = onClose
@@ -347,13 +352,13 @@ struct NativeEmojiPickerView: View {
             url: url,
             fallbackColor: appearance.secondaryText
           )
-          .frame(width: 28, height: 28)
+          .frame(width: largeEmoji ? 48 : 28, height: largeEmoji ? 48 : 28)
         } else {
-          Text(value).font(.system(size: 28))
+          Text(value).font(.system(size: largeEmoji ? 48 : 28))
         }
       }
       .frame(maxWidth: .infinity)
-      .frame(height: 44)
+      .frame(height: largeEmoji ? 60 : 44)
       .contentShape(Rectangle())
     }
     .buttonStyle(.plain)

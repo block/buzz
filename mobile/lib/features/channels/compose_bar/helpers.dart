@@ -32,13 +32,19 @@ void _useComposerChannelNames(
   _MarkdownEditingController controller,
   AsyncValue<List<Channel>> channelsAsync,
 ) {
-  final channelNames = {
-    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
-      channel.name.toLowerCase(): channel.id,
-  };
-  final channelNamesKey = channelNames.entries
-      .map((entry) => '${entry.key}\u0000${entry.value}')
-      .join('\u0001');
+  // The composer rebuilds on every keystroke and keyboard frame, so build the
+  // name map and its key only when the channel list itself changes.
+  final channels = channelsAsync.asData?.value;
+  final (:channelNames, :channelNamesKey) = useMemoized(() {
+    final names = {
+      for (final channel in channels ?? const <Channel>[])
+        channel.name.toLowerCase(): channel.id,
+    };
+    final key = names.entries
+        .map((entry) => '${entry.key}\u0000${entry.value}')
+        .join('\u0001');
+    return (channelNames: names, channelNamesKey: key);
+  }, [channels]);
   useEffect(() {
     controller.setChannelNames(channelNames);
     return null;
@@ -160,6 +166,8 @@ Widget _composerSuggestionPanel({
   required List<MentionCandidate> mentionSuggestions,
   required Set<String> unavailableMentions,
   required bool mentionSearchFailed,
+  required bool reserveMentionHeight,
+  required bool mentionSearching,
   required VoidCallback onMentionSearchRetry,
   required Map<String, UserProfile> userCache,
   required String? currentPubkey,
@@ -181,6 +189,8 @@ Widget _composerSuggestionPanel({
           suggestions: mentionSuggestions,
           unavailable: unavailableMentions,
           searchFailed: mentionSearchFailed,
+          reserveHeight: reserveMentionHeight,
+          searching: mentionSearching,
           onRetry: onMentionSearchRetry,
           userCache: userCache,
           currentPubkey: currentPubkey,
@@ -203,6 +213,7 @@ Widget _composerAttachmentPanel({
   required Future<List<XFile>> Function() onPickAllPhotos,
   required Future<void> Function(List<XFile> photos) onChoosePhotos,
   required Future<void> Function(List<XFile> photos) onChooseAllPhotos,
+  required Future<void> Function(Future<void> Function()) preparePhotos,
 }) => _AttachmentSurfacePanel(
   key: ValueKey(
     surface == _AttachmentSurface.closed
@@ -221,6 +232,7 @@ Widget _composerAttachmentPanel({
   onPickAllPhotos: onPickAllPhotos,
   onChoosePhotos: onChoosePhotos,
   onChooseAllPhotos: onChooseAllPhotos,
+  preparePhotos: preparePhotos,
 );
 
 const _pastedImageMimeTypes = <String>[
@@ -306,14 +318,6 @@ void _insertTriggerAtCursor(
     selection: TextSelection.collapsed(offset: cursor + insert.length),
   );
   focusNode.requestFocus();
-}
-
-bool hasMention(String text, String name) {
-  final pattern = RegExp(
-    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
-    caseSensitive: false,
-  );
-  return pattern.hasMatch(text);
 }
 
 /// Outcome of the non-member mention prompt. `null` (dialog dismissed)
@@ -418,8 +422,9 @@ void _sendTypingIndicator(
 /// identity change that causes the failure also resets that state on the next
 /// frame, so [messenger] must be resolved before the send's first `await`.
 void _reportSendCancelledByCommunitySwitch(ScaffoldMessengerState? messenger) {
-  messenger?.showSnackBar(
-    const SnackBar(content: Text('Message not sent: the community changed')),
+  messenger?.showFeedbackSnackBar(
+    const SnackBar(content: Text('Not sent. Community changed.')),
+    kind: ToastKind.error,
   );
 }
 
@@ -641,8 +646,9 @@ class _OutgoingMentions {
     );
     demote(outcome.notAdded);
     if (outcome.errors.isNotEmpty) {
-      messenger?.showSnackBar(
+      messenger?.showFeedbackSnackBar(
         SnackBar(content: Text(outcome.errors.join(' '))),
+        kind: ToastKind.error,
       );
     }
   }

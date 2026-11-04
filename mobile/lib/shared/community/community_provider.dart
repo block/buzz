@@ -298,24 +298,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) =>
-      _removeCommunity(id, invalidateAuthentication: true);
-
-  /// Removes the active community through the same local-first path as the
-  /// community list while allowing [AuthNotifier] to publish its final state.
-  Future<void> removeActiveCommunityForSignOut() =>
-      _removeCommunity(null, invalidateAuthentication: false);
-
-  Future<void> _removeCommunity(
-    String? requestedId, {
-    required bool invalidateAuthentication,
-  }) {
+  Future<void> removeCommunity(String id) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
-      final id = requestedId ?? activeId;
-      if (id == null) return;
       if (activeId == id) {
         await ref.read(communityTransitionProvider).run();
       }
@@ -346,12 +333,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           await storage.saveActiveId(remaining.first.id);
           // Reassign list state so activeCommunityProvider picks up the new ID.
           state = AsyncData([...remaining]);
-          if (invalidateAuthentication) ref.invalidate(authProvider);
+          ref.invalidate(authProvider);
         } else {
           await storage.clearActiveId();
           // Invalidate auth so it re-evaluates against the now-empty storage
           // and transitions to unauthenticated.
-          if (invalidateAuthentication) ref.invalidate(authProvider);
+          ref.invalidate(authProvider);
         }
       }
       if (revocationJournaled) {
@@ -636,21 +623,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         state = AsyncData(updatedList);
         await syncCommunitySnapshot(ref, updatedList);
       });
-
-  Future<void> renameCommunity(String id, String name) async {
-    final storage = ref.read(communityStorageProvider);
-    final current = state.value ?? [];
-    final index = current.indexWhere((w) => w.id == id);
-    if (index < 0) return;
-
-    final updated = current[index].copyWith(name: name);
-    await storage.save(updated);
-
-    final updatedList = [...current];
-    updatedList[index] = updated;
-    state = AsyncData(updatedList);
-    await syncCommunitySnapshot(ref, updatedList);
-  }
 }
 
 final communityListProvider =

@@ -355,7 +355,7 @@ impl ReadSession {
     pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         let degraded = match &mut self.inner {
             ReadSessionInner::Replica { tx, writer } => {
-                match event::query_events_on(tx, q).await {
+                match event::query_events_on(tx, q, event::ReadDeadline::Session).await {
                     Ok(rows) => return Ok(rows),
                     // Surface a cancel instead of re-running it on the writer; see
                     // `DbError::is_statement_cancelled` for the trade-off.
@@ -729,7 +729,7 @@ impl Default for DbConfig {
             read_max_connections: None,
             min_connections: 2,
             acquire_timeout_secs: 3,
-            max_lifetime_secs: 1800,
+            max_lifetime_secs: 300,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
             usage_metrics_replica_max_age_ms: 30_000,
@@ -1099,14 +1099,7 @@ impl Db {
             .test_before_acquire(false)
             .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
             .after_connect(|conn, _meta| {
-                Box::pin(async move {
-                    sqlx::query(crate::event::TIGHTEN_STATEMENT_TIMEOUT_SQL)
-                        .bind(crate::event::READ_STATEMENT_TIMEOUT)
-                        .bind(false)
-                        .execute(&mut *conn)
-                        .await
-                        .map(|_| ())
-                })
+                Box::pin(crate::event::tighten_session_read_statement_timeout(conn))
             })
             .after_release(|conn, _meta| Box::pin(Self::reader_release_check(conn)))
     }

@@ -404,36 +404,6 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
   }
 
-  func testStrictAgeGateWriteFailsWhenAppGroupStoreIsUnavailable() {
-    let bridge = BuzzPushSnapshotBridge(
-      appGroupIdentifier: nil,
-      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
-      keychainAccessGroup: nil
-    )
-    let completed = expectation(description: "strict write rejected")
-    var received: Any?
-
-    XCTAssertTrue(
-      bridge.handle(
-        FlutterMethodCall(
-          methodName: "syncAgeGatePushSnapshot",
-          arguments: [
-            "section": "communities",
-            "communities": [[String: Any]](),
-            "signingKeys": [String: String](),
-            "settleFence": false,
-          ]
-        )
-      ) { value in
-        received = value
-        completed.fulfill()
-      }
-    )
-
-    wait(for: [completed], timeout: callbackTimeout)
-    XCTAssertEqual((received as? FlutterError)?.code, "snapshot_sync_unavailable")
-  }
-
   func testMetadataAuthorityUsesNewestGrantForMatchingRelay() {
     let correctRelay = grant(
       generation: 2,

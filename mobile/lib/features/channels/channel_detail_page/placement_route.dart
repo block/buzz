@@ -41,8 +41,8 @@ class ChannelDetailPage extends ConsumerWidget {
         placement != ChannelRoutePlacement.ordinary &&
         groups == null &&
         lookup.isLoading) {
-      return Scaffold(
-        appBar: AppBar(title: Text(channel.name)),
+      return FrostedScaffold(
+        appBar: FrostedAppBar(title: Text(channel.name)),
         body: const Center(child: BuzzLoadingIndicator()),
       );
     }
@@ -50,6 +50,9 @@ class ChannelDetailPage extends ConsumerWidget {
       key: ValueKey((channel.id, placed)),
       channel: current,
       personalChat: placed,
+      welcomeAgent: current.isDm
+          ? ref.watch(bestieWelcomeProvider(channel.id))
+          : null,
       placementKnown:
           placed ||
           groups != null ||

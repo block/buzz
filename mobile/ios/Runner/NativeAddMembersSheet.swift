@@ -66,20 +66,21 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
       if request == session { picker?.update(data) }
       result(nil)
     case "dismiss":
-      if request == session { close(notify: false) }
-      result(nil)
+      if request == session { close(notify: false) { result(nil) } }
+      else { result(nil) }
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
-  private func close(notify: Bool) {
-    guard let request = session, let navigation else { return }
+  private func close(notify: Bool, completion: (() -> Void)? = nil) {
+    guard let request = session, let navigation else { completion?(); return }
     session = nil
     self.navigation = nil
     picker = nil
     navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
       if notify { self?.channel.invokeMethod("closed", arguments: ["session": request]) }
+      completion?()
     }
   }
 
@@ -106,6 +107,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       !selectedKeys.contains($0["pubkey"] as? String ?? "")
     }
   }
+  private var checkmarkAction: Bool { state["confirmWithCheckmark"] as? Bool == true }
+  private var atLimit: Bool { selected.count >= (state["selectionLimit"] as? Int ?? Int.max) }
   private var busy: Bool { state["submitting"] as? Bool == true }
   private var loading: Bool { state["loading"] as? Bool == true }
   private var loadError: Bool { state["loadError"] as? Bool == true }
@@ -117,7 +120,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     pageColor = Self.color(state["pageColor"]) ?? .systemGroupedBackground
     rowColor = Self.color(state["rowColor"]) ?? .secondarySystemGroupedBackground
     super.init(style: .insetGrouped)
-    title = "Add members"
+    title = state["title"] as? String ?? "Add members"
   }
 
   @available(*, unavailable)
@@ -142,12 +145,13 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     definesPresentationContext = true
     navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancel))
     navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(add))
-    let appearance = UINavigationBarAppearance()
-    appearance.configureWithOpaqueBackground()
-    appearance.backgroundColor = pageColor
-    appearance.shadowColor = .clear
-    navigationItem.standardAppearance = appearance
-    navigationItem.scrollEdgeAppearance = appearance
+    if checkmarkAction {
+      navigationItem.leftBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(cancel))
+      navigationItem.leftBarButtonItem?.accessibilityLabel = "Close"
+      navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "checkmark"), style: .done, target: self, action: #selector(add))
+      navigationItem.rightBarButtonItem?.accessibilityLabel = "Create message"
+    }
+    NavigationTopEdge.configure(tableView, item: navigationItem)
     applyState()
   }
 
@@ -168,7 +172,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     navigationController?.isModalInPresentation = busy
     navigationItem.leftBarButtonItem?.isEnabled = !busy
     navigationItem.rightBarButtonItem?.isEnabled = !busy && !selected.isEmpty
-    navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
+    if checkmarkAction {
+      navigationItem.rightBarButtonItem?.accessibilityLabel = busy ? "Creating message" : "Create message"
+    } else {
+      navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
+    }
     search.searchBar.isUserInteractionEnabled = !busy
     tableView.reloadData()
     let error = state["error"] as? String ?? ""
@@ -209,7 +217,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
 
   override func numberOfSections(in tableView: UITableView) -> Int { 2 }
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    section == 0 ? selected.count : (loading || loadError || users.isEmpty ? 1 : users.count)
+    section == 0 ? selected.count : (atLimit || loading || loadError || users.isEmpty ? 1 : users.count)
   }
   override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
     section == 0 ? (selected.isEmpty ? nil : "Selected") : "People and agents"
@@ -220,12 +228,12 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     var content = cell.defaultContentConfiguration()
     var avatarRequest: (String, String)?
     var memberLabel: String?
-    if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
-      content.text = loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
+    if indexPath.section == 1 && (atLimit || loading || loadError || users.isEmpty) {
+      content.text = atLimit ? "DMs support up to nine people, including you." : loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
       content.textProperties.color = .secondaryLabel
       content.textProperties.numberOfLines = 0
       cell.selectionStyle = loadError && !loading ? .default : .none
-      if loadError && !loading { cell.accessibilityTraits.insert(.button) }
+      if loadError && !loading && !atLimit { cell.accessibilityTraits.insert(.button) }
     } else {
       let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
       content.text = user["name"] as? String
@@ -269,8 +277,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     guard !busy else { return }
-    if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
-      if loadError && !loading { send("retry", [:]) }
+    if indexPath.section == 1 && (atLimit || loading || loadError || users.isEmpty) {
+      if loadError && !loading && !atLimit { send("retry", [:]) }
       return
     }
     let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
@@ -281,8 +289,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     let size = CGSize(width: 40, height: 40)
     return UIGraphicsImageRenderer(size: size).image { _ in
       (Self.color(user["avatarBackground"]) ?? .tertiarySystemFill).setFill()
-      UIBezierPath(roundedRect: CGRect(origin: .zero, size: size),
-        cornerRadius: user["agent"] as? Bool == true ? 12 : 20).fill()
+      let rect = CGRect(origin: .zero, size: size)
+      (user["agent"] as? Bool == true ? Self.agentSquircle(rect) : UIBezierPath(ovalIn: rect)).fill()
       let text = (user["initial"] as? String ?? "?") as NSString
       let attributes: [NSAttributedString.Key: Any] = [
         .font: UIFont.systemFont(ofSize: 18, weight: .medium),
@@ -291,6 +299,22 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       let measured = text.size(withAttributes: attributes)
       text.draw(at: CGPoint(x: (40 - measured.width) / 2, y: (40 - measured.height) / 2), withAttributes: attributes)
     }.withRenderingMode(.alwaysOriginal)
+  }
+
+  /// Mirrors avatar_shape.dart and desktop's `ROUNDED_SQUIRCLE_PATH`
+  /// (desktop/src/shared/ui/AvatarClipPaths.tsx).
+  private static func agentSquircle(_ rect: CGRect) -> UIBezierPath {
+    func at(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+      CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+    }
+    let path = UIBezierPath()
+    path.move(to: at(0.5, 0))
+    path.addCurve(to: at(1, 0.5), controlPoint1: at(0.93, 0), controlPoint2: at(1, 0.07))
+    path.addCurve(to: at(0.5, 1), controlPoint1: at(1, 0.93), controlPoint2: at(0.93, 1))
+    path.addCurve(to: at(0, 0.5), controlPoint1: at(0.07, 1), controlPoint2: at(0, 0.93))
+    path.addCurve(to: at(0.5, 0), controlPoint1: at(0, 0.07), controlPoint2: at(0.07, 0))
+    path.close()
+    return path
   }
 
   private static func color(_ value: Any?) -> UIColor? {

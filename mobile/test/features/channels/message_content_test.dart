@@ -492,6 +492,88 @@ void main() {
   });
 
   group('MessageContent', () {
+    testWidgets('renders backslash escapes as the escaped character', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      String visible() => [
+        for (final element in find.byType(RichText).evaluate())
+          (element.widget as RichText).text.toPlainText(),
+      ].join('|');
+
+      for (final (content, shown) in [
+        (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        (r'**bold \#x** \[not math\](y)', '[not math](y)'),
+        (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
+        (
+          r'[\#buzz-mobile](buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b)',
+          '#buzz-mobile',
+        ),
+        ('```\nx \\# y\n```', r'x \# y'),
+        (r'code `a\#b`', r'a\#b'),
+        (r'\`literal\` then `a\#b`', '`literal` then '),
+        // Authored stand-in characters are not mistaken for escapes.
+        ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
+        ('~~~\nx \\# y\n~~~', r'x \# y'),
+        // A fence that never closes is still code inside a quote or list.
+        ('> ```sh\n> echo \\#x', r'echo \#x'),
+        ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // A fence closes only at the quote depth it opened at.
+        ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
+        ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
+        // A quoted fence ends with its quote, so later prose is parsed.
+        ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
+        // Known limitation: gpt_markdown's raw-text fallback for this
+        // unclaimed strike skips inline components, so the stand-in shows.
+        // Its fullwidth form still reads as #.
+        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A bare link's trailing backslash stays outside the link.
+        (r'see https://example.com/a\', 'see '),
+        (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
+        (r'*https://example.com/a\**', '*'),
+        (r'see \<https://example.com/b>', 'see <'),
+        (r'see \https://example.com/c', r'see \'),
+        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        (
+          '![shot \\#1](https://example.com/a.png)\n'
+              '![shot \\#2](https://example.com/b.png)',
+          null,
+        ),
+      ]) {
+        for (final bubble in [false, true]) {
+          await tester.pumpWidget(
+            _testable(MessageContent(content: content, bubble: bubble)),
+          );
+          final reason = '$content (bubble: $bubble) showed ${visible()}';
+          if (shown != null) {
+            expect(
+              find.textContaining(shown, findRichText: true),
+              findsWidgets,
+              reason: reason,
+            );
+          }
+          // No stand-in or leaked link syntax reaches text or semantics.
+          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          expect(
+            find.textContaining(
+              RegExp('\u2060|\\]\\(http'),
+              findRichText: true,
+            ),
+            findsNothing,
+            reason: reason,
+          );
+          expect(
+            find.bySemanticsLabel(RegExp('\u2060')),
+            findsNothing,
+            reason: reason,
+          );
+        }
+      }
+      // Gallery labels drop their escapes too.
+      expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
+      semantics.dispose();
+    });
+
     testWidgets('forwards text alignment to markdown rendering', (
       tester,
     ) async {
@@ -1842,7 +1924,8 @@ void main() {
         'groups uploaded photos into a carousel and opens the full gallery',
         (tester) async {
           const first = 'https://example.com/media/one.png';
-          const second = 'https://example.com/media/two.png';
+          // The second destination is escaped; the carousel must unescape it.
+          const second = 'https://example.com/media/two_2.png';
           const third = 'https://example.com/media/three.png';
           await tester.pumpWidget(
             _testable(
@@ -1851,7 +1934,7 @@ void main() {
                     '''
 Photos
 ![image]($first)
-![image]($second)
+![image](https://example.com/media/two\\_2.png)
 ![image]($third)
 ''',
                 tags: [
@@ -3056,16 +3139,49 @@ Photos
         );
       });
 
-      testWidgets('unknown channel renders without tap', (tester) async {
+      testWidgets('unknown #token stays text', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Took over #8700 from #general',
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains('Took over #8700 from'));
+      });
+
+      testWidgets('no #token becomes a chip before channel names load', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           _testable(
             const MessageContent(content: 'Check #unknown', channelNames: {}),
           ),
         );
 
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('Check #unknown'));
+      });
+
+      testWidgets('possessive #channel keeps the pill and the suffix', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: "See #general's pinned plan",
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
         expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
-        expect(find.text('unknown'), findsOneWidget);
-        expect(find.text('#unknown'), findsNothing);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains("'s pinned plan"));
       });
 
       testWidgets('does not treat URL fragments as channel links', (

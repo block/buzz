@@ -6,7 +6,7 @@ import 'thread_reference.dart';
 
 /// Nostr event kind constants.
 ///
-/// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
+/// Keep in sync with `crates/buzz-core/src/kind.rs`.
 abstract final class EventKind {
   /// Kind:0 user profile metadata.
   static const profile = 0;
@@ -21,6 +21,7 @@ abstract final class EventKind {
   /// Kind:13534 event containing the current relay-community membership.
   static const relayMembership = 13534;
   static const streamMessage = 9;
+  static const nip29EditMetadata = 9002;
   static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;
   static const typingIndicator = 20002;
@@ -43,6 +44,8 @@ abstract final class EventKind {
   static const jobResult = 43004;
   static const jobCancel = 43005;
   static const jobError = 43006;
+  static const memberAddedNotification = 44100;
+  static const memberRemovedNotification = 44101;
   static const forumPost = 45001;
   static const forumComment = 45003;
   static const huddleStarted = 48100;
@@ -83,12 +86,14 @@ abstract final class EventKind {
     streamMessageEdit,
   ];
 
-  /// Visible content kinds requested by the NIP-CW channel-window path.
-  static const channelTimelineContentKinds = [
+  /// Row kinds a NIP-CW channel-window page reads. System notices (40099)
+  /// are read apart by [NostrFilters.channelNotices]: a page counts every row
+  /// kind against its limit, so a burst of joins would otherwise fill the
+  /// first page and hold the messages back.
+  static const channelWindowPageKinds = [
     streamMessage,
     streamMessageV2,
     streamMessageDiff,
-    systemMessage,
     jobRequest,
     jobAccepted,
     jobProgress,
@@ -97,6 +102,12 @@ abstract final class EventKind {
     jobError,
     huddleStarted,
     huddleEnded,
+  ];
+
+  /// Visible content kinds of the channel timeline.
+  static const channelTimelineContentKinds = [
+    ...channelWindowPageKinds,
+    systemMessage,
   ];
 }
 
@@ -290,6 +301,10 @@ class ChannelData {
   final DateTime? ttlDeadline;
   final bool isArchived;
 
+  /// The relay's bare `["unlisted"]` flag: an unlisted channel is left out of
+  /// listings and does not hold its name in the listed-name rule.
+  final bool isUnlisted;
+
   const ChannelData({
     required this.id,
     required this.name,
@@ -303,6 +318,7 @@ class ChannelData {
     this.ttlSeconds,
     this.ttlDeadline,
     this.isArchived = false,
+    this.isUnlisted = false,
   });
 
   factory ChannelData.fromEvent(NostrEvent event) {
@@ -357,6 +373,7 @@ class ChannelData {
       ttlSeconds: ttlSeconds,
       ttlDeadline: ttlDeadline,
       isArchived: isArchived,
+      isUnlisted: event.tags.any((t) => t.isNotEmpty && t[0] == 'unlisted'),
     );
   }
 }

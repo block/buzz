@@ -1,6 +1,5 @@
 import '../../helpers/two_finger_double_tap.dart';
-import 'package:buzz/shared/hosted/builderlab_account.dart';
-import 'package:buzz/shared/hosted/hosted_community_connection.dart';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/features/pairing/add_community_page.dart';
@@ -8,7 +7,9 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:buzz/shared/community/community_grid_option.dart';
+
 import 'dart:async';
+
 import 'package:buzz/onboarding_app_entry.dart';
 
 import 'package:buzz/hosted_app_gate.dart';
@@ -156,64 +157,39 @@ void main() {
       expect(find.text('Select a community'), findsOneWidget);
       expect(find.byType(BottomSheet), findsNothing);
       expect(find.byTooltip('Back'), findsOneWidget);
-      // Cancelling restore must not open Add after the pending request returns.
-      final cancelledRestore = Completer<void>();
-      fixture.beforeAdmission = (_) => cancelledRestore.future;
+      // Opening Add must not restore memberships or show the joining loader,
+      // even when admission would fail. Back still returns to the picker.
+      var admissionAttempts = 0;
+      fixture.beforeAdmission = (_) async {
+        admissionAttempts++;
+        throw StateError('Opening Add must not admit existing communities');
+      };
       await tester.ensureVisible(
         find.byKey(const Key('community-switcher-add')),
       );
       await tester.tap(find.byKey(const Key('community-switcher-add')));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(find.byTooltip('Back').hitTestable(), findsNothing);
-      expect(find.byType(BeeLoadingMark), findsOneWidget);
-      await tester.tap(find.text('Cancel'));
-      await tester.pump();
-      expect(fixture.flow.stage, HostedFlowStage.chooseCommunities);
-      cancelledRestore.complete();
+      expect(find.text('Joining your community'), findsNothing);
+      expect(find.byType(BeeLoadingMark), findsNothing);
       await tester.pumpAndSettle();
-      expect(find.byType(OnboardingAppEntry), findsNothing);
-      expect(find.text('Select a community'), findsOneWidget);
-      for (final conflict in [false, true]) {
-        fixture.beforeAdmission = (name) async {
-          if (name == 'two.communities.buzz.xyz') {
-            if (conflict) throw const SavedCommunityIdentityConflict();
-            throw AccountFailure.unavailable;
-          }
-        };
-        await tester.tap(find.byKey(const Key('community-switcher-add')));
-        await tester.pumpAndSettle();
-        expect(find.byType(OnboardingAppEntry), findsNothing);
-        await tester.tap(
-          find.text(
-            conflict ? 'Keep saved identity and skip' : 'Skip this community',
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(OnboardingAppEntry), findsOneWidget);
-        expect(fixture.openedCommunity, isNull);
-        await tester.pageBack();
-        await tester.pumpAndSettle();
-        expect(find.text('Select a community'), findsOneWidget);
-        fixture.admitted.clear();
-      }
-      fixture.beforeAdmission = null;
-      // Add restores existing memberships, stays opaque, and returns to the
-      // picker on Back without the disposed Add route cancelling discovery.
-      await tester.ensureVisible(
-        find.byKey(const Key('community-switcher-add')),
-      );
-      await tester.tap(find.byKey(const Key('community-switcher-add')));
-      await tester.pumpAndSettle();
-      expect(fixture.admitted, hasLength(2));
+      expect(fixture.admitted, isEmpty);
       expect(find.byType(OnboardingAppEntry), findsOneWidget);
+      expect(find.text('Add a community'), findsOneWidget);
+      expect(admissionAttempts, 0);
       expect(find.text('Home content').hitTestable(), findsNothing);
+      expect(fixture.openedCommunity, isNull);
+      final requestsBeforeBack = List<String>.of(fixture.requests);
       await tester.pageBack();
+      await tester.pump();
+      expect(find.text('Getting ready…'), findsNothing);
+      expect(find.text('Joining your community'), findsNothing);
+      expect(find.byType(BeeLoadingMark), findsNothing);
       await tester.pumpAndSettle();
+      expect(fixture.requests, requestsBeforeBack);
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Select a community'), findsOneWidget);
       expect(fixture.flow.stage, HostedFlowStage.chooseCommunities);
-      fixture.admitted.clear();
+      expect(fixture.admitted, isEmpty);
 
       final admission = Completer<void>();
       fixture.beforeAdmission = (_) => admission.future;

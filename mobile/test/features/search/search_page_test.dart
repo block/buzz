@@ -8,6 +8,7 @@ import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/search/recent_searches_provider.dart';
 import 'package:buzz/features/search/search_page.dart';
@@ -883,6 +884,92 @@ void main() {
     expect(find.byType(BuzzAgentIcon), findsOneWidget);
   });
 
+  // A hit can come from a channel the loaded list lacks, such as an open
+  // channel the user hasn't joined. It opens from the channel's own metadata
+  // when the relay shares it, and otherwise says why it can't.
+  for (final (name, shared, listFails, toast) in [
+    ('opens its unlisted channel', true, false, null),
+    (
+      'explains a channel it cannot open',
+      false,
+      false,
+      'Channel not found here',
+    ),
+    // A failed channel list still leaves the channel's own metadata.
+    ('opens its channel when the channel list failed', true, true, null),
+    // Without the list, a missing channel may be one the user belongs to.
+    (
+      'reports a failure when the channel list failed',
+      false,
+      true,
+      'Could not open the channel',
+    ),
+  ]) {
+    testWidgets('a message result $name', (tester) async {
+      final relay = _ChannelMetadataRelaySession(
+        shared
+            ? {'treasury': _openChannelMetadata('treasury', 'treasury')}
+            : {},
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            searchProvider.overrideWith(
+              () => _FakeSearchNotifier(
+                const SearchState(
+                  query: 'budget',
+                  messageResults: [
+                    SearchHit(
+                      eventId: 'message-1',
+                      content: 'The budget is ready',
+                      kind: 9,
+                      pubkey: 'alice',
+                      channelId: 'treasury',
+                      channelName: 'treasury',
+                      createdAt: 1,
+                      score: 1,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            recentSearchesProvider.overrideWith(
+              () => _FakeRecentSearchesNotifier(const []),
+            ),
+            profileProvider.overrideWith(() => _FakeProfileNotifier()),
+            channelsProvider.overrideWith(
+              () => _FakeChannelsNotifier(const [], listFails),
+            ),
+            relaySessionProvider.overrideWith(() => relay),
+            savedPrefsProvider.overrideWithValue(prefs),
+            meGroupsProvider.overrideWith((ref) => const Stream.empty()),
+          ],
+          child: const SearchPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('search-message-row-message-1')),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(relay.metadataLookups.first, 'treasury');
+      if (toast == null) {
+        final page = tester.widget<ChannelDetailPage>(
+          find.byType(ChannelDetailPage),
+        );
+        expect(page.channel.id, 'treasury');
+        expect(page.channel.isMember, isFalse);
+      } else {
+        expect(find.byType(ChannelDetailPage), findsNothing);
+        expect(find.text(toast), findsOneWidget);
+      }
+    });
+  }
+
   testWidgets('does not label an unjoined channel as having zero members', (
     tester,
   ) async {
@@ -992,13 +1079,72 @@ class _FakeProfileNotifier extends ProfileNotifier {
       const UserProfile(pubkey: 'test', displayName: 'Test');
 }
 
-class _FakeChannelsNotifier extends ChannelsNotifier {
-  _FakeChannelsNotifier([this.channels = const []]);
+/// Answers kind:39000 lookups with [metas] and nothing else.
+class _ChannelMetadataRelaySession extends RelaySessionNotifier {
+  _ChannelMetadataRelaySession(this.metas);
 
-  final List<Channel> channels;
+  final Map<String, NostrEvent> metas;
+  final metadataLookups = <String>[];
 
   @override
-  Future<List<Channel>> build() async => channels;
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!(filter.kinds.length == 1 && filter.kinds.single == 39000)) {
+      return const [];
+    }
+    final ids = filter.tags['#d'] ?? const <String>[];
+    metadataLookups.addAll(ids);
+    return [for (final id in ids) ?metas[id]];
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async => () {};
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+}
+
+NostrEvent _openChannelMetadata(String id, String name) => NostrEvent(
+  id: 'meta-$id',
+  pubkey: 'relay',
+  createdAt: 2,
+  kind: 39000,
+  tags: [
+    ['d', id],
+    ['name', name],
+    ['t', 'stream'],
+    ['public'],
+  ],
+  content: '',
+  sig: 'sig',
+);
+
+class _FakeChannelsNotifier extends ChannelsNotifier {
+  _FakeChannelsNotifier([this.channels = const [], this.fails = false]);
+
+  final List<Channel> channels;
+  final bool fails;
+
+  @override
+  Future<List<Channel>> build() async =>
+      fails ? throw StateError('channel list failed') : channels;
 }
 
 class _FakeDmActions implements ChannelActions {

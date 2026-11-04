@@ -1,4 +1,3 @@
-import '../../helpers/two_finger_double_tap.dart';
 import 'package:buzz/shared/community/community_grid_option.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
@@ -98,8 +97,8 @@ void main() {
     }
 
     Future<void> pair() async {
-      final trigger = find.byKey(const Key('developer-pairing-trigger'));
-      await twoFingerDoubleTap(tester, tester.getCenter(trigger));
+      await tester.longPress(find.text('Scan a QR code').hitTestable());
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Use a pairing code').hitTestable());
       await tester.pumpAndSettle();
       await tester.enterText(
@@ -200,7 +199,7 @@ void main() {
       f.beforeAdmission = null;
       await tester.tap(find.text('Try again').hitTestable());
       await tester.pumpAndSettle();
-      expect(f.admitted, ['paired']);
+      expect(f.admitted, ['paired.communities.buzz.xyz']);
       expect(f.remembered, contains('wss://paired.communities.buzz.xyz'));
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);

@@ -64,9 +64,6 @@ const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
 
-/// Captures one image with the system camera, or returns null when cancelled.
-typedef PickCameraImage = Future<XFile?> Function();
-
 /// Selects multiple gallery images for upload in picker order.
 typedef PickGalleryImages = Future<List<XFile>> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
@@ -240,7 +237,6 @@ class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
-  final PickCameraImage? _pickCameraImage;
   final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
   final PickAttachmentFile? _pickAttachmentFile;
@@ -258,7 +254,6 @@ class MediaUploadService {
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
-    PickCameraImage? pickCameraImage,
     PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
     PickAttachmentFile? pickAttachmentFile,
@@ -273,7 +268,6 @@ class MediaUploadService {
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
-       _pickCameraImage = pickCameraImage,
        _pickGalleryImages =
            pickGalleryImages ??
            (() async {
@@ -300,28 +294,12 @@ class MediaUploadService {
     }
   }
 
-  Future<BlobDescriptor?> pickAndUploadImage() async {
-    final pickedImage = await _pickGalleryImage();
-    if (pickedImage == null) return null;
-    return uploadImage(pickedImage);
-  }
-
   /// Opens the system photo library without uploading the selected image.
   Future<XFile?> pickGalleryImage() => _pickGalleryImage();
-
-  /// Opens the system camera without uploading the captured image.
-  Future<XFile?> captureImage() async => _pickCameraImage?.call();
 
   /// Produces displayable, sanitized image bytes before an upload begins.
   Future<Uint8List> prepareImageBytes(XFile image) async =>
       (await _prepareUploadImage(image)).bytes;
-
-  /// Opens the system camera and uploads the captured image.
-  Future<BlobDescriptor?> captureAndUploadImage() async {
-    final pickedImage = await _pickCameraImage?.call();
-    if (pickedImage == null) return null;
-    return uploadImage(pickedImage);
-  }
 
   /// Opens the system picker with multi-selection enabled.
   Future<List<XFile>> pickGalleryImages() => _pickGalleryImages();
@@ -346,12 +324,6 @@ class MediaUploadService {
           _clipboardHasImageMethod,
         ) ??
         false;
-  }
-
-  Future<BlobDescriptor> readAndUploadClipboardImage() async {
-    final image = await readClipboardImage();
-    if (image == null) throw Exception('Unable to read pasted image');
-    return uploadImage(image);
   }
 
   /// Reads a clipboard image for composer preview before the user sends it.
@@ -460,12 +432,6 @@ class MediaUploadService {
     }
   }
 
-  Future<BlobDescriptor?> pickAndUploadVideo() async {
-    final pickedVideo = await pickGalleryVideo();
-    if (pickedVideo == null) return null;
-    return uploadVideo(pickedVideo);
-  }
-
   /// Packages a recorded AAC voice note in the canonical MP4 envelope.
   Future<BlobDescriptor> uploadVoiceNote(
     XFile voiceNote, {
@@ -543,12 +509,6 @@ class MediaUploadService {
       cancellationToken: cancellationToken,
     );
     return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
-  }
-
-  Future<BlobDescriptor?> pickAndUploadFile() async {
-    final pickedFile = await pickAttachmentFile();
-    if (pickedFile == null) return null;
-    return uploadFile(pickedFile);
   }
 
   Future<BlobDescriptor> uploadBytes(

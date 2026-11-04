@@ -30,13 +30,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use buzz_core::tenant::{normalize_host, TenantContext};
+use buzz_core::tenant::{normalize_host, TenantContext, MAX_HOST_LEN};
 use url::{Host, Url};
 
 use crate::state::AppState;
-
-/// Maximum accepted authority length. Matches `communities.host VARCHAR(255)`.
-const MAX_HOST_LEN: usize = 255;
 
 /// JSON body for `POST /operator/communities`.
 #[derive(Debug, Deserialize)]

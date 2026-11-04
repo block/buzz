@@ -21,7 +21,7 @@ void dmRecipientLayoutTests(Widget Function(List<Override>) harness) {
         ]),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Create or start conversation'));
+      await tester.tap(find.byTooltip('Create'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('New DM'));
       await tester.pumpAndSettle();
@@ -102,7 +102,7 @@ void dmRecipientLayoutTests(Widget Function(List<Override>) harness) {
       expect(rows.evaluate().length, lessThan(30));
       expect(tester.takeException(), isNull);
 
-      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.tap(find.byTooltip('Close'));
       await tester.pumpAndSettle();
       expect(find.text('New message'), findsNothing);
     },

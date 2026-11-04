@@ -44,6 +44,23 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('Continue'));
     await tester.pump();
+    expect(find.text('Choose your avatar'), findsOneWidget);
+    expect(attempts, 0);
+    expect(
+      tester.widget<FilledButton>(find.byType(FilledButton)).onPressed,
+      isNull,
+    );
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'Kenny',
+    );
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Skip'));
+    await tester.tap(find.text('Skip'));
+    await tester.pump();
     expect(find.text('Saving…'), findsOneWidget);
     await tester.binding.handlePopRoute();
     await tester.pump();
@@ -53,7 +70,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(attempts, 1);
     expect(find.text('Not now'), findsOneWidget);
-    await tester.tap(find.text('Not now'));
+    await tester.ensureVisible(find.text('Not now'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Not now').hitTestable());
     await tester.pumpAndSettle();
     await pending;
     expect(attempts, 1);

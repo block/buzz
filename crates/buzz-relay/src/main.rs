@@ -61,7 +61,7 @@ fn connect_search_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    sqlx::postgres::PgPoolOptions::new()
+    buzz_search::pool_options()
         .acquire_timeout(std::time::Duration::from_secs(config.acquire_timeout_secs))
         .connect_lazy(url)
         .map_err(|e| anyhow::anyhow!("Search DB URL is invalid: {e}"))
@@ -1314,6 +1314,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     info!("operator-listener registration cleanup started");
 
+    if let Some(url) = state.config.storage_usage_delivery_url.clone() {
+        tokio::spawn(buzz_relay::storage_usage_delivery::run_delivery_worker(
+            Arc::clone(&state),
+            url,
+        ));
+        info!("storage-usage delivery worker started");
+    }
+
     // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
     // Uses DB-level leases (held_by / lease_expires_at) so multiple pods can
     // run the worker concurrently without double-delivery.
@@ -1899,6 +1907,10 @@ mod env_filter_tests {
             otel.contains("relay-info") && otel.contains("datastore-info"),
             "{otel}"
         );
+        let access = logged(otel_filter(None), || {
+            tracing::warn!(target: "buzz_relay::access", "access-warn");
+        });
+        assert!(access.is_empty(), "{access}");
     }
 
     #[test]

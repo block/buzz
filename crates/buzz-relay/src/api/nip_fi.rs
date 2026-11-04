@@ -760,7 +760,7 @@ mod route_integration_tests {
 
     // ES256 key pair — same material as command.rs tests, known-good.
     const TEST_PRIVATE_KEY_PEM: &str =
-        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n";
+        "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
 
     const TEST_ISS: &str = "https://idp.test.example.com";
     const TEST_AUD: &str = "https://relay.test.example.com";
@@ -1939,6 +1939,7 @@ mod route_integration_tests {
             },
         )];
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: registry.clone(),
@@ -2533,9 +2534,12 @@ mod route_integration_tests {
                 .parse()
                 .expect("header value"),
         );
-        crate::nip_fi_http::admit_nip_fi_http_on_state(state, &headers, || {
-            Ok(crate::nip_fi_http::Nip98Proof::new(*key, ()))
-        })
+        crate::nip_fi_http::admit_nip_fi_http_on_state(
+            state,
+            &headers,
+            &crate::access::AccessSlot::default(),
+            || Ok(crate::nip_fi_http::Nip98Proof::new(*key, ())),
+        )
         .await
         .map(|_| ())
     }
@@ -2667,12 +2671,14 @@ mod route_integration_tests {
             "control: the route recorded the deny entry"
         );
 
-        let admitted =
-            crate::nip_fi_http::admit_nip_fi_http_on_state(&state, &HeaderMap::new(), || {
-                Ok(crate::nip_fi_http::Nip98Proof::new(key, 7u8))
-            })
-            .await
-            .expect("Off mode admits on NIP-98 success regardless of deny entries");
+        let admitted = crate::nip_fi_http::admit_nip_fi_http_on_state(
+            &state,
+            &HeaderMap::new(),
+            &crate::access::AccessSlot::default(),
+            || Ok(crate::nip_fi_http::Nip98Proof::new(key, 7u8)),
+        )
+        .await
+        .expect("Off mode admits on NIP-98 success regardless of deny entries");
         assert_eq!(admitted.proven_pubkey(), &key);
         assert!(admitted.assertion().is_none());
         assert_eq!(*admitted.extra(), 7);
@@ -2687,6 +2693,7 @@ mod route_integration_tests {
         let resp = crate::nip_fi_http::admit_nip_fi_http_on_state::<(), _>(
             &state,
             &HeaderMap::new(),
+            &crate::access::AccessSlot::default(),
             || Err(legacy()),
         )
         .await
@@ -3565,6 +3572,7 @@ mod route_integration_tests {
                 },
             )];
             config.nip_fi = NipFiRelayConfig {
+                profile_policies: Vec::new(),
                 source: Default::default(),
                 mode: NipFiMode::Shadow,
                 registry: registry.clone(),

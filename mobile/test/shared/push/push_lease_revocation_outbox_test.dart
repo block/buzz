@@ -58,6 +58,48 @@ void main() {
     expect(records.single.relayUrl, 'https://relay.example/');
   });
 
+  test('removal without a grant retains cleanup through restart', () async {
+    final community =
+        Community.create(
+          name: 'Test',
+          relayUrl: 'wss://relay.example',
+          nsec: keys.nsec,
+        ).copyWith(
+          pubkey: keys.public,
+          pushNotificationsEnabled: true,
+          pushSubscriptionState: const BuzzPushLeaseSubscriptionState.desired()
+              .withReservedGeneration(4),
+        );
+    final first = _outbox(
+      storage: storage,
+      clock: clock,
+      scheduler: scheduler,
+      publisher: (_) async => throw StateError('offline'),
+    );
+    expect(
+      await first.enqueueCommunity(community, readGrants: () async => []),
+      isTrue,
+    );
+    await first.trigger();
+    first.dispose();
+    final pending = (await storage.loadAll()).single;
+    expect(pending.installationId, community.pushLeaseInstallationId);
+    expect(pending.expiresAt, isNull);
+    clock.seconds = pending.nextAttemptAt;
+    final published = <BuzzPushLeaseRevocationRecord>[];
+    final restarted = _outbox(
+      storage: storage,
+      clock: clock,
+      scheduler: scheduler,
+      publisher: (record) async => published.add(record),
+    );
+    await restarted.trigger();
+    expect(published.single.installationId, community.pushLeaseInstallationId);
+    expect(published.single.generation, 7);
+    expect(await storage.loadAll(), isEmpty);
+    restarted.dispose();
+  });
+
   test('legacy community revokes its grant-addressed lease', () async {
     final outbox = _outbox(
       storage: storage,

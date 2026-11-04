@@ -3,7 +3,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/hosted_flow.dart';
-import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/theme/grid.dart';
 import '../../shared/community/community_grid.dart';
 import '../../shared/community/community_grid_option.dart';
@@ -28,15 +27,19 @@ class HostedCommunitySelection extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(flow);
-    Future<void> addCommunity() async {
+    void addCommunity() {
+      if (flow.stage != HostedFlowStage.chooseCommunities) return;
+      final choices = flow.captureCommunityChoices();
+      if (choices == null) return;
       final navigator = Navigator.of(context, rootNavigator: true);
-      if (!await flow.prepareToAddCommunity() || !navigator.mounted) return;
       late final MaterialPageRoute<void> route;
       var exiting = false;
       Future<void> exit() async {
         if (exiting) return;
         exiting = true;
-        await flow.signInAccount();
+        if (!flow.restoreCommunityChoices(choices)) {
+          await flow.signInAccount();
+        }
         if (flow.stage == HostedFlowStage.signIn ||
             flow.stage == HostedFlowStage.idle) {
           exiting = false;
@@ -50,6 +53,13 @@ class HostedCommunitySelection extends HookConsumerWidget {
           addingCommunity: true,
           restoreAccount: false,
           onExit: exit,
+          onComplete: () {
+            if (flow.restoreCommunityChoices(choices)) {
+              flow.addSelectedCommunities(returnToAddedCommunity: true);
+            } else {
+              flow.signInAccount();
+            }
+          },
         ),
       );
       navigator.push(route);
@@ -64,10 +74,7 @@ class HostedCommunitySelection extends HookConsumerWidget {
         for (final community in flow.communities)
           CommunityGridOption(
             id: community.relayUrl,
-            name: HostedEnvironment.communityDisplayName(
-              community.name,
-              community.relayUrl,
-            ),
+            name: community.name,
             relayUrl: community.relayUrl,
             onSelect: (_) async {
               flow.chooseLandingCommunity(community.relayUrl);

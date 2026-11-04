@@ -22,8 +22,8 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
-import 'emoji_picker.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/emoji_picker.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import 'message_long_press_region.dart';
 import 'timeline_message.dart';
 

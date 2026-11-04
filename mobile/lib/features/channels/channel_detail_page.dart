@@ -1,9 +1,16 @@
+import 'message_author_visibility.dart';
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'message_swipe_reply.dart';
+import 'bestie_welcome.dart';
+import 'bestie_welcome_storage.dart';
+import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' show cos, max, min, pi;
 import 'dart:ui' show ImageFilter, lerpDouble;
@@ -23,6 +30,7 @@ import '../../shared/me/me_sync.dart';
 import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
+import 'me/me_workspace_picker.dart';
 import 'me/me_messages_provider.dart';
 import '../../shared/huddle/huddle.dart';
 import '../../shared/identity_names/identity_names.dart';
@@ -30,6 +38,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/bouncing_dots_indicator.dart';
@@ -56,8 +65,8 @@ import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
-import 'conversation_activity.dart';
-import 'conversation_activity_state.dart';
+import 'inline_agent_typing.dart';
+import 'typing_motion_preview.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -67,7 +76,7 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
-import 'emoji_picker.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'ime_metrics_settle_observer.dart';
 import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
@@ -85,7 +94,7 @@ import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'small_avatar.dart';
@@ -98,10 +107,10 @@ import 'timeline_message.dart';
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
+part 'channel_detail_page/hidden_history_paging.dart';
 part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
-part 'channel_detail_page/composer_activity.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
@@ -266,6 +275,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
 
   /// Uses personal assistant routing for a chat placed in Me.
   final bool personalChat;
+  final String? welcomeAgent;
   final bool placementKnown;
   final String? initialAssistant;
   final String? initialMessageId;
@@ -278,6 +288,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     super.key,
     required this.channel,
     required this.personalChat,
+    this.welcomeAgent,
     required this.placementKnown,
     this.initialAssistant,
     this.initialMessageId,
@@ -301,6 +312,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
     final messagesState = ref.watch(messagesProvider);
+    final workspace = useMeWorkspace(
+      context,
+      ref,
+      enabled: personalChat,
+      channelId: channel.id,
+    );
     final assistant = useMeChatAssistant(
       context,
       ref,
@@ -445,8 +462,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channelBotPubkeys:
           channelBotPubkeysState.asData?.value ?? const <String>{},
     );
-    // As on desktop, the user's agents working in a thread show on its root
-    // message. Me counts thread typing as its own conversation's.
+    // Flat conversations show agent work inline instead of linking to threads.
     final threadWorking = _threadWorkingAgents(
       ref,
       personalChat
@@ -456,7 +472,26 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                 channel.id,
               ).select((all) => _threadTypingKey(all, currentPubkey)),
             ),
+      additionalAgents: resolvedChannel.isDm ? agentPubkeys : const {},
     );
+    final ownedThreadTypers = {
+      for (final agents in threadWorking.values) ...agents,
+    };
+    // DM thread activity belongs on its message, not in the main typing row.
+    // Flat Solo chats and ordinary channel typing keep their existing scope.
+    final typingEntries = ref
+        .watch(
+          visibleTypingProvider(
+            channel.id,
+            selfPubkey: currentPubkey,
+            include: (e) =>
+                personalChat ||
+                e.threadHeadId == null ||
+                (!resolvedChannel.isDm &&
+                    ownedThreadTypers.contains(e.pubkey.toLowerCase())),
+          ),
+        )
+        .entries;
     useEffect(() {
       if (sessionStatus != SessionStatus.connected ||
           identitySubscriptionPubkeys.isEmpty) {
@@ -525,10 +560,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
+    // A loaded timeline stays on screen through a reconnect, as a loaded
+    // forum does. The session drops its socket five seconds into the
+    // background, so nearly every return to the app reconnects. Only a forum
+    // with no posts yet waits out this debounce for its skeleton.
     final showConnectionSkeleton = useState(false);
     final shouldDebounceConnectionSkeleton =
-        isConnectionInProgress &&
-        (resolvedChannel.isForum || messagesNotifier.hasLoadedMessages);
+        isConnectionInProgress && resolvedChannel.isForum;
     useEffect(() {
       if (!shouldDebounceConnectionSkeleton) {
         showConnectionSkeleton.value = false;
@@ -639,17 +677,23 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         ? dmHeader?.presenceLabel
         : headerMemberLabel;
 
-    final timelineMessages = resolvedChannel.isForum
-        ? <TimelineMessage>[]
-        : formatTimeline(
-            messagesState.value ?? const [],
-            currentPubkey: currentPubkey,
-          );
+    // The page also rebuilds for read state, presence, roster and layout
+    // changes. Format only when the events themselves change: the notifier
+    // publishes a new list for every event change.
+    final events = messagesState.value ?? const <NostrEvent>[];
+    final timelineMessages = useMemoized(
+      () => resolvedChannel.isForum
+          ? <TimelineMessage>[]
+          : formatTimeline(events, currentPubkey: currentPubkey),
+      [events, currentPubkey, resolvedChannel.isForum],
+    );
     final timelineEntries = buildMainTimelineEntries(
       // End events still update the original card through allMessages.
       timelineMessages
           .where(
-            (message) => !isCollapsedHuddleEnding(message, timelineMessages),
+            (message) =>
+                !isHiddenMembershipNotice(message) &&
+                !isCollapsedHuddleEnding(message, timelineMessages),
           )
           .toList(),
       flat: personalChat,
@@ -661,7 +705,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           !resolvedChannel.isForum &&
               timelineEntries.isNotEmpty &&
               !showInitialConnectionSkeleton &&
-              !showConnectionSkeleton.value &&
               !messagesState.isLoading
           ? Stack(
               children: [
@@ -711,8 +754,16 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           'offline' => context.colors.outline,
           _ => null,
         },
+        // Loaded content stays readable while it reconnects and catches up;
+        // the title capsule shows that it is not current yet.
+        nativeTitleRefreshing: resolvedChannel.isForum
+            ? isConnectionInProgress &&
+                  ref.watch(forumPostsProvider(channel.id)).value != null
+            : (isConnectionInProgress && messagesNotifier.hasLoadedMessages) ||
+                  messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
+          if (personalChat) workspace.nativeAction,
           if (personalChat)
             assistant.nativeAction
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
@@ -733,6 +784,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
+          if (personalChat) workspace.action,
           if (personalChat)
             assistant.action
           else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
@@ -780,7 +832,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         key: ValueKey('message-loading:${channel.id}'),
                         loading:
                             showInitialConnectionSkeleton ||
-                            showConnectionSkeleton.value ||
                             messagesState.isLoading,
                         shimmerEnabled:
                             sessionStatus != SessionStatus.disconnected,
@@ -820,7 +871,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           ),
                           data: (events) {
                             return _MessageList(
+                              welcomeAgent: welcomeAgent,
                               notifier: ref.watch(messagesProvider.notifier),
+                              inlineTyping:
+                                  resolvedChannel.isMember &&
+                                      !resolvedChannel.isArchived
+                                  ? typingEntries
+                                  : const [],
                               threadWorking: threadWorking,
                               stickyDateHeaderState: stickyDateHeaderState,
                               entries: timelineEntries,
@@ -889,15 +946,6 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _ComposerActivity(
-                        scope: ActivityScope(
-                          channelId: channel.id,
-                          selfPubkey: currentPubkey,
-                          allThreads: personalChat,
-                        ),
-                        channel: resolvedChannel,
-                        messages: timelineMessages,
-                      ),
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,
