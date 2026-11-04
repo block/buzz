@@ -31,5 +31,11 @@ class RelayEventRejected implements Exception {
   String toString() => 'Exception: $message';
 }
 
+/// [RelaySessionNotifier.publish] had no connection to send on, so it sent
+/// nothing.
+class RelayNotConnected extends StateError {
+  RelayNotConnected() : super('Relay session is not connected');
+}
+
 /// Recovery lifecycle for a live relay subscription.
 enum RelaySubscriptionStatus { ready, retrying }

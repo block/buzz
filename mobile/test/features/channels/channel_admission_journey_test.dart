@@ -50,6 +50,7 @@ class _AdmissionRelay extends RelaySessionNotifier {
   bool applies = true;
   bool losesAck = false;
   bool rejects = false;
+  bool disconnected = false;
   bool rosterFails = false;
   final changes = <List<List<String>>>[];
 
@@ -62,6 +63,8 @@ class _AdmissionRelay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (event.kind == 9002) {
+      // Like the real session, a disconnected one sends nothing.
+      if (disconnected) throw RelayNotConnected();
       changes.add(event.tags);
       if (rejects) throw const RelayEventRejected('restricted: not allowed');
       if (applies) {
@@ -374,6 +377,25 @@ void main() {
     );
     expect(_checkRow, findsNothing);
     expect(_defaultSwitch(tester).onChanged, isNotNull);
+
+    // So is a change made while disconnected, and it works after reconnect.
+    relay
+      ..rejects = false
+      ..disconnected = true;
+    await tester.tap(find.text('Default channel'));
+    await tester.pumpAndSettle();
+    expect(relay.changes, hasLength(4));
+    expect(
+      find.text('Couldn’t change channel access. Try again.'),
+      findsOneWidget,
+    );
+    expect(_checkRow, findsNothing);
+    relay.disconnected = false;
+    await tester.tap(find.text('Default channel'));
+    await tester.pumpAndSettle();
+    expect(relay.changes, hasLength(5));
+    expect(_checkRow, findsNothing);
+    expect(_defaultSwitch(tester).value, isTrue);
   });
 
   testWidgets('a failed community role read explains and retries in place', (

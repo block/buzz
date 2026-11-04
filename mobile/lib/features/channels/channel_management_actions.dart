@@ -287,7 +287,7 @@ class ChannelActions {
       throw const ChannelChangeUnconfirmed();
     }
     _ensureCommunityValid();
-    var sent = false;
+    var signed = false;
     try {
       await _signedEventRelay.submit(
         kind: 9002,
@@ -298,15 +298,19 @@ class ChannelActions {
         ],
         // From here the relay may apply the change even if its answer is lost.
         onSigned: (_) {
-          sent = true;
+          signed = true;
           uncertain.hold(tag);
         },
       );
     } on RelayEventRejected {
       uncertain.clear();
       rethrow;
+    } on RelayNotConnected {
+      // Nothing was sent, so nothing can have been applied.
+      uncertain.clear();
+      rethrow;
     } catch (_) {
-      if (!sent) rethrow;
+      if (!signed) rethrow;
       _ref.invalidate(channelAdmissionProvider(channelId));
       throw const ChannelChangeUnconfirmed();
     }
