@@ -1,12 +1,18 @@
 import 'package:flutter/gestures.dart';
+
 import 'community_link_focus.dart';
 import '../../shared/widgets/ios_community_link_input.dart';
+
 import 'package:flutter/material.dart';
+
 import '../../shared/widgets/onboarding_route.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/deeplink/community_link_input.dart';
+import '../../shared/hosted/hosted_community_creation.dart';
+import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
 
@@ -28,6 +34,8 @@ class AddCommunityPage extends StatelessWidget {
     this.onFindCommunities,
     this.onCreateCommunity,
     this.enteringCommunityLink = false,
+    this.creatingCommunity = false,
+    this.onSubmitCommunity,
     this.existingUser = false,
     this.scannerProgress = 0,
     this.busy = false,
@@ -47,6 +55,8 @@ class AddCommunityPage extends StatelessWidget {
   final VoidCallback? onFindCommunities;
   final VoidCallback? onCreateCommunity;
   final bool enteringCommunityLink;
+  final bool creatingCommunity;
+  final ValueChanged<String>? onSubmitCommunity;
   final bool existingUser;
   final double scannerProgress;
   final bool busy;
@@ -57,7 +67,7 @@ class AddCommunityPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final step = enteringCommunityLink
+    final step = enteringCommunityLink || creatingCommunity
         ? 'link'
         : existingUser
         ? 'pair'
@@ -66,6 +76,8 @@ class AddCommunityPage extends StatelessWidget {
         ? _AddCommunityConnection(
             key: const ValueKey('add-community-connection'),
             enteringLink: enteringCommunityLink,
+            creatingCommunity: creatingCommunity,
+            onSubmitCommunity: onSubmitCommunity,
             onboarding: onboarding,
             onFindCommunities: onFindCommunities,
             onCreateCommunity: onCreateCommunity,
