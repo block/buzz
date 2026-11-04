@@ -30,7 +30,9 @@ The legacy desktop reads public NIP-11 metadata before each WebSocket connection
 Only `requires_nip_fi: true` shows the upgrade card. Missing/false requirements
 keep the existing connection flow. Discovery failures retain an unknown-policy
 state and continue the existing socket/authentication path; the relay enforces
-admission. Only explicit required policy opens the upgrade modal. Switching
+admission. Query/fragment URLs keep their existing socket behavior; the native
+discovery reader rejects them before making an HTTP request. Credentials never
+reach a fallback dial. Only explicit required policy opens the upgrade modal. Switching
 communities invalidates pending checks. The card does not
 reset keys or remove saved communities.
 

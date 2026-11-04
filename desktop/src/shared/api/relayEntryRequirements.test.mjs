@@ -136,6 +136,24 @@ test("failed discovery preserves authenticated legacy reconnect and required-hos
     assert.equal(client.terminal, true);
     authAccepted = true;
     client.disconnect();
+    // Preserve legacy socket URLs without sending query/fragment data to HTTP discovery.
+    for (const legacyUrl of [
+      "wss://a.example/?route=free",
+      "wss://a.example/#view",
+    ]) {
+      relay = legacyUrl;
+      policy = new Error("Community discovery rejects query or fragment");
+      await client.preconnect();
+      assert.equal(client.getConnectionState(), "connected");
+      assert.equal(client.entryRequirements.getSnapshot().verdict, "error");
+      assert.equal(
+        calls
+          .filter(([command]) => command === "plugin:websocket|connect")
+          .at(-1)[1].url,
+        legacyUrl,
+      );
+      client.disconnect();
+    }
     // Invalid addresses cannot use discovery fallback to send credentials.
     const beforeInvalid = dials;
     relay = "wss://user:secret@a.example/";

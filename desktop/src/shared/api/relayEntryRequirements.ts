@@ -51,13 +51,9 @@ export class RelayEntryRequirements {
     if (
       !["ws:", "wss:"].includes(address.protocol) ||
       address.username ||
-      address.password ||
-      address.search ||
-      address.hash
+      address.password
     ) {
-      throw new Error(
-        "Community URL must use ws or wss without credentials, query or fragment",
-      );
+      throw new Error("Community URL must use ws or wss without credentials");
     }
     if (!isCurrent())
       throw new Error("Relay connection attempt was superseded.");
