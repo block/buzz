@@ -81,7 +81,30 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     var metadata: [BuzzNotificationMetadata] = []
     var avatars: [BuzzNotificationAvatar] = []
     var avatarRequests: [String: String]?
+    /// Messages already shown in a notification, newest first. Optional so stores
+    /// written before it existed still decode.
+    var presented: [PresentedMessage]?
   }
+
+  private struct PresentedMessage: Codable {
+    let id: String
+    /// The event's own `created_at`. Retention follows it, so an entry stays while the
+    /// relay still ranks the event among the newest results.
+    let createdAt: Int
+    /// `createdAt` capped at the time it was shown, so a future-dated event can't hold
+    /// back later messages.
+    let watermark: Int
+  }
+
+  /// How far before the newest shown message a message may be and still be shown.
+  /// Pushes can resolve out of order, and the relay accepts a `created_at` up to 15
+  /// minutes off (`MAX_TIMESTAMP_DRIFT_SECS` in the relay's ingest handler), so a new
+  /// message can carry an earlier time than one already shown. Anything older is
+  /// history, not the message a push is for.
+  public static let presentationReorderWindow = 15 * 60
+  /// Retention keeps up to this many entries by `watermark` and as many by `createdAt`,
+  /// so neither future-dated entries nor a burst of recent ones can evict the other.
+  static let maximumPresentedMessages = 256
 
   public init(
     directory: URL,
@@ -253,6 +276,61 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     }
   }
 
+  /// Claims the first of `candidates`, newest first, that hasn't been shown and isn't
+  /// older than the newest message shown in any of `scopes` by more than
+  /// ``presentationReorderWindow``, and returns its index. A push carries no event
+  /// reference, so without this every push whose own event isn't the newest match would
+  /// repeat the same message. One lock covers the whole selection, so concurrent pushes
+  /// can't claim against a stale view, and only a claim writes. A revoked scope is
+  /// skipped. Broken storage must not hide messages, so a candidate whose store can't
+  /// be read or written is returned without being recorded.
+  public func claimFirstUnpresented(
+    _ candidates: [(event: VerifiedNostrEvent, scope: BuzzNotificationCacheScope)],
+    scopes: [BuzzNotificationCacheScope]
+  ) throws -> Int? {
+    try locked {
+      var shown: [String: Result<[PresentedMessage], Error>] = [:]
+      func presented(_ scope: BuzzNotificationCacheScope) -> Result<[PresentedMessage], Error> {
+        if let cached = shown[scope.directoryName] { return cached }
+        let result = Result { try unlockedAccess(scope) { $0.presented ?? [] } }
+        shown[scope.directoryName] = result
+        return result
+      }
+      let newestShown = (scopes + candidates.map(\.scope))
+        .compactMap { try? presented($0).get().map(\.watermark).max() }.max()
+      let now = Int(now().timeIntervalSince1970)
+      for (index, candidate) in candidates.enumerated() {
+        let watermark = min(candidate.event.createdAt, now)
+        switch presented(candidate.scope) {
+        case .failure(BuzzNotificationCacheError.revoked):
+          continue
+        case .failure(let error):
+          NSLog("Notification dedupe unavailable: %@", String(describing: error))
+          return index
+        case .success(let entries):
+          guard !entries.contains(where: { $0.id == candidate.event.id }) else { continue }
+          if let newestShown, watermark < newestShown - Self.presentationReorderWindow {
+            continue
+          }
+        }
+        do {
+          try unlockedAccess(candidate.scope, write: true) { state in
+            state.presented =
+              [PresentedMessage(
+                id: candidate.event.id, createdAt: candidate.event.createdAt,
+                watermark: watermark)] + (state.presented ?? [])
+          }
+        } catch BuzzNotificationCacheError.revoked {
+          continue
+        } catch {
+          NSLog("Notification dedupe not recorded: %@", String(describing: error))
+        }
+        return index
+      }
+      return nil
+    }
+  }
+
   /// Deletes abandoned sign-ins on the extension's next execution.
   public func removeRevokedScopes(keeping scopes: [BuzzNotificationCacheScope]) throws {
     try locked {
@@ -291,53 +369,74 @@ public final class BuzzNotificationCache: @unchecked Sendable {
     _ scope: BuzzNotificationCacheScope, write: Bool = false,
     _ operation: (inout State) throws -> T
   ) throws -> T {
-    try locked {
-      guard isCurrent(scope) else { throw BuzzNotificationCacheError.revoked }
-      let directory = root.appendingPathComponent(scope.directoryName, isDirectory: true)
-      let file = directory.appendingPathComponent("metadata.json")
-      var state = State()
-      if FileManager.default.fileExists(atPath: file.path) {
-        let attributes = try file.resourceValues(forKeys: [.fileSizeKey])
-        guard let size = attributes.fileSize, size <= Self.maximumBytes else {
-          try FileManager.default.removeItem(at: file)
-          throw BuzzNotificationCacheError.corruptStore
-        }
-        do {
-          state = try JSONDecoder().decode(State.self, from: Data(contentsOf: file))
-        } catch {
-          try FileManager.default.removeItem(at: file)
-          throw BuzzNotificationCacheError.corruptStore
-        }
-        guard state.version == 1 else {
-          try FileManager.default.removeItem(at: file)
-          throw BuzzNotificationCacheError.corruptStore
-        }
+    try locked { try unlockedAccess(scope, write: write, operation) }
+  }
+
+  /// ``access(_:write:_:)`` for a caller that already holds the lock.
+  private func unlockedAccess<T>(
+    _ scope: BuzzNotificationCacheScope, write: Bool = false,
+    _ operation: (inout State) throws -> T
+  ) throws -> T {
+    guard isCurrent(scope) else { throw BuzzNotificationCacheError.revoked }
+    let directory = root.appendingPathComponent(scope.directoryName, isDirectory: true)
+    let file = directory.appendingPathComponent("metadata.json")
+    var state = State()
+    if FileManager.default.fileExists(atPath: file.path) {
+      let attributes = try file.resourceValues(forKeys: [.fileSizeKey])
+      guard let size = attributes.fileSize, size <= Self.maximumBytes else {
+        try FileManager.default.removeItem(at: file)
+        throw BuzzNotificationCacheError.corruptStore
       }
-      let result = try operation(&state)
-      guard isCurrent(scope) else { throw BuzzNotificationCacheError.revoked }
-      if write {
-        state.metadata = Array(state.metadata.sorted { $0.checkedAt > $1.checkedAt }.prefix(512))
-        state.avatars = Array(state.avatars.sorted { $0.savedAt > $1.savedAt }.prefix(128))
-        let profileAuthors = Set(
-          state.metadata.filter { $0.event.kind == 0 }.map { $0.event.pubkey })
-        state.avatarRequests = state.avatarRequests?.filter { profileAuthors.contains($0.key) }
-        let encoder = JSONEncoder()
-        var data = try encoder.encode(state)
-        while data.count > Self.maximumBytes {
-          if !state.avatars.isEmpty {
-            state.avatars.removeLast()
-          } else if !state.metadata.isEmpty {
-            state.metadata.removeLast()
-          } else {
-            throw BuzzNotificationCacheError.oversizedRecord
-          }
-          data = try encoder.encode(state)
-        }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try data.write(to: file, options: .atomic)
+      do {
+        state = try JSONDecoder().decode(State.self, from: Data(contentsOf: file))
+      } catch {
+        try FileManager.default.removeItem(at: file)
+        throw BuzzNotificationCacheError.corruptStore
       }
-      return result
+      guard state.version == 1 else {
+        try FileManager.default.removeItem(at: file)
+        throw BuzzNotificationCacheError.corruptStore
+      }
     }
+    let result = try operation(&state)
+    guard isCurrent(scope) else { throw BuzzNotificationCacheError.revoked }
+    if write {
+      state.metadata = Array(state.metadata.sorted { $0.checkedAt > $1.checkedAt }.prefix(512))
+      state.avatars = Array(state.avatars.sorted { $0.savedAt > $1.savedAt }.prefix(128))
+      let profileAuthors = Set(
+        state.metadata.filter { $0.event.kind == 0 }.map { $0.event.pubkey })
+      state.avatarRequests = state.avatarRequests?.filter { profileAuthors.contains($0.key) }
+      if let presented = state.presented, let newest = presented.map(\.watermark).max() {
+        // The age check rejects anything older than the window, so those entries can
+        // go. A future-dated entry stays while the relay may still rank it first.
+        let cutoff = newest - Self.presentationReorderWindow
+        // Entries are newest claim first, so ties keep the most recent claims.
+        let current = Array(presented.filter { $0.createdAt >= cutoff }.enumerated())
+        func newestIDs(by key: (PresentedMessage) -> Int) -> [String] {
+          current.sorted {
+            key($0.element) == key($1.element)
+              ? $0.offset < $1.offset : key($0.element) > key($1.element)
+          }.prefix(Self.maximumPresentedMessages).map(\.element.id)
+        }
+        let retained = Set(newestIDs(by: \.watermark)).union(newestIDs(by: \.createdAt))
+        state.presented = current.map(\.element).filter { retained.contains($0.id) }
+      }
+      let encoder = JSONEncoder()
+      var data = try encoder.encode(state)
+      while data.count > Self.maximumBytes {
+        if !state.avatars.isEmpty {
+          state.avatars.removeLast()
+        } else if !state.metadata.isEmpty {
+          state.metadata.removeLast()
+        } else {
+          throw BuzzNotificationCacheError.oversizedRecord
+        }
+        data = try encoder.encode(state)
+      }
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try data.write(to: file, options: .atomic)
+    }
+    return result
   }
 
   private func locked<T>(_ operation: () throws -> T) throws -> T {

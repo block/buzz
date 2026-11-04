@@ -80,10 +80,8 @@ String trimIdentityName(String value) {
   return value.substring(start, end);
 }
 
-final RegExp _hexKey = RegExp(r'^[0-9a-fA-F]{64}$');
-
 void _requireKey(String key, String name) {
-  if (!_hexKey.hasMatch(key)) {
+  if (!isHexPubkey(key)) {
     throw ArgumentError.value(key, name, 'not a 64-character hex public key');
   }
 }

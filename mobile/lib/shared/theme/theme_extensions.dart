@@ -12,6 +12,11 @@ extension AppThemeExtension on BuildContext {
   ThemeData get theme => Theme.of(this);
   ColorScheme get colors => theme.colorScheme;
   Color get controlSurface => neutralControlSurface(theme.brightness);
+
+  /// Design-system text-tertiary (neutral-9), for quiet author labels.
+  Color get tertiaryTextColor => theme.brightness == Brightness.dark
+      ? const Color(0xFFA6A6A6)
+      : const Color(0xFF8D8D8D);
   TextTheme get textTheme => theme.textTheme;
 
   AppColors get appColors {

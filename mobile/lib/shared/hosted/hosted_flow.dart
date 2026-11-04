@@ -1005,6 +1005,21 @@ class HostedFlow extends ChangeNotifier {
     addingCommunityName = null;
   }
 
+  /// Ends the account session without removing saved identities or communities.
+  Future<void> signOutAccount() async {
+    await leave();
+    final generation = _generation;
+    if (_disposed || stage != HostedFlowStage.idle) return;
+    accountOnly = true;
+    _set(HostedFlowStage.working);
+    await _enqueue(() async {
+      await account.clearLocalSession();
+      if (_disposed || generation != _generation) return;
+      accountOnly = false;
+      _set(HostedFlowStage.idle);
+    });
+  }
+
   Future<void> leave({bool noCommunities = false}) async {
     _nextGeneration();
     final generation = _generation;

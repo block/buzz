@@ -22,6 +22,8 @@ class _Fixture {
   bool scaleEmoji = false;
   bool mentionHandler = true;
   bool mediaHandlers = false;
+  bool bubble = false;
+  bool ownMessage = false;
   int? tappedRevision;
   String? tappedId;
 
@@ -40,6 +42,8 @@ class _Fixture {
               agentMentionPubkeys: Set.of(agents),
               tags: tags,
               scaleEmojiOnly: scaleEmoji,
+              bubble: bubble,
+              ownMessage: ownMessage,
               onMediaReply: mediaHandlers
                   ? () {
                       tappedRevision = generation;
@@ -79,7 +83,57 @@ List<MarkdownComponent> _components(WidgetTester tester) => tester
     .widget<GptMarkdown>(find.byType(GptMarkdown).first)
     .inlineComponents!;
 
+GptMarkdownThemeData _bubbleTheme(WidgetTester tester) => tester
+    .widget<GptMarkdownTheme>(
+      find
+          .ancestor(
+            of: find.byType(GptMarkdown).first,
+            matching: find.byType(GptMarkdownTheme),
+          )
+          .first,
+    )
+    .gptThemeData;
+
+InlineSpan _renderedText(WidgetTester tester) => tester
+    .widget<RichText>(
+      find
+          .descendant(
+            of: find.byType(GptMarkdown).first,
+            matching: find.byType(RichText),
+          )
+          .first,
+    )
+    .text;
+
 void main() {
+  for (final own in [false, true]) {
+    testWidgets(
+      'a bubble rebuild with unchanged inputs keeps its parsed markdown '
+      '(own: $own)',
+      (tester) async {
+        final fixture = _Fixture()
+          ..bubble = true
+          ..ownMessage = own
+          ..content = '# Title\n\nHello `code` and #sample';
+        addTearDown(fixture.revision.dispose);
+        await tester.pumpWidget(fixture.build());
+        final theme = _bubbleTheme(tester);
+        final text = _renderedText(tester);
+        for (var i = 0; i < 3; i++) {
+          await fixture.refresh(tester);
+          // A new theme object would notify every GptMarkdown below it, and
+          // each one would parse its text again.
+          expect(_bubbleTheme(tester), same(theme));
+          expect(_renderedText(tester), same(text));
+        }
+        fixture.ownMessage = !own;
+        await fixture.refresh(tester);
+        expect(_bubbleTheme(tester), isNot(same(theme)));
+        expect(_bubbleTheme(tester).linkColor, isNot(theme.linkColor));
+      },
+    );
+  }
+
   testWidgets('explicit channel links retain the current callback', (
     tester,
   ) async {

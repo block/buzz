@@ -61,7 +61,7 @@ class _Batch {
 /// Records survive disconnects as `checked: false` (cached) and are only
 /// reconciled by a completed subscription on the current connection.
 class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
-  final Map<String, int> _wanted = {};
+  late final Map<String, int> _wanted = newInterestMap();
   final Map<String, NostrEvent> _heads = {};
   final Set<String> _checked = {};
   final Map<String, _Batch> _batches = {};
@@ -75,6 +75,11 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   int _interest = 0;
   (String, String?)? _scope;
   Timer? _refreshTimer;
+
+  /// The interest map, insertion-ordered by interest. Tests override this to
+  /// count how many entries eviction visits.
+  @visibleForTesting
+  Map<String, int> newInterestMap() => {};
 
   @override
   Map<String, VerifiedProfile> build() {
@@ -128,13 +133,18 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       added |= !_wanted.containsKey(key);
       _wanted[key] ??= ++_interest;
     }
-    while (_wanted.length > _wantedLimit) {
-      final oldest = _wanted.entries.reduce(
-        (a, b) => a.value < b.value ? a : b,
-      );
-      _wanted.remove(oldest.key);
-      _heads.remove(oldest.key);
-      _checked.remove(oldest.key);
+    // A key's interest is set once, when it is inserted, so the map's
+    // insertion order is interest order and the oldest keys come first. Take
+    // them in one pass: a scan per eviction made one 4,000-member roster take
+    // ~300 ms on device, and even `keys.first` per eviction is quadratic,
+    // because each new iterator skips the slots earlier removals left behind.
+    final overflow = _wanted.length - _wantedLimit;
+    if (overflow > 0) {
+      for (final oldest in _wanted.keys.take(overflow).toList()) {
+        _wanted.remove(oldest);
+        _heads.remove(oldest);
+        _checked.remove(oldest);
+      }
       added = true;
     }
     if (!added) return;

@@ -293,6 +293,48 @@ run_unit_tests() {
       handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions \
       handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds
 
+  # Access log line tests, mirroring `just test-unit`'s module filters.
+  run_test_step "buzz-relay access log tests" \
+    cargo test -p buzz-relay --lib access::tests:: -- --nocapture
+
+  run_test_step "buzz-relay git access log tests" \
+    cargo test -p buzz-relay --lib api::git::transport::access_log_tests:: -- --nocapture
+
+  # Infra-free tests the access-logging change added or edited, by exact
+  # name: their modules otherwise need a database.
+  run_test_step "buzz-relay access logging infra-free tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      handlers::req::tests::unqueued_eose_logs_aborted_not_served \
+      api::bridge::postgres_tests::reject_code_keeps_only_a_known_prefix \
+      api::bridge::postgres_tests::nip98_replay_check_fails_closed_when_guard_errors \
+      api::bridge::postgres_tests::verify_bridge_auth_rejects_nip98_event_signed_for_wrong_communitys_host \
+      api::bridge::postgres_tests::verify_bridge_auth_can_require_payload_tag_for_json_body_endpoints \
+      api::bridge::postgres_tests::verify_bridge_auth_accepts_nip98_event_signed_for_matching_host \
+      api::bridge::postgres_tests::moderation_read_query_bearing_nip98_event_verifies_with_matching_query \
+      api::bridge::postgres_tests::moderation_read_query_bearing_nip98_event_rejected_against_bare_path \
+      api::bridge::postgres_tests::moderation_read_audit_query_bearing_nip98_event_verifies \
+      api::bridge::postgres_tests::moderation_read_restricted_no_query_still_verifies \
+      connection::tests::aborting_lifecycle_owner_is_drop_safe \
+      connection::tests::shutdown_terminalizes_auth_stalled_on_database_before_late_success \
+      connection::terminal_close_delivery_tests::upgrade_would_deny_line_without_auth_logs_absent_at_close \
+      handlers::event::tests::observer_owner_cache_is_scoped_to_community \
+      state::tests::shared_counter_between_direct_and_fanout \
+      api::bridge::postgres_tests::nip98_replay_check_logs_only_its_refusal \
+      api::bridge::postgres_tests::warn_only_artifact_read_lines_keep_the_filter_summary \
+      connection::tests::close_totals_count_a_batch_flushed_by_the_drain_after_cancellation \
+      connection::tests::close_totals_count_frames_the_writer_flushed \
+      connection::tests::close_totals_skip_a_frame_the_socket_rejects \
+      connection::tests::close_totals_skip_frames_stranded_by_a_failed_flush \
+      connection::tests::dispatcher_counts_each_req_and_count_frame_once \
+      connection::tests::read_before_login_logs_one_denial_from_the_handler \
+      connection::tests::read_refused_by_a_full_handler_semaphore_logs_one_denial \
+      connection::tests::read_refused_by_unavailable_admission_logs_one_denial \
+      handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial \
+      nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line \
+      api::bridge::moderation_refusal_tests::moderation_lookup_failure_is_unavailable \
+      api::admin::auth::tests::admin_role_refusal_logs_denied \
+      api::admin::auth::tests::admin_duplicate_authorization_logs_duplicate
+
   # Infra-free bridge search extension parser tests, by exact name: the rest of
   # api::bridge::postgres_tests needs a database.
   run_test_step "buzz-relay bridge search extension tests" \
@@ -333,6 +375,13 @@ run_unit_tests() {
   run_test_step "buzz-relay community close suppresses losing denial frame test" \
     cargo test -p buzz-relay --lib state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame -- --exact --nocapture
 
+  run_test_step "buzz-relay read cache tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      state::tests::admitted_index_follows_every_key_change \
+      state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
+      tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
+      state::tests::disconnect_drops_the_cached_restriction_row
+
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
@@ -369,6 +418,9 @@ run_unit_tests() {
   local nip_fi_exact_tests=(
     audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative
     connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge
+    connection::tests::startup_cancellation_writes_one_close_line
+    connection::tests::connection_limit_refusal_writes_one_close_line
+    connection::tests::dropped_authenticated_handler_writes_one_close_line
     audio::room::tests::b1_pending_peer_removed_before_commit_emits_no_delta
     audio::room::tests::b2_commit_peer_emits_exactly_one_joined_delta_and_marks_visible
     audio::room::tests::b3_commit_peer_revision_is_monotone_between_concurrent_events
@@ -422,6 +474,7 @@ run_unit_tests() {
     state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket
     state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket
     state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason
+    state::tests::enforce_end_is_recorded_only_by_the_winning_terminal
     state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame
     state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels
   )

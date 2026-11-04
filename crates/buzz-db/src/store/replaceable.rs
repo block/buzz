@@ -278,11 +278,15 @@ async fn replace_parameterized_event_in_transaction_impl(
                     .await?;
             }
             let statement = if hard_delete_superseded {
-                "DELETE FROM events \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                superseded_with_mentions_sql!(
+                    "DELETE FROM events \
+                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                )
             } else {
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                superseded_with_mentions_sql!(
+                    "UPDATE events SET deleted_at = NOW() \
+                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+                )
             };
             sqlx::query(statement)
                 .bind(community_id.as_uuid())
@@ -298,16 +302,6 @@ async fn replace_parameterized_event_in_transaction_impl(
                     .bind(previous_value)
                     .execute(tx.conn())
                     .await?;
-            }
-
-            if hard_delete_superseded {
-                if let Some((_, existing_id)) = &existing {
-                    sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
-                        .bind(community_id.as_uuid())
-                        .bind(existing_id)
-                        .execute(tx.conn())
-                        .await?;
-                }
             }
         }
 
@@ -494,12 +488,12 @@ impl Db {
                 .await?;
 
                 // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
-                sqlx::query(
+                sqlx::query(superseded_with_mentions_sql!(
                     "UPDATE events SET deleted_at = NOW() \
                      WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
                      AND channel_id IS NOT DISTINCT FROM $4 \
-                     AND deleted_at IS NULL",
-                )
+                     AND deleted_at IS NULL"
+                ))
                 .bind(community_id.as_uuid())
                 .bind(kind_i32)
                 .bind(pubkey_bytes.as_slice())
@@ -782,6 +776,197 @@ mod postgres_tests {
                 .await
                 .expect("count rolled-back event");
         assert_eq!(new_rows, 0, "new roster must roll back with its index");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn superseded_heads_drop_their_mention_rows() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "superseded_mentions").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        // The signer must differ from every p-tagged key: the builder drops
+        // self-references.
+        let keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let owner = owner_keys.public_key().to_hex();
+        let mentioned: Vec<String> = (0..3)
+            .map(|_| Keys::generate().public_key().to_hex())
+            .collect();
+        let mention_rows = |event: &nostr::Event| {
+            let id = event.id.as_bytes().to_vec();
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+                )
+                .bind(community_uuid)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("count mention rows")
+            }
+        };
+        let base = Timestamp::now().as_secs();
+
+        // Every supersede path retires the old head with a soft delete, except
+        // NIP-RS read state and mesh status, which the NIP-33 path hard-deletes.
+        // The relay roster writer is the production kind:39002 path; its p tags
+        // must match the channel's members. The relay-signed kind:13535 list
+        // goes through the addressable path.
+        enum Path {
+            MemberSnapshot,
+            Addressable,
+            Parameterized,
+        }
+        let roster_p = vec![vec![owner.as_str(), "", "owner"]];
+        let people_p =
+            || -> Vec<Vec<&str>> { mentioned.iter().map(|pk| vec![pk.as_str()]).collect() };
+        let relay_pubkey = keys.public_key().to_bytes();
+        for (case, path, kind, d_tag, extra_tags, p_tags, hard_delete) in [
+            (
+                "member snapshot",
+                Path::MemberSnapshot,
+                39002_u16,
+                Some(channel.to_string()),
+                vec![],
+                roster_p,
+                false,
+            ),
+            (
+                "addressable",
+                Path::Addressable,
+                13535_u16,
+                None,
+                vec![],
+                people_p(),
+                false,
+            ),
+            (
+                "parameterized",
+                Path::Parameterized,
+                30000_u16,
+                Some("people".to_owned()),
+                vec![],
+                people_p(),
+                false,
+            ),
+            (
+                "NIP-RS read state",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("read-state:{}", "a".repeat(32))),
+                vec![["t", "read-state"]],
+                people_p(),
+                true,
+            ),
+            (
+                "mesh status",
+                Path::Parameterized,
+                buzz_core::kind::KIND_BOOKMARK_SET as u16,
+                Some("buzz-mesh-member-status:owner-test".to_owned()),
+                vec![["k", "buzz-mesh-status"]],
+                people_p(),
+                true,
+            ),
+        ] {
+            let indexed = p_tags.len() as i64;
+            let version = |offset: u64, content: &str| {
+                let mut tags: Vec<Tag> = d_tag
+                    .iter()
+                    .map(|d| Tag::parse(["d", d.as_str()]).expect("d tag"))
+                    .collect();
+                tags.extend(
+                    extra_tags
+                        .iter()
+                        .map(|t| Tag::parse(*t).expect("extra tag")),
+                );
+                tags.extend(p_tags.iter().map(|p| {
+                    let mut parts = vec!["p"];
+                    parts.extend(p.iter().copied());
+                    Tag::parse(parts).expect("p tag")
+                }));
+                EventBuilder::new(Kind::Custom(kind), content)
+                    .tags(tags)
+                    .custom_created_at(Timestamp::from(base + offset))
+                    .sign_with_keys(&keys)
+                    .expect("sign version")
+            };
+            let replace = |event: nostr::Event| {
+                let db = &db;
+                let d_tag = d_tag.clone();
+                let path = &path;
+                async move {
+                    let inserted = match path {
+                        Path::MemberSnapshot => {
+                            let mut snapshot = db
+                                .lock_member_snapshot(community, channel, &relay_pubkey)
+                                .await
+                                .expect("lock member snapshot");
+                            let inserted = snapshot
+                                .replace_member_event(&event)
+                                .await
+                                .expect("replace roster")
+                                .1;
+                            snapshot.release().await.expect("commit roster");
+                            inserted
+                        }
+                        Path::Addressable => {
+                            db.replace_addressable_event(community, &event, None)
+                                .await
+                                .expect("replace addressable")
+                                .1
+                        }
+                        Path::Parameterized => {
+                            let d_tag = d_tag.expect("parameterized d tag");
+                            db.replace_parameterized_event(community, &event, &d_tag, None)
+                                .await
+                                .expect("replace parameterized")
+                                .1
+                        }
+                    };
+                    assert!(inserted, "{case}: newer version must be inserted");
+                }
+            };
+
+            let old = version(0, "old");
+            replace(old.clone()).await;
+            assert_eq!(mention_rows(&old).await, indexed, "{case}: head is indexed");
+
+            let new = version(1, "new");
+            replace(new.clone()).await;
+            assert_eq!(
+                mention_rows(&old).await,
+                0,
+                "{case}: retired head keeps no mention rows"
+            );
+            assert_eq!(
+                mention_rows(&new).await,
+                indexed,
+                "{case}: new head is indexed"
+            );
+            let retired: Option<bool> = sqlx::query_scalar(
+                "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(old.id.as_bytes().as_slice())
+            .fetch_optional(&pool)
+            .await
+            .expect("read retired head");
+            if hard_delete {
+                assert_eq!(retired, None, "{case}: the old head is removed");
+            } else {
+                assert_eq!(
+                    retired,
+                    Some(true),
+                    "{case}: the old head is soft-deleted, not removed"
+                );
+            }
+        }
     }
 
     #[tokio::test]

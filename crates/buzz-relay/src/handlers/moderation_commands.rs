@@ -115,8 +115,9 @@ pub async fn handle_moderation_command(
                 ))),
             )
         })?;
-    ensure_actor_not_banned(&restriction)
-        .map_err(|e| IngestError::ban(BanRefusal::Banned, IngestError::Rejected(e)))?;
+    ensure_actor_not_banned(&restriction).map_err(|e| {
+        IngestError::ban(BanRefusal::banned(&restriction), IngestError::Rejected(e))
+    })?;
     execute_moderation_command(tenant, state, event, &actor)
         .await
         .map_err(IngestError::Rejected)
@@ -199,7 +200,6 @@ async fn handle_ban(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
-    state.invalidate_restriction_cache(tenant.community(), &target);
 
     // Live enforcement: close open sessions for the banned principal now —
     // this pod's sockets synchronously (fenced to this community) and every
@@ -634,6 +634,7 @@ mod tests {
     fn banned_admin_cannot_reach_an_unban_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
@@ -645,6 +646,7 @@ mod tests {
         // ban, so an authorized moderator can still lift it.
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(Utc::now() + Duration::minutes(5)),
         };
         assert!(ensure_actor_not_banned(&timed_out).is_ok());

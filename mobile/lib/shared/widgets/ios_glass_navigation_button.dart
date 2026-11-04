@@ -13,6 +13,7 @@ import '../theme/theme.dart';
 enum IosGlassNavigationIcon {
   back,
   close,
+  check,
   camera,
   photoLibrary,
   palette,
@@ -251,6 +252,7 @@ class IosGlassNavigationButton extends HookWidget {
                               IosGlassNavigationIcon.back =>
                                 BuzzIcons.chevronLeft,
                               IosGlassNavigationIcon.close => BuzzIcons.x,
+                              IosGlassNavigationIcon.check => BuzzIcons.check,
                               IosGlassNavigationIcon.camera => BuzzIcons.camera,
                               IosGlassNavigationIcon.photoLibrary =>
                                 BuzzIcons.images,

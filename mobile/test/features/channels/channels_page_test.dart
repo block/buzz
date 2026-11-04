@@ -1,4 +1,8 @@
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/hosted/browser_auth.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 
@@ -68,6 +72,7 @@ import 'package:buzz/shared/widgets/skeleton.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/native_creation_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
 part 'channels_page_test/home_community_flight.dart';
@@ -75,10 +80,12 @@ part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
   setUpAll(() async {
-    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS')) {
+    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS') ||
+        Platform.environment.containsKey('CREATE_SHEET_SCREENSHOTS')) {
       for (final font in {
         'Inter': 'assets/fonts/InterVariable.ttf',
         'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
+        'MaterialIcons': 'fonts/MaterialIcons-Regular.otf',
       }.entries) {
         await (FontLoader(
           font.key,
@@ -2553,6 +2560,173 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('organization sign-in is reachable before content loads', (
+    tester,
+  ) async {
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+    final notifier = _FakeCommunityListNotifier(communities);
+    final pending = Completer<List<Channel>>();
+    final account = BuilderlabAccountClient();
+    final signIn = OrganizationSignIn(
+      account: account,
+      browser: BrowserAuth(),
+      reconnect: () async {},
+    )..status = OrganizationSessionStatus.signedOut;
+    final auth = HostedRelayAuth(
+      BuilderlabAccountClient(),
+      organization: account,
+      organizationRelay: (uri) => uri.host == 'bravo.example.com',
+    );
+    addTearDown(() {
+      signIn.dispose();
+      auth.dispose();
+      account.dispose();
+    });
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          organizationSignInProvider.overrideWithValue(signIn),
+          hostedRelayAuthProvider.overrideWithValue(auth),
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              testChannels,
+              load: () => notifier.activeId == 'alpha'
+                  ? Future.value(testChannels)
+                  : pending.future,
+            ),
+          ),
+          communityListProvider.overrideWith(() => notifier),
+          activeCommunityProvider.overrideWith((ref) async {
+            await ref.watch(communityListProvider.future);
+            return communities.firstWhere(
+              (community) => community.id == notifier.activeId,
+            );
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+    expect(notifier.switchedIds, ['bravo']);
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(find.textContaining('taking longer to load'), findsNothing);
+    pending.complete(testChannels);
+  });
+
+  testWidgets(
+    'a refused organization key closes the switcher before content loads',
+    (tester) async {
+      final communities = [
+        Community(
+          id: 'alpha',
+          name: 'Alpha',
+          relayUrl: 'wss://alpha.example.com',
+          addedAt: DateTime(2025),
+        ),
+        Community(
+          id: 'bravo',
+          name: 'Bravo',
+          relayUrl: 'wss://bravo.example.com',
+          addedAt: DateTime(2025),
+        ),
+      ];
+      final notifier = _FakeCommunityListNotifier(communities);
+      final pending = Completer<List<Channel>>();
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedIn;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (uri) => uri.host == 'bravo.example.com',
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            organizationSignInProvider.overrideWithValue(signIn),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                testChannels,
+                load: () => notifier.activeId == 'alpha'
+                    ? Future.value(testChannels)
+                    : pending.future,
+              ),
+            ),
+            communityListProvider.overrideWith(() => notifier),
+            activeCommunityProvider.overrideWith((ref) async {
+              await ref.watch(communityListProvider.future);
+              return communities.firstWhere(
+                (community) => community.id == notifier.activeId,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-menu-switch')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(notifier.switchedIds, ['bravo']);
+      // Signed in with no refusal yet: keep waiting for content.
+      expect(find.byKey(const Key('community-switcher-page')), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byKey(const Key('community-switcher-page'))),
+      );
+      auth.rejected(
+        container.read(relayConfigProvider),
+        'Bearer refused',
+        terminal: true,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+      expect(find.textContaining('taking longer to load'), findsNothing);
+      pending.complete(testChannels);
+    },
+  );
+
   for (final timeout in [false, true]) {
     testWidgets(
       'community loading failure can retry the active selection (timeout: $timeout)',
@@ -2756,13 +2930,181 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('create channel sheet lists type and visibility radio options', (
+  registerNativeCreationTests(
+    (overrides) => buildTestable(overrides: overrides),
+  );
+
+  testWidgets(
+    'create channel sheet uses checked menus and a validated header action',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final actions = _CreateSheetActions();
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            channelActionsProvider.overrideWith((ref) => actions),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New channel'));
+      await tester.pumpAndSettle();
+      final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
+      expect(createSheetRect.top, 0);
+      expect(createSheetRect.height, 800);
+      tester.testTextInput.hide();
+      await tester.pumpAndSettle();
+
+      if (Platform.environment['CREATE_SHEET_SCREENSHOTS']
+          case final directory?) {
+        final boundary = tester
+            .element(find.byType(BottomSheet).last)
+            .findAncestorRenderObjectOfType<RenderRepaintBoundary>()!;
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 2);
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          await Directory(directory).create(recursive: true);
+          await File(
+            '$directory/new-channel.png',
+          ).writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+      }
+
+      expect(find.text('New channel'), findsOneWidget);
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(find.text('Name'), findsOneWidget);
+      expect(find.text('Description  Optional'), findsOneWidget);
+      void expectSingleFieldLabels() {
+        final nodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          nodes.add(node);
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
+
+        collect(tester.getSemantics(find.byType(BottomSheet).last));
+        for (final label in ['Name', 'Description']) {
+          final matches = nodes.where((node) => node.label.contains(label));
+          expect(matches, hasLength(1));
+          expect(matches.single.flagsCollection.isTextField, isTrue);
+        }
+      }
+
+      expectSingleFieldLabels();
+      expect(find.text('Channel type'), findsOneWidget);
+      expect(find.text('Ongoing'), findsOneWidget);
+      expect(find.text('Temporary'), findsNothing);
+      expect(find.text('Visibility'), findsOneWidget);
+      expect(find.text('Public'), findsOneWidget);
+      expect(find.text('Private'), findsNothing);
+      final submit = find.byKey(const Key('create-channel-submit'));
+      expect(tester.widget<TextButton>(submit).onPressed, isNull);
+      await tester.enterText(
+        find.byKey(const Key('create-channel-name')),
+        'release-notes',
+      );
+      await tester.pump();
+      expect(tester.widget<TextButton>(submit).onPressed, isNotNull);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.single, {
+        'name': 'release-notes',
+        'type': 'stream',
+        'visibility': 'open',
+        'description': '',
+        'ttl': null,
+      });
+      expect(find.text('Bad state: Try again'), findsOneWidget);
+      expectSingleFieldLabels();
+
+      final nameField = tester.widget<TextField>(
+        find.byKey(const Key('create-channel-name')),
+      );
+      final descriptionField = tester.widget<TextField>(
+        find.byKey(const Key('create-channel-description')),
+      );
+      expect(nameField.textInputAction, TextInputAction.done);
+      expect(nameField.onSubmitted, isNotNull);
+      expect(descriptionField.textInputAction, TextInputAction.done);
+      expect(descriptionField.onSubmitted, isNotNull);
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-name'))).height,
+        greaterThanOrEqualTo(52),
+      );
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-type'))).height,
+        greaterThanOrEqualTo(48),
+      );
+
+      await tester.tap(find.byKey(const Key('create-channel-type')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('create-channel-type-temporary')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Expires after'), findsOneWidget);
+      expect(find.text('7 days'), findsOneWidget);
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-ttl'))).height,
+        greaterThanOrEqualTo(51),
+      );
+
+      await tester.tap(find.byKey(const Key('create-channel-visibility')));
+      await tester.pumpAndSettle();
+      final privateVisibility = find.byKey(
+        const Key('create-channel-visibility-private'),
+      );
+      await tester.ensureVisible(privateVisibility);
+      await tester.pumpAndSettle();
+      await tester.tap(privateVisibility);
+      await tester.pumpAndSettle();
+      expect(find.text('Private'), findsOneWidget);
+      expect(find.text('Public'), findsNothing);
+      await tester.enterText(
+        find.byKey(const Key('create-channel-description')),
+        'Release updates',
+      );
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.last, {
+        'name': 'release-notes',
+        'type': 'stream',
+        'visibility': 'private',
+        'description': 'Release updates',
+        'ttl': 7 * 24 * 60 * 60,
+      });
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('create-channel-name')), findsNothing);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('create channel sheet shows a taken-name refusal as plain text', (
     tester,
   ) async {
     await tester.pumpWidget(
       buildTestable(
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          // Same shape relay_session completes a refused publish with.
+          channelActionsProvider.overrideWith(
+            (ref) => _RefusingCreateActions(
+              Exception(
+                'invalid: an open channel named "Launch" already exists',
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -2772,65 +3114,23 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('New channel'));
     await tester.pumpAndSettle();
-    final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(createSheetRect.top, greaterThanOrEqualTo(24));
-    tester.testTextInput.hide();
-    await tester.pumpAndSettle();
-
-    expect(find.text('Create a new channel'), findsOneWidget);
-    expect(find.text('Name'), findsOneWidget);
-    expect(find.text('Description  Optional'), findsOneWidget);
-    expect(find.text('Channel type'), findsOneWidget);
-    expect(find.text('Ongoing'), findsOneWidget);
-    expect(find.text('Temporary'), findsOneWidget);
-    expect(find.text('Visibility'), findsOneWidget);
-    expect(find.text('Public'), findsOneWidget);
-    expect(find.text('Private'), findsOneWidget);
-    expect(find.byKey(const Key('create-channel-submit')), findsNothing);
-    final nameField = tester.widget<TextField>(
+    await tester.enterText(
       find.byKey(const Key('create-channel-name')),
+      'Launch',
     );
-    final descriptionField = tester.widget<TextField>(
-      find.byKey(const Key('create-channel-description')),
-    );
-    expect(nameField.textInputAction, TextInputAction.done);
-    expect(nameField.onSubmitted, isNotNull);
-    expect(descriptionField.textInputAction, TextInputAction.done);
-    expect(descriptionField.onSubmitted, isNotNull);
-    expect(
-      tester.getSize(find.byKey(const Key('create-channel-name'))).height,
-      greaterThanOrEqualTo(52),
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const Key('create-channel-type-ongoing')))
-          .height,
-      greaterThanOrEqualTo(56),
-    );
-
-    await tester.tap(find.byKey(const Key('create-channel-type-temporary')));
+    await tester.pump();
+    // The sheet submits from the keyboard's done action.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
-    expect(find.text('Expires after'), findsOneWidget);
-    expect(find.text('7 days'), findsOneWidget);
     expect(
-      tester.getSize(find.byKey(const Key('create-channel-ttl'))).height,
-      greaterThanOrEqualTo(51),
+      find.text('An open channel named "Launch" already exists'),
+      findsOneWidget,
     );
-
-    final privateVisibility = find.byKey(
-      const Key('create-channel-visibility-private'),
-    );
-    await tester.ensureVisible(privateVisibility);
-    await tester.pumpAndSettle();
-    await tester.tap(privateVisibility);
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<RadioGroup<String>>(find.byType(RadioGroup<String>))
-          .groupValue,
-      'private',
-    );
+    expect(find.textContaining('Exception'), findsNothing);
+    expect(find.textContaining('invalid:'), findsNothing);
+    // The sheet stays open so the user can pick another name.
+    expect(find.text('New channel'), findsOneWidget);
   });
 
   dmRecipientLayoutTests(
@@ -2891,8 +3191,16 @@ void main() {
     await tester.pumpAndSettle();
 
     final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(dmSheetRect.top, greaterThanOrEqualTo(24));
+    expect(dmSheetRect.top, 0);
+    expect(dmSheetRect.height, 800);
     expect(find.text('New message'), findsOneWidget);
+    expect(find.byTooltip('Close'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+          .onPressed,
+      isNull,
+    );
     expect(find.text('To:'), findsOneWidget);
     expect(find.text('Search for a person'), findsOneWidget);
     final recipientField = find.byKey(const Key('new-dm-recipient-field'));
@@ -3014,10 +3322,26 @@ void main() {
     expect(searchField.textInputAction, TextInputAction.done);
     expect(searchField.onSubmitted, isNotNull);
 
-    // Done opens the DM at once instead of waiting on the full channel list.
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    // The header action opens the DM without waiting on the full channel list.
+    await tester.tap(find.byKey(const Key('new-dm-submit')));
     await tester.pump();
     expect(waits, [false]);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byWidgetPredicate(
+              (widget) => widget is IconButton && widget.tooltip == 'Close',
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
   });
 
   testWidgets('wraps many recipients without overflowing above the keyboard', (
@@ -3840,6 +4164,55 @@ class _PendingDmActions implements ChannelActions {
     waits.add(waitForChannelList);
     return Completer<Channel>().future;
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _CreateSheetActions implements ChannelActions {
+  final creations = <Map<String, Object?>>[];
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async {
+    creations.add({
+      'name': name,
+      'type': channelType,
+      'visibility': visibility,
+      'description': description,
+      'ttl': ttlSeconds,
+    });
+    throw StateError('Try again');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _RefusingCreateActions implements ChannelActions {
+  _RefusingCreateActions(this.error);
+
+  final Object error;
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async => throw error;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

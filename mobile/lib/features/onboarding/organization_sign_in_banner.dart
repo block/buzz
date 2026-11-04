@@ -24,18 +24,16 @@ class OrganizationSignInBanner extends HookConsumerWidget {
     useListenable(signIn);
     useListenable(auth);
     final config = ref.watch(relayConfigProvider);
-    if (signIn == null || !auth.organizationProtects(config)) {
+    if (signIn == null ||
+        !organizationSignInPromptVisible(signIn, auth, config)) {
       return const SizedBox.shrink();
     }
-    final relayFailure =
-        auth.failedRelay == config.baseUrl &&
-            auth.failedPubkey == pubkeyFromNsec(config.nsec)
-        ? auth.failure
-        : null;
+    final relayFailure = organizationRelayFailure(auth, config);
     final String message;
     final List<Widget> actions;
     switch (signIn.status) {
       case OrganizationSessionStatus.checking:
+        // Unreachable: organizationSignInPromptVisible hides checking.
         return const SizedBox.shrink();
       case OrganizationSessionStatus.signingIn:
         message = 'Finishing organization sign-in…';
@@ -60,12 +58,7 @@ class OrganizationSignInBanner extends HookConsumerWidget {
           ),
         ];
       case OrganizationSessionStatus.signedIn:
-        // Signed out is handled above; unavailable keeps reconnecting.
-        if (relayFailure == null ||
-            relayFailure == AccountFailure.signedOut ||
-            relayFailure == AccountFailure.unavailable) {
-          return const SizedBox.shrink();
-        }
+        // The check above hides signed out and unavailable, which reconnects.
         message = relayFailure == AccountFailure.denied
             ? 'Your organization account cannot use this community with this key.'
             : 'Could not reconnect with your organization account.';

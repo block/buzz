@@ -486,7 +486,7 @@ void main() {
       expect(find.text('Connect'), findsNothing);
     });
 
-    testWidgets('pairing actions are disabled when connecting', (tester) async {
+    testWidgets('connection progress replaces pairing actions', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(
           overrides: [
@@ -497,13 +497,44 @@ void main() {
       );
       await tester.pump();
 
-      final scanButton = tester.widget<FilledButton>(find.byType(FilledButton));
-      final pairingCodeButton = tester.widget<TextButton>(
-        find.widgetWithText(TextButton, 'Use pairing code'),
+      expect(
+        find.byKey(const Key('pairing-community-loading')),
+        findsOneWidget,
       );
+      expect(find.text('Scan a QR code'), findsNothing);
+      expect(find.text('Use pairing code'), findsNothing);
+    });
 
-      expect(scanButton.onPressed, isNull);
-      expect(pairingCodeButton.onPressed, isNull);
+    testWidgets('connection Cancel closes the identity recovery route', (
+      tester,
+    ) async {
+      final navigator = GlobalKey<NavigatorState>();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConnectingPairingNotifier()),
+          ],
+          child: MaterialApp(
+            navigatorKey: navigator,
+            theme: AppTheme.light(),
+            home: const Scaffold(body: Text('Settings')),
+          ),
+        ),
+      );
+      navigator.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const PairingPage(
+            addingCommunity: true,
+            identityRecoveryOnly: true,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PairingPage), findsNothing);
+      expect(find.text('Settings'), findsOneWidget);
     });
 
     testWidgets('recovery entry rejects ordinary nostrpair codes', (
