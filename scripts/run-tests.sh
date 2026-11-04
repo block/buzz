@@ -386,6 +386,9 @@ run_unit_tests() {
       tenant::tests::an_overlong_host_fails_closed_before_the_resolver \
       state::tests::disconnect_drops_the_cached_restriction_row
 
+  run_test_step "buzz-relay membership snapshot tests" \
+    cargo test -p buzz-relay --lib membership_cache::tests:: -- --nocapture
+
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
 
