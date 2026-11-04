@@ -56,6 +56,9 @@ omit this community CHECK. No bootstrap or schema-tooling workaround is required
 The trusted operator mediates the authenticated actor. Kgoose must resolve that
 actor's usable registered key from its session; it must never accept a user-supplied
 actor key as identity. The actor must equal the expected and current owner.
+`actor_pubkey` records the mediator's claimed authenticated actor for audit and
+idempotency; it is not an independently verified end-user credential. The relay
+authenticates the operator and checks the stored current owner.
 Host and keys normalize before comparison; issuer bytes match exactly. UUIDs
 must be non-nil. Unknown JSON fields are rejected.
 
