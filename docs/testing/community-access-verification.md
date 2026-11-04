@@ -78,7 +78,18 @@ that relay and `DATABASE_URL` for its disposable database before running:
 
 ```sh
 cargo test -p buzz-test-client --test community_ban_routes -- --ignored --nocapture
+REPRO_RELAY_HTTP="${RELAY_HTTP_URL:?set the private relay HTTP URL}" \
+REPRO_HOST="${REPRO_HOST:?set the same private relay host:port}" \
+  cargo test -p buzz-test-client --test regression_relay_admin_ban_gate -- --ignored --nocapture
 ```
+
+For the second command, set `REPRO_HOST` to that private relay's host and port
+and keep `DATABASE_URL` pointed at the same disposable database. This regression
+uses `REPRO_RELAY_HTTP` and `REPRO_HOST`, rather than the route matrix's
+`RELAY_URL` and `RELAY_HTTP_URL`. It verifies that banned and timed-out relay
+administrators are refused on kinds 9030–9033 and an unrestricted administrator
+still succeeds. Do not omit it: the unit and PostgreSQL runners do not select
+this ignored target.
 
 Follow [Community-ban route coverage](../../TESTING.md#community-ban-route-coverage)
 for the matrix contracts and [the large-roster rehearsal](../../TESTING.md#5-verify-a-roster-beyond-1000-members)
