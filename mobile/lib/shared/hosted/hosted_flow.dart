@@ -597,7 +597,7 @@ class HostedFlow extends ChangeNotifier {
     if (resolved.state == HostedIdentityState.needsSetup &&
         resolved.canCreate &&
         canSealBackup &&
-        (target == null || createNew) &&
+        (target == null || target is InviteDeepLink || createNew) &&
         !_importRequested) {
       // Recheck authoritative absence in the service before generating. Never
       // turn failed recovery or a pending backup into a replacement identity.

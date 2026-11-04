@@ -1021,17 +1021,12 @@ void main() {
         } finally {
           browserReturn.complete();
         }
-        await f.settle(tester);
-        expect(await f.store.read(), isNull);
-        expect(
-          find.text('Import existing identity').hitTestable(),
-          findsOneWidget,
-        );
-        await tester.tap(find.text('Create my Buzz identity').hitTestable());
         await enrollmentReached.future.timeout(const Duration(seconds: 5));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 400));
         try {
+          expect(find.text('Create my Buzz identity'), findsNothing);
+          expect(find.text('Import existing identity'), findsNothing);
           expect(find.byTooltip('Back').hitTestable(), findsNothing);
           // External teardown still fences pending enrollment.
           await f.flow.leave();
