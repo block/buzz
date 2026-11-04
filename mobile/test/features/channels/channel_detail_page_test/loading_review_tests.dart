@@ -446,24 +446,43 @@ void _loadingReviewTests() {
     );
   }
 
-  testWidgets('loaded page rebuild formats the timeline once', (tester) async {
+  testWidgets('loaded page formats the timeline only when its events change', (
+    tester,
+  ) async {
     var transforms = 0;
     debugOnFormatTimeline = () => transforms++;
     addTearDown(() => debugOnFormatTimeline = null);
+    final first = _textMsg(
+      id: 'one',
+      pubkey: 'alice',
+      content: 'Loaded message',
+    );
+    final messages = _FakeMessagesNotifier([first]);
     await tester.pumpWidget(
-      _buildTestable(
-        messages: [
-          _textMsg(id: 'one', pubkey: 'alice', content: 'Loaded message'),
-        ],
-      ),
+      _buildTestable(messages: [first], messagesNotifier: messages),
     );
     await tester.pumpAndSettle();
+    // Read state, presence and layout changes rebuild the page; formatting
+    // every event again for each of them stalls large channels.
     for (var i = 0; i < 3; i++) {
       transforms = 0;
       tester.element(find.byType(ChannelDetailPage)).markNeedsBuild();
       await tester.pump();
-      expect(transforms, 1);
+      expect(transforms, 0);
     }
+    transforms = 0;
+    messages.setMessages([
+      first,
+      _textMsg(
+        id: 'two',
+        pubkey: 'alice',
+        createdAt: first.createdAt + 1,
+        content: 'Live message',
+      ),
+    ]);
+    await tester.pump();
+    expect(transforms, 1);
+    expect(find.text('Live message', findRichText: true), findsOneWidget);
   });
 
   testWidgets('reconnect keeps cached media in place', (tester) async {

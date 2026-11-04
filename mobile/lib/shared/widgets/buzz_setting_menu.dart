@@ -34,6 +34,9 @@ class BuzzSettingMenu<T> extends StatelessWidget {
   /// Use the same borderless row as Settings inside a shared card.
   final bool grouped;
 
+  /// Keep an active form field and its keyboard focused while choosing a value.
+  final bool preserveTextInput;
+
   /// Affordance for opening the menu.
   final IconData trailingIcon;
 
@@ -48,11 +51,17 @@ class BuzzSettingMenu<T> extends StatelessWidget {
     this.valueIcon,
     required this.valueLabel,
     this.grouped = false,
+    this.preserveTextInput = false,
     this.trailingIcon = BuzzIcons.chevronDown,
   });
 
   @override
   Widget build(BuildContext context) {
+    final menu = _buildMenu(context);
+    return preserveTextInput ? TextFieldTapRegion(child: menu) : menu;
+  }
+
+  Widget _buildMenu(BuildContext context) {
     if (grouped && defaultTargetPlatform == TargetPlatform.iOS) {
       return Stack(
         children: [
@@ -104,7 +113,7 @@ class BuzzSettingMenu<T> extends StatelessWidget {
 
     void toggleMenu(MenuController menu) {
       if (menu.isOpen) return menu.close();
-      FocusManager.instance.primaryFocus?.unfocus();
+      if (!preserveTextInput) FocusManager.instance.primaryFocus?.unfocus();
       menu.open();
     }
 
@@ -130,32 +139,35 @@ class BuzzSettingMenu<T> extends StatelessWidget {
           for (final option in options)
             // The check icon carries no semantics, so mark the selection on
             // the item's own node.
-            MergeSemantics(
-              child: Semantics(
-                checked: option.value == value,
-                inMutuallyExclusiveGroup: true,
-                child: MenuItemButton(
-                  key: option.key,
-                  onPressed: () => onSelected(option.value),
-                  style: MenuItemButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Grid.twelve,
+            TextFieldTapRegion(
+              enabled: preserveTextInput,
+              child: MergeSemantics(
+                child: Semantics(
+                  checked: option.value == value,
+                  inMutuallyExclusiveGroup: true,
+                  child: MenuItemButton(
+                    key: option.key,
+                    onPressed: () => onSelected(option.value),
+                    style: MenuItemButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Grid.twelve,
+                      ),
                     ),
-                  ),
-                  // A trailing check keeps labels flush with the menu's edge.
-                  trailingIcon: option.value == value
-                      ? Icon(
-                          Icons.check,
-                          size: 20,
-                          color: context.colors.primary,
-                        )
-                      : const SizedBox(width: 20),
-                  // Root menu panels ignore size styles and shrink-wrap their items,
-                  // so the label sets the width: the row's, less the item's padding,
-                  // the check and the gap before it.
-                  child: SizedBox(
-                    width: constraints.maxWidth - Grid.twelve * 3 - 20,
-                    child: Text(option.label),
+                    // A trailing check keeps labels flush with the menu's edge.
+                    trailingIcon: option.value == value
+                        ? Icon(
+                            Icons.check,
+                            size: 20,
+                            color: context.colors.primary,
+                          )
+                        : const SizedBox(width: 20),
+                    // Root menu panels ignore size styles and shrink-wrap their items,
+                    // so the label sets the width: the row's, less the item's padding,
+                    // the check and the gap before it.
+                    child: SizedBox(
+                      width: constraints.maxWidth - Grid.twelve * 3 - 20,
+                      child: Text(option.label),
+                    ),
                   ),
                 ),
               ),

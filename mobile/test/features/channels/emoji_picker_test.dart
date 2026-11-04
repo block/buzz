@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:buzz/features/channels/emoji_picker.dart';
-import 'package:buzz/features/channels/recent_emoji_provider.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -788,6 +788,57 @@ void main() {
         expect(selected, ['\u{1F525}']);
         expect(dismissals, 1);
         expect(prefs.getInt('buzz.emoji-picker.skin-tone.v1'), 4);
+      } finally {
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('avatar picker excludes custom emoji from native sheet', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      MethodCall? presentation;
+      _setMockNativeEmojiPickerHandler((call) async {
+        presentation = call;
+        return true;
+      });
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              myPubkeyProvider.overrideWithValue('self'),
+              customEmojiPaletteProvider.overrideWith(
+                () => _FakeCustomEmojiPaletteNotifier(
+                  Completer<List<CustomEmoji>>().future,
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Builder(
+                builder: (context) => FilledButton(
+                  onPressed: () => showEmojiPicker(
+                    context: context,
+                    nativeEmojiOnly: true,
+                    onSelect: (_) {},
+                  ),
+                  child: const Text('Open avatar picker'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Open avatar picker'));
+        await tester.pump();
+        expect(presentation?.method, 'present');
+        final arguments = presentation?.arguments as Map<Object?, Object?>;
+        expect(arguments['customEmoji'], isEmpty);
+        expect(arguments['largeEmoji'], isTrue);
+        await _sendNativeEmojiPickerCall(tester, 'dismissed');
       } finally {
         _setMockNativeEmojiPickerHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;

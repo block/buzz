@@ -78,7 +78,8 @@ class _AddCommunityConnection extends HookWidget {
           subtitle: enteringLink
               ? 'Paste an invite link or community address.'
               : onboarding
-              ? 'Join your people or create a space of your own.'
+              ? accountStatus ??
+                    'Join your people or create a space of your own.'
               : accountStatus ?? 'Scan a QR code or enter a community link.',
           onBack: onBack,
           foregroundProgress: scannerProgress,

@@ -9,6 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
 import 'navigation_button_surface.dart';
+import 'agent_navigation_icon.dart';
 
 /// Expands an Android shortcut into a rounded, translucent action menu.
 class AndroidExpandingMenuButton extends HookWidget {
@@ -315,41 +316,49 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                     ),
                                                 child: Row(
                                                   children: [
-                                                    Icon(switch (actions[i]
-                                                        .symbol) {
-                                                      '' => null,
-                                                      'checkmark' =>
-                                                        BuzzIcons.check,
-                                                      'star' =>
-                                                        Icons.star_border,
-                                                      'info.circle' =>
-                                                        Icons.info_outline,
-                                                      'desktopcomputer' =>
-                                                        Icons
-                                                            .desktop_windows_outlined,
-                                                      'square.and.pencil' =>
-                                                        BuzzIcons.edit,
-                                                      'workspace' =>
-                                                        BuzzIcons.workspace,
-                                                      'folder.badge.plus' =>
-                                                        BuzzIcons.folderPlus,
-                                                      'bubble.left' =>
-                                                        BuzzIcons.messageSquare,
-                                                      'number' =>
-                                                        BuzzIcons.hash,
-                                                      'arrow.left.arrow.right' =>
-                                                        BuzzIcons
-                                                            .arrowLeftRight,
-                                                      'person.badge.plus' =>
-                                                        BuzzIcons.userPlus,
-                                                      'circle.lefthalf.filled' =>
-                                                        BuzzIcons.sunMoon,
-                                                      'person.2' =>
-                                                        BuzzIcons.users,
-                                                      'gearshape' =>
-                                                        BuzzIcons.settings,
-                                                      _ => BuzzIcons.plus,
-                                                    }, size: 22),
+                                                    actions[i].symbol == 'agent'
+                                                        ? const AgentNavigationIcon()
+                                                        : Icon(switch (actions[i]
+                                                              .symbol) {
+                                                            '' => null,
+                                                            'checkmark' =>
+                                                              BuzzIcons.check,
+                                                            'star' =>
+                                                              Icons.star_border,
+                                                            'info.circle' =>
+                                                              Icons
+                                                                  .info_outline,
+                                                            'desktopcomputer' =>
+                                                              Icons
+                                                                  .desktop_windows_outlined,
+                                                            'square.and.pencil' =>
+                                                              BuzzIcons.edit,
+                                                            'workspace' =>
+                                                              BuzzIcons
+                                                                  .workspace,
+                                                            'folder.badge.plus' =>
+                                                              BuzzIcons
+                                                                  .folderPlus,
+                                                            'bubble.left' =>
+                                                              BuzzIcons
+                                                                  .messageSquare,
+                                                            'number' =>
+                                                              BuzzIcons.hash,
+                                                            'arrow.left.arrow.right' =>
+                                                              BuzzIcons
+                                                                  .arrowLeftRight,
+                                                            'person.badge.plus' =>
+                                                              BuzzIcons
+                                                                  .userPlus,
+                                                            'circle.lefthalf.filled' =>
+                                                              BuzzIcons.sunMoon,
+                                                            'person.2' =>
+                                                              BuzzIcons.users,
+                                                            'gearshape' =>
+                                                              BuzzIcons
+                                                                  .settings,
+                                                            _ => BuzzIcons.plus,
+                                                          }, size: 22),
                                                     const SizedBox(
                                                       width: Grid.sm,
                                                     ),

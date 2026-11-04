@@ -240,9 +240,10 @@ void bubbleContentTests() {
       _testable(
         const MessageContent(
           content:
-              'Before\n\n[file.txt](https://example.com/file.txt)\n\nAfter',
+              // The escaped destination must still match its plain imeta URL.
+              'Before\n\n[file.txt](https://example.com/file\\_a.txt)\n\nAfter',
           tags: [
-            ['imeta', 'url https://example.com/file.txt', 'm text/plain'],
+            ['imeta', 'url https://example.com/file_a.txt', 'm text/plain'],
           ],
           bubble: true,
         ),

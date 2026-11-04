@@ -8,6 +8,7 @@ import '../message_media.dart';
 import 'buzz_link_label.dart';
 import 'channel_token_pattern.dart';
 import 'link_normalizer.dart';
+import 'markdown_escapes.dart';
 
 /// One piece of a message preview: plain text or an inline token that renders
 /// as a chip or image.
@@ -252,34 +253,7 @@ String _unwrapEmphasis(String shielded) {
   return result;
 }
 
-/// Holds each backslash-escaped character as a private-use stand-in, so no
-/// link, emphasis, mention, emoji or channel syntax matches it: `\*x\*` stays
-/// `*x*` and `\@alice` stays text.
-String _shield(String text) => text.contains(_escapePrefix)
-    ? text.replaceAllMapped(
-        _escape,
-        (m) => String.fromCharCode(_escapeBase + m[1]!.codeUnitAt(0)),
-      )
-    : text;
-
-/// The characters [_shield] held, as displayed.
-String _unshield(String text) => text.replaceAllMapped(
-  _escaped,
-  (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - _escapeBase),
-);
-
-/// The escapes [_shield] held, back in source form, for helpers that read
-/// Markdown.
-String _reescape(String text) => text.replaceAllMapped(
-  _escaped,
-  (m) => '\\${String.fromCharCode(m[0]!.codeUnitAt(0) - _escapeBase)}',
-);
-
-const _escapePrefix = r'\';
-const _escapeBase = 0xE000;
 final _hasDelimiter = RegExp(r'[*_~<]');
-final _escape = RegExp(r'\\([!-/:-@\[-`{-~])');
-final _escaped = RegExp('[\uE021-\uE07E]');
 
 // Look ahead so adjacent tokens sharing a colon are both considered.
 final _shortcode = RegExp(r'(?=:([a-z0-9_-]+):)', caseSensitive: false);
@@ -377,14 +351,14 @@ class _PreviewBuilder {
   }
 
   void _inline(String text) {
-    final source = _shield(text);
+    final source = shieldMarkdownEscapes(text);
     var start = 0;
     for (final match in _link.allMatches(source)) {
       _tokens(_unwrapEmphasis(source.substring(start, match.start)));
       start = match.end;
       final isImage = match[1]!.isNotEmpty;
-      final label = _reescape(match[2]!);
-      final url = _reescape(match[3]!);
+      final label = reescapeMarkdownEscapes(match[2]!);
+      final url = reescapeMarkdownEscapes(match[3]!);
       final imeta = imetaByUrl[normalizeMarkdownDestination(url)];
       final kind =
           classifyMediaUrl(url, imeta: imeta) ??
@@ -408,7 +382,7 @@ class _PreviewBuilder {
         this.text(short);
         continue;
       }
-      _tokens(_unwrapEmphasis(_shield(shown)));
+      _tokens(_unwrapEmphasis(shieldMarkdownEscapes(shown)));
     }
     _tokens(_unwrapEmphasis(source.substring(start)));
   }
@@ -420,7 +394,7 @@ class _PreviewBuilder {
     return null;
   }
 
-  /// [_shield]ed plain text with mention, custom emoji and channel tokens.
+  /// [shieldMarkdownEscapes]ed plain text with mention, custom emoji and channel tokens.
   void _tokens(String source) {
     if (source.isEmpty) return;
     final found = <({int start, int end, PreviewPiece piece})>[];
@@ -428,7 +402,7 @@ class _PreviewBuilder {
       for (final range in mentionOccurrences(source, mentionBindings.keys)) {
         final piece = _mention(
           range.label,
-          _unshield(source.substring(range.start + 1, range.end)),
+          unshieldMarkdownEscapes(source.substring(range.start + 1, range.end)),
         );
         if (piece != null) {
           found.add((start: range.start, end: range.end, piece: piece));
@@ -460,11 +434,11 @@ class _PreviewBuilder {
     var cursor = 0;
     for (final token in found) {
       if (token.start < cursor) continue;
-      text(_unshield(source.substring(cursor, token.start)));
+      text(unshieldMarkdownEscapes(source.substring(cursor, token.start)));
       add(token.piece);
       cursor = token.end;
     }
-    text(_unshield(source.substring(cursor)));
+    text(unshieldMarkdownEscapes(source.substring(cursor)));
   }
 
   /// Mirrors the thread view's mention chip: an ambiguous label stays text.

@@ -619,7 +619,7 @@ void bubbleLayoutTests() {
         messages: [
           _systemMsg(
             id: 'single-line',
-            payload: {'type': 'member_left', 'actor': 'alice'},
+            payload: {'type': 'channel_archived', 'actor': 'alice'},
           ),
         ],
         users: {
@@ -631,7 +631,7 @@ void bubbleLayoutTests() {
     final card = find.byKey(const ValueKey('activity-card-single-line'));
     final icon = find.descendant(of: card, matching: find.byType(Icon));
     expect(icon, findsNothing);
-    expect(findRichText('left the channel'), findsOneWidget);
+    expect(findRichText('archived this channel'), findsOneWidget);
   });
 
   testWidgets(
@@ -647,7 +647,7 @@ void bubbleLayoutTests() {
           messages: [
             _systemMsg(
               id: 'sys-accessible',
-              payload: {'type': 'member_left', 'actor': 'alice'},
+              payload: {'type': 'channel_archived', 'actor': 'alice'},
               createdAt:
                   DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/ 1000,
             ),

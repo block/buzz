@@ -159,7 +159,9 @@ pub async fn create_channel(
     .bind(labels)
     .bind(unlisted)
     .execute(tx.conn())
-    .await?;
+    .await
+    .map_err(|e| listed_name_taken(e, Some(name)))?;
+    ensure_listed_channel_name_unique(&mut tx, id).await?;
 
     let (sql, operation) = tx.artifact_change_query(r#"
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -396,12 +398,14 @@ async fn insert_channel_rows(
     .bind(labels)
     .bind(unlisted)
     .execute(tx.conn())
-    .await?
+    .await
+    .map_err(|e| listed_name_taken(e, Some(name)))?
     .rows_affected();
 
     let was_created = rows_affected > 0;
 
     if was_created {
+        ensure_listed_channel_name_unique(tx, channel_id).await?;
         // Bootstrap the creator as owner.
         let (sql, operation) = tx.artifact_change_query(r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -453,6 +457,81 @@ async fn insert_channel_rows(
     }
 
     Ok(was_created)
+}
+
+/// SQL that is true for a channel the channel directory lists: an open,
+/// listed stream or forum that is not deleted. An archived channel is still
+/// listed, so it keeps its name. Within a community, no two of these share a
+/// name, ignoring case ([`ensure_listed_channel_name_unique`]).
+pub(crate) const LISTED_CHANNEL_SQL: &str =
+    "visibility = 'open' AND NOT unlisted AND channel_type IN ('stream', 'forum') \
+     AND deleted_at IS NULL";
+
+/// Refuses, with [`DbError::ChannelNameTaken`], a write on `tx` that left
+/// `channel_id` listed ([`LISTED_CHANNEL_SQL`]) under a name another listed
+/// channel in the community already has, ignoring case. Private channels,
+/// DMs and the other types may repeat names: nobody browses them side by
+/// side, and refusing a name that a private channel holds would tell anyone
+/// that the channel exists.
+///
+/// Call it after the write that creates the channel or changes its name,
+/// visibility or unlisted flag. It first takes a transaction advisory lock
+/// on the name, so two writers that claim one name take turns and the second
+/// sees the first's committed row. A writer takes this lock last, after the
+/// locks of [`lock_channel_for_settings_write`], and holds at most one.
+async fn ensure_listed_channel_name_unique(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+) -> Result<()> {
+    let community_id = tx.community();
+    let name: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT name FROM channels WHERE community_id = $1 AND id = $2 AND {LISTED_CHANNEL_SQL}"
+    )))
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    let Some(name) = name else {
+        return Ok(());
+    };
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || lower($2), 0))")
+        .bind(format!("buzz_channel_name:{}:", community_id.as_uuid()))
+        .bind(&name)
+        .execute(tx.conn())
+        .await?;
+    let taken: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND id <> $2 \
+         AND lower(name) = lower($3) AND {LISTED_CHANNEL_SQL})"
+    )))
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(&name)
+    .fetch_one(tx.conn())
+    .await?;
+    if taken {
+        return Err(DbError::ChannelNameTaken(name));
+    }
+    Ok(())
+}
+
+/// The unique index on `(community_id, lower(name))` over
+/// [`LISTED_CHANNEL_SQL`] channels that migration 0081 adds. It refuses a
+/// duplicate at the write itself, before
+/// [`ensure_listed_channel_name_unique`] runs, so this release maps the
+/// refusal too: it can run beside that index during the rollout of 0081 and
+/// after a rollback.
+const LISTED_NAME_INDEX: &str = "idx_channels_listed_name";
+
+/// Reports a channel write that [`LISTED_NAME_INDEX`] refused as
+/// [`DbError::ChannelNameTaken`] for `name`, the name the channel would have
+/// had.
+fn listed_name_taken(error: sqlx::Error, name: Option<&str>) -> DbError {
+    match (&error, name) {
+        (sqlx::Error::Database(db), Some(name)) if db.constraint() == Some(LISTED_NAME_INDEX) => {
+            DbError::ChannelNameTaken(name.to_owned())
+        }
+        _ => error.into(),
+    }
 }
 
 /// SQL that is true when `column` holds a legacy channel type
@@ -982,6 +1061,7 @@ pub(crate) struct ChannelSettingsWriter<'tx> {
     ttl: TtlLock,
     previous_visibility: String,
     archived: bool,
+    listed: bool,
 }
 
 impl ChannelSettingsWriter<'_> {
@@ -994,6 +1074,12 @@ impl ChannelSettingsWriter<'_> {
     /// lock keeps this current until the transaction ends.
     pub(crate) fn archived(&self) -> bool {
         self.archived
+    }
+
+    /// Whether the channel was listed ([`LISTED_CHANNEL_SQL`]) when the lock
+    /// was taken. The row lock keeps this current until the transaction ends.
+    pub(crate) fn listed(&self) -> bool {
+        self.listed
     }
 
     /// The locked transaction, for writes that are not channel settings
@@ -1084,15 +1170,16 @@ async fn lock_channel_row(
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
     // every other settings write and a huddle join, but not against the
     // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
-    let (previous_visibility, archived): (String, bool) = sqlx::query_as(
-        "SELECT visibility::text, archived_at IS NOT NULL FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_optional(tx.conn())
-    .await?
-    .ok_or(DbError::ChannelNotFound(channel_id))?;
+    let (previous_visibility, archived, listed): (String, bool, bool) =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
+             WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+        )))
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .fetch_optional(tx.conn())
+        .await?
+        .ok_or(DbError::ChannelNotFound(channel_id))?;
     Ok(ChannelSettingsWriter {
         tx,
         channel_id,
@@ -1100,6 +1187,7 @@ async fn lock_channel_row(
         ttl,
         previous_visibility,
         archived,
+        listed,
     })
 }
 
@@ -1170,16 +1258,19 @@ async fn update_channel_on(
         set_parts.join(", ")
     );
 
-    let policy_changed = if updates.visibility.is_some()
+    // The current name is what a visibility or unlisted change that
+    // [`LISTED_NAME_INDEX`] refuses would have listed.
+    let (policy_changed, current_name) = if updates.visibility.is_some()
         || updates.ttl_seconds.is_some()
         || updates.unlisted.is_some()
     {
-        sqlx::query_scalar::<_,bool>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6)) FROM channels WHERE community_id=$1 AND id=$2")
+        sqlx::query_as::<_,(bool, String)>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6)), name FROM channels WHERE community_id=$1 AND id=$2")
             .bind(community_id.as_uuid()).bind(channel_id).bind(updates.visibility.as_deref())
             .bind(updates.ttl_seconds.is_some()).bind(updates.ttl_seconds.flatten()).bind(updates.unlisted)
-            .fetch_one(tx.conn()).await?
+            .fetch_one(tx.conn()).await
+            .map(|(changed, name)| (changed, Some(name)))?
     } else {
-        false
+        (false, None)
     };
     let (sql, operation) =
         tx.artifact_change_query(&sql, param_idx, channel_param_idx + 1, policy_changed);
@@ -1212,9 +1303,16 @@ async fn update_channel_on(
     q = q.bind(channel_id);
     q = q.bind(operation);
 
-    let result = q.execute(tx.conn()).await?;
+    let result = q
+        .execute(tx.conn())
+        .await
+        .map_err(|e| listed_name_taken(e, updates.name.as_deref().or(current_name.as_deref())))?;
+
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
+    }
+    if updates.name.is_some() || updates.visibility.is_some() || updates.unlisted.is_some() {
+        ensure_listed_channel_name_unique(tx, channel_id).await?;
     }
     if policy_changed {
         sqlx::query(
@@ -1416,6 +1514,14 @@ pub struct ChannelMetadataEdit {
     pub purpose: Option<String>,
     /// `Some(true)` archives the channel; `Some(false)` restores it.
     pub archived: Option<bool>,
+    /// Set for a relay operator's name-only rename, whatever the operator's
+    /// channel role. It may rename an archived listed channel
+    /// ([`LISTED_CHANNEL_SQL`]), which stays archived. Checked under the row
+    /// lock.
+    pub operator_rename: bool,
+    /// Set when the actor is the channel's owner or admin. An operator rename
+    /// without it applies only to a listed channel.
+    pub channel_authority: bool,
 }
 
 /// The result of [`Db::apply_channel_metadata_event`].
@@ -1467,12 +1573,20 @@ pub(crate) async fn apply_channel_metadata_event(
             previous_visibility,
         });
     }
-    // Decide the archive state here, after the duplicate check and under
-    // the row lock, not during validation. A resend that races the first
-    // commit then sees that commit as a duplicate (above), never as a
-    // channel already in the requested state.
+    // Decide the archive state and an operator's right to rename here,
+    // after the duplicate check and under the row lock, not during
+    // validation. A resend that races the first commit then sees that commit
+    // as a duplicate (above), never as a channel already in the requested
+    // state, and an owner who makes the channel private or unlisted
+    // meanwhile is seen.
+    if edit.operator_rename && !edit.channel_authority && !locked.listed() {
+        return Err(DbError::AccessDenied(
+            "a relay operator may rename only a listed channel".to_string(),
+        ));
+    }
     match (locked.archived(), edit.archived) {
         (true, Some(false)) | (false, None | Some(true)) => {}
+        (true, None) if edit.operator_rename && locked.listed() => {}
         (true, _) => return Err(DbError::AccessDenied("channel is archived".to_string())),
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
@@ -1508,6 +1622,8 @@ pub(crate) async fn apply_channel_metadata_event(
         topic,
         purpose,
         archived,
+        operator_rename: _,
+        channel_authority: _,
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {
@@ -1548,6 +1664,31 @@ pub async fn soft_delete_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<bool> {
+    Ok(
+        soft_delete_channel_capturing_members(pool, community_id, channel_id)
+            .await?
+            .is_some(),
+    )
+}
+
+/// A deleted channel's type and the members active when it was deleted.
+#[derive(Debug, Clone)]
+pub struct DeletedChannel {
+    /// The channel's type, e.g. `stream`.
+    pub channel_type: String,
+    /// The pubkeys of its active members, oldest first.
+    pub members: Vec<Vec<u8>>,
+}
+
+/// [`soft_delete_channel`], also returning who was a member at the deletion's
+/// serialization point: read under the same membership lock, so a join either
+/// commits first and is included, or waits and is then refused. `None` when the
+/// channel was already deleted or never existed.
+pub async fn soft_delete_channel_capturing_members(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Option<DeletedChannel>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -1556,12 +1697,31 @@ pub async fn soft_delete_channel(
     .await?;
     let mut writer = match lock_channel_for_delete(&mut tx, channel_id).await {
         Ok(writer) => writer,
-        Err(DbError::ChannelNotFound(_)) => return Ok(false),
+        Err(DbError::ChannelNotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
+    let channel_type: String = sqlx::query_scalar(
+        "SELECT channel_type::text FROM channels WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(writer.tx.conn())
+    .await?;
+    let members: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL \
+         ORDER BY joined_at ASC",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(writer.tx.conn())
+    .await?;
     soft_delete_on(&mut writer).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(DeletedChannel {
+        channel_type,
+        members,
+    }))
 }
 
 async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
@@ -1959,6 +2119,16 @@ impl Db {
         channel_id: Uuid,
     ) -> Result<bool> {
         soft_delete_channel(&self.pool, community_id, channel_id).await
+    }
+
+    /// See [`soft_delete_channel_capturing_members`].
+    #[datastore_span(name = "soft_delete_channel_capturing_members", system = "postgresql")]
+    pub async fn soft_delete_channel_capturing_members(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<DeletedChannel>> {
+        soft_delete_channel_capturing_members(&self.pool, community_id, channel_id).await
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.
@@ -2585,6 +2755,86 @@ mod postgres_tests {
         assert!(matches!(outcome, ChannelCreate::Created(_)), "{outcome:?}");
     }
 
+    /// Holds an open create of the listed channel `race` on its own
+    /// transaction while a second create claims the same name beside it.
+    async fn second_listed_create_beside_open_create(commit_first: bool) -> Result<ChannelCreate> {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = Keys::generate();
+        let creator_bytes = creator.public_key().to_bytes().to_vec();
+        let listed = |name: &'static str| NewChannel {
+            name,
+            visibility: ChannelVisibility::Open,
+            ..new_channel(&creator_bytes, &[])
+        };
+
+        let mut first = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("begin first create");
+        assert!(
+            insert_channel_rows(&mut first, Uuid::new_v4(), listed("race"))
+                .await
+                .expect("first create's rows")
+        );
+
+        let second_id = Uuid::new_v4();
+        let second = tokio::spawn({
+            let (creator, creator_bytes) = (creator.clone(), creator_bytes.clone());
+            async move {
+                let pool = crate::test_support::named_pool("listed-name-race").await;
+                create_channel_with_event(
+                    &pool,
+                    None,
+                    community,
+                    second_id,
+                    NewChannel {
+                        name: "RACE",
+                        visibility: ChannelVisibility::Open,
+                        ..new_channel(&creator_bytes, &[])
+                    },
+                    &create_event(&creator, second_id),
+                )
+                .await
+            }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "listed-name-race").await;
+        assert!(
+            !second.is_finished(),
+            "the second create waits for the open create's name"
+        );
+
+        if commit_first {
+            first.commit().await.expect("commit first create");
+        } else {
+            drop(first);
+        }
+        second.await.expect("second create task")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_listed_create_beside_an_open_create_of_its_name_is_refused_once_committed() {
+        let outcome = second_listed_create_beside_open_create(true).await;
+        assert!(
+            matches!(&outcome, Err(DbError::ChannelNameTaken(name)) if name == "RACE"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_listed_create_beside_a_failed_create_of_its_name_succeeds() {
+        let outcome = second_listed_create_beside_open_create(false).await;
+        assert!(
+            matches!(outcome, Ok(ChannelCreate::Created(_))),
+            "{outcome:?}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn a_create_whose_event_fails_leaves_no_channel() {
@@ -2666,6 +2916,84 @@ mod postgres_tests {
             .await
             .expect("members");
         assert_eq!(members.len(), 1, "only the first creator is a member");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn soft_delete_captures_members_at_its_serialization_point() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let early = random_pubkey();
+        let late = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "delete-captures-members",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        let channel_id = channel.id;
+
+        // Queue a join, then the delete, behind a held membership lock: the
+        // join is serialized before the delete, so the delete must see it.
+        let snapshot =
+            crate::channel_members::lock_member_snapshot(&pool, community, channel_id, &[9u8; 32])
+                .await
+                .expect("hold membership lock");
+        let join_pool = crate::test_support::named_pool("join-before-delete").await;
+        let early_key = early.clone();
+        let join = tokio::spawn(async move {
+            crate::channel_members::add_member(
+                &join_pool,
+                community,
+                channel_id,
+                &early_key,
+                MemberRole::Member,
+                None,
+            )
+            .await
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "join-before-delete").await;
+        let delete_pool = crate::test_support::named_pool("delete-after-join").await;
+        let delete = tokio::spawn(async move {
+            soft_delete_channel_capturing_members(&delete_pool, community, channel_id).await
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "delete-after-join").await;
+        snapshot.release().await.expect("release membership lock");
+
+        join.await.expect("join task").expect("join before delete");
+        let deleted = delete
+            .await
+            .expect("delete task")
+            .expect("delete")
+            .expect("channel was live");
+        assert_eq!(deleted.channel_type, "stream");
+        assert_eq!(deleted.members, vec![owner, early]);
+
+        // A join after the delete is refused, so nobody is left un-notified.
+        assert!(crate::channel_members::add_member(
+            &pool,
+            community,
+            channel_id,
+            &late,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .is_err());
+        assert!(
+            soft_delete_channel_capturing_members(&pool, community, channel_id)
+                .await
+                .expect("second delete")
+                .is_none()
+        );
     }
 
     #[tokio::test]

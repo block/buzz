@@ -35,6 +35,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
+import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -208,6 +209,32 @@ class MessageContent extends HookConsumerWidget {
     // Own-bubble links share the bubble ink; markdown marks them by underline.
     final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
     final bubbleInk = ownMessage ? ownTextColor : context.colors.onSurface;
+    final onSurface = context.colors.onSurface;
+    // GptMarkdownTheme notifies its dependents whenever the data object
+    // changes (the data has no value equality), and each notification makes
+    // every GptMarkdown below re-parse its text. Reuse one bubble theme while
+    // its inputs are unchanged so an ordinary rebuild does not re-parse.
+    final bubbleMarkdownTheme = useMemoized(
+      () => markdownTheme.copyWith(
+        linkColor: linkColor,
+        // A neutral chip would put white ink on a light fill; tint the accent
+        // instead.
+        inlineCode: ownMessage
+            ? markdownTheme.inlineCode.copyWith(
+                color: ownTextColor,
+                backgroundColor: chatCodeTint(ownTextColor, 0.18),
+                borderColor: ownTextColor.withValues(alpha: 0.3),
+              )
+            : null,
+        h1: markdownTheme.h1?.copyWith(color: bubbleInk),
+        h2: markdownTheme.h2?.copyWith(color: bubbleInk),
+        h3: markdownTheme.h3?.copyWith(color: bubbleInk),
+        h4: markdownTheme.h4?.copyWith(color: bubbleInk),
+        h5: markdownTheme.h5?.copyWith(color: bubbleInk),
+        h6: markdownTheme.h6?.copyWith(color: bubbleInk),
+      ),
+      [markdownTheme, linkColor, ownMessage, ownTextColor, onSurface],
+    );
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -270,7 +297,13 @@ class MessageContent extends HookConsumerWidget {
     final trailingGallery = maxLines == null
         ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
-    final markdownContent = trailingGallery?.content ?? normalizedContent;
+    final galleryText = trailingGallery?.content ?? normalizedContent;
+    // gpt_markdown has no backslash escapes, so hold escaped characters as
+    // stand-ins that _MarkdownEscapeMd and the link builders restore.
+    final markdownContent = useMemoized(
+      () => shieldMarkdownProseEscapes(galleryText),
+      [galleryText],
+    );
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
@@ -384,24 +417,30 @@ class MessageContent extends HookConsumerWidget {
           bubble: bubble,
           ink: bubble && ownMessage ? ownTextColor : null,
         ),
-        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-          context,
-          ref,
-          linkText,
-          url,
-          imetaByUrl[url],
-          linkStyle,
-          style,
-          resolvedChannelTap,
-          resolvedChannelNames,
-        ),
-        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-          context,
-          imageUrl,
-          imetaByUrl[imageUrl],
-          onReply: onMediaReply == null ? null : mediaReply,
-          onMore: onMediaMore == null ? null : mediaMore,
-        ),
+        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
+          final url = unshieldMarkdownEscapes(shieldedUrl);
+          return _buildLink(
+            context,
+            ref,
+            linkText,
+            url,
+            imetaByUrl[url],
+            linkStyle,
+            style,
+            resolvedChannelTap,
+            resolvedChannelNames,
+          );
+        },
+        imageBuilder: (context, shieldedUrl, _, _) {
+          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
+          return _buildMedia(
+            context,
+            imageUrl,
+            imetaByUrl[imageUrl],
+            onReply: onMediaReply == null ? null : mediaReply,
+            onMore: onMediaMore == null ? null : mediaMore,
+          );
+        },
         textAlign: textAlign,
         maxLines: maxLines,
         inlineComponents: inlineComponents,
@@ -461,53 +500,7 @@ class MessageContent extends HookConsumerWidget {
                             ),
                           ),
                           child: GptMarkdownTheme(
-                            gptThemeData: markdownTheme.copyWith(
-                              linkColor: linkColor,
-                              // A neutral chip would put white ink on a light
-                              // fill; tint the accent instead.
-                              inlineCode: ownMessage
-                                  ? markdownTheme.inlineCode.copyWith(
-                                      color: ownTextColor,
-                                      backgroundColor: chatCodeTint(
-                                        ownTextColor,
-                                        0.18,
-                                      ),
-                                      borderColor: ownTextColor.withValues(
-                                        alpha: 0.3,
-                                      ),
-                                    )
-                                  : null,
-                              h1: markdownTheme.h1?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h2: markdownTheme.h2?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h3: markdownTheme.h3?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h4: markdownTheme.h4?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h5: markdownTheme.h5?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h6: markdownTheme.h6?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                            ),
+                            gptThemeData: bubbleMarkdownTheme,
                             child: renderMarkdown(segment.text),
                           ),
                         ),

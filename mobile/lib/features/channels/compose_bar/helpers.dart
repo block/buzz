@@ -32,13 +32,19 @@ void _useComposerChannelNames(
   _MarkdownEditingController controller,
   AsyncValue<List<Channel>> channelsAsync,
 ) {
-  final channelNames = {
-    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
-      channel.name.toLowerCase(): channel.id,
-  };
-  final channelNamesKey = channelNames.entries
-      .map((entry) => '${entry.key}\u0000${entry.value}')
-      .join('\u0001');
+  // The composer rebuilds on every keystroke and keyboard frame, so build the
+  // name map and its key only when the channel list itself changes.
+  final channels = channelsAsync.asData?.value;
+  final (:channelNames, :channelNamesKey) = useMemoized(() {
+    final names = {
+      for (final channel in channels ?? const <Channel>[])
+        channel.name.toLowerCase(): channel.id,
+    };
+    final key = names.entries
+        .map((entry) => '${entry.key}\u0000${entry.value}')
+        .join('\u0001');
+    return (channelNames: names, channelNamesKey: key);
+  }, [channels]);
   useEffect(() {
     controller.setChannelNames(channelNames);
     return null;

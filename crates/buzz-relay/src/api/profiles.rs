@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use crate::state::AppState;
 
-use super::{api_error, bridge, db_read_error, internal_error};
+use super::{api_error, bridge, db_read_error, search_read_error};
 
 /// Route path for profile name search.
 pub(crate) const SEARCH_PATH: &str = "/profiles/search";
@@ -76,29 +76,33 @@ fn parse_request(body: &[u8]) -> Result<Search, (StatusCode, Json<Value>)> {
 /// member. Responds with one page of signed kind:0 events, best match first.
 pub async fn search(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    search_inner(state, headers, body).await.into_response()
+    search_inner(state, slot, headers, body)
+        .await
+        .into_response()
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn search_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, Response> {
     // Admission first so the denial contract wins over request validation.
     // [FI-TRACE-HTTP-INGRESS]
     let (tenant, pubkey) =
-        bridge::authenticate_member_post(&state, &headers, SEARCH_PATH, &body).await?;
+        bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
     let (query, limit, page) = parse_request(&body).map_err(IntoResponse::into_response)?;
 
     let hits = state
         .search
         .search_profile_names(tenant.community(), &query, page, limit)
         .await
-        .map_err(|e| internal_error(&format!("profile search error: {e}")).into_response())?
+        .map_err(|e| search_read_error("profile search error", &e).into_response())?
         .hits;
     if hits.is_empty() {
         return Ok(Json(Value::Array(Vec::new())));

@@ -125,9 +125,6 @@ pub(super) async fn query(
     reader: &nostr::PublicKey,
     filter: &Value,
 ) -> Response {
-    if !state.config.artifact_incremental_enabled {
-        return Err(unavailable());
-    }
     let _permit = WORK.try_acquire().map_err(|_| unavailable())?;
     tokio::time::timeout(
         std::time::Duration::from_secs(8),

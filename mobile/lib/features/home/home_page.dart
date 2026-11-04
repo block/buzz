@@ -95,7 +95,7 @@ class HomePage extends HookConsumerWidget {
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           (
-            label: 'Switch workspace',
+            label: 'Switch community',
             symbol: 'arrow.left.arrow.right',
             onPressed: openSwitcher,
           ),
@@ -105,17 +105,17 @@ class HomePage extends HookConsumerWidget {
               symbol: 'person.badge.plus',
               onPressed: () => openPage(communityInvitePageBuilder!),
             ),
+          (
+            label: 'Agents',
+            symbol: 'agent',
+            onPressed: () => onAgents(context),
+          ),
           if (communityAppearancePageBuilder != null)
             (
               label: 'Appearance',
               symbol: 'circle.lefthalf.filled',
               onPressed: () => openPage(communityAppearancePageBuilder!),
             ),
-          (
-            label: 'Agents',
-            symbol: 'person.2',
-            onPressed: () => onAgents(context),
-          ),
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [

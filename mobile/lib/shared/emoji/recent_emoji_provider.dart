@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/relay/relay.dart';
-import '../../shared/theme/theme_provider.dart';
+import '../relay/relay.dart';
+import '../theme/theme_provider.dart';
 
 /// Frequently-used emoji, ranked and persisted.
 ///

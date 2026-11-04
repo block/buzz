@@ -4,8 +4,6 @@ import '../profile/user_profile.dart';
 import '../utils/string_utils.dart';
 import 'identity_name_policy.dart';
 
-final RegExp _hexPubkey = RegExp(r'^[0-9a-f]{64}$');
-
 /// Immutable naming facts known to this client, independent of any view.
 ///
 /// Mobile's owner hint is the verified NIP-OA owner from the profile `auth`
@@ -44,7 +42,7 @@ class IdentityNameSources {
     bool isAgent = false,
   }) {
     final key = pubkey.toLowerCase();
-    if (!_hexPubkey.hasMatch(key)) return null;
+    if (!isHexPubkey(key)) return null;
     final profile = profiles[key];
     final owner = (profile?.ownerPubkey ?? agentOwners[key] ?? fallbackOwner)
         ?.toLowerCase();
@@ -57,7 +55,7 @@ class IdentityNameSources {
           _nonBlank(fallbackName) ??
           shortPubkey(key),
       isAgent: isAgent || owner != null || agentPubkeys.contains(key),
-      ownerPubkey: owner != null && _hexPubkey.hasMatch(owner) ? owner : null,
+      ownerPubkey: owner != null && isHexPubkey(owner) ? owner : null,
     );
   }
 
@@ -85,7 +83,7 @@ class IdentityNameSources {
     this,
     {
       for (final key in candidates)
-        if (_hexPubkey.hasMatch(key.toLowerCase())) key.toLowerCase(),
+        if (isHexPubkey(key.toLowerCase())) key.toLowerCase(),
     },
     {for (final key in agentPubkeys) key.toLowerCase()},
     {
@@ -112,6 +110,7 @@ class IdentityNames {
   final Map<String, String> _fallbackNames;
   final Map<String, String> _ownerPubkeys;
   final Map<String, ResolvedIdentityName?> _outside = {};
+  final Map<String, NamingIdentity?> _facts = {};
   late final Map<String, ResolvedIdentityName> _members = _resolve(_candidates);
 
   IdentityNames._(
@@ -151,11 +150,16 @@ class IdentityNames {
           .where((owner) => !_sources.profiles.containsKey(owner))
           .toSet();
 
-  NamingIdentity? _factFor(String key) => _sources.factFor(
+  /// Facts are fixed for this scope's sources, so each key is derived once
+  /// even though owner loading and resolution both read the whole context.
+  NamingIdentity? _factFor(String key) => _facts.putIfAbsent(
     key,
-    fallbackName: _fallbackNames[key],
-    fallbackOwner: _ownerPubkeys[key],
-    isAgent: _agentPubkeys.contains(key),
+    () => _sources.factFor(
+      key,
+      fallbackName: _fallbackNames[key],
+      fallbackOwner: _ownerPubkeys[key],
+      isAgent: _agentPubkeys.contains(key),
+    ),
   );
 
   /// The resolved label and qualifier for [pubkey], or null for an invalid key.
@@ -163,7 +167,7 @@ class IdentityNames {
     final key = pubkey.toLowerCase();
     if (_candidates.contains(key)) return _members[key];
     return _outside.putIfAbsent(key, () {
-      if (!_hexPubkey.hasMatch(key)) return null;
+      if (!isHexPubkey(key)) return null;
       return _resolve({..._candidates, key})[key];
     });
   }

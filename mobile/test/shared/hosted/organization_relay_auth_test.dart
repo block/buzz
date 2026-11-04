@@ -87,6 +87,7 @@ void main() {
   group('organization relay assertions', () {
     late List<http.Request> requests;
     late Object? boundIdentity;
+    late int assertionLifetime;
 
     BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
       accountOrigin: organization,
@@ -110,7 +111,9 @@ void main() {
             jsonEncode({
               'assertion': 'org-token',
               'nostr_pubkey': keys.public,
-              'expires_at': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 120,
+              'expires_at':
+                  DateTime.now().millisecondsSinceEpoch ~/ 1000 +
+                  assertionLifetime,
             }),
             200,
           ),
@@ -145,6 +148,7 @@ void main() {
     setUp(() {
       requests = [];
       boundIdentity = null;
+      assertionLifetime = 120;
     });
 
     test(
@@ -172,6 +176,29 @@ void main() {
         );
       },
     );
+
+    test('the issuer chooses the lifetime of an unexpired assertion', () async {
+      await saveSession();
+      for (final (lifetime, accepted) in [
+        (300, true),
+        (86400, true),
+        (0, false),
+        (-60, false),
+      ]) {
+        assertionLifetime = lifetime;
+        final auth = relayAuth(organizationClient());
+        if (accepted) {
+          expect(await auth.headers(relay), {
+            'Nostr-Federated-Identity': 'Bearer org-token',
+          });
+        } else {
+          await expectLater(
+            auth.headers(relay),
+            throwsA(AccountFailure.invalidResponse),
+          );
+        }
+      }
+    });
 
     test('a key bound to the same member is accepted', () async {
       await saveSession();

@@ -198,6 +198,15 @@ class SearchNotifier extends Notifier<SearchState> {
       channelDirectoryLoadStatusProvider,
       (_, _) => _refreshChannels(),
     );
+    // Offline, a directory load fails at once. Load it again on reconnect, so
+    // the failure clears without another query.
+    ref.listen(relaySessionProvider, (previous, next) {
+      if (next.status == SessionStatus.connected &&
+          previous?.status != SessionStatus.connected &&
+          _directoryFailed) {
+        retryChannels();
+      }
+    });
     ref.onDispose(() {
       _debounce?.cancel();
     });
@@ -260,6 +269,14 @@ class SearchNotifier extends Notifier<SearchState> {
     ChannelDirectoryLoadStatus.loading => false,
     _ => true,
   };
+
+  /// Whether this search loaded the directory for the current query and it
+  /// did not load. An earlier failure stays hidden while the next load runs.
+  bool get _directoryFailed =>
+      _searchesOpenChannels(state.query) &&
+      _directoryAttempted &&
+      _directoryLoad == null &&
+      _directoryMissing;
 
   /// Loads the directory again after it failed, like desktop's Retry channels.
   void retryChannels() {
@@ -376,13 +393,8 @@ class SearchNotifier extends Notifier<SearchState> {
         ref.read(channelsProvider).asData?.value ?? const <Channel>[],
         state.query,
       ),
-      // An earlier failure stays hidden while our next load runs, and the
-      // notice clears when another caller loads the directory.
-      channelSearchFailed:
-          _searchesOpenChannels(state.query) &&
-          _directoryAttempted &&
-          _directoryLoad == null &&
-          _directoryMissing,
+      // The notice clears when another caller loads the directory.
+      channelSearchFailed: _directoryFailed,
       isLoading: _isLoading,
     );
   }

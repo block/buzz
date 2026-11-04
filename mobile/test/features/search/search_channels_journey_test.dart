@@ -460,6 +460,44 @@ void main() {
     expect(spinner, findsOneWidget);
     expect(find.byKey(const Key('search-channels-failed')), findsNothing);
   });
+
+  testWidgets(
+    'a reconnect reloads the directory a disconnected search missed',
+    (tester) async {
+      final session = _ReconnectingSession();
+      final actions = _HeldUserSearch();
+
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            relayConfigProvider.overrideWith(_Community.new),
+            myPubkeyProvider.overrideWith((ref) => 'test'),
+            relaySessionProvider.overrideWith(() => session),
+            channelActionsProvider.overrideWith((ref) => actions),
+            channelsProvider.overrideWith(_NoMemberChannels.new),
+            recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+            profileProvider.overrideWith(_Profile.new),
+          ],
+          child: const SearchPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Offline, the directory cannot load, and search says so.
+      await tester.enterText(find.byType(TextField), 'ops');
+      await tester.pump(const Duration(milliseconds: 300));
+      session.searches.removeAt(0).complete(const []);
+      actions.searches.removeAt(0).complete(const []);
+      await tester.pump();
+      expect(find.byKey(const Key('search-channels-failed')), findsOneWidget);
+
+      // Reconnecting loads it for the same query, with no typing.
+      session.connect();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('search-channels-failed')), findsNothing);
+      expect(find.text('ops-room'), findsOneWidget);
+    },
+  );
 }
 
 Channel _channel(String name, {required bool isMember}) => Channel(
@@ -625,4 +663,55 @@ class _MembershipHeldSession extends _HeldSession {
     memberships.add(membership);
     return membership.future;
   }
+}
+
+/// Starts offline and answers channel-list reads once [connect]ed, listing
+/// one open channel, "ops-room".
+class _ReconnectingSession extends _HeldSession {
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+
+  void connect() => state = const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) => filter.search == null
+      ? Future.value(const [])
+      : super.fetchHistory(filter, timeout: timeout);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [
+    if (filters.single.kinds.contains(39000) && filters.single.until == null)
+      const NostrEvent(
+        id: 'meta-ops',
+        pubkey: 'relay',
+        createdAt: 2,
+        kind: 39000,
+        tags: [
+          ['d', 'ops-id'],
+          ['name', 'ops-room'],
+          ['t', 'stream'],
+          ['public'],
+        ],
+        content: '',
+        sig: 'sig',
+      ),
+  ];
 }

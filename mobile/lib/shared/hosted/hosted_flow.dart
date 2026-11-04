@@ -533,6 +533,15 @@ class HostedFlow extends ChangeNotifier {
     if ((target == null && !accountOnly) || session == null) {
       throw AccountFailure.signedOut;
     }
+    // Older native sessions may predate the web setup gate. Preserve their
+    // subject and destination while completing the same browser handoff.
+    if (session.needsAccountSetup) {
+      _set(HostedFlowStage.signIn);
+      await browser.start(
+        target == null ? {'type': 'account'} : _intent(target),
+      );
+      return;
+    }
     final store = this.store.forSubject(session.subject);
     if (target != null && !_acceptTarget(target)) return;
     if (target == null && _batchSubject != session.subject) {
@@ -994,6 +1003,21 @@ class HostedFlow extends ChangeNotifier {
     _conflictingRelay = null;
     _addingCommunities = false;
     addingCommunityName = null;
+  }
+
+  /// Ends the account session without removing saved identities or communities.
+  Future<void> signOutAccount() async {
+    await leave();
+    final generation = _generation;
+    if (_disposed || stage != HostedFlowStage.idle) return;
+    accountOnly = true;
+    _set(HostedFlowStage.working);
+    await _enqueue(() async {
+      await account.clearLocalSession();
+      if (_disposed || generation != _generation) return;
+      accountOnly = false;
+      _set(HostedFlowStage.idle);
+    });
   }
 
   Future<void> leave({bool noCommunities = false}) async {

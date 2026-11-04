@@ -9,6 +9,7 @@ import 'builderlab_account.dart';
 import 'account_identity_store.dart';
 import 'hosted_environment.dart';
 import 'organization_environment.dart';
+import '../push/push_bridge.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
   final account = BuilderlabAccountClient();
@@ -21,7 +22,15 @@ final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
 final organizationAccountProvider = Provider<BuilderlabAccountClient?>((ref) {
   final origin = OrganizationEnvironment.origin;
   if (origin == null) return null;
-  final account = BuilderlabAccountClient(accountOrigin: origin);
+  final account = BuilderlabAccountClient(
+    accountOrigin: origin,
+    // The notification extension mints its own assertions for these relays.
+    onSessionChanged: (credential) => shareOrganizationSessionWithNotifications(
+      origin: origin,
+      credential: credential,
+      relayHosts: OrganizationEnvironment.relayHosts,
+    ),
+  );
   ref.onDispose(account.dispose);
   return account;
 });
@@ -223,7 +232,7 @@ class HostedRelayAuth extends ChangeNotifier {
         throw AccountFailure.invalidResponse;
       }
       final now = _now().millisecondsSinceEpoch ~/ 1000;
-      if (expiry <= now || expiry > now + 300) {
+      if (expiry <= now) {
         throw AccountFailure.invalidResponse;
       }
       final expires = DateTime.fromMillisecondsSinceEpoch(

@@ -19,10 +19,21 @@ const _sectionHeaderExtent = 28.0;
 /// Cells divide the content width evenly with no gaps, the way emoji-mart lays
 /// its grid out; the space around each glyph comes from the cell being larger
 /// than the glyph.
-SliverGridDelegate get _gridDelegate =>
-    const SliverGridDelegateWithFixedCrossAxisCount(
-      crossAxisCount: _emojiPerLine,
-      mainAxisExtent: _cellExtent,
+class _EmojiGridSizing extends InheritedWidget {
+  const _EmojiGridSizing({required this.large, required super.child});
+  final bool large;
+  static bool isLarge(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_EmojiGridSizing>()?.large ??
+      false;
+  @override
+  bool updateShouldNotify(_EmojiGridSizing oldWidget) =>
+      large != oldWidget.large;
+}
+
+SliverGridDelegate _gridDelegate(BuildContext context) =>
+    SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: _EmojiGridSizing.isLarge(context) ? 5 : _emojiPerLine,
+      mainAxisExtent: _EmojiGridSizing.isLarge(context) ? 60 : _cellExtent,
     );
 
 /// One labelled run of tiles in the continuous grid.
@@ -31,6 +42,7 @@ SliverGridDelegate get _gridDelegate =>
 /// the grid having been laid out — with ~1.9k emoji most sections are far
 /// off-screen, so there is no render object to measure or `ensureVisible`.
 class _EmojiSection {
+  final bool large;
   final String id;
   final String label;
   final IconData icon;
@@ -38,6 +50,7 @@ class _EmojiSection {
   final Widget Function(BuildContext context, int index) itemBuilder;
 
   const _EmojiSection({
+    this.large = false,
     required this.id,
     required this.label,
     required this.icon,
@@ -45,9 +58,10 @@ class _EmojiSection {
     required this.itemBuilder,
   });
 
-  int get rowCount => (itemCount / _emojiPerLine).ceil();
+  int get rowCount => (itemCount / (large ? 5 : _emojiPerLine)).ceil();
 
-  double get extent => _sectionHeaderExtent + rowCount * _cellExtent;
+  double get extent =>
+      _sectionHeaderExtent + rowCount * (large ? 60 : _cellExtent);
 }
 
 /// Offset of each section's header, in scroll order. Element `i` is where the
@@ -111,7 +125,10 @@ class _EmojiTile extends StatelessWidget {
         button: true,
         label: entry.name,
         child: Center(
-          child: NativeEmojiGlyph(emoji: entry.native, size: _emojiGlyphSize),
+          child: NativeEmojiGlyph(
+            emoji: entry.native,
+            size: _EmojiGridSizing.isLarge(context) ? 48 : _emojiGlyphSize,
+          ),
         ),
       ),
     );
@@ -144,7 +161,7 @@ class _CustomEmojiTile extends StatelessWidget {
           child: CustomEmojiImage(
             shortcode: emoji.shortcode,
             url: emoji.url,
-            size: _emojiGlyphSize,
+            size: _EmojiGridSizing.isLarge(context) ? 48 : _emojiGlyphSize,
           ),
         ),
       ),
@@ -183,7 +200,7 @@ class _ContinuousEmojiGrid extends StatelessWidget {
               SliverPadding(
                 padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
                 sliver: SliverGrid.builder(
-                  gridDelegate: _gridDelegate,
+                  gridDelegate: _gridDelegate(context),
                   itemCount: section.itemCount,
                   itemBuilder: section.itemBuilder,
                 ),
@@ -235,7 +252,7 @@ class _EmojiSearchResults extends StatelessWidget {
           SliverPadding(
             padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
             sliver: SliverGrid.builder(
-              gridDelegate: _gridDelegate,
+              gridDelegate: _gridDelegate(context),
               itemCount: customEmoji.length,
               itemBuilder: (context, index) {
                 final entry = customEmoji[index];
@@ -252,7 +269,7 @@ class _EmojiSearchResults extends StatelessWidget {
           SliverPadding(
             padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
             sliver: SliverGrid.builder(
-              gridDelegate: _gridDelegate,
+              gridDelegate: _gridDelegate(context),
               itemCount: entries.length,
               itemBuilder: (context, index) {
                 final entry = entries[index];
