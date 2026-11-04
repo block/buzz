@@ -868,24 +868,46 @@ fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
     routable.then(|| hex::decode(root).ok()).flatten()
 }
 
-/// Whether `id` is itself a recorded reply. Its own replies are recorded under
-/// the thread's root, so a read for them must take the generic path. One
-/// probe of `idx_thread_metadata_event_id`. A root that has replies also has
-/// a row, the depth-0 stub with no root of its own, which is not a reply.
+/// Whether `id` is itself a reply. Its own replies are recorded under the
+/// thread's root, so a read for them must take the generic path.
+///
+/// A message gains a `thread_metadata` row when it is recorded as a reply, or
+/// as a depth-0 stub (no root) once something replies to it. A stub usually
+/// marks a root, but ingest also stubs a reply that has no row of its own and
+/// recovers its ancestry from its NIP-10 tags, so a stub is a root only when
+/// the message's own markers do not resolve to a reply. No row means nothing
+/// has replied to it. One probe of `idx_thread_metadata_event_id`.
 async fn is_recorded_reply(
     conn: &mut sqlx::PgConnection,
     q: &EventQuery,
     id: &[u8],
     deadline: ReadDeadline,
 ) -> Result<bool> {
-    let mut qb = QueryBuilder::new("SELECT 1 FROM thread_metadata WHERE community_id = ");
+    let mut qb = QueryBuilder::new(
+        "SELECT tm.root_event_id IS NOT NULL AS has_root, e.tags FROM thread_metadata tm \
+         LEFT JOIN events e ON e.community_id = tm.community_id \
+         AND e.created_at = tm.event_created_at AND e.id = tm.event_id \
+         WHERE tm.community_id = ",
+    );
     qb.push_bind(q.community_id.as_uuid())
-        .push(" AND event_id = ")
+        .push(" AND tm.event_id = ")
         .push_bind(id.to_vec())
-        .push(" AND root_event_id IS NOT NULL LIMIT 1");
-    Ok(!fetch_with_read_deadline(conn, &mut qb, true, deadline)
-        .await?
-        .is_empty())
+        .push(" LIMIT 1");
+    let rows = fetch_with_read_deadline(conn, &mut qb, true, deadline).await?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    if row.try_get::<bool, _>("has_root")? {
+        return Ok(true);
+    }
+    let tags: Option<serde_json::Value> = row.try_get("tags")?;
+    let tags: Vec<Vec<String>> = tags
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| DbError::InvalidData("invalid message tags".into()))?
+        .unwrap_or_default();
+    let markers = buzz_core::nip10::parse_thread_markers_from_parts(tags.iter().map(Vec::as_slice));
+    Ok(markers.resolve().is_some())
 }
 
 /// SQL for thread-route reads: walk the root's replies newest-first
@@ -3762,6 +3784,52 @@ mod postgres_tests {
         assert_eq!(
             ids(query_events(&pool, &nested_parent).await.unwrap()),
             vec![nested.id]
+        );
+
+        // A legacy reply L, stored without its own thread row, gains a rootless
+        // stub when D replies to it. Its markers still make it a reply, so a
+        // read of L's replies falls back and finds D.
+        let legacy = message(
+            9,
+            vec![
+                vec!["h".into(), h.clone()],
+                vec!["e".into(), root_hex.clone(), String::new(), "reply".into()],
+            ],
+            now + 14,
+        );
+        insert_event(&pool, community, &legacy, Some(channel))
+            .await
+            .unwrap();
+        let d = reply(9, Some(&legacy), now + 15);
+        db.insert_event_with_thread_metadata(
+            community,
+            &d,
+            Some(channel),
+            Some(ThreadMetadataParams {
+                event_id: d.id.as_bytes(),
+                event_created_at: ts(&d),
+                channel_id: channel,
+                parent_event_id: Some(legacy.id.as_bytes()),
+                parent_event_created_at: Some(ts(&legacy)),
+                root_event_id: Some(root_id),
+                root_event_created_at: Some(ts(&root)),
+                depth: 2,
+                broadcast: false,
+            }),
+        )
+        .await
+        .unwrap();
+        expected.insert(0, d.id);
+        let got = is_recorded_reply(&mut conn, &q, legacy.id.as_bytes(), ReadDeadline::PerRead);
+        assert!(
+            got.await.unwrap(),
+            "a stubbed legacy reply is still a reply"
+        );
+        let mut legacy_parent = q.clone();
+        legacy_parent.e_tags = Some(vec![legacy.id.to_hex()]);
+        assert_eq!(
+            ids(query_events(&pool, &legacy_parent).await.unwrap()),
+            vec![d.id]
         );
 
         // Keyset pages of two cover the same order.
