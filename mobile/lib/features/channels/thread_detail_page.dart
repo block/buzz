@@ -644,7 +644,10 @@ class ThreadDetailPage extends HookConsumerWidget {
           headHeight.value == null) {
         return null;
       }
-      if (initialMessageId != null) {
+      // A targeted entry starts at its target, not the tail. Absorb the
+      // replies it hydrated with once; later arrivals use the ordinary rules
+      // below, so a reply sent from this page still comes into view.
+      if (initialMessageId != null && !initialTailSettle.isComplete) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
         return null;
