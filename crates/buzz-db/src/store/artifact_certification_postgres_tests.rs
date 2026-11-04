@@ -431,7 +431,23 @@ async fn deletion_admission_does_not_block_other_communities() {
 #[tokio::test]
 #[ignore = "requires Postgres; performance measurement"]
 async fn measure_certification_backlog() {
-    let (db, _) = fixture().await;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let (_, _) = fixture().await;
+    let connections = Arc::new(AtomicUsize::new(0));
+    let observed = connections.clone();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .after_connect(move |_, _| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { Ok(()) })
+        })
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let db = Db::from_pool(pool);
     for communities in [1, 100] {
         for repetition in 0..3 {
             for _ in 0..communities {
@@ -439,6 +455,7 @@ async fn measure_certification_backlog() {
                 sqlx::query("INSERT INTO artifact_sync_pending(community_id,operation_id,earliest_at) SELECT $1,gen_random_uuid(),clock_timestamp() FROM generate_series(1,$2)")
                     .bind(community.as_uuid()).bind(10_000 / communities).execute(db.pool()).await.unwrap();
             }
+            let before = connections.load(Ordering::Relaxed);
             let start = std::time::Instant::now();
             let mut after = None;
             let mut completed = 0;
@@ -453,7 +470,7 @@ async fn measure_certification_backlog() {
                 calls += 1;
                 assert!(calls < 30_000);
             }
-            println!("PERF recovery communities={communities} repetition={repetition} count={completed} calls={calls} elapsed_ms={:.3}", start.elapsed().as_secs_f64()*1000.0);
+            println!("PERF recovery communities={communities} repetition={repetition} count={completed} calls={calls} connections={} elapsed_ms={:.3}", connections.load(Ordering::Relaxed)-before, start.elapsed().as_secs_f64()*1000.0);
         }
     }
 }
