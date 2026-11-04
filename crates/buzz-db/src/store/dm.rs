@@ -187,8 +187,7 @@ pub async fn create_dm(
 
     // Add all participants as members with role='member'.
     for pk in participants {
-        sqlx::query(
-            r#"
+        let (sql, operation) = tx.artifact_change_query(r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'member', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
@@ -196,14 +195,15 @@ pub async fn create_dm(
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(id)
-        .bind(*pk)
-        .bind(created_by)
-        .execute(tx.conn())
-        .await?;
+            "#, 1, 5, true);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community_id.as_uuid())
+            .bind(id)
+            .bind(*pk)
+            .bind(created_by)
+            .bind(operation)
+            .execute(tx.conn())
+            .await?;
     }
 
     let row = sqlx::query(

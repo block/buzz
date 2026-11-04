@@ -81,6 +81,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
     "api_tokens",
     "archived_identities",
+    "artifact_sync_pending",
     "artifact_heads",
     "artifact_revisions",
     "audit_log",
@@ -151,6 +152,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "push_leases",
     "relay_invites",
     "delivery_log",
+    "artifact_sync_pending",
     "artifact_heads",
     "artifact_revisions",
     "events",
@@ -8628,6 +8630,12 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let (request, inventory) = inventoried_request(&db, &store).await;
         let community = *request.community_id.as_uuid();
         seed_relay_admin_rows(&db, community).await;
+        let mut artifact_write = db
+            .begin_event_write_transaction(request.community_id)
+            .await
+            .unwrap();
+        artifact_write.record_artifact_change().await.unwrap();
+        artifact_write.commit().await.unwrap();
         let bystander = db
             .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
             .await
@@ -8699,6 +8707,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(deleted.get("artifact_sync_pending"), Some(&1));
 
         let retained: Uuid = sqlx::query_scalar(
             "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",

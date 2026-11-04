@@ -72,6 +72,7 @@ use crate::Result;
 pub struct AdmittedTx {
     tx: Transaction<'static, Postgres>,
     community: CommunityId,
+    artifact_certification: Option<Uuid>,
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
@@ -89,6 +90,7 @@ impl AdmittedTx {
         Ok(Self {
             tx,
             community,
+            artifact_certification: None,
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
@@ -108,6 +110,7 @@ impl AdmittedTx {
         Ok(Self {
             tx,
             community: lease.community_id,
+            artifact_certification: None,
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
@@ -129,6 +132,43 @@ impl AdmittedTx {
                 super::push_enqueue::record_drop("transaction_full");
             }
         }
+    }
+
+    /// Add one durable record to an existing mutation without another SQL call.
+    pub(crate) fn artifact_change_query(
+        &mut self,
+        sql: &str,
+        community_parameter: usize,
+        operation_parameter: usize,
+        needed: bool,
+    ) -> (String, Option<Uuid>) {
+        let operation = if needed && self.artifact_certification.is_none() {
+            let operation = Uuid::new_v4();
+            self.artifact_certification = Some(operation);
+            Some(operation)
+        } else {
+            None
+        };
+        // The transaction clock is a conservative bound for NOW() defaults.
+        // CTE execution order cannot move this lower bound past the change.
+        let sql = format!(
+            "WITH buzz_artifact_certification AS (INSERT INTO artifact_sync_pending \
+             (community_id,operation_id,earliest_at) \
+             SELECT ${community_parameter},${operation_parameter}::uuid,LEAST(transaction_timestamp(),statement_timestamp()) \
+             WHERE ${operation_parameter}::uuid IS NOT NULL) {sql}"
+        );
+        (sql, operation)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_artifact_change(&mut self) -> Result<()> {
+        let (sql, operation) = self.artifact_change_query("SELECT $1::uuid", 1, 2, true);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(self.community.as_uuid())
+            .bind(operation)
+            .execute(self.conn())
+            .await?;
+        Ok(())
     }
 
     /// The community this transaction was admitted for.

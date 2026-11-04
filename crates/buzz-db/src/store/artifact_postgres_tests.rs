@@ -15,6 +15,162 @@ struct Fixture {
     peer: Keys,
     relay: Keys,
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifact_writes_record_one_certification_before_their_timestamps() {
+    let f = Fixture::new().await;
+    let id = Uuid::new_v4();
+    let mut previous = None;
+    let mut home = f.a;
+    for op in ["create", "update", "move", "delete", "restore"] {
+        let source = if op == "move" { Some(home) } else { None };
+        if op == "move" {
+            home = f.b;
+        }
+        let event = f.revision(id, op, home, previous.as_ref(), &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&event, source).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        let (count, early): (i64, bool) = sqlx::query_as(
+            "SELECT count(*),bool_and(p.earliest_at <= LEAST(h.modified_at,r.modified_at)) \
+             FROM artifact_sync_pending p JOIN artifact_heads h USING(community_id) \
+             JOIN artifact_revisions r ON r.community_id=h.community_id AND r.event_id=h.event_id \
+             WHERE p.community_id=$1 AND h.artifact_id=$2",
+        )
+        .bind(f.community.as_uuid())
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        assert_eq!((count, early), (1, true), "{op}");
+        assert!(matches!(
+            f.accept(&event, source).await,
+            ArtifactOutcome::Duplicate
+        ));
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+        previous = Some(event);
+    }
+    let event = previous.unwrap();
+    crate::event::soft_delete_event_and_update_thread(
+        &f.db.pool,
+        f.community,
+        event.id.as_bytes(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn access_writers_record_certification_for_grants_and_removals() {
+    use crate::channel_members::{add_member, remove_member, MemberRole};
+    let f = Fixture::new().await;
+    let owner = f.owner.public_key().to_bytes();
+    let peer = f.peer.public_key().to_bytes();
+    for _ in 0..2 {
+        add_member(
+            &f.db.pool,
+            f.community,
+            f.b,
+            &peer,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+        remove_member(&f.db.pool, f.community, f.b, &peer, &owner)
+            .await
+            .unwrap();
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    }
+    let mut tx =
+        f.db.begin_event_write_transaction(f.community)
+            .await
+            .unwrap();
+    crate::channel_members::lock_channel_memberships_in_transaction(&mut tx, &[f.b])
+        .await
+        .unwrap()
+        .insert_auto_membership(f.b, &peer, &owner)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    crate::relay_admin_actions::deploy_kick_member(&f.db.pool, f.community, f.b, &peer, &owner)
+        .await
+        .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    crate::dm::create_dm(&f.db.pool, f.community, &[&owner, &peer], &owner)
+        .await
+        .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_writers_record_certification_for_creation_and_policy() {
+    use buzz_core::channel::{ChannelType, ChannelVisibility};
+    let f = Fixture::new().await;
+    let owner = f.owner.public_key().to_bytes();
+    crate::channel::create_channel(
+        &f.db.pool,
+        f.community,
+        "certified",
+        ChannelType::Stream,
+        ChannelVisibility::Open,
+        None,
+        &owner,
+        None,
+        &[],
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    crate::channel::create_channel_with_id(
+        &f.db.pool,
+        f.community,
+        Uuid::new_v4(),
+        "certified-id",
+        ChannelType::Stream,
+        ChannelVisibility::Open,
+        None,
+        &owner,
+        None,
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    for updates in [
+        crate::channel::ChannelUpdate {
+            visibility: Some("private".into()),
+            ..Default::default()
+        },
+        crate::channel::ChannelUpdate {
+            unlisted: Some(true),
+            ..Default::default()
+        },
+        crate::channel::ChannelUpdate {
+            ttl_seconds: Some(Some(3600)),
+            ..Default::default()
+        },
+    ] {
+        crate::channel::update_channel(&f.db.pool, f.community, f.a, updates)
+            .await
+            .unwrap();
+        assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+    }
+    crate::channel::soft_delete_channel(&f.db.pool, f.community, f.a)
+        .await
+        .unwrap();
+    assert_eq!(f.db.recover_artifact_certifications().await.unwrap(), 1);
+}
 impl Fixture {
     async fn new() -> Self {
         let pool = PgPool::connect(&crate::test_support::database_url())
@@ -822,4 +978,47 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; performance measurement"]
+async fn measure_artifact_write_latency() {
+    println!("PERF source={}", env!("CARGO_MANIFEST_DIR"));
+    use std::{sync::Arc, time::Instant};
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(64)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let fixture = Arc::new(Fixture::on(Db::from_pool(pool)).await);
+    for concurrency in [1, 8, 32] {
+        for repetition in 0..3 {
+            let mut workers = tokio::task::JoinSet::new();
+            let start = Instant::now();
+            for _ in 0..concurrency {
+                let f = fixture.clone();
+                workers.spawn(async move {
+                    let mut samples = Vec::new();
+                    for _ in 0..32 {
+                        let event =
+                            f.revision(Uuid::new_v4(), "create", f.a, None, &f.owner, vec![]);
+                        let start = Instant::now();
+                        assert!(matches!(
+                            f.accept(&event, None).await,
+                            ArtifactOutcome::Accepted(_)
+                        ));
+                        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    samples
+                });
+            }
+            let mut samples = Vec::new();
+            while let Some(result) = workers.join_next().await {
+                samples.extend(result.unwrap());
+            }
+            let elapsed = start.elapsed().as_secs_f64();
+            samples.sort_by(f64::total_cmp);
+            println!("PERF write concurrency={concurrency} repetition={repetition} count={} elapsed_s={elapsed:.4} ops_s={:.1} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3}", samples.len(), samples.len() as f64 / elapsed, samples[samples.len()/2], samples[samples.len()*95/100], samples[samples.len()*99/100]);
+        }
+    }
 }

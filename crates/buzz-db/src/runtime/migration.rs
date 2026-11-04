@@ -2893,6 +2893,7 @@ mod postgres_tests {
             "entity_deletion_requests",
             "artifact_heads",
             "artifact_revisions",
+            "artifact_sync_pending",
             "channel_members",
             "communities",
             "entity_deletion_stage_history",

@@ -718,19 +718,24 @@ pub async fn execute_kick_with_marker(
     crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
         .await?;
 
-    let kick = sqlx::query(
+    let (sql, operation) = tx.artifact_change_query(
         r#"
         UPDATE channel_members
         SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
-    )
-    .bind(actor_pubkey)
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(target_pubkey)
-    .execute(tx.conn())
-    .await?;
+        2,
+        5,
+        true,
+    );
+    let kick = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(actor_pubkey)
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(target_pubkey)
+        .bind(operation)
+        .execute(tx.conn())
+        .await?;
 
     if kick.rows_affected() == 0 {
         tx.rollback().await?;
@@ -1726,19 +1731,24 @@ pub async fn deploy_kick_member(
         .await?;
     // Use a direct UPDATE to avoid the tenant ownership check in channel::remove_member.
     // This is the deployment-authority primitive: no actor role check.
-    let result = sqlx::query(
+    let (sql, operation) = tx.artifact_change_query(
         r#"
         UPDATE channel_members
         SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
-    )
-    .bind(actor_pubkey)
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(target_pubkey)
-    .execute(tx.conn())
-    .await?;
+        2,
+        5,
+        true,
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(actor_pubkey)
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(target_pubkey)
+        .bind(operation)
+        .execute(tx.conn())
+        .await?;
     tx.commit().await?;
 
     if result.rows_affected() > 0 {
@@ -3903,6 +3913,13 @@ mod postgres_tests {
             matches!(r1, KickWithMarkerResult::Removed),
             "first kick must be Removed"
         );
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM artifact_sync_pending WHERE community_id=$1")
+                .bind(community_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 1);
 
         // step_marker must now be set.
         let rec = get_action(&pool, action_id)

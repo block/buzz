@@ -55,5 +55,58 @@ All instances must use the same configured relay signing key, because that key
 authenticates the progress tokens. NIP-11 advertises `artifacts.incremental`.
 Every serving writer must maintain the modification timestamps.
 
-The 120-second stamp-to-visibility bound remains an operating assumption.
-Runtime measurements are tracked separately.
+Without durable certification on every serving writer, the 120-second
+stamp-to-visibility bound remains an operating assumption. Runtime measurements
+are tracked separately.
+
+## Durable certification
+
+Migration `0081` adds `artifact_sync_pending`. It is an expand migration.
+It adds no trigger, function, foreign key, or backfill. Old relays ignore this
+table for serving writes. Their deletion catalog fails closed until the new
+relay deploys. New relays require the table before they accept relevant writes. With startup
+migrations enabled, the older binary still has the SQLx `VersionMissing`
+restriction described in `docs/database.md`.
+
+Each supported writer records one pending operation in its admitted transaction.
+The operation has a unique UUID. The existing mutation statement also inserts the record, with no extra SQL
+round trip. Its timestamp uses the earlier transaction or statement clock as
+a conservative bound for the relevant sync stamps. Repeated changes in the transaction reuse the record.
+Rollback removes both the changes and the record. An uncertain commit leaves
+both committed or neither committed. Recovery does not require a caller retry.
+
+Every relay starts a recovery worker.
+The worker reads bounded batches. It rotates across communities, including
+after a failed attempt. It locks pending rows with `SKIP LOCKED`. Each tick
+has a five-second work budget and at most 100 batches. Each batch has at most
+1,000 records across communities in one transaction. Only one worker processes
+a batch across the fleet. The election lock applies only to recovery. Serving
+writes do not take it. A blocked community cannot exclude other communities.
+Each operation has a short deadline. Recovery reuses a connection after a
+confirmed commit. Errors or cancellation close that connection.
+After it observes a committed record, it reads database time. If less than
+120 seconds separate that time from the early timestamp, the overlap covers
+visibility of the write. A clock reversal or a delay of at least 120 seconds
+requires a reset. A delayed recovery can cause an unnecessary reset.
+
+Recovery advances `artifact_policy_modified_at` only when it requires a reset.
+It removes the pending rows in that same transaction. A crash before this
+commit leaves the pending rows for retry. A retry after the commit finds no
+work. Ordinary writes do not acquire a shared counter or policy row lock.
+
+Existing clients use the existing `policy_changed` reset. They start discovery
+again and revalidate saved IDs. The request, response, cursor, checkpoint, and
+capability formats stay at version 1. No client change is required. A reset
+covers the community because that is the existing policy boundary.
+
+Full coverage requires all serving writers to use this release. The covered
+paths are artifact create, update, move, delete, restore, and redaction;
+channel creation; membership grants, rejoins, and removals; channel visibility,
+listing, TTL, and deletion changes; DM creation; and admin member removals.
+Archive state and hidden DMs do not change artifact access. Incremental reads
+exclude TTL channels. Whole-community deletion stops reads and purges pending
+records. Operator SQL and mixed old writers cannot provide this guarantee.
+The full guarantee starts after old writers drain. Use the existing reset
+procedure after the fleet upgrade or a rollback to an old writer.
+
+This change does not authorize deployment or a production maintenance write.
