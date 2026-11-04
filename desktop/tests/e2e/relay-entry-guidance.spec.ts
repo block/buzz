@@ -147,6 +147,7 @@ test("required community can switch to a saved free community and join another r
       ),
     });
   await expect(activeRail).toBeVisible();
+  await expect(page.getByTestId("community-rail-button-free")).toHaveCount(1);
   expect(
     await page.evaluate(
       () => JSON.parse(localStorage.getItem("buzz-communities") ?? "[]").length,
@@ -180,6 +181,7 @@ test("required community can switch to a saved free community and join another r
   ).toBe(3);
   await card.getByRole("button", { name: "Open Free", exact: true }).click();
   await expect(card).toBeHidden();
+  await expect(page.getByTestId("community-rail-button-free")).toHaveCount(1);
   expect(
     await page.evaluate(
       () => JSON.parse(localStorage.getItem("buzz-communities") ?? "[]").length,

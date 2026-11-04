@@ -690,7 +690,7 @@ function CommunityApp({
       {appContent}
       {activeCommunity ? (
         <RelayEntryGate
-          key={communityKey}
+          key={`entry-${communityKey}`}
           relayUrl={activeCommunity.relayUrl}
           communities={communities}
           onRetry={reconnectCommunity}
