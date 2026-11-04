@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:buzz/features/onboarding/organization_sign_in_banner.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -33,6 +34,11 @@ class _Session extends RelaySessionNotifier {
 }
 
 void main() {
+  setUpAll(() async {
+    final font = FontLoader('Inter')
+      ..addFont(rootBundle.load('assets/fonts/InterVariable.ttf'));
+    await font.load();
+  });
   late OrganizationSignIn signIn;
   final logins = <Uri>[];
   late HostedRelayAuth auth;
@@ -81,7 +87,7 @@ void main() {
     });
   });
   Future<void> mount(WidgetTester tester, {double scale = 1}) async {
-    await tester.binding.setSurfaceSize(const Size(375, 667));
+    await tester.binding.setSurfaceSize(const Size(320, 568));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
       ProviderScope(
@@ -96,7 +102,7 @@ void main() {
           home: Scaffold(
             body: MediaQuery(
               data: MediaQueryData(
-                size: const Size(375, 667),
+                size: const Size(320, 568),
                 textScaler: TextScaler.linear(scale),
               ),
               child: Stack(
@@ -121,60 +127,71 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  testWidgets('sign in, cancel, retry sign-in and successful completion', (
-    tester,
-  ) async {
-    await mount(tester);
-    expect(find.text("It looks like you're signed out."), findsOneWidget);
-    await tester.tap(find.text('Sign in'));
-    await tester.pumpAndSettle();
-    expect(logins, hasLength(1));
-    expect(find.text('Finish sign-in in browser'), findsOneWidget);
-    final button = tester.widget<FilledButton>(
-      find.widgetWithText(FilledButton, 'Cancel'),
+  for (final scale in [1.0, 2.0, 3.0]) {
+    testWidgets(
+      'sign in, cancel, retry sign-in and successful completion at $scale',
+      (tester) async {
+        await mount(tester, scale: scale);
+        expect(find.text("It looks like you're signed out."), findsOneWidget);
+        expectVisibleCard(tester);
+        await tester.tap(find.text('Sign in'));
+        await tester.pumpAndSettle();
+        expect(logins, hasLength(1));
+        expect(find.text('Finish sign-in in browser'), findsOneWidget);
+        expectVisibleCard(tester);
+        final button = tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, 'Cancel'),
+        );
+        expect(
+          button.style!.backgroundColor!.resolve({}),
+          AppTheme.light().colorScheme.error,
+        );
+        await tester.runAsync(() async {
+          await tester.tap(find.text('Cancel'));
+          await pumpEventQueue();
+        });
+        await tester.pumpAndSettle();
+        expect(find.text("It looks like you're signed out."), findsOneWidget);
+        await tester.tap(find.text('Sign in'));
+        await tester.pumpAndSettle();
+        await tester.runAsync(() async {
+          await signIn.browser.receive(
+            Uri.parse(BrowserAuth.callback).replace(
+              queryParameters: {
+                'state': logins.last.queryParameters['state']!,
+                'code': 'code',
+              },
+            ),
+          );
+          await pumpEventQueue();
+        });
+        expect(signIn.account.account?.subject, 'member');
+        expect(
+          await const FlutterSecureStorage().read(
+            key: 'buzz_hosted_session_organization_example_v1',
+          ),
+          contains('member'),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ReconnectCapsule), findsNothing);
+      },
     );
-    expect(
-      button.style!.backgroundColor!.resolve({}),
-      AppTheme.light().colorScheme.error,
-    );
-    await tester.runAsync(() async {
-      await tester.tap(find.text('Cancel'));
-      await pumpEventQueue();
-    });
-    await tester.pumpAndSettle();
-    expect(find.text("It looks like you're signed out."), findsOneWidget);
-    await tester.tap(find.text('Sign in'));
-    await tester.pumpAndSettle();
-    await tester.runAsync(() async {
-      await signIn.browser.receive(
-        Uri.parse(BrowserAuth.callback).replace(
-          queryParameters: {
-            'state': logins.last.queryParameters['state']!,
-            'code': 'code',
-          },
-        ),
-      );
-      await pumpEventQueue();
-    });
-    expect(signIn.account.account?.subject, 'member');
-    expect(
-      await const FlutterSecureStorage().read(
-        key: 'buzz_hosted_session_organization_example_v1',
-      ),
-      contains('member'),
-    );
-    await tester.pumpAndSettle();
-    expect(find.byType(ReconnectCapsule), findsNothing);
-  });
-  for (final failure in [AccountFailure.storage, AccountFailure.unavailable]) {
-    testWidgets('$failure keeps sign-in recovery available', (tester) async {
-      signIn.failure = failure;
-      await mount(tester);
-      expect(find.text('Sign in failed. Try again.'), findsOneWidget);
-      await tester.tap(find.text('Sign in'));
-      await tester.pumpAndSettle();
-      expect(logins, hasLength(1));
-    });
+    for (final failure in [
+      AccountFailure.storage,
+      AccountFailure.unavailable,
+    ]) {
+      testWidgets('$failure keeps sign-in recovery available at $scale', (
+        tester,
+      ) async {
+        signIn.failure = failure;
+        await mount(tester, scale: scale);
+        expect(find.text('Sign in failed. Try again.'), findsOneWidget);
+        expectVisibleCard(tester);
+        await tester.tap(find.text('Sign in'));
+        await tester.pumpAndSettle();
+        expect(logins, hasLength(1));
+      });
+    }
   }
   testWidgets('denied access retains both actions at large text sizes', (
     tester,
@@ -222,4 +239,42 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Sign in'), findsOneWidget);
   });
+}
+
+// Check the painted clip, not just absence of RenderFlex overflow: a stadium
+// can silently cut glyphs off even when Flutter reports no layout exception.
+void expectVisibleCard(WidgetTester tester) {
+  expect(tester.takeException(), isNull);
+  final card = find
+      .descendant(
+        of: find.byType(ReconnectCapsule),
+        matching: find.byType(PhysicalShape),
+      )
+      .first;
+  final bounds = tester.getRect(card);
+  expect(bounds.left, greaterThanOrEqualTo(0));
+  expect(bounds.top, greaterThanOrEqualTo(0));
+  expect(bounds.right, lessThanOrEqualTo(320));
+  expect(bounds.bottom, lessThanOrEqualTo(568));
+  final shape = tester.widget<PhysicalShape>(card);
+  final path = shape.clipper.getClip(bounds.size);
+  for (final element
+      in find.descendant(of: card, matching: find.byType(Text)).evaluate()) {
+    final rect = tester
+        .getRect(find.byWidget(element.widget))
+        .shift(-bounds.topLeft)
+        .deflate(0.1);
+    for (final point in [
+      rect.topLeft,
+      rect.topRight,
+      rect.bottomLeft,
+      rect.bottomRight,
+    ]) {
+      expect(
+        path.contains(point),
+        isTrue,
+        reason: 'Text must fit inside the painted card',
+      );
+    }
+  }
 }

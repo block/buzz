@@ -28,9 +28,22 @@ _MentionRows _useMentionRows(
   int start = -1,
   ObjectRef<_DeadMention?>? dead,
 }) {
-  final shown = useRef<(String, int, List<MentionCandidate>, bool)?>(null);
+  final args = query == null
+      ? null
+      : (channelId: channelId, query: query, opening: opening);
+  final ranked = args == null
+      ? const <MentionCandidate>[]
+      : ref.watch(mentionCandidatesProvider(args));
+  final searchFailed =
+      args != null && ref.watch(mentionSearchFailedProvider(args));
+  final pending = args != null && ref.watch(mentionSearchPendingProvider(args));
+  final shown = useStableMentionRows(
+    ranked,
+    query: query ?? '',
+    opening: opening,
+    pending: pending,
+  );
   if (query == null) {
-    shown.value = null;
     return (
       rows: const [],
       unavailable: const {},
@@ -39,20 +52,11 @@ _MentionRows _useMentionRows(
       searching: false,
     );
   }
-  final args = (channelId: channelId, query: query, opening: opening);
-  final ranked = ref.watch(mentionCandidatesProvider(args));
-  final searchFailed = ref.watch(mentionSearchFailedProvider(args));
-  final pending = ref.watch(mentionSearchPendingProvider(args));
-  final last = shown.value;
-  final same = last != null && last.$1 == query && last.$2 == opening;
-  final result = stableMentionRows(same ? last.$3 : const [], ranked);
-  final reserveHeight = pending || (same && last.$4);
-  shown.value = (query, opening, result.rows, reserveHeight);
   final rows = (
-    rows: result.rows,
-    unavailable: result.unavailable,
+    rows: shown.rows,
+    unavailable: shown.unavailable,
     searchFailed: searchFailed,
-    reserveHeight: reserveHeight,
+    reserveHeight: shown.reserveHeight,
     searching: pending,
   );
   if (dead != null) {

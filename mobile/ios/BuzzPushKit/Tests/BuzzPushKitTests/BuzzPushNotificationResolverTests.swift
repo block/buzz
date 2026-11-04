@@ -513,6 +513,29 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertNil(push(), "a future-dated message is not shown again")
   }
 
+  func testExtremeTimestampsDoNotCrashTheClaim() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+    let scope = try XCTUnwrap(BuzzNotificationCacheScope(community: community()))
+    let cache = BuzzNotificationCache(
+      directory: root, now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) },
+      isCurrent: { $0 == scope })
+    func claim(_ event: VerifiedNostrEvent) throws -> Bool {
+      try cache.claimFirstUnpresented([(event: event, scope: scope)], scopes: [scope]) == 0
+    }
+    func message(_ content: String, createdAt: Int) throws -> VerifiedNostrEvent {
+      try Self.signedEvent(privateKey: Self.profilePrivateKey, createdAt: createdAt,
+        kind: 9, tags: [["h", Self.channelID]], content: content)
+    }
+    let ancient = try message("Ancient", createdAt: Int.min)
+    XCTAssertTrue(try claim(ancient))
+    XCTAssertFalse(try claim(ancient))
+    XCTAssertTrue(try claim(try message("Current", createdAt: Self.now)))
+    XCTAssertFalse(try claim(try message("Also ancient", createdAt: Int.min + 1)),
+      "a message far older than one already shown is history")
+    XCTAssertTrue(try claim(try message("Far future", createdAt: Int.max)))
+  }
+
   func testFutureDatedEntriesDoNotEvictAClaimedMessage() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     addTeardownBlock { try? FileManager.default.removeItem(at: root) }
