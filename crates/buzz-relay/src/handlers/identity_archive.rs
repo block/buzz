@@ -125,48 +125,67 @@ pub async fn handle_identity_archive_event(
 
     // The stored row is the archive state its delta reports: a request that
     // only adds a replacement keeps an earlier reason it does not restate.
-    let Some(row) = state
-        .db
-        .get_archived(tenant.community(), &target_hex)
-        .await
-        .map_err(|e| format!("database error: {e}"))?
-    else {
-        // Unarchived concurrently; that request publishes its own delta.
-        return Ok(());
-    };
     // Clients read reason and replacement only from the newest delta, and the
-    // snapshot carries neither. When that delta never reached storage, a
-    // repeat request republishes it from the row instead of doing nothing.
-    if !changed {
-        let latest = latest_nipia_delta(tenant, state, &target_hex)
+    // snapshot carries neither. A concurrent request can publish a delta for
+    // an older row after ours, and a delta can fail to reach storage. So
+    // re-read the row and the newest delta until the newest one reports the
+    // row; a repeat request republishes a missing delta instead of doing
+    // nothing. This is the same re-check the snapshot uses.
+    const MAX_DELTA_ATTEMPTS: usize = 8;
+    let mut must_publish = changed;
+    for _ in 0..MAX_DELTA_ATTEMPTS {
+        let Some(row) = state
+            .db
+            .get_archived(tenant.community(), &target_hex)
             .await
-            .map_err(|e| format!("database error: {e}"))?;
-        if latest.is_some_and(|delta| delta_reports(&delta, &row)) {
+            .map_err(|e| format!("database error: {e}"))?
+        else {
+            // Unarchived concurrently; that request publishes its own delta.
             return Ok(());
+        };
+        // Test-only barrier: holds a publisher after it has read the row, so a
+        // test can change the row before this publisher writes its delta.
+        #[cfg(test)]
+        crate::handlers::side_effects::publish_test_hooks::after_reading_archive_state(
+            tenant.community(),
+        )
+        .await;
+        if !must_publish {
+            let latest = latest_nipia_delta(tenant, state, &target_hex)
+                .await
+                .map_err(|e| format!("database error: {e}"))?;
+            if latest.is_some_and(|delta| delta_reports(&delta, &row)) {
+                return Ok(());
+            }
         }
-    }
-
-    let published = publish_nipia_archived(
-        tenant,
-        state,
-        &row.pubkey,
-        &row.consent_path,
-        &row.actor,
-        &row.request_event_id,
-        if changed { event.content.as_str() } else { "" },
-        row.reason.as_deref(),
-        row.replaced_by.as_deref(),
-    )
-    .await;
-    if changed {
-        if let Err(e) = publish_nipia_archival_list(tenant, state).await {
-            warn!(error = %e, "failed to publish NIP-IA archival list");
+        let published = publish_nipia_archived(
+            tenant,
+            state,
+            &row.pubkey,
+            &row.consent_path,
+            &row.actor,
+            &row.request_event_id,
+            if changed && must_publish {
+                event.content.as_str()
+            } else {
+                ""
+            },
+            row.reason.as_deref(),
+            row.replaced_by.as_deref(),
+        )
+        .await;
+        if changed && must_publish {
+            if let Err(e) = publish_nipia_archival_list(tenant, state).await {
+                warn!(error = %e, "failed to publish NIP-IA archival list");
+            }
         }
+        published.map_err(|e| {
+            warn!(error = %e, "failed to publish NIP-IA delta");
+            "archive applied but its delta was not published; retry the request".to_string()
+        })?;
+        must_publish = false;
     }
-    published.map_err(|e| {
-        warn!(error = %e, "failed to publish NIP-IA delta");
-        "archive applied but its delta was not published; retry the request".to_string()
-    })
+    Err("archive applied but its delta did not settle; retry the request".to_string())
 }
 
 /// Whether `delta` is an archive delta that carries `row`'s replacement.
@@ -698,7 +717,7 @@ mod tests {
         // Deterministically wait until the stale publisher has read `{target}`.
         reached_hook
             .await
-            .expect("stale publisher reached the post-list_archived hook");
+            .expect("stale publisher reached the post-read hook");
 
         // canonical -> {} while the stale publisher holds its `{target}` view.
         state
@@ -986,5 +1005,86 @@ mod tests {
             .collect();
         assert_eq!(repaired.len(), 1, "the missing delta is republished once");
         assert_eq!(replacement(&repaired[0].event), Some(successor_hex.clone()));
+    }
+
+    /// A publisher that read the row before a concurrent request added the
+    /// replacement must not leave its older delta as the newest one.
+    /// Deterministic via the `publish_test_hooks` barrier.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stale_archive_publisher_does_not_hide_a_concurrent_replacement() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+        let old_keys = Keys::generate();
+        let old_hex = old_keys.public_key().to_hex();
+        let successor_hex = Keys::generate().public_key().to_hex();
+        let request = |replaced_by: Option<&str>| {
+            let mut tags = vec![
+                Tag::parse(["-"]).expect("protected tag"),
+                Tag::parse(["p", old_hex.as_str()]).expect("p tag"),
+            ];
+            if let Some(successor) = replaced_by {
+                tags.push(Tag::parse(["replaced-by", successor]).expect("replaced-by tag"));
+            }
+            EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+                .tags(tags)
+                .allow_self_tagging()
+                .sign_with_keys(&old_keys)
+                .expect("sign archive request")
+        };
+        handle_identity_archive_event(&tenant, &state, &request(None))
+            .await
+            .expect("self archive accepted");
+
+        // A repeat request reads the row without a replacement, then waits.
+        let (reached_hook, release) =
+            crate::handlers::side_effects::publish_test_hooks::arm(tenant.community());
+        let stale_tenant = tenant.clone();
+        let stale_state = state.clone();
+        let stale_request = request(None);
+        let stale = tokio::spawn(async move {
+            handle_identity_archive_event(&stale_tenant, &stale_state, &stale_request).await
+        });
+        reached_hook
+            .await
+            .expect("stale publisher reached the post-read hook");
+
+        // The replacement is added and published while it waits.
+        handle_identity_archive_event(&tenant, &state, &request(Some(&successor_hex)))
+            .await
+            .expect("replacement accepted");
+
+        release.notify_one();
+        stale
+            .await
+            .expect("join stale publisher")
+            .expect("stale publisher settles without error");
+
+        let latest = latest_nipia_delta(&tenant, &state, &old_hex)
+            .await
+            .expect("latest delta")
+            .expect("a delta");
+        let replaced_by = latest.tags.iter().find_map(|tag| {
+            let fields = tag.as_slice();
+            (fields.first().map(String::as_str) == Some("replaced-by"))
+                .then(|| fields.get(1).cloned())
+                .flatten()
+        });
+        assert_eq!(
+            replaced_by,
+            Some(successor_hex),
+            "the newest delta must report the stored replacement"
+        );
     }
 }

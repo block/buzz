@@ -4538,7 +4538,7 @@ pub(crate) mod publish_test_hooks {
         (rx, release)
     }
 
-    pub(super) async fn after_list_archived(community: CommunityId) {
+    pub(crate) async fn after_reading_archive_state(community: CommunityId) {
         let gate = {
             let mut slot = GATE.lock().unwrap();
             match slot.as_ref() {
@@ -4575,7 +4575,7 @@ pub async fn publish_nipia_archival_list(
         // stale-read/late-write ordering the drift check must catch is
         // deterministic, not scheduler-dependent. Inert in production.
         #[cfg(test)]
-        publish_test_hooks::after_list_archived(tenant.community()).await;
+        publish_test_hooks::after_reading_archive_state(tenant.community()).await;
         let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
         tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 
