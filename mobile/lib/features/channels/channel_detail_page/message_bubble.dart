@@ -185,9 +185,6 @@ class _MessageBubble extends HookConsumerWidget {
                             : Alignment.centerLeft,
                         child: Padding(
                           padding: EdgeInsets.only(
-                            right: ownMessage
-                                ? messageAvatarSize + messageAvatarContentGap
-                                : 0,
                             left: ownMessage
                                 ? 0
                                 : messageAvatarSize + messageAvatarContentGap,
@@ -245,8 +242,10 @@ class _MessageBubble extends HookConsumerWidget {
                             : TextDirection.ltr,
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          const SizedBox(width: messageAvatarSize),
-                          const SizedBox(width: messageAvatarContentGap),
+                          if (!ownMessage) ...[
+                            const SizedBox(width: messageAvatarSize),
+                            const SizedBox(width: messageAvatarContentGap),
+                          ],
                           Expanded(
                             child: Padding(
                               padding: EdgeInsets.only(
@@ -431,10 +430,9 @@ class _MessageBubble extends HookConsumerWidget {
                           ),
                         ],
                       ),
-                      if (showAvatar)
+                      if (showAvatar && !ownMessage)
                         Positioned(
-                          left: ownMessage ? null : 0,
-                          right: ownMessage ? 0 : null,
+                          left: 0,
                           bottom: 0,
                           child: MessageMediaAvatar(
                             offset: mediaOffset,
