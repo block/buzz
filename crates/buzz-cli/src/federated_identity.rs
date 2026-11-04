@@ -81,7 +81,7 @@ pub fn canonical_relay_url(relay_url: &str) -> Result<String, CliError> {
     // `wss://host` means 443, so an explicit `:80` would silently alias it;
     // NIP-FA has no relay on port 80. The URL parser drops `:80` for
     // `http`/`ws`, so read the authority as written.
-    if explicit_port(relay_url) == Some("80") {
+    if explicit_port(relay_url) == Some(80) {
         return Err(CliError::Usage(format!(
             "NIP-FA does not support a relay on port 80: {relay_url}"
         )));
@@ -93,27 +93,31 @@ pub fn canonical_relay_url(relay_url: &str) -> Result<String, CliError> {
     Ok(format!("wss://{authority}"))
 }
 
-/// The port written in `url`'s authority, if any.
-fn explicit_port(url: &str) -> Option<&str> {
+/// The port written in `url`'s authority, as a number, if any.
+fn explicit_port(url: &str) -> Option<u16> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let (host, port) = host_port.rsplit_once(':')?;
-    (!host.is_empty() && !port.contains(']')).then_some(port)
+    if host.is_empty() || port.contains(']') {
+        return None;
+    }
+    port.parse().ok()
 }
 
-/// An adapter `Retry-After`: delta-seconds or an HTTP-date (RFC 9110).
+/// An adapter `Retry-After`: delta-seconds or an HTTP-date in any of the
+/// three RFC 9110 formats.
 fn parse_retry_after(value: &str, now: u64) -> Option<Duration> {
     let value = value.trim();
     if let Ok(secs) = value.parse() {
         return Some(Duration::from_secs(secs));
     }
-    let at = chrono::DateTime::parse_from_rfc2822(value)
+    let at = httpdate::parse_http_date(value)
         .ok()?
-        .timestamp();
-    Some(Duration::from_secs(
-        u64::try_from(at).ok()?.saturating_sub(now),
-    ))
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(Duration::from_secs(at.saturating_sub(now)))
 }
 
 fn unix_now() -> u64 {
@@ -455,6 +459,7 @@ mod tests {
             "http://relay.example.com:80",
             "ws://user@relay.example.com:80",
             "http://[::1]:80",
+            "http://relay.example.com:080",
         ] {
             assert!(
                 matches!(canonical_relay_url(port_80), Err(CliError::Usage(_))),
@@ -476,6 +481,14 @@ mod tests {
         assert_eq!(
             parse_retry_after("Sun, 06 Nov 1994 08:49:00 GMT", now),
             Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after("Sunday, 06-Nov-94 08:50:07 GMT", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after("Sun Nov  6 08:50:07 1994", now),
+            Some(Duration::from_secs(30))
         );
         assert_eq!(parse_retry_after("soon", now), None);
     }

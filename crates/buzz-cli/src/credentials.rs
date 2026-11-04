@@ -270,6 +270,20 @@ impl Credentials {
         }
     }
 
+    /// Credentials signing through `signer` alone, for tests.
+    #[cfg(test)]
+    pub(crate) fn from_signer(signer: Arc<dyn NostrSigner>, public_key: PublicKey) -> Self {
+        Self {
+            public_key,
+            signer,
+            local_keys: None,
+            auth_tag: None,
+            evidence: None,
+            #[cfg(unix)]
+            desktop: None,
+        }
+    }
+
     /// Credentials backed by the Buzz desktop: it signs, encrypts and supplies
     /// NIP-FI evidence; the private key never reaches this process.
     #[cfg(unix)]

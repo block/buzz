@@ -1239,9 +1239,10 @@ impl BuzzClient {
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
         let headers = self.upgrade_headers().await?;
-        // Two deadlines: the relay's waits are each capped (the connect below,
-        // and buzz_ws_client's AUTH_CHALLENGE / AUTH_OK / PUBLISH_OK ceilings),
-        // and NIP-42 signing between them is bounded by the signer itself. A
+        // Two kinds of deadline: each network phase is capped as a whole,
+        // writes included (the connect below, then buzz_ws_client's challenge,
+        // AUTH, EVENT and close phases), and NIP-42 signing between them is
+        // bounded by the signer itself. A
         // desktop provider may wait out throttling and hold `sign_event` for a
         // person's decision, which no relay budget should cut short.
         let signer = crate::credentials::CapturingSigner::new(&self.credentials);
@@ -3252,10 +3253,9 @@ mod desktop_throttle_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    use futures_util::{SinkExt, StreamExt};
     use nostr::{EventBuilder, Kind};
-    use tokio_tungstenite::tungstenite::Message;
 
+    use super::ws_deadline_tests::ws_relay;
     use super::BuzzClient;
     use crate::desktop_provider::{tests as dp, Provider};
     use crate::error::CliError;
@@ -3321,34 +3321,6 @@ mod desktop_throttle_tests {
         );
     }
 
-    /// A WebSocket relay that sends a challenge, then OKs AUTH and one event.
-    /// Returns its URL and the count of AUTH and EVENT frames it received.
-    async fn ws_relay() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-        let (auths, events) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let (a, e) = (auths.clone(), events.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let (a, e) = (a.clone(), e.clone());
-                tokio::spawn(async move {
-                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                    let _ = ws
-                        .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
-                        .await;
-                    while let Some(Ok(Message::Text(text))) = ws.next().await {
-                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
-                        let counter = if frame[0] == "AUTH" { &a } else { &e };
-                        counter.fetch_add(1, Ordering::SeqCst);
-                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
-                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
-                    }
-                });
-            }
-        });
-        (relay, auths, events)
-    }
-
     #[tokio::test]
     async fn persistent_throttling_during_nip42_is_retryable() {
         let keys = nostr::Keys::generate();
@@ -3399,5 +3371,190 @@ mod desktop_throttle_tests {
         assert_eq!(signs.load(Ordering::SeqCst), 2);
         assert_eq!(auths.load(Ordering::SeqCst), 1);
         assert_eq!(events.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// WebSocket publish deadlines, on a paused clock: a signer may take as long
+/// as it needs, while each network phase, writes included, is capped.
+#[cfg(test)]
+mod ws_deadline_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use nostr::{Event, EventBuilder, Keys, Kind, NostrSigner, PublicKey, UnsignedEvent};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::BuzzClient;
+    use crate::credentials::Credentials;
+    use crate::error::CliError;
+
+    /// A WebSocket relay that sends a challenge, then OKs AUTH and one event.
+    /// Returns its URL and the count of AUTH and EVENT frames it received.
+    pub(super) async fn ws_relay() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (auths, events) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (a, e) = (auths.clone(), events.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (a, e) = (a.clone(), e.clone());
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = ws
+                        .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                        .await;
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let counter = if frame[0] == "AUTH" { &a } else { &e };
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                    }
+                });
+            }
+        });
+        (relay, auths, events)
+    }
+
+    /// Keys that take `delay` to sign, like a signer held for a decision.
+    /// The clock is paused only while signing (after the real connect), so
+    /// the delay passes at once unless an earlier timer fires first.
+    #[derive(Debug)]
+    struct Slow(Keys, Duration);
+
+    impl NostrSigner for Slow {
+        fn backend(&self) -> nostr::signer::SignerBackend<'_> {
+            nostr::signer::SignerBackend::Custom("slow".into())
+        }
+        fn get_public_key(
+            &self,
+        ) -> nostr::util::BoxedFuture<'_, Result<PublicKey, nostr::signer::SignerError>> {
+            self.0.get_public_key()
+        }
+        fn sign_event(
+            &self,
+            unsigned: UnsignedEvent,
+        ) -> nostr::util::BoxedFuture<'_, Result<Event, nostr::signer::SignerError>> {
+            Box::pin(async move {
+                tokio::time::pause();
+                tokio::time::sleep(self.1).await;
+                tokio::time::resume();
+                self.0.sign_event(unsigned).await
+            })
+        }
+        fn nip04_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_encrypt(p, c)
+        }
+        fn nip04_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_decrypt(p, c)
+        }
+        fn nip44_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_encrypt(p, c)
+        }
+        fn nip44_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_decrypt(p, c)
+        }
+    }
+
+    fn client(relay: String, keys: &Keys, delay: Duration) -> BuzzClient {
+        let signer = Arc::new(Slow(keys.clone(), delay));
+        BuzzClient::new(relay, Credentials::from_signer(signer, keys.public_key())).unwrap()
+    }
+
+    /// Signing held for 300 s, past the old 225 s single cap, still publishes,
+    /// once.
+    #[tokio::test]
+    async fn a_signature_held_past_every_relay_cap_still_publishes_once() {
+        let keys = Keys::generate();
+        let (relay, auths, events) = ws_relay().await;
+        let c = client(relay, &keys, Duration::from_secs(300));
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(300));
+        assert!(
+            started.elapsed() < Duration::from_secs(330),
+            "real time stays short"
+        );
+        assert_eq!(auths.load(Ordering::SeqCst), 1);
+        assert_eq!(events.load(Ordering::SeqCst), 1);
+    }
+
+    /// A relay that OKs AUTH and then stops reading stalls the EVENT write;
+    /// the publish fails within its phase cap and is not sent again.
+    #[tokio::test]
+    async fn a_stalled_event_write_fails_within_its_phase_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        // The relay pauses the clock once it has OKed AUTH, so the EVENT
+        // phase runs on virtual time from that mark.
+        let authed = Arc::new(std::sync::Mutex::new(None));
+        let mark = authed.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mark = mark.clone();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = ws
+                        .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                        .await;
+                    if let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                        tokio::time::pause();
+                        *mark.lock().unwrap() = Some(tokio::time::Instant::now());
+                    }
+                    // Hold the socket open without reading.
+                    std::future::pending::<()>().await;
+                    drop(ws);
+                });
+            }
+        });
+        let keys = Keys::generate();
+        let c = BuzzClient::new(relay, Credentials::from_keys(keys.clone())).unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "x".repeat(32 * 1024 * 1024))
+            .sign_with_keys(&keys)
+            .unwrap();
+        // An unbounded write would wait here for the hour, not forever.
+        let err = tokio::time::timeout(Duration::from_secs(3600), c.publish_ephemeral_event(event))
+            .await
+            .expect("the stalled write is bounded")
+            .unwrap_err();
+        let stalled = authed.lock().unwrap().expect("AUTH was OKed").elapsed();
+        // From the OK the client has at most the rest of the AUTH phase (the
+        // paused clock jumps to its read deadline before the OK is read) and
+        // the whole EVENT phase.
+        use buzz_ws_client::connection::{AUTH_OK_TIMEOUT_SECS, PUBLISH_OK_TIMEOUT_SECS};
+        let cap = Duration::from_secs(AUTH_OK_TIMEOUT_SECS + 1 + PUBLISH_OK_TIMEOUT_SECS + 1);
+        assert!(stalled <= cap, "{stalled:?} {err:?}");
+        assert!(
+            matches!(err, CliError::Other(ref m) if m.contains("Timeout")),
+            "{err:?}"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 }

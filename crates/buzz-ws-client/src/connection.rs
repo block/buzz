@@ -26,6 +26,20 @@ pub const AUTH_OK_TIMEOUT_SECS: u64 = 20;
 /// Seconds to wait for the relay's OK response to a published event.
 pub const PUBLISH_OK_TIMEOUT_SECS: u64 = 30;
 
+/// Cap on a graceful close.
+pub const CLOSE_TIMEOUT_SECS: u64 = 5;
+
+/// Run one network phase, writes included, within its read `wait` plus a
+/// second, so a read that times out reports its own error first.
+async fn phase<T>(
+    wait: Duration,
+    io: impl std::future::Future<Output = Result<T, WsClientError>>,
+) -> Result<T, WsClientError> {
+    tokio::time::timeout(wait + Duration::from_secs(1), io)
+        .await
+        .map_err(|_| WsClientError::Timeout)?
+}
+
 /// A NIP-42-capable WebSocket connection to a Nostr relay.
 pub struct NostrWsConnection {
     ws: WsStream,
@@ -133,18 +147,21 @@ impl NostrWsConnection {
         signer: &S,
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
-        let challenge = self
-            .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
-            .await?;
+        // Each network phase is capped as a whole, writes (and Pongs sent
+        // while reading) included. Signing between them is the signer's to
+        // bound: a remote signer may hold it for a person's decision.
+        let wait = Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS);
+        let challenge = phase(wait, self.wait_for_auth_challenge(wait)).await?;
 
         let auth_event = build_auth_event(&challenge, &self.relay_url, signer, auth_tag).await?;
         let event_id = auth_event.id.to_hex();
 
-        self.send_raw(&json!(["AUTH", auth_event])).await?;
-
-        let ok = self
-            .wait_for_ok(&event_id, Duration::from_secs(AUTH_OK_TIMEOUT_SECS))
-            .await?;
+        let wait = Duration::from_secs(AUTH_OK_TIMEOUT_SECS);
+        let ok = phase(wait, async {
+            self.send_raw(&json!(["AUTH", auth_event])).await?;
+            self.wait_for_ok(&event_id, wait).await
+        })
+        .await?;
         if !ok.accepted {
             return Err(WsClientError::AuthFailed(ok.message));
         }
@@ -156,9 +173,12 @@ impl NostrWsConnection {
     /// Sends a signed event to the relay and waits for the OK response.
     pub async fn send_event(&mut self, event: Event) -> Result<OkResponse, WsClientError> {
         let event_id = event.id.to_hex();
-        self.send_raw(&json!(["EVENT", event])).await?;
-        self.wait_for_ok(&event_id, Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS))
-            .await
+        let wait = Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS);
+        phase(wait, async {
+            self.send_raw(&json!(["EVENT", event])).await?;
+            self.wait_for_ok(&event_id, wait).await
+        })
+        .await
     }
 
     /// Receives the next relay message, waiting up to `timeout_dur`.
@@ -185,10 +205,13 @@ impl NostrWsConnection {
         Ok((Instant::now(), msg))
     }
 
-    /// Closes the WebSocket connection gracefully.
+    /// Closes the WebSocket connection gracefully, within [`CLOSE_TIMEOUT_SECS`].
     pub async fn disconnect(mut self) -> Result<(), WsClientError> {
-        self.ws.close(None).await?;
-        Ok(())
+        phase(Duration::from_secs(CLOSE_TIMEOUT_SECS), async {
+            self.ws.close(None).await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Sends a raw JSON value as a WebSocket text frame.

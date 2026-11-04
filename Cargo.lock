@@ -1117,6 +1117,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "hex",
+ "httpdate",
  "infer",
  "keyring 3.6.3",
  "libc",
