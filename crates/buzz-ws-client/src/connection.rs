@@ -207,11 +207,10 @@ impl NostrWsConnection {
 
     /// Closes the WebSocket connection gracefully, within [`CLOSE_TIMEOUT_SECS`].
     pub async fn disconnect(mut self) -> Result<(), WsClientError> {
-        phase(Duration::from_secs(CLOSE_TIMEOUT_SECS), async {
-            self.ws.close(None).await?;
-            Ok(())
-        })
-        .await
+        tokio::time::timeout(Duration::from_secs(CLOSE_TIMEOUT_SECS), self.ws.close(None))
+            .await
+            .map_err(|_| WsClientError::Timeout)??;
+        Ok(())
     }
 
     /// Sends a raw JSON value as a WebSocket text frame.
