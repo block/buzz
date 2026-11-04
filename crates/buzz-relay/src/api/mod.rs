@@ -6,6 +6,7 @@ pub mod buzz_v1;
 pub mod events;
 pub mod gifs;
 pub mod git;
+pub(crate) mod github_hooks;
 pub mod invites;
 pub mod media;
 pub mod mesh_demo;

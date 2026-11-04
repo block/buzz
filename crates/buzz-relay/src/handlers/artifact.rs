@@ -74,7 +74,7 @@ fn head_unavailable() -> IngestError {
 
 /// Live delivery only; unlike kind 9 there are no audit, workflow, or thread
 /// side effects. A failed publish is retried, because syncs depend on it.
-async fn publish(state: &Arc<AppState>, tenant: &TenantContext, stored: &StoredEvent) {
+pub(crate) async fn publish(state: &Arc<AppState>, tenant: &TenantContext, stored: &StoredEvent) {
     let Some(channel) = stored.channel_id else {
         return;
     };
