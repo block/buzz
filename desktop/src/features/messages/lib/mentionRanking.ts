@@ -1,3 +1,4 @@
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 
 export type MentionCandidateForRanking = {
@@ -41,7 +42,7 @@ function scoreMentionCandidateLabel(
   label: string,
   lowerQuery: string,
 ): number | null {
-  const lower = label.toLowerCase();
+  const lower = foldForMatch(label);
   if (lower === lowerQuery) return 0;
   if (lower.startsWith(lowerQuery)) return 1;
 
@@ -109,7 +110,7 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   query: string,
   activePersonaIds: ReadonlySet<string> = new Set(),
 ): RankedMentionCandidate<T>[] {
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = foldForMatch(query);
 
   return candidates
     .map((candidate, order) => {

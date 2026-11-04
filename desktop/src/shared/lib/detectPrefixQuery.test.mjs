@@ -131,3 +131,15 @@ test("bare prefix after ( yields empty single-word query, not multi-word", () =>
 test("no prefix present → null", () => {
   assert.equal(at("#", "just text", CHANNELS), null);
 });
+
+test("multi-word query matches known names across accents", () => {
+  assert.deepEqual(at("@", "hi @elodie du", ["élodie dupont"]), {
+    query: "elodie du",
+    startIndex: 3,
+  });
+  assert.deepEqual(at("@", "hi @Élodie du", ["elodie dupont"]), {
+    query: "Élodie du",
+    startIndex: 3,
+  });
+  assert.equal(at("@", "hi @elodie ", ["élodie", "élodie dupont"]), null);
+});

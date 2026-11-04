@@ -1,4 +1,5 @@
 import type { UserProfileSummary } from "@/shared/api/types";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 
 const HEX_PUBKEY = /^[0-9a-f]{64}$/;
@@ -82,13 +83,13 @@ export function filterAuthorCandidatePage(
       .filter(({ pubkey }) => pubkey === directPubkey)
       .slice(0, 1);
   }
-  const needle = query.toLowerCase();
+  const needle = foldForMatch(query);
   return candidates
     .filter(
       (candidate) =>
         !needle ||
         [candidate.displayName, candidate.nip05Handle, candidate.pubkey].some(
-          (field) => field?.toLowerCase().includes(needle),
+          (field) => field != null && foldForMatch(field).includes(needle),
         ),
     )
     .slice(0, limit);

@@ -251,4 +251,41 @@ void main() {
       expect(rankMentions(rows, ''), [zed, alpha, mary]);
     }
   });
+
+  test('matching ignores accents, Space commits only an exact name', () {
+    MentionChoice person(String pubkey, String name) => MentionChoice(
+      pubkey: pubkey,
+      name: name,
+      label: name,
+      aliases: [name],
+      member: true,
+    );
+    final choices = [person('e', 'Élodie'), person('r', 'Rene')];
+    for (final (query, ranked, space) in [
+      ('elodie', ['e'], null),
+      ('ÉLODIE', ['e'], 'e'),
+      ('ÉLO', ['e'], null),
+      ('rené', ['r'], null),
+      ('RENE', ['r'], 'r'),
+      ('ren', ['r'], null),
+    ]) {
+      expect(
+        [for (final c in rankMentions(choices, query)) c.pubkey],
+        ranked,
+        reason: query,
+      );
+      expect(exactMention(choices, query), space, reason: query);
+    }
+    for (final (query, open) in [
+      ('elodie m', true),
+      ('rené d', true),
+      ('elodie martin ', false),
+    ]) {
+      expect(
+        matchesMentionQuery(query, ['Élodie Martin', 'Rene Dupont']),
+        open,
+        reason: query,
+      );
+    }
+  });
 }

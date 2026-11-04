@@ -1,3 +1,5 @@
+import { foldForMatch } from "@/shared/lib/foldForMatch";
+
 const WORD_SEPARATORS = /[\s\-_./@]+/;
 
 /**
@@ -49,10 +51,10 @@ function editDistance(left: string, right: string) {
  * Four characters is the noise floor: shorter typo matches are too ambiguous.
  */
 export function hasTypoTolerantPrefixMatch(value: string, query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
+  const normalizedQuery = foldForMatch(query.trim());
   if (normalizedQuery.length < 4) return false;
 
-  const words = value.toLowerCase().split(WORD_SEPARATORS).filter(Boolean);
+  const words = foldForMatch(value).split(WORD_SEPARATORS).filter(Boolean);
   for (const word of words) {
     const minimumLength = Math.max(1, normalizedQuery.length - 1);
     const maximumLength = Math.min(word.length, normalizedQuery.length + 1);

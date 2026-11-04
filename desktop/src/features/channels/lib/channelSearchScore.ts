@@ -1,3 +1,4 @@
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { hasTypoTolerantPrefixMatch } from "@/shared/lib/fuzzyText";
 
 /**
@@ -65,7 +66,9 @@ export function scoreChannelName(
 ): number | null {
   if (lowerQuery.length === 0) return SCORE_EXACT;
 
-  const lower = name.toLowerCase();
+  // Callers pass a lower-cased query; fold both sides so accents don't count.
+  lowerQuery = foldForMatch(lowerQuery);
+  const lower = foldForMatch(name);
 
   if (lower === lowerQuery) return SCORE_EXACT;
   if (lower.startsWith(lowerQuery)) return SCORE_PREFIX;
@@ -119,7 +122,7 @@ export function scoreChannelMatch(
 
   // Description only does plain substring — it's supplementary context, so we
   // don't want fuzzy description hits outranking or crowding out name matches.
-  if (channel.description.toLowerCase().includes(lowerQuery)) {
+  if (foldForMatch(channel.description).includes(foldForMatch(lowerQuery))) {
     return SCORE_DESCRIPTION;
   }
 

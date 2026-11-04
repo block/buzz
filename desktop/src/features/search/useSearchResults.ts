@@ -30,6 +30,7 @@ import {
 } from "@/features/search/lib/parseSearchOperators";
 import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
+import { foldForMatch } from "@/shared/lib/foldForMatch";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 function formatUserResultName(user: UserSearchResult) {
@@ -49,7 +50,7 @@ function dedupeSearchHits(hits: SearchHit[]) {
   });
 }
 
-function resolveChannelIdFromOperator(
+export function resolveChannelIdFromOperator(
   raw: string | null,
   channels: Channel[],
   channelLabels?: Record<string, string>,
@@ -64,11 +65,11 @@ function resolveChannelIdFromOperator(
   if (isChannelUuid(value)) {
     return { status: "resolved", value };
   }
-  const needle = value.toLowerCase();
+  const needle = foldForMatch(value);
   const match = channels.find((channel) => {
     const label = channelLabels?.[channel.id]?.trim() || channel.name;
     return (
-      channel.name.toLowerCase() === needle || label.toLowerCase() === needle
+      foldForMatch(channel.name) === needle || foldForMatch(label) === needle
     );
   });
   return match
@@ -76,7 +77,7 @@ function resolveChannelIdFromOperator(
     : { status: "unresolved" };
 }
 
-function resolveAuthorFromOperator(
+export function resolveAuthorFromOperator(
   raw: string | null,
   candidates: Array<{ pubkey: string; displayName?: string | null }>,
 ): OperatorResolveResult<string> {
@@ -86,12 +87,13 @@ function resolveAuthorFromOperator(
   if (isHexPubkey(raw)) {
     return { status: "resolved", value: normalizePubkey(raw) };
   }
-  const handle = normalizeFromHandle(raw).toLowerCase();
+  // A hex pubkey folds to itself, so the pubkey comparison below still works.
+  const handle = foldForMatch(normalizeFromHandle(raw));
   if (!handle) {
     return { status: "unresolved" };
   }
   const match = candidates.find((candidate) => {
-    const name = candidate.displayName?.trim().toLowerCase();
+    const name = foldForMatch(candidate.displayName?.trim() ?? "");
     return name === handle || normalizePubkey(candidate.pubkey) === handle;
   });
   return match

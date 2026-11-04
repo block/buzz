@@ -6216,6 +6216,22 @@ void main() {
       expect(result.first.name, 'random');
     });
 
+    test('ignores accents in both directions', () {
+      final accented = [
+        _makeChannel(name: 'réunion', channelType: 'stream'),
+        _makeChannel(name: 'cafe', channelType: 'stream'),
+      ];
+      for (final (query, expected) in [
+        ('reunion', 'réunion'),
+        ('RÉU', 'réunion'),
+        ('café', 'cafe'),
+      ]) {
+        expect(filterChannels(accented, query).map((c) => c.name), [
+          expected,
+        ], reason: query);
+      }
+    });
+
     test('excludes DM channels', () {
       final result = filterChannels(channels, 'dm');
       expect(result, isEmpty);

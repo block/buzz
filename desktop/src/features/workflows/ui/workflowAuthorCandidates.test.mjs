@@ -144,3 +144,20 @@ test("profile enrichment updates matching presentation without reordering", () =
   assert.equal(enriched[1].isAgent, true);
   assert.strictEqual(enriched[2], candidates[2]);
 });
+
+test("filters author candidates ignoring accents on both sides", () => {
+  const candidates = mergeAuthorCandidateSources([
+    [
+      { pubkey: A, displayName: "Élodie" },
+      { pubkey: B, displayName: "Jerome" },
+    ],
+  ]);
+  assert.deepEqual(
+    filterAuthorCandidatePage(candidates, "elo", null, 5).map((c) => c.pubkey),
+    [A],
+  );
+  assert.deepEqual(
+    filterAuthorCandidatePage(candidates, "jérô", null, 5).map((c) => c.pubkey),
+    [B],
+  );
+});

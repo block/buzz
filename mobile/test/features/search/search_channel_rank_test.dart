@@ -66,6 +66,22 @@ void main() {
         ['b'],
       ),
       (
+        'accents and case are ignored in both directions',
+        [
+          _channel('réunion-équipe', isMember: true),
+          _channel('cafe', isMember: true),
+          _channel('budget', isMember: true),
+        ],
+        'reunion equipe',
+        ['réunion-équipe'],
+      ),
+      (
+        'an accented query finds a plain name',
+        [_channel('cafe', isMember: true), _channel('budget', isMember: true)],
+        '#CAFÉ',
+        ['cafe'],
+      ),
+      (
         'the exact name leads past eight weaker matches, cut to eight',
         [
           for (var i = 1; i <= 9; i++) _channel('team-ops-$i', isMember: true),
