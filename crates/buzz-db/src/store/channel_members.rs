@@ -574,10 +574,13 @@ impl LockedMemberSnapshot {
 /// Capture all active members while holding the channel's group-state
 /// replacement locks and the same per-channel lock used by membership writers.
 ///
-/// The returned guard must remain alive through publication. This prevents a
-/// publisher (on this relay or a rolling one) from replacing a group-state
-/// event with an older channel or roster read after a concurrent edit, add or
-/// remove has committed and published newer state.
+/// The returned guard must remain alive through publication. Publishers that
+/// read the channel and roster through it cannot replace a group-state event
+/// with an older read after a concurrent edit, add or remove has committed and
+/// published newer state. A rolling relay that still publishes kind:39000 and
+/// kind:39001 through `Db::replace_addressable_event` only serializes its
+/// writes with this guard: it reads the channel before taking the key, so it
+/// can still publish a stale read until those publishers retire.
 pub async fn lock_member_snapshot(
     pool: &PgPool,
     community_id: CommunityId,
@@ -593,8 +596,8 @@ pub async fn lock_member_snapshot(
     // Match the canonical replacement writer's lock order: the coordinate's
     // replacement key, then (for 39002) the membership key that migration
     // 0032's INSERT trigger takes. The 39000 and 39001 keys are the ones
-    // `Db::replace_addressable_event` takes, so a rolling relay that still
-    // writes them there serializes with this guard. Every holder takes the
+    // `Db::replace_addressable_event` takes, so a rolling relay's writes to
+    // them serialize with this guard (see above for freshness). Every holder takes the
     // keys in kind order and none waits on a lower kind's key while holding a
     // higher one, so there is no lock-order inversion.
     for kind in GROUP_STATE_KINDS {
@@ -5219,6 +5222,97 @@ mod postgres_tests {
                 .len(),
             2
         );
+    }
+
+    /// A held snapshot owns the channel's kind:39000 and kind:39001
+    /// coordinates as well as its roster: a `replace_addressable_event` for
+    /// either (the path a rolling relay still publishes them on) waits for
+    /// the guard, then loses to the newer head the guard published. One row
+    /// per kind. Mutation: drop that kind from `GROUP_STATE_KINDS` in
+    /// `lock_member_snapshot` → RED (the legacy write never waits).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn locked_member_snapshot_serializes_legacy_metadata_writers() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let relay_keys = Keys::generate();
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        for kind in [39000u16, 39001] {
+            let channel = create_test_channel(
+                &pool,
+                community_id,
+                &format!("snapshot-legacy-{kind}"),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner,
+                None,
+            )
+            .await
+            .expect("create channel");
+            let event = |created_at: u64, label: &str| {
+                nostr::EventBuilder::new(nostr::Kind::Custom(kind), "")
+                    .tags(vec![
+                        nostr::Tag::parse(["d", &channel.id.to_string()]).expect("d tag"),
+                        nostr::Tag::parse(["name", label]).expect("label tag"),
+                    ])
+                    .custom_created_at(nostr::Timestamp::from(created_at))
+                    .sign_with_keys(&relay_keys)
+                    .expect("sign group state")
+            };
+            let now = chrono::Utc::now().timestamp() as u64;
+
+            let mut snapshot = lock_member_snapshot(&pool, community, channel.id, &relay_pubkey)
+                .await
+                .expect("hold group-state guard");
+            let application_name = format!("legacy-group-state-{kind}");
+            let legacy_db =
+                crate::Db::from_pool(crate::test_support::named_pool(&application_name).await);
+            let legacy_event = event(now, "legacy");
+            let legacy = tokio::spawn(async move {
+                legacy_db
+                    .replace_addressable_event(community, &legacy_event, Some(channel.id))
+                    .await
+            });
+            crate::test_support::wait_for_lock_wait(&pool, &application_name).await;
+            assert!(
+                !legacy.is_finished(),
+                "kind:{kind}: the legacy write must wait for the guard"
+            );
+            let (_, inserted) = snapshot
+                .replace_group_state_event(&event(now + 1, "guarded"))
+                .await
+                .expect("guarded replacement");
+            assert!(inserted, "kind:{kind}");
+            snapshot.release().await.expect("release guard");
+
+            let (_, legacy_inserted) = legacy
+                .await
+                .expect("legacy task")
+                .expect("legacy replacement");
+            assert!(
+                !legacy_inserted,
+                "kind:{kind}: the older legacy write must lose to the guarded head"
+            );
+            let heads: Vec<serde_json::Value> = sqlx::query_scalar(
+                "SELECT tags FROM events WHERE community_id = $1 AND kind = $2 \
+                 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+            )
+            .bind(community_id)
+            .bind(i32::from(kind))
+            .bind(relay_pubkey.as_slice())
+            .bind(channel.id.to_string())
+            .fetch_all(&pool)
+            .await
+            .expect("live heads");
+            assert_eq!(heads.len(), 1, "kind:{kind}: one live head");
+            assert!(
+                heads[0].to_string().contains("guarded"),
+                "kind:{kind}: {heads:?}"
+            );
+        }
     }
 
     /// Captured roster publication must hold the same shared community-deletion

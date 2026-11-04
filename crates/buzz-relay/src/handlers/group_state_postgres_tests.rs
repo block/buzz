@@ -1464,9 +1464,10 @@ async fn a_relay_operator_may_not_rename_an_unlisted_channel() {
 /// channel read, commits the edit, waits until the edit's publisher is
 /// either blocked or done, then lets the stale one finish. The newest
 /// kind:39000 must reflect the edit. Mutation: read the channel before
-/// `lock_member_snapshot` in `emit_group_discovery_events` (or drop the
-/// 39000 key from its lock set) → RED: the stale publisher writes
-/// `auto_join` one second after the edit's event and wins.
+/// `lock_member_snapshot` in `emit_group_discovery_events` → RED: the stale
+/// publisher writes `auto_join` one second after the edit's event and wins.
+/// The per-kind replacement keys the guard takes are pinned by
+/// `locked_member_snapshot_serializes_legacy_metadata_writers` in buzz-db.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_stale_publisher_cannot_overwrite_a_newer_metadata_edit() {
