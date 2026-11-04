@@ -983,6 +983,7 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
 #[tokio::test]
 #[ignore = "requires Postgres; performance measurement"]
 async fn measure_artifact_write_latency() {
+    println!("PERF source={}", env!("CARGO_MANIFEST_DIR"));
     use std::{sync::Arc, time::Instant};
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(64)

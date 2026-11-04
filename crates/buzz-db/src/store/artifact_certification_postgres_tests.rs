@@ -431,6 +431,7 @@ async fn deletion_admission_does_not_block_other_communities() {
 #[tokio::test]
 #[ignore = "requires Postgres; performance measurement"]
 async fn measure_certification_backlog() {
+    println!("PERF source={}", env!("CARGO_MANIFEST_DIR"));
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
