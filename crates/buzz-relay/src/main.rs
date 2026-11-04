@@ -9,7 +9,6 @@ fn log_filter<S>(rust_log: Option<&str>) -> telemetry::DirectiveFilter<S> {
 
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
-use buzz_core::CommunityId;
 use buzz_db::{
     partition::{PartitionAudit, PARTITION_MANAGER_MONTHS_AHEAD},
     Db, DbConfig,
