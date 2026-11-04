@@ -37,6 +37,8 @@ globalThis.window = {
   __TAURI_INTERNALS__: {
     transformCallback: () => nextCallbackId++,
     async invoke(command, args) {
+      if (command === "fetch_relay_entry_requirements")
+        return { required: false, upgradeUrl: null };
       if (command === "plugin:websocket|connect") {
         dials.push(now);
         return 100 + dials.length;

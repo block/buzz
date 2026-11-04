@@ -12,6 +12,8 @@ import {
   useState,
 } from "react";
 
+import { relayClient } from "@/shared/api/relayClient";
+import { RelayEntryGate } from "./RelayEntryGate";
 import { router } from "@/app/router";
 import {
   completeCommunityViewTransition,
@@ -632,6 +634,11 @@ function CommunityApp({
   // Tauri backend is still configured for the previous one.
   const communityApplied =
     community.isReady && community.appliedKey === communityKey;
+  // Covers the connecting/onboarding curtain too, before the shell mounts.
+  const appliedRelayKey = communityApplied ? communityKey : null;
+  useEffect(() => {
+    if (appliedRelayKey) void relayClient.preconnect().catch(() => {});
+  }, [appliedRelayKey]);
   useLayoutEffect(() => {
     if (communityApplied) {
       completeCommunityViewTransition();
@@ -678,6 +685,18 @@ function CommunityApp({
   return (
     <>
       {appContent}
+      {activeCommunity ? (
+        <RelayEntryGate
+          key={communityKey}
+          relayUrl={activeCommunity.relayUrl}
+          communities={communities}
+          onRetry={reconnectCommunity}
+          onSwitch={(id) => {
+            communityOnboarding.clear();
+            void transitionCommunity(id);
+          }}
+        />
+      ) : null}
       {transaction ? (
         <div
           className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
