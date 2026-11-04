@@ -253,6 +253,26 @@ Off, the stored requirement in Shadow, and true in Enforce. Unknown/non-serving
 hosts remain generic 404. Unreadable required FI policy is 503 in evaluating
 modes; an unavailable FI dependency must not turn Off into FI enforcement.
 
+### Upstream operator contract correction required
+
+BUZZ-511 / [#8988](https://github.com/block/buzz/pull/8988) owns reconciliation
+of `community-auth-upgrades.md` with the owner's mode decision. At this draft's
+base, its per-request enforcement and mistaken-acceptance containment guidance
+still describe a stored requirement as an unconditional admission floor and
+prohibit returning to free admission. That conflicts with the intentional Off
+behavior in E4. Track the correction as an execution prerequisite for E4 and
+abort/recovery guidance: link the exact reviewed implementing head in the run
+record and reconcile both documents before live use. The BUZZ-511 owner has
+been handed this correction; it is not presumed implemented by this draft.
+
+The correction must distinguish an explicitly authorized mode transition from
+an unsupported rollback binary or policy reset. Off preserves policy, generation
+and receipts while bypassing FI admission; it cannot claim active enforcement.
+Abort is not automatic permission to switch to Off. Record an explicitly
+reviewed containment/recovery choice, preserving durable state and issuer trust.
+Until the upstream correction is reviewed, E4 and live use of the abort/recovery
+guidance remain blocked.
+
 ## Failure injection and recovery
 
 Before each injection, record its target boot, affected connection, operation and
