@@ -266,15 +266,19 @@ void main() {
     final other = backupFor(organizationClient());
     current = 'f' * 64;
     paths.clear();
+    // Each retry waits exactly its delay: none a second early, one on time.
+    await connect(other);
     var delay = OrganizationKeyBackup.firstRetryDelay;
-    for (var i = 0; i < 10; i++) {
+    for (var i = 0; i < 9; i++) {
+      now = now.add(delay - const Duration(seconds: 1));
       await connect(other);
+      expect(backupPaths(), hasLength(i + 1));
+      now = now.add(const Duration(seconds: 1));
       await connect(other);
-      now = now.add(delay);
-      if (delay < OrganizationKeyBackup.maxRetryDelay) delay *= 2;
-      if (delay > OrganizationKeyBackup.maxRetryDelay) {
-        delay = OrganizationKeyBackup.maxRetryDelay;
-      }
+      expect(backupPaths(), hasLength(i + 2));
+      delay = delay * 2 > OrganizationKeyBackup.maxRetryDelay
+          ? OrganizationKeyBackup.maxRetryDelay
+          : delay * 2;
     }
     expect(other.lastFailure, HostedBackupFailure.identityMismatch);
     expect(backupPaths(), List.filled(10, '/v1/buzz/nsec-backups/status'));
