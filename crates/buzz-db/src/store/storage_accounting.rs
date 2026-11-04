@@ -261,12 +261,8 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn usage_delivery_reads_snapshot_time_and_community_states() {
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&crate::test_support::database_url())
-            .await
-            .expect("connect admin");
-        let (pool, name) = create_scratch_db(&admin).await;
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
         let db = Db::from_pool(pool.clone());
 
         assert_eq!(
@@ -327,14 +323,5 @@ mod postgres_tests {
         communities.sort_by(|a, b| a.host.cmp(&b.host));
         expected.sort_by(|a, b| a.host.cmp(&b.host));
         assert_eq!(communities, expected);
-
-        drop(leader);
-        drop(db);
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await;
     }
 }
