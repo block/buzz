@@ -13,14 +13,14 @@ const editedMarkerText = '(edited)';
 // Last lines that a following " (edited)" would join or turn into Markdown
 // structure: indented code, a table row, a rule or setext underline, `$$`
 // display math, or a bare list, quote, checkbox or radio marker. A heading
-// takes its own line as on desktop, and so does a line ending in a link:
-// links render as widget spans, so screen readers would read a joined marker
-// first. Escapes are already shielded here, so `\]` is text, not math.
+// takes its own line as on desktop. Escapes are already shielded here, so
+// `\]` is text, not math. Each pattern starts at the line start or at a
+// fixed character, so no run of text is rescanned and a match stays linear in
+// the line, whatever an author puts in it.
 final _block = RegExp(
   r'^(?:\s{4}|\t)|^\s*\||\|\s*$|\$\$\s*$'
   r'|^\s*(?:([-*_])(?:\s*\1){2,}|=+)\s*$'
   r'|^\s*#{1,6}(?:\s|$)'
-  r'|[a-zA-Z][a-zA-Z0-9+.-]*://\S*\s*$|\]\([^)]*\)\s*$'
   r'|^\s*(?:[-*+]|>|\d+\.|\[[ xX]\]|\([ xX]\))\s*$',
 );
 
@@ -32,9 +32,37 @@ final _block = RegExp(
 String? withEditedSlot(String markdown) {
   final body = markdown.trimRight();
   if (body.isEmpty || body.contains('```')) return null;
-  if (_block.hasMatch(body.split('\n').last)) return null;
+  final last = body.substring(body.lastIndexOf('\n') + 1);
+  if (_block.hasMatch(last) || _endsInLink(last)) return null;
   return '$body $editedSlot';
 }
+
+/// Whether [line] ends in a URL or a Markdown link. Links render as widget
+/// spans, so screen readers would read a joined marker before the link. A
+/// scan, not a regular expression: an unanchored one restarts at every
+/// character and takes quadratic time on a long authored line.
+bool _endsInLink(String line) {
+  final text = line.trimRight();
+  // A link: `](`, then no `)` up to the final one.
+  if (text.length > 2 && text.endsWith(')')) {
+    final previous = text.lastIndexOf(')', text.length - 2);
+    if (text.substring(previous + 1, text.length - 1).contains('](')) {
+      return true;
+    }
+  }
+  // A URL: `://` in the last word, after a scheme that has a letter.
+  final word = text.substring(text.lastIndexOf(_space) + 1);
+  for (var i = word.indexOf('://'); i > 0; i = word.indexOf('://', i + 1)) {
+    for (var j = i - 1; j >= 0 && _schemeChar.hasMatch(word[j]); j--) {
+      if (_letter.hasMatch(word[j])) return true;
+    }
+  }
+  return false;
+}
+
+final _space = RegExp(r'\s');
+final _schemeChar = RegExp(r'[a-zA-Z0-9+.-]');
+final _letter = RegExp(r'[a-zA-Z]');
 
 /// Metadata after an edited body: the accent ink on your own bubble, else
 /// the muted metadata colour.
