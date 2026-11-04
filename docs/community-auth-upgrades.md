@@ -142,8 +142,9 @@ signature replay uses the existing operator replay error independently of this t
 
 Migration 0082 is additive: legacy rows keep `requires_nip_fi=false` and generation
 zero. It adds no trigger, function, procedure, rule or foreign key and rewrites no
-existing rows. Lock and statement budgets are 5 and 30 seconds. Existing global
-`enforce` remains an additional floor; this layer changes no data-plane gate.
+existing rows. Lock and statement budgets are 5 and 30 seconds. This migration
+changes no data-plane gate. Relay mode determines whether stored requirements
+are enforced, as described below.
 Do not infer requirements from issuer rows, backfill free communities, or remove
 the enterprise enforce floor as part of this migration.
 
@@ -157,8 +158,12 @@ No tenant serving writer owns this table and no fence trigger is attached.
 
 The active-community primary accessor is
 `Db::community_auth_policy(CommunityId) -> Result<Option<CommunityAuthPolicy>>`.
-`None` means no active target; errors must fail closed. Per-request enforcement must combine
-its stored requirement with global enforce and honor repair denial first.
+`None` means no active target. Repair mode denies protected traffic first. In
+`off`, no community requires FI, including a stored-required community; FI lookup
+or dependency failures must not deny ordinary admission. In `shadow`, enforce
+stored requirements and observe optional communities. In `enforce`, require FI
+for every community. Evaluating policy lookups fail closed on errors. Mode
+changes do not clear the stored requirement, generation, issuer trust or receipts.
 
 ## Mistaken acceptance and containment
 
@@ -173,10 +178,18 @@ through its existing operator procedure; never broaden trust to make a probe pas
 Disabling calls or rolling back code does not undo acceptance. In Shadow, never
 restore a serving binary that ignores the durable requirement; retain effective enforcement
 or contain the community while repairing the FI path. There is no
-clear-policy API or routine SQL reset, and neither a timeout nor a mistaken call
-is permission to return the community to free admission. Recovery must retain
-the accepted requirement and operation evidence. No fleet-wide drain or deployment
-is an automatic fallback.
+clear-policy API or routine SQL reset. A timeout or mistaken call does not
+authorize clearing the requirement or discarding operation evidence.
+
+An explicit operator change to `off` intentionally suspends FI enforcement for
+all communities while preserving durable requirements and receipts. This is a
+relay-wide mode choice, not an undo of acceptance or a binary rollback. Readback
+must distinguish stored policy from effective enforcement and must not report
+active enforcement in Off. Returning to `shadow` resumes enforcement for stored
+required communities; `enforce` requires FI everywhere. Off suspends FI for
+every community; it is not per-community containment. Choose relay-wide Off
+suspension or archive/lifecycle containment explicitly; neither a fleet-wide
+drain nor a deployment is an automatic fallback.
 
 Last-issuer removal is refused once the community requires NIP-FI, including
 when the operator binding path requests `allow_last`. Bind a replacement before
