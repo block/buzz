@@ -30,6 +30,8 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
+import { AttachmentChannelDropTarget } from "@/features/attachment-drag/ui/AttachmentChannelDropTarget";
+import type { AttachmentDragPayload } from "@/features/attachment-drag/lib/attachmentDragPayload";
 import { ChannelActivityPopover } from "@/features/sidebar/ui/ChannelActivityPopover";
 import { useAppShell } from "@/app/AppShellContext";
 import { UserNameIndicators } from "@/features/user-status/ui/UserNameIndicators";
@@ -252,6 +254,7 @@ export function ChannelMenuButton({
   isMuted,
   dmParticipants,
   presenceStatus,
+  onDropAttachment,
   onSelectChannel,
 }: {
   channel: Channel;
@@ -262,6 +265,10 @@ export function ChannelMenuButton({
   isMuted?: boolean;
   dmParticipants?: SidebarDmParticipant[];
   presenceStatus?: PresenceStatus;
+  onDropAttachment?: (
+    channelId: string,
+    payload: AttachmentDragPayload,
+  ) => void;
   onSelectChannel: (channelId: string) => void;
 }) {
   const resolvedLabel = label ?? channel.name;
@@ -362,14 +369,31 @@ export function ChannelMenuButton({
     </SidebarMenuButton>
   );
 
-  if (!activeWorking && !hasThreadUnread) {
-    return button;
-  }
+  const wrappedButton =
+    !activeWorking && !hasThreadUnread ? (
+      button
+    ) : (
+      <ChannelActivityPopover activeWorking={activeWorking} channel={channel}>
+        {button}
+      </ChannelActivityPopover>
+    );
 
   return (
-    <ChannelActivityPopover activeWorking={activeWorking} channel={channel}>
-      {button}
-    </ChannelActivityPopover>
+    <AttachmentChannelDropTarget
+      channelName={resolvedLabel}
+      disabled={
+        !channel.isMember ||
+        Boolean(channel.archivedAt) ||
+        channel.channelType === "forum"
+      }
+      onDropAttachment={
+        onDropAttachment
+          ? (payload) => onDropAttachment(channel.id, payload)
+          : undefined
+      }
+    >
+      {wrappedButton}
+    </AttachmentChannelDropTarget>
   );
 }
 
@@ -392,6 +416,7 @@ export function SidebarSection({
   onMarkChannelRead,
   onMarkChannelUnread,
   onSelectChannel,
+  onDropAttachment,
   onToggleCollapsed,
   mutedChannelIds,
   onMuteChannel,
@@ -419,6 +444,10 @@ export function SidebarSection({
   ) => void;
   onMarkChannelUnread?: (channelId: string) => void;
   onSelectChannel: (channelId: string) => void;
+  onDropAttachment?: (
+    channelId: string,
+    payload: AttachmentDragPayload,
+  ) => void;
   onToggleCollapsed?: () => void;
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
@@ -485,6 +514,7 @@ export function SidebarSection({
                       }
                       label={channelLabels?.[channel.id] ?? channel.name}
                       presenceStatus={presenceByChannelId?.[channel.id]}
+                      onDropAttachment={onDropAttachment}
                       onSelectChannel={onSelectChannel}
                     />
                     {channel.channelType === "dm" &&

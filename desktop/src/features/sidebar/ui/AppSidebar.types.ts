@@ -1,3 +1,4 @@
+import type { AttachmentDragPayload } from "@/features/attachment-drag/lib/attachmentDragPayload";
 import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
 import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
@@ -91,6 +92,10 @@ export type AppSidebarProps = {
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
+  onDropAttachmentOnChannel?: (
+    channelId: string,
+    payload: AttachmentDragPayload,
+  ) => Promise<void> | void;
   onOpenSearchResult: (hit: SearchHit, query: string) => void;
   /** Full channel set for global search, including channels outside the joined sidebar list. */
   searchChannels: Channel[];

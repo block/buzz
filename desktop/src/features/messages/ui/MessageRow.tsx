@@ -38,6 +38,7 @@ import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { attachmentDragItemsFromTags } from "@/features/attachment-drag/lib/attachmentDragPayload";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
@@ -301,6 +302,12 @@ export const MessageRow = React.memo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
       [message.tags],
     );
+    const attachmentDragItemsByUrl = React.useMemo(() => {
+      const items = attachmentDragItemsFromTags(message.tags);
+      return items.length > 0
+        ? new Map(items.map((item) => [item.url, item]))
+        : undefined;
+    }, [message.tags]);
     const snapshotSharedBy = React.useMemo(
       () =>
         resolveSnapshotSharedBy(
@@ -444,6 +451,7 @@ export const MessageRow = React.memo(
                 message,
                 isKnownAgentPubkey,
               )}
+              attachmentDragItemsByUrl={attachmentDragItemsByUrl}
               content={message.body}
               messageId={message.id}
               linkPreviewsSuppressed={linkPreviewsSuppressed}
@@ -457,6 +465,9 @@ export const MessageRow = React.memo(
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
               snapshotSharedBy={snapshotSharedBy}
+              sourceChannelId={channelId}
+              sourceMessageAuthor={message.author}
+              sourceThreadRootId={message.rootId ?? message.id}
               videoReviewCommentRootId={videoReviewCommentRootId}
               videoReviewContext={videoReviewContext}
             />

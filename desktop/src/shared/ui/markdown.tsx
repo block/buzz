@@ -5,6 +5,8 @@ import { ChevronLeft, ChevronRight, Download } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type { AttachmentDragItem } from "@/features/attachment-drag/lib/attachmentDragPayload";
+import { DraggableAttachment } from "@/features/attachment-drag/ui/DraggableAttachment";
 import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { parseChannelLink } from "@/features/messages/lib/channelLink";
 import { isAudioAttachment } from "@/features/messages/lib/audioAttachment";
@@ -137,7 +139,12 @@ import {
 type ImageBlockProps = {
   alt: string | undefined;
   dim?: string;
+  dragItem?: AttachmentDragItem;
   resolvedSrc: string | undefined;
+  sourceAuthor?: string | null;
+  sourceChannelId?: string | null;
+  sourceMessageId?: string;
+  sourceThreadRootId?: string | null;
   src: string | undefined;
   thumbSrc?: string;
 };
@@ -983,7 +990,18 @@ export const LinkPreviewImageLightbox =
  * body on hover. Keeping the trigger stable and managing the lightbox via
  * React state avoids that repaint.
  */
-function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
+function ImageBlock({
+  alt,
+  dim,
+  dragItem,
+  resolvedSrc,
+  sourceAuthor,
+  sourceChannelId,
+  sourceMessageId,
+  sourceThreadRootId,
+  src,
+  thumbSrc,
+}: ImageBlockProps) {
   const [lightboxState, setLightboxState] = React.useState<{
     galleryIndex: number;
     galleryItems?: ImageGalleryItem[];
@@ -1147,41 +1165,57 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     [],
   );
 
+  const imageButton = (
+    <button
+      aria-hidden={isHiddenInSpoiler ? true : undefined}
+      aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
+      className={cn(
+        "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in overflow-hidden rounded-2xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
+        lightboxState && "opacity-0",
+      )}
+      data-image-lightbox-resolved-src={resolvedSrc}
+      data-image-lightbox-alt={alt}
+      data-image-lightbox-dim={dim}
+      data-image-lightbox-src={src}
+      data-image-lightbox-trigger=""
+      data-testid="message-image-lightbox-trigger"
+      ref={triggerRef}
+      tabIndex={isHiddenInSpoiler ? -1 : undefined}
+      type="button"
+      onClick={handleImageTriggerClick}
+      onContextMenuCapture={handleContextMenu}
+    >
+      <ProgressiveImage
+        alt={alt}
+        fullImageRef={inlineImageRef}
+        height={intrinsicDimensions.height}
+        onFullLoad={handleImageLoad}
+        onThumbnailLoad={updateSpoilerMediaSize}
+        resolvedSrc={resolvedSrc}
+        showSpoilerSize={Boolean(hiddenSpoilerMediaSize)}
+        style={spoilerMediaStyle}
+        thumbnailRef={thumbnailImageRef}
+        thumbSrc={thumbSrc}
+        width={intrinsicDimensions.width}
+      />
+    </button>
+  );
+
   return (
     <>
-      <button
-        aria-hidden={isHiddenInSpoiler ? true : undefined}
-        aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
-        className={cn(
-          "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in overflow-hidden rounded-2xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
-          lightboxState && "opacity-0",
-        )}
-        data-image-lightbox-resolved-src={resolvedSrc}
-        data-image-lightbox-alt={alt}
-        data-image-lightbox-dim={dim}
-        data-image-lightbox-src={src}
-        data-image-lightbox-trigger=""
-        data-testid="message-image-lightbox-trigger"
-        ref={triggerRef}
-        tabIndex={isHiddenInSpoiler ? -1 : undefined}
-        type="button"
-        onClick={handleImageTriggerClick}
-        onContextMenuCapture={handleContextMenu}
-      >
-        <ProgressiveImage
-          alt={alt}
-          fullImageRef={inlineImageRef}
-          height={intrinsicDimensions.height}
-          onFullLoad={handleImageLoad}
-          onThumbnailLoad={updateSpoilerMediaSize}
-          resolvedSrc={resolvedSrc}
-          showSpoilerSize={Boolean(hiddenSpoilerMediaSize)}
-          style={spoilerMediaStyle}
-          thumbnailRef={thumbnailImageRef}
-          thumbSrc={thumbSrc}
-          width={intrinsicDimensions.width}
-        />
-      </button>
+      {dragItem && sourceMessageId && !isHiddenInSpoiler ? (
+        <DraggableAttachment
+          item={dragItem}
+          sourceAuthor={sourceAuthor}
+          sourceChannelId={sourceChannelId}
+          sourceMessageId={sourceMessageId}
+          sourceThreadRootId={sourceThreadRootId}
+        >
+          {imageButton}
+        </DraggableAttachment>
+      ) : (
+        imageButton
+      )}
       {menu && src ? (
         <MediaContextMenu
           dataAttributes={["data-image-context-menu"]}
@@ -1223,13 +1257,18 @@ export function createMarkdownComponents(
     ...props
   }: React.ComponentPropsWithoutRef<"a">) {
     const {
+      attachmentDragItemsByUrl,
       channels,
       imetaByUrl,
+      messageId,
       onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
       onImportSnapshotFromUrl,
       relayOrigin,
+      sourceChannelId,
+      sourceMessageAuthor,
+      sourceThreadRootId,
       resolveChannelReferences,
       snapshotSharedBy,
     } = useMarkdownRuntime();
@@ -1250,7 +1289,22 @@ export function createMarkdownComponents(
         ? href
         : undefined,
     );
-    if (audioAttachment) return audioAttachment;
+    if (audioAttachment) {
+      const dragItem = href ? attachmentDragItemsByUrl?.get(href) : undefined;
+      return dragItem && messageId ? (
+        <DraggableAttachment
+          item={dragItem}
+          sourceAuthor={sourceMessageAuthor}
+          sourceChannelId={sourceChannelId}
+          sourceMessageId={messageId}
+          sourceThreadRootId={sourceThreadRootId}
+        >
+          {audioAttachment}
+        </DraggableAttachment>
+      ) : (
+        audioAttachment
+      );
+    }
 
     // Classify verified agent/team snapshots before generic files.
     const snapshotCard = resolveSnapshotCard(
@@ -1287,8 +1341,22 @@ export function createMarkdownComponents(
       label,
     );
     if (card) {
-      return (
+      const fileCard = (
         <FileCard href={card.href} filename={card.filename} size={card.size} />
+      );
+      const dragItem = href ? attachmentDragItemsByUrl?.get(href) : undefined;
+      return dragItem && messageId ? (
+        <DraggableAttachment
+          item={dragItem}
+          sourceAuthor={sourceMessageAuthor}
+          sourceChannelId={sourceChannelId}
+          sourceMessageId={messageId}
+          sourceThreadRootId={sourceThreadRootId}
+        >
+          {fileCard}
+        </DraggableAttachment>
+      ) : (
+        fileCard
       );
     }
 
@@ -1472,7 +1540,14 @@ export function createMarkdownComponents(
     ),
     hr: () => <hr className="border-border/80" />,
     img: function MarkdownImage({ alt, src }) {
-      const { imetaByUrl } = useMarkdownRuntime();
+      const {
+        attachmentDragItemsByUrl,
+        imetaByUrl,
+        messageId,
+        sourceChannelId,
+        sourceMessageAuthor,
+        sourceThreadRootId,
+      } = useMarkdownRuntime();
       const entry = src ? imetaByUrl?.get(src) : undefined;
       const isVideo = src ? isVideoMedia(src, entry?.m) : false;
       if (!interactive) {
@@ -1482,6 +1557,7 @@ export function createMarkdownComponents(
 
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (isVideo && src && resolvedSrc) {
+        const dragItem = attachmentDragItemsByUrl?.get(src);
         return (
           <span
             className={cn(
@@ -1489,13 +1565,31 @@ export function createMarkdownComponents(
             )}
             data-block-media=""
           >
-            <MarkdownVideoPlayer
-              key={src ?? resolvedSrc}
-              alt={alt}
-              entry={entry}
-              resolvedSrc={resolvedSrc}
-              src={src}
-            />
+            {dragItem && messageId ? (
+              <DraggableAttachment
+                item={dragItem}
+                sourceAuthor={sourceMessageAuthor}
+                sourceChannelId={sourceChannelId}
+                sourceMessageId={messageId}
+                sourceThreadRootId={sourceThreadRootId}
+              >
+                <MarkdownVideoPlayer
+                  key={src ?? resolvedSrc}
+                  alt={alt}
+                  entry={entry}
+                  resolvedSrc={resolvedSrc}
+                  src={src}
+                />
+              </DraggableAttachment>
+            ) : (
+              <MarkdownVideoPlayer
+                key={src ?? resolvedSrc}
+                alt={alt}
+                entry={entry}
+                resolvedSrc={resolvedSrc}
+                src={src}
+              />
+            )}
           </span>
         );
       }
@@ -1504,7 +1598,12 @@ export function createMarkdownComponents(
           <ImageBlock
             alt={alt}
             dim={entry?.dim}
+            dragItem={src ? attachmentDragItemsByUrl?.get(src) : undefined}
             resolvedSrc={resolvedSrc}
+            sourceAuthor={sourceMessageAuthor}
+            sourceChannelId={sourceChannelId}
+            sourceMessageId={messageId}
+            sourceThreadRootId={sourceThreadRootId}
             src={src}
             thumbSrc={entry?.thumb ? rewriteRelayUrl(entry.thumb) : undefined}
           />
@@ -1674,6 +1773,7 @@ function getMarkdownComponents(
 }
 
 function MarkdownInner({
+  attachmentDragItemsByUrl,
   channelNames,
   className,
   configNudgeAuthorPubkey,
@@ -1694,6 +1794,9 @@ function MarkdownInner({
   mentionPubkeysByName,
   searchQuery,
   snapshotSharedBy,
+  sourceChannelId,
+  sourceMessageAuthor,
+  sourceThreadRootId,
   videoReviewContext,
 }: MarkdownProps) {
   const { channels: rawChannels } = useChannelNavigation();
@@ -1733,9 +1836,11 @@ function MarkdownInner({
   const runtime = React.useMemo<MarkdownRuntime>(
     () => ({
       agentMentionPubkeysByName,
+      attachmentDragItemsByUrl,
       channels,
       imetaByUrl,
       leadingInlineContent,
+      messageId,
       mentionPubkeysByName,
       onOpenChannel,
       onOpenEntityLink,
@@ -1743,6 +1848,9 @@ function MarkdownInner({
       relayOrigin,
       resolveChannelReferences: true,
       snapshotSharedBy,
+      sourceChannelId,
+      sourceMessageAuthor,
+      sourceThreadRootId,
       onImportSnapshotFromUrl: (
         fileBytes: number[],
         fileName: string,
@@ -1754,15 +1862,20 @@ function MarkdownInner({
     }),
     [
       agentMentionPubkeysByName,
+      attachmentDragItemsByUrl,
       channels,
       imetaByUrl,
       leadingInlineContent,
+      messageId,
       mentionPubkeysByName,
       onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
       relayOrigin,
       snapshotSharedBy,
+      sourceChannelId,
+      sourceMessageAuthor,
+      sourceThreadRootId,
       goAgents,
     ],
   );

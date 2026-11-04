@@ -1,4 +1,5 @@
 import * as React from "react";
+import { toast } from "sonner";
 import { ProtectedGlobalOverlay } from "@protected-feature-components";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
@@ -38,8 +39,11 @@ import {
 import { useDmResurfaceFromMessages } from "@/features/channels/useDmResurfaceFromMessages";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
+import { attachmentDragContentAndTags } from "@/features/attachment-drag/lib/attachmentDragPayload";
+import type { AttachmentDragPayload } from "@/features/attachment-drag/lib/attachmentDragPayload";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
+import { useSendMessageMutation } from "@/features/messages/hooks";
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
@@ -507,6 +511,7 @@ export function AppShell() {
 
   const createChannelMutation = useCreateChannelMutation(),
     createForumMutation = useCreateChannelMutation();
+  const sendMessageMutation = useSendMessageMutation(null, identityQuery.data);
   const { applyCanvas, applyAgents } = useApplyTemplate();
   const openDmMutation = useOpenDmMutation();
   const hideDmMutation = useHideDmMutation();
@@ -662,6 +667,34 @@ export function AppShell() {
       void openSearchHit(hit, { query });
     },
     [openSearchHit],
+  );
+  const sendAttachmentMutateAsync = sendMessageMutation.mutateAsync;
+  const handleDropAttachmentOnChannel = React.useCallback(
+    async (channelId: string, payload: AttachmentDragPayload) => {
+      const targetChannel = channels.find(
+        (channel) => channel.id === channelId,
+      );
+      const targetLabel = targetChannel
+        ? targetChannel.channelType === "dm"
+          ? "DM"
+          : `#${targetChannel.name}`
+        : "channel";
+
+      try {
+        const { content, mediaTags } = attachmentDragContentAndTags(payload);
+        await sendAttachmentMutateAsync({
+          channelId,
+          content,
+          mediaTags,
+          mentionPubkeys: [],
+        });
+        toast.success(`Attachment sent to ${targetLabel}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toast.error(`Couldn't send attachment: ${message}`);
+      }
+    },
+    [channels, sendAttachmentMutateAsync],
   );
   useAppShellLifecycleEffects({
     desktopBadgeEnabled: !isHuddleRoom,
@@ -884,6 +917,9 @@ export function AppShell() {
                           }}
                           onSelectAgents={() => void goAgents()}
                           onSelectChannel={handleSidebarChannelSelect}
+                          onDropAttachmentOnChannel={
+                            handleDropAttachmentOnChannel
+                          }
                           onOpenSearchResult={handleOpenSearchResult}
                           searchChannels={channels}
                           searchFocusRequests={[

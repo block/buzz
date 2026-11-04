@@ -123,6 +123,7 @@ export function AppSidebar({
   onSelectWorkflows,
   onSelectHome,
   onSelectChannel,
+  onDropAttachmentOnChannel,
   onOpenSearchResult,
   searchChannels,
   searchFocusRequests,
@@ -605,6 +606,7 @@ export function AppSidebar({
                       onMarkChannelRead={onMarkChannelRead}
                       onMarkChannelUnread={onMarkChannelUnread}
                       onSelectChannel={onSelectChannel}
+                      onDropAttachment={onDropAttachmentOnChannel}
                       onToggleCollapsed={() => toggleCollapsedGroup("starred")}
                       selectedChannelId={selectedChannelId}
                       title="Starred"
@@ -654,6 +656,7 @@ export function AppSidebar({
                           toggleCollapsedSection(section.id)
                         }
                         onSelectChannel={onSelectChannel}
+                        onDropAttachment={onDropAttachmentOnChannel}
                         onMarkChannelRead={onMarkChannelRead}
                         onMarkChannelUnread={onMarkChannelUnread}
                         onMarkSectionRead={() => {
@@ -708,6 +711,7 @@ export function AppSidebar({
                       onMarkChannelRead={onMarkChannelRead}
                       onMarkChannelUnread={onMarkChannelUnread}
                       onSelectChannel={onSelectChannel}
+                      onDropAttachment={onDropAttachmentOnChannel}
                       onToggleCollapsed={() => toggleCollapsedGroup("channels")}
                       selectedChannelId={selectedChannelId}
                       title="Channels"
@@ -746,6 +750,7 @@ export function AppSidebar({
                       onMarkChannelRead={onMarkChannelRead}
                       onMarkChannelUnread={onMarkChannelUnread}
                       onSelectChannel={onSelectChannel}
+                      onDropAttachment={onDropAttachmentOnChannel}
                       onToggleCollapsed={() => toggleCollapsedGroup("forums")}
                       selectedChannelId={selectedChannelId}
                       title="Forums"
@@ -786,6 +791,7 @@ export function AppSidebar({
                     onMarkChannelRead={onMarkChannelRead}
                     onMarkChannelUnread={onMarkChannelUnread}
                     onSelectChannel={onSelectChannel}
+                    onDropAttachment={onDropAttachmentOnChannel}
                     onToggleCollapsed={() =>
                       toggleCollapsedGroup("directMessages")
                     }

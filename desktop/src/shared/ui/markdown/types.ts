@@ -5,6 +5,7 @@ import type { ParsedEntityLink } from "@/shared/lib/entityLink";
 import type { Channel } from "@/shared/api/types";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { VideoReviewContext } from "../VideoPlayer";
+import type { AttachmentDragItem } from "@/features/attachment-drag/lib/attachmentDragPayload";
 
 export type ImetaEntry = {
   dim?: string;
@@ -39,6 +40,11 @@ export type MarkdownRuntime = {
   agentMentionPubkeysByName?: Record<string, string>;
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
+  attachmentDragItemsByUrl?: ReadonlyMap<string, AttachmentDragItem>;
+  messageId?: string;
+  sourceChannelId?: string | null;
+  sourceMessageAuthor?: string | null;
+  sourceThreadRootId?: string | null;
   /** Inline content supplied to the first prose-capable Markdown block. */
   leadingInlineContent?: React.ReactNode;
   mentionPubkeysByName?: Record<string, string>;
@@ -93,8 +99,12 @@ export type MarkdownProps = {
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
   mediaInset?: boolean;
-  /** Event/message identity used only for local preview-image visibility. */
+  /** Event/message identity used for local preview-image visibility and attachment dragging. */
   messageId?: string;
+  attachmentDragItemsByUrl?: ReadonlyMap<string, AttachmentDragItem>;
+  sourceChannelId?: string | null;
+  sourceMessageAuthor?: string | null;
+  sourceThreadRootId?: string | null;
   linkPreviewsSuppressed?: boolean;
   linkPreviewTags?: readonly (readonly string[])[];
   /** Inline content prepended inside the first rendered prose paragraph. */

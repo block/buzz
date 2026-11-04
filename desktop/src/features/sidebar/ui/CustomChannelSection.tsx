@@ -41,6 +41,7 @@ import {
   SidebarMenu,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
+import type { AttachmentDragPayload } from "@/features/attachment-drag/lib/attachmentDragPayload";
 import { ChannelMenuButton } from "@/features/sidebar/ui/SidebarSection";
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import { deferMenuAction } from "@/features/sidebar/ui/sidebarMenuHelpers";
@@ -352,6 +353,7 @@ export function ChannelGroupSection({
   onMarkChannelRead,
   onMarkChannelUnread,
   onSelectChannel,
+  onDropAttachment,
   onToggleCollapsed,
   selectedChannelId,
   sortMode,
@@ -399,6 +401,10 @@ export function ChannelGroupSection({
   ) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onSelectChannel: (channelId: string) => void;
+  onDropAttachment?: (
+    channelId: string,
+    payload: AttachmentDragPayload,
+  ) => void;
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
   sortMode?: ChannelSortMode;
@@ -442,6 +448,7 @@ export function ChannelGroupSection({
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
                       }
+                      onDropAttachment={onDropAttachment}
                       onSelectChannel={onSelectChannel}
                     />
                   </DraggableChannelRow>
@@ -454,6 +461,7 @@ export function ChannelGroupSection({
                     isActive={
                       isActiveChannel && selectedChannelId === channel.id
                     }
+                    onDropAttachment={onDropAttachment}
                     onSelectChannel={onSelectChannel}
                   />
                 )}
@@ -553,6 +561,7 @@ export function CustomChannelSection({
   onSortModeChange,
   onToggleCollapsed,
   onSelectChannel,
+  onDropAttachment,
   onMarkChannelRead,
   onMarkChannelUnread,
   onMarkSectionRead,
@@ -589,6 +598,10 @@ export function CustomChannelSection({
   onSortModeChange?: (mode: ChannelSortMode) => void;
   onToggleCollapsed: () => void;
   onSelectChannel: (channelId: string) => void;
+  onDropAttachment?: (
+    channelId: string,
+    payload: AttachmentDragPayload,
+  ) => void;
   onMarkChannelRead: (
     channelId: string,
     lastMessageAt: string | null | undefined,
@@ -743,6 +756,7 @@ export function CustomChannelSection({
                                   isActiveChannel &&
                                   selectedChannelId === channel.id
                                 }
+                                onDropAttachment={onDropAttachment}
                                 onSelectChannel={onSelectChannel}
                               />
                             </DraggableChannelRow>
