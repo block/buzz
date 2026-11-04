@@ -45,9 +45,31 @@ export class RelayEntryRequirements {
     isCurrent: () => boolean,
   ) {
     const resolved = relayUrl ?? (await getRelayWsUrl());
+    const address = new URL(resolved);
+    if (
+      !["ws:", "wss:"].includes(address.protocol) ||
+      address.username ||
+      address.password ||
+      address.search ||
+      address.hash
+    ) {
+      throw new Error(
+        "Community URL must use ws or wss without credentials, query or fragment",
+      );
+    }
     if (!isCurrent())
       throw new Error("Relay connection attempt was superseded.");
-    await this.check(resolved);
+    try {
+      await this.check(resolved);
+    } catch (error) {
+      if (RelayEntryRequirements.isUpgradeRequired(error)) throw error;
+      // Unknown policy is not optional. The relay still enforces admission;
+      // a missing public document must not break legacy/free connections.
+      console.warn(
+        "Could not check community authentication requirements; trying the relay",
+        error,
+      );
+    }
     if (!isCurrent())
       throw new Error("Relay connection attempt was superseded.");
     const wsId = await invoke<number>("plugin:websocket|connect", {
@@ -68,7 +90,10 @@ export class RelayEntryRequirements {
       relayUrl,
       pending: true,
     });
-    let result: { required: boolean; upgradeUrl: string | null };
+    let result: {
+      required: boolean;
+      upgradeUrl: string | null;
+    };
     try {
       result = await invokeTauri("fetch_relay_entry_requirements", {
         relayUrl,

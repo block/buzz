@@ -637,7 +637,10 @@ function CommunityApp({
   // Covers the connecting/onboarding curtain too, before the shell mounts.
   const appliedRelayKey = communityApplied ? communityKey : null;
   useEffect(() => {
-    if (appliedRelayKey) void relayClient.preconnect().catch(() => {});
+    if (appliedRelayKey)
+      void relayClient.preconnect().catch((error) => {
+        console.error("Failed to preconnect to relay", error);
+      });
   }, [appliedRelayKey]);
   useLayoutEffect(() => {
     if (communityApplied) {

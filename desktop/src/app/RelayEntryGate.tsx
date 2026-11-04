@@ -25,8 +25,7 @@ export function RelayEntryGate({
   const state = useSyncExternalStore(entry.subscribe, entry.getSnapshot);
   const [editing, setEditing] = useState(false);
   const [openError, setOpenError] = useState(false);
-  const visible = state.relayUrl === relayUrl && state.verdict !== null;
-  const required = state.verdict === "required";
+  const visible = state.relayUrl === relayUrl && state.verdict === "required";
   return (
     <>
       <Dialog open={visible && !editing}>
@@ -36,24 +35,19 @@ export function RelayEntryGate({
           onPointerDownOutside={(event) => event.preventDefault()}
           data-testid="relay-entry-guidance"
         >
-          <DialogTitle>
-            {required
-              ? "Upgrade Buzz to join this community"
-              : "Could not check this community"}
-          </DialogTitle>
+          <DialogTitle>Upgrade Buzz to join this community</DialogTitle>
           <DialogDescription>
-            {required
-              ? "This community requires sign-in supported by a newer Buzz app. Your keys and saved communities are still here."
-              : "The community's sign-in requirements could not be checked. Try again when the community is reachable."}
+            This community requires sign-in supported by a newer Buzz app. Your
+            keys and saved communities are still here.
           </DialogDescription>
           <p className="break-all text-sm text-muted-foreground">{relayUrl}</p>
-          {required && !state.upgradeUrl ? (
+          {!state.upgradeUrl ? (
             <p className="text-sm">
               Ask your community administrator for a Buzz installer that
               supports this community and your computer.
             </p>
           ) : null}
-          {required && state.upgradeUrl ? (
+          {state.upgradeUrl ? (
             <Button
               onClick={() => {
                 setOpenError(false);

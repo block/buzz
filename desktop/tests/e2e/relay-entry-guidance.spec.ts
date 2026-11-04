@@ -26,17 +26,35 @@ test("saved desktop community: required, retryable failure, recovery and keys su
     card.getByRole("button", { name: "Download newer Buzz" }),
   ).toHaveCount(0);
   await card.screenshot({ path: "test-results/relay-entry-required.png" });
-  const storage = await page.evaluate(() => ({ ...localStorage }));
+  let storage = await page.evaluate(() => ({ ...localStorage }));
   // Native networking is the external boundary. The session and rendered gate stay real.
   await page.evaluate(() => {
     const config = (window as PolicyWindow).__BUZZ_E2E__;
     config.mock.relayEntryPolicy = { required: false, error: "HTTP 503" };
   });
   await card.getByRole("button", { name: "Retry community check" }).click();
-  await expect(card.getByText("Could not check this community")).toBeVisible();
+  await expect(card).toBeHidden();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.waitForFunction(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+        }
+      ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.() === "connected",
+  );
+  const beforeReload = await page.evaluate(() => ({ ...localStorage }));
+  for (const [key, value] of Object.entries(storage)) {
+    if (/communities|identity|private.key|nsec/i.test(key))
+      expect(beforeReload[key], key).toBe(value);
+  }
+  // The test bridge reseeds the launch timestamp on reload; compare retained
+  // storage within each launch rather than comparing the fixture's timestamps.
+  await page.reload();
+  storage = await page.evaluate(() => ({ ...localStorage }));
   await expect(
-    card.getByRole("button", { name: "Download newer Buzz" }),
-  ).toHaveCount(0);
+    card.getByText("Upgrade Buzz to join this community"),
+  ).toBeVisible();
   await page.evaluate(() => {
     (window as PolicyWindow).__BUZZ_E2E__.mock.relayEntryPolicy = {
       required: true,

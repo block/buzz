@@ -28,8 +28,9 @@ Desktop chat shell with:
 
 The legacy desktop reads public NIP-11 metadata before each WebSocket connection.
 Only `requires_nip_fi: true` shows the upgrade card. Missing/false requirements
-keep the existing connection flow; discovery failures show a retryable check
-failure. Switching communities invalidates pending checks. The card does not
+keep the existing connection flow. Discovery errors remain unknown policy and
+continue the existing socket/authentication path, where the relay enforces
+admission. Only explicit required policy opens the upgrade modal. Switching communities invalidates pending checks. The card does not
 reset keys or remove saved communities.
 
 Packagers may set both `BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_RELAY` (an exact `ws` or
