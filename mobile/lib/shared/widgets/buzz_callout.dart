@@ -200,23 +200,11 @@ class _Card extends StatelessWidget {
                 ),
                 child: Center(
                   heightFactor: 1,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: context.colors.surface,
-                      borderRadius: BorderRadius.circular(Radii.full),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Grid.xs,
-                        vertical: Grid.xxs,
-                      ),
-                      child: Text(
-                        message,
-                        textAlign: TextAlign.center,
-                        style: context.textTheme.titleMedium?.copyWith(
-                          color: context.colors.onSurface,
-                        ),
-                      ),
+                  child: Text(
+                    message,
+                    textAlign: TextAlign.center,
+                    style: context.textTheme.titleLarge?.copyWith(
+                      color: context.colors.onInverseSurface,
                     ),
                   ),
                 ),
