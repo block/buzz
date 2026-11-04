@@ -1486,6 +1486,7 @@ async fn a_stale_publisher_cannot_overwrite_a_newer_metadata_edit() {
             &Keys::generate(),
         )
         .await
+        .map(|write| write.outcome)
         .expect("seed relay owner");
     let channel = create_channel(&state, &tenant, &relay_owner, &[]).await;
     edit_channel(
