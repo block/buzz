@@ -229,6 +229,11 @@ class _CapturingRelaySession extends RelaySessionNotifier {
   }) async => history;
 
   @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) async => history;
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
