@@ -34,7 +34,10 @@ class HostedBackupService {
   final BackupIdentity identity;
   final HpkeBackup _hpke;
   final FlutterSecureStorage _storage;
-  static final _queue = SerialQueue();
+
+  /// One queue per account origin: a stalled organization backup must not
+  /// hold up the hosted backup onboarding waits on.
+  static final _queues = <String, SerialQueue>{};
 
   /// Scoped to the account's own origin, so hosted and organization backups
   /// of one key never share a pending envelope.
@@ -42,7 +45,11 @@ class HostedBackupService {
       'buzz_backup_pending_v2_${sha256.convert(utf8.encode(jsonEncode([backend, subject, pubkey])))}';
 
   Future<void> backup({bool Function()? isCurrent}) {
-    final result = _queue.run(() => _backup(isCurrent: isCurrent));
+    final queue = _queues.putIfAbsent(
+      account.accountOrigin.origin,
+      SerialQueue.new,
+    );
+    final result = queue.run(() => _backup(isCurrent: isCurrent));
     return result;
   }
 

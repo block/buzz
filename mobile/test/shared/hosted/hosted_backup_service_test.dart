@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
@@ -45,6 +46,25 @@ class FakeAccount extends BuilderlabAccountClient {
     if (reject) throw AccountFailure.rejected;
     if (fail) throw AccountFailure.unavailable;
     return {'stored': true, 'backup_id': envelope['backup_id']};
+  }
+}
+
+/// An organization account whose enrollment never answers.
+class StalledAccount extends BuilderlabAccountClient {
+  StalledAccount()
+    : super(accountOrigin: Uri.parse('https://block.example.com'));
+  final enrolling = Completer<void>();
+  @override
+  BuilderlabAccount get account =>
+      BuilderlabAccount(subject: 'member', expiresAt: DateTime(2100));
+  @override
+  Future<Map<String, dynamic>> post(
+    String path,
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) {
+    if (!enrolling.isCompleted) enrolling.complete();
+    return Completer<Map<String, dynamic>>().future;
   }
 }
 
@@ -101,6 +121,29 @@ void main() {
       expect((await identity.read())!.backup!.backupId, envelope['backup_id']);
       await HostedBackupService(account, identity, hpke: hpke).backup();
       expect(account.uploads, hasLength(2));
+    },
+  );
+  test(
+    'a stalled organization backup does not hold up the hosted one',
+    () async {
+      final identity = AccountIdentityStore();
+      await identity.create(nostr.Keys('42' * 32).nsec);
+      final stalled = StalledAccount();
+      unawaited(
+        HostedBackupService(
+          stalled,
+          identity,
+          hpke: FakeHpke(envelope),
+        ).backup(),
+      );
+      await stalled.enrolling.future;
+      final account = FakeAccount(envelope)..fail = false;
+      await HostedBackupService(
+        account,
+        identity,
+        hpke: FakeHpke(envelope),
+      ).backup().timeout(const Duration(seconds: 5));
+      expect(account.uploads, hasLength(1));
     },
   );
   test('unreadable pending ciphertext blocks enrollment and upload', () async {
