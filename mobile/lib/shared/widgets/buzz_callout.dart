@@ -84,8 +84,7 @@ class BuzzCallout extends HookWidget {
             top: padding.top + Grid.xs,
           ),
           fullWidth: onTap != null,
-          // Inverse colors set the callout apart from menus and the page.
-          color: context.colors.inverseSurface,
+          color: _calloutColors(context).$1,
           shadowColor: appPopoverShadowColor(context),
           child: onTap == null
               ? _Tip(message: message, onDismiss: onDismiss)
@@ -100,6 +99,16 @@ class BuzzCallout extends HookWidget {
       child: child,
     );
   }
+}
+
+/// The callout's background and foreground. Inverse colors set it apart from
+/// menus and the page; in dark mode, whose inverse is a flat light gray, it
+/// uses the raised dark surface instead, as toasts do.
+(Color, Color) _calloutColors(BuildContext context) {
+  final colors = context.colors;
+  return Theme.of(context).brightness == Brightness.dark
+      ? (colors.surfaceContainer, colors.onSurface)
+      : (colors.inverseSurface, colors.onInverseSurface);
 }
 
 class _Tip extends StatelessWidget {
@@ -127,7 +136,7 @@ class _Tip extends StatelessWidget {
             message,
             textAlign: TextAlign.center,
             style: context.textTheme.bodyMedium?.copyWith(
-              color: context.colors.onInverseSurface,
+              color: _calloutColors(context).$2,
             ),
           ),
         ),
@@ -204,7 +213,7 @@ class _Card extends StatelessWidget {
                     message,
                     textAlign: TextAlign.center,
                     style: context.textTheme.titleLarge?.copyWith(
-                      color: context.colors.onInverseSurface,
+                      color: _calloutColors(context).$2,
                     ),
                   ),
                 ),
@@ -215,7 +224,7 @@ class _Card extends StatelessWidget {
                 child: IconButton(
                   tooltip: 'Dismiss',
                   onPressed: onDismiss,
-                  color: context.colors.onInverseSurface,
+                  color: _calloutColors(context).$2,
                   icon: const Icon(BuzzIcons.x),
                 ),
               ),
