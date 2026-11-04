@@ -84,10 +84,25 @@ pub fn canonical_relay_url(relay_url: &str) -> Result<String, CliError> {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .unwrap_or(0);
+    #[cfg(test)]
+    let now = now + test_clock::SKEW.with(std::cell::Cell::get);
+    now
+}
+
+/// A clock tests move forward instead of sleeping. Per thread, so it moves
+/// only for the test (and its current-thread runtime) that advances it.
+#[cfg(test)]
+pub(crate) mod test_clock {
+    thread_local! {
+        pub(super) static SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    pub(crate) fn advance(secs: u64) {
+        SKEW.with(|skew| skew.set(skew.get() + secs));
+    }
 }
 
 fn refresh_at(now: u64, expires_at: u64) -> u64 {

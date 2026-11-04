@@ -1212,10 +1212,10 @@ impl BuzzClient {
         // Connect failures stay Network (retryable:true) — definitively never received.
         // Canonical pre-ingest 429 (Relay{429}) stays retryable — definitively not stored.
         if let Err(ref e) = result {
-            // A relay answer other than a rate limit settles the outcome
-            // (callers resolve conflicts); anything else after a possibly
-            // delivered attempt does not.
-            let settled = matches!(e, CliError::Relay { status, .. } if *status != 429);
+            // Once an attempt may have been stored, no later answer settles
+            // the outcome, except a canvas 409, which the canvas command
+            // resolves by looking the canvas up.
+            let settled = matches!(e, CliError::Relay { status: 409, body } if body.contains("canvas changed"));
             if is_stored_event_exhaustion_ambiguous(e)
                 || (maybe_delivered.load(std::sync::atomic::Ordering::Relaxed) && !settled)
             {
@@ -2463,6 +2463,28 @@ mod retry_policy_tests {
             "all 3 attempts must fire before surfacing DeliveryUnknown"
         );
     }
+
+    /// The first send is stored but its answer is lost; the retry is then
+    /// refused before ingest. The refusal cannot undo the first send, so the
+    /// outcome stays unknown rather than a plain rejection.
+    #[tokio::test]
+    async fn a_403_after_a_lost_stored_send_stays_delivery_unknown() {
+        let (url, attempts) = test_server(|n| match n {
+            1 => (StatusCode::BAD_GATEWAY, "bad gateway".to_string()),
+            _ => (
+                StatusCode::FORBIDDEN,
+                r#"{"error":"restricted: not allowed"}"#.to_string(),
+            ),
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_stored_event(&client_keys(&client));
+        let err = client.submit_event(event).await.unwrap_err();
+
+        assert!(matches!(err, CliError::DeliveryUnknown(_)), "{err:?}");
+        assert!(!crate::error::is_retryable_error(&err));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "no retry after the 403");
+    }
 }
 
 #[cfg(test)]
@@ -3073,8 +3095,7 @@ mod federated_identity_route_tests {
                             }
                             let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
                             let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
-                            // Due for refresh within a second.
-                            let expires_at = nostr::Timestamp::now().as_secs() + 1;
+                            let expires_at = nostr::Timestamp::now().as_secs() + 300;
                             axum::Json(serde_json::json!({
                                 "assertion": test_support::assertion(pubkey, expires_at),
                                 "nostr_pubkey": pubkey,
@@ -3093,7 +3114,7 @@ mod federated_identity_route_tests {
                         sends.fetch_add(1, Ordering::SeqCst);
                         // The relay may have stored it; the proxy lost the answer
                         // after the assertion reached its refresh boundary.
-                        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                        crate::federated_identity::test_clock::advance(300);
                         StatusCode::BAD_GATEWAY.into_response()
                     }
                 }
