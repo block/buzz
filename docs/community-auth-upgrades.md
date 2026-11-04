@@ -1,7 +1,7 @@
 # Community NIP-FI upgrade operator contract
 
-BUZZ-510 adds durable policy acceptance. BUZZ-511 supplies per-community
-request enforcement and discovery; BUZZ-512 supplies existing-session activation.
+The acceptance layer records durable policy. The per-request enforcement layer
+adds community checks and discovery; the activation layer updates existing sessions.
 Do not expose upgrade calls in a deployment until those releases and the serving
 fleet baseline have been verified. This change alone cannot establish enforcement.
 It never reports `active` and never substitutes a timer for activation evidence.
@@ -101,7 +101,7 @@ Enable and readback return HTTP 200 for an accepted receipt:
 ```
 
 `requires_nip_fi: true` records durable acceptance. `state` reports availability
-and activation separately. BUZZ-510 returns `pending` while the target's policy,
+and activation separately. The acceptance layer returns `pending` while the target's policy,
 lifecycle and issuer binding still match, and `unavailable` if they do not or
 trusted issuer configuration is no longer applicable. A missing database response
 is HTTP 503, never a fabricated receipt. A receipt is not proof of current service
@@ -110,8 +110,8 @@ health. No response in this version reports `active`.
 `pending_reasons` applies only while `state` is `pending`; clients must ignore
 those obligations when state is `unavailable`, which always takes precedence.
 `pending_reasons` is extensible. Clients must preserve pending on unknown values.
-`registry_baseline_unverified` prevents completion until BUZZ-512 verifies fleet
-membership. That ticket may add `boot_application_pending`, `boot_drain_pending`
+`registry_baseline_unverified` prevents completion until the activation layer verifies fleet
+membership. That layer may add `boot_application_pending`, `boot_drain_pending`
 and `boot_unreachable`, and must bind activation evidence to the exact operation
 and generation. Baseline invalidation must prevent `active`.
 
@@ -142,7 +142,7 @@ signature replay uses the existing operator replay error independently of this t
 Migration 0082 is additive: legacy rows keep `requires_nip_fi=false` and generation
 zero. It adds no trigger, function, procedure, rule or foreign key and rewrites no
 existing rows. Lock and statement budgets are 5 and 30 seconds. Existing global
-`enforce` remains an additional floor; this ticket changes no data-plane gate.
+`enforce` remains an additional floor; this layer changes no data-plane gate.
 Do not infer requirements from issuer rows, backfill free communities, or remove
 the enterprise enforce floor as part of this migration.
 
@@ -156,7 +156,7 @@ No tenant serving writer owns this table and no fence trigger is attached.
 
 The active-community primary accessor is
 `Db::community_auth_policy(CommunityId) -> Result<Option<CommunityAuthPolicy>>`.
-`None` means no active target; errors must fail closed. BUZZ-511 must combine
+`None` means no active target; errors must fail closed. Per-request enforcement must combine
 its stored requirement with global enforce and honor repair denial first.
 
 ## Mistaken acceptance and containment
