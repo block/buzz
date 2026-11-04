@@ -11,6 +11,9 @@ import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/storage/secure_storage.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -1003,6 +1006,50 @@ void main() {
   }, skip: !HostedEnvironment.enabled);
 
   test(
+    'Solo agent choices reload after this device creates an agent',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final relay = _InventoryRelay();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relay),
+          meSyncProvider.overrideWithValue(
+            MeSync(
+              relay,
+              RelayConfig(baseUrl: 'https://relay.test', nsec: fakeOwner.nsec),
+            ),
+          ),
+          meArchivedAgentsProvider.overrideWith((ref) async => {}),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+        ],
+      );
+      addTearDown(container.dispose);
+      final choices = container.listen(meAssistantsProvider, (_, _) {});
+      addTearDown(choices.close);
+      expect(await container.read(meAssistantsProvider.future), isEmpty);
+
+      relay.listed = true;
+      expect(
+        await controller.create(
+          _community(),
+          'Scout',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
+        isTrue,
+      );
+      expect(
+        (await container.read(
+          meAssistantsProvider.future,
+        )).map((a) => a.pubkey),
+        [fakeAgent],
+      );
+    },
+    skip: !HostedEnvironment.enabled,
+  );
+
+  test(
     'runtime absence and deletion survive sign-out and a fresh owner-scoped load',
     () async {
       final registry = FakeRegistry(bound: fakeOwner.public);
@@ -1153,6 +1200,41 @@ class _AgentRelay extends RelaySessionNotifier {
   }) async => switch (filter.kinds.single) {
     0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
     30177 when live => [_registration(fakeAgent)],
+    _ => [],
+  };
+}
+
+/// Serves Solo's inventory reads: the owner's signed registration once
+/// [listed], and the agent's attested profile.
+class _InventoryRelay extends RelaySessionNotifier {
+  bool listed = false;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => switch (filters.single.kinds.single) {
+    0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+    30177 when listed => [
+      NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 30177,
+          content: jsonEncode({
+            'name': 'Scout',
+            'parallelism': 1,
+            'respond_to': 'owner-only',
+          }),
+          secretKey: fakeOwner.secret,
+          createdAt: 1,
+          tags: [
+            ['d', fakeAgent],
+          ],
+        ).toMap(),
+      ),
+    ],
     _ => [],
   };
 }

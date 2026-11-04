@@ -466,10 +466,17 @@ pub enum IngestError {
 /// Which admission outcome an [`IngestError::Ban`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BanRefusal {
-    /// The principal or its owner is banned.
-    Banned,
+    /// The principal is banned; the source says whose row decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// The restriction lookup failed, so no ban decision could be made.
     Unavailable,
+}
+
+impl BanRefusal {
+    /// The ban refusal for a banned restriction snapshot.
+    pub(crate) fn banned(restriction: &buzz_db::moderation::RestrictionState) -> Self {
+        Self::Banned(crate::handlers::auth::BanSource::of(restriction))
+    }
 }
 
 impl IngestError {
@@ -517,8 +524,8 @@ fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestEr
     match error {
         // Same wire prefix and HTTP status (403) as every other durable
         // restriction refusal — see the write-path gate below and `auth.rs`.
-        RelayAdminError::Banned => IngestError::ban(
-            BanRefusal::Banned,
+        RelayAdminError::Banned(source) => IngestError::ban(
+            BanRefusal::Banned(source),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ),
         RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
@@ -2351,7 +2358,7 @@ fn write_restriction_denial(
 ) -> Option<IngestError> {
     if restriction.banned {
         return Some(IngestError::ban(
-            BanRefusal::Banned,
+            BanRefusal::banned(restriction),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ));
     }
@@ -3451,7 +3458,7 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
@@ -3507,7 +3514,6 @@ async fn ingest_event_inner(
         )
         .await;
 
-        info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -3525,6 +3531,7 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let atomic_deletion = crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
@@ -3547,7 +3554,7 @@ async fn ingest_event_inner(
                 buzz_db::DbError::ChannelNameTaken(_) => {
                     IngestError::Rejected(format!("invalid: {e}"))
                 }
-                _ => IngestError::Internal(format!("error: {e}")),
+                _ => IngestError::Internal(format!("error: {}", e.kind())),
             })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
@@ -3580,6 +3587,20 @@ async fn ingest_event_inner(
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if atomic_deletion {
+        // One commit stores the deletion and soft-deletes its targets, so an
+        // accepted deletion never leaves its target live. Failure stores
+        // nothing; the client is told and can resend.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_deletion(
+            tenant,
+            &event,
+            state,
+            channel_id,
+            thread_params,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: deletion failed: {e}")))?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3625,7 +3646,7 @@ async fn ingest_event_inner(
             .db
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3640,7 +3661,7 @@ async fn ingest_event_inner(
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3657,7 +3678,7 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3695,7 +3716,9 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
+                    other => {
+                        IngestError::Internal(format!("error: database error: {}", other.kind()))
+                    }
                 });
             }
         }
@@ -3709,9 +3732,10 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
-    // insert's own transaction above.
+    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and
+    // kind:9002 applied their changes in the insert's own transaction above.
     let persisted_atomically = workflow_deletion
+        || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
         || kind_u32 == KIND_NIP29_EDIT_METADATA;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
@@ -3781,8 +3805,6 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
-
-    info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
     Ok(IngestResult {
         event_id: event_id_hex,
@@ -3979,11 +4001,13 @@ mod postgres_tests {
     /// client retry-loop against an authorization decision.
     #[test]
     fn relay_admin_ban_maps_to_blocked_auth_failure() {
-        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::Own,
+        ));
         assert!(matches!(
             mapped,
             IngestError::Ban {
-                refusal: BanRefusal::Banned,
+                refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Own),
                 ..
             }
         ));
@@ -7518,7 +7542,7 @@ mod postgres_tests {
         match enforce_write_restriction(&state, &tenant, KIND_REPORT, &agent.public_key()).await {
             Err(
                 err @ IngestError::Ban {
-                    refusal: BanRefusal::Banned,
+                    refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Owner),
                     ..
                 },
             ) => match err.into_legacy() {
@@ -7561,7 +7585,7 @@ mod postgres_tests {
             .expect("ban owner");
 
         for keys in [&owner, &agent] {
-            let crate::api::relay_members::MembershipRefusal::Api((status, body)) =
+            let crate::api::relay_members::MembershipRefusal::Api(reason, (status, body)) =
                 crate::api::relay_members::enforce_relay_membership(
                     &state,
                     &tenant,
@@ -7575,6 +7599,7 @@ mod postgres_tests {
             else {
                 panic!("without a token the relay's own refusal is returned");
             };
+            assert_eq!(reason, crate::access::AuthReason::Banned);
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
             assert_eq!(
                 body.0["error"],
@@ -7656,10 +7681,10 @@ mod postgres_tests {
         .map_err(|refusal| {
             let status = refusal.status();
             let body = match refusal {
-                crate::api::relay_members::MembershipRefusal::Api((_, body)) => {
+                crate::api::relay_members::MembershipRefusal::Api(_, (_, body)) => {
                     body.0["error"].as_str().unwrap_or("").to_owned()
                 }
-                crate::api::relay_members::MembershipRefusal::NipFi(class) => {
+                crate::api::relay_members::MembershipRefusal::NipFi(_, class) => {
                     class.http_body().to_owned()
                 }
             };

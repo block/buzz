@@ -672,31 +672,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown. Access-scope queries retain global events;
-    // explicit multi-value #h filters do not.
-    //
-    // SECURITY: Some(empty vec) means "match no channels". Access-scope
-    // queries still retain globals; explicit #h queries match nothing.
-    if let Some(ref ch_ids) = q.channel_ids {
-        if ch_ids.is_empty() {
-            if q.channel_ids_include_global {
-                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-            } else {
-                qb.push(" AND FALSE");
-            }
-        } else {
-            qb.push(" AND (");
-            if q.channel_ids_include_global {
-                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
-            }
-            qb.push(format!("{col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
-            qb.push("))");
-        }
-    }
+    push_channel_scope(&mut qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -1038,6 +1014,38 @@ fn push_tag_value_filters(
     }
 }
 
+/// AND the [`EventQuery::channel_ids`] scope, before `LIMIT`. Access-scope
+/// queries retain channel-less global events; explicit multi-value `#h`
+/// filters do not.
+///
+/// SECURITY: `Some(empty vec)` means "match no channels": access-scope queries
+/// still retain globals, explicit `#h` queries match nothing.
+///
+/// The set is one array bind, so a viewer's channel count does not change the
+/// SQL text. One `IN ($n, …)` bind per channel made a new statement for every
+/// arity, so a read rarely reused its cached plan and was planned again on
+/// each call, over every `events` partition when it has no `since`.
+fn push_channel_scope(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    let Some(ref ch_ids) = q.channel_ids else {
+        return;
+    };
+    if ch_ids.is_empty() {
+        if q.channel_ids_include_global {
+            qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+        } else {
+            qb.push(" AND FALSE");
+        }
+        return;
+    }
+    qb.push(" AND (");
+    if q.channel_ids_include_global {
+        qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+    }
+    qb.push(format!("{col_prefix}channel_id = ANY("))
+        .push_bind(ch_ids.clone())
+        .push("))");
+}
+
 /// Return only membership notices whose channel type the query may see
 /// (NIP-CL), as [`buzz_core::filter::notice_visible`] does in `filters_match`:
 /// `AND (kind NOT IN (44100, 44101) OR <type tag in visible types>
@@ -1226,28 +1234,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown for COUNT. Access-scope queries retain global
-    // events; explicit multi-value #h filters do not.
-    if let Some(ref ch_ids) = q.channel_ids {
-        if ch_ids.is_empty() {
-            if q.channel_ids_include_global {
-                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-            } else {
-                qb.push(" AND FALSE");
-            }
-        } else {
-            qb.push(" AND (");
-            if q.channel_ids_include_global {
-                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
-            }
-            qb.push(format!("{col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
-            qb.push("))");
-        }
-    }
+    push_channel_scope(&mut qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -1522,6 +1509,18 @@ async fn purge_retention_free_events(
     };
 
     Ok(purged as u64)
+}
+
+/// An event a NIP-09 (kind 5) or NIP-29 (kind 9005) deletion soft-deletes in
+/// the deletion's own insert transaction, with the thread it belongs to.
+#[derive(Clone, Copy, Debug)]
+pub struct DeletionTarget<'a> {
+    /// The event to soft-delete.
+    pub event_id: &'a [u8],
+    /// Its direct parent, whose `reply_count` drops when it is deleted.
+    pub parent_event_id: Option<&'a [u8]>,
+    /// Its thread root, whose `descendant_count` drops when it is deleted.
+    pub root_event_id: Option<&'a [u8]>,
 }
 
 /// Atomically soft-delete an event and decrement thread reply counters.
@@ -2906,6 +2905,57 @@ impl Db {
         Ok(result)
     }
 
+    /// Store a kind 5 / 9005 deletion and soft-delete its `targets` in one
+    /// transaction, so an accepted deletion never leaves its target live.
+    ///
+    /// The targets are soft-deleted even when the deletion is a duplicate, so
+    /// resending a deletion repairs a target an earlier write left live. Ingest
+    /// accepts the resend only within its timestamp window, so this does not
+    /// repair older rows.
+    /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
+    /// tells whether `targets[i]` was soft-deleted by this call.
+    #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
+    pub async fn insert_deletion_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+        targets: &[crate::event::DeletionTarget<'_>],
+    ) -> Result<(StoredEvent, bool, Vec<bool>)> {
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            channel_id,
+            thread_meta,
+        )
+        .await?;
+        if inserted {
+            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
+        }
+        let mut deleted = Vec::with_capacity(targets.len());
+        for target in targets {
+            deleted.push(
+                crate::event::soft_delete_event_and_update_thread_in_tx(
+                    &mut tx,
+                    target.event_id,
+                    target.parent_event_id,
+                    target.root_event_id,
+                )
+                .await?,
+            );
+        }
+        tx.commit().await?;
+        Ok((stored, inserted, deleted))
+    }
+
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
     #[datastore_span(name = "soft_delete_discovery_events", system = "postgresql")]
     pub async fn soft_delete_discovery_events(
@@ -3024,6 +3074,40 @@ mod e_tag_filter_shape_tests {
         assert!(!unbounded.contains("m.event_created_at <="));
         assert!(!unbounded.contains("m.event_kind"));
     }
+
+    /// The channel scope is one array bind: a viewer's channel count must not
+    /// change the SQL text, or each count is its own statement that is planned
+    /// again on every call. Holds for the `#p` join and plain reads, for
+    /// access scope and explicit `#h`, in both the page SELECT and the COUNT.
+    #[test]
+    fn channel_scope_sql_does_not_depend_on_channel_count() {
+        let sql = |p_tag: bool, include_global: bool, n: usize| {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.p_tag_hex = p_tag.then(|| "ab".repeat(32));
+            q.kinds = Some(vec![9]);
+            q.channel_ids = Some((0..n).map(|_| uuid::Uuid::new_v4()).collect());
+            q.channel_ids_include_global = include_global;
+            (
+                build_query_events_sql(&q).sql().as_str().to_owned(),
+                count_events_sql(&q).sql().as_str().to_owned(),
+            )
+        };
+        for p_tag in [true, false] {
+            for include_global in [true, false] {
+                let one = sql(p_tag, include_global, 1);
+                assert_eq!(one, sql(p_tag, include_global, 40));
+                for text in [&one.0, &one.1] {
+                    assert!(text.contains("channel_id = ANY($"), "{text}");
+                    assert!(!text.contains("channel_id IN ("), "{text}");
+                    assert_eq!(
+                        text.contains("channel_id IS NULL OR "),
+                        include_global,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3098,8 +3182,10 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let mut conn = pool.acquire().await.expect("acquire");
-        sqlx::query("DEALLOCATE ALL")
-            .execute(&mut *conn)
+        // Clear SQLx's statement cache and Postgres's prepared statements
+        // together; a raw `DEALLOCATE ALL` would leave the client cache
+        // pointing at statements the server no longer has.
+        sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
         let mut q = EventQuery::for_community(community);
@@ -3122,6 +3208,107 @@ mod postgres_tests {
             .await
             .expect("plain query");
         assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
+    }
+
+    /// Access-scoped `#p` reads for viewers with different channel counts
+    /// share one cached statement on a connection, so Postgres can keep its
+    /// plan instead of planning every read again. Every scope, empty included,
+    /// still returns and counts exactly its own rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_scoped_mention_reads_share_one_prepared_statement() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let mut channels = Vec::new();
+        for _ in 0..3 {
+            channels.push(make_test_channel(&pool, community_uuid, None).await);
+        }
+        let mut conn = pool.acquire().await.expect("acquire");
+        // Clear SQLx's statement cache and Postgres's prepared statements
+        // together; a raw `DEALLOCATE ALL` would leave the client cache
+        // pointing at statements the server no longer has.
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        for n in 1..=channels.len() {
+            let q = EventQuery {
+                kinds: Some(vec![9]),
+                p_tag_hex: Some("ab".repeat(32)),
+                channel_ids: Some(channels[..n].to_vec()),
+                ..EventQuery::for_community(community)
+            };
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("mention read");
+        }
+        assert_eq!(
+            prepared_like(&mut conn, "%JOIN event_mentions%").await,
+            1,
+            "one statement for every channel count"
+        );
+        drop(conn);
+
+        // The array bind keeps each scope's rows: one mention of the target in
+        // each scoped channel, one global, and one in a channel no scope names.
+        let db = crate::Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let target = "ab".repeat(32);
+        let mention = |content: String| {
+            EventBuilder::new(Kind::Custom(9), content)
+                .tags([Tag::parse(["p", target.as_str()]).expect("p tag")])
+                .sign_with_keys(&author)
+                .expect("sign mention")
+        };
+        let mut in_channel = Vec::new();
+        for (i, channel) in channels.iter().enumerate() {
+            let event = mention(format!("in channel {i}"));
+            db.insert_event(community, &event, Some(*channel))
+                .await
+                .expect("insert channel mention");
+            in_channel.push(event.id);
+        }
+        let global = mention("global".into());
+        db.insert_event(community, &global, None)
+            .await
+            .expect("insert global mention");
+        let outside_channel = make_test_channel(&pool, community_uuid, None).await;
+        db.insert_event(community, &mention("outside".into()), Some(outside_channel))
+            .await
+            .expect("insert out-of-scope mention");
+
+        for n in 0..=channels.len() {
+            for include_global in [true, false] {
+                let q = EventQuery {
+                    kinds: Some(vec![9]),
+                    p_tag_hex: Some(target.clone()),
+                    channel_ids: Some(channels[..n].to_vec()),
+                    channel_ids_include_global: include_global,
+                    ..EventQuery::for_community(community)
+                };
+                let mut expected = in_channel[..n].to_vec();
+                if include_global {
+                    expected.push(global.id);
+                }
+                expected.sort();
+                let mut page: Vec<_> = query_events(&pool, &q)
+                    .await
+                    .expect("mention page")
+                    .into_iter()
+                    .map(|stored| stored.event.id)
+                    .collect();
+                page.sort();
+                assert_eq!(
+                    page, expected,
+                    "{n} channels, include_global={include_global}: page"
+                );
+                assert_eq!(
+                    count_events(&pool, &q).await.expect("mention count"),
+                    expected.len() as i64,
+                    "{n} channels, include_global={include_global}: count"
+                );
+            }
+        }
     }
 
     /// Effective `statement_timeout` observed *inside* the read deadline, and
@@ -5594,6 +5781,157 @@ mod postgres_tests {
             thread_meta_count, 0,
             "thread metadata must not persist when mention indexing fails atomically"
         );
+    }
+
+    async fn target_deleted_at(pool: &PgPool, community: Uuid, id: &[u8]) -> Option<DateTime<Utc>> {
+        sqlx::query_scalar("SELECT deleted_at FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read target deleted_at")
+    }
+
+    async fn event_count(pool: &PgPool, community: Uuid, id: &[u8]) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count event rows")
+    }
+
+    fn deletion_of(target: &nostr::Event) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(5), "")
+            .tags(vec![Tag::parse(["e", &target.id.to_hex()]).expect("e tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign deletion")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_deletion_event_target_failure_stores_nothing_and_resend_applies() {
+        let (pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "deletion_target_rollback",
+        )
+        .await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let reaction = make_event_with_kind_and_tags(7, vec![]);
+        db.insert_event(community, &reaction, Some(channel))
+            .await
+            .expect("insert reaction");
+        let deletion = deletion_of(&reaction);
+        let targets = [DeletionTarget {
+            event_id: reaction.id.as_bytes(),
+            parent_event_id: None,
+            root_event_id: None,
+        }];
+
+        sqlx::query(
+            "CREATE FUNCTION reject_test_soft_delete() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected soft-delete failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_soft_delete BEFORE UPDATE ON events \
+             FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) \
+             EXECUTE FUNCTION reject_test_soft_delete()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure injection");
+
+        let error = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect_err("a failed target soft-delete must fail the deletion");
+        assert!(
+            error.to_string().contains("injected soft-delete failure"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            event_count(&pool, community_uuid, deletion.id.as_bytes()).await,
+            0,
+            "the deletion must not be stored while its target stays live"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_none(),
+            "the failed transaction must leave the target as it was"
+        );
+
+        sqlx::query("DROP TRIGGER reject_test_soft_delete ON events")
+            .execute(&pool)
+            .await
+            .expect("remove failure injection");
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend after the failure clears");
+        assert!(inserted, "the resend stores the deletion");
+        assert_eq!(deleted, vec![true]);
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_deletion_event_resend_repairs_a_live_target() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let reaction = make_event_with_kind_and_tags(7, vec![]);
+        db.insert_event(community, &reaction, Some(channel))
+            .await
+            .expect("insert reaction");
+        // A deletion stored by a write that never soft-deleted its target.
+        let deletion = deletion_of(&reaction);
+        db.insert_event(community, &deletion, Some(channel))
+            .await
+            .expect("insert torn deletion");
+        let targets = [DeletionTarget {
+            event_id: reaction.id.as_bytes(),
+            parent_event_id: None,
+            root_event_id: None,
+        }];
+
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend the deletion");
+        assert!(!inserted, "the deletion was already stored");
+        assert_eq!(
+            deleted,
+            vec![true],
+            "the resend soft-deletes the live target"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
+
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend again");
+        assert!(!inserted);
+        assert_eq!(deleted, vec![false], "an applied deletion changes nothing");
     }
 
     #[tokio::test]

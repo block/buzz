@@ -1785,6 +1785,7 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
@@ -1872,6 +1873,7 @@ mod tests {
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2033,6 +2035,7 @@ mod tests {
             }
             let (send_tx, _send_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2155,6 +2158,7 @@ mod tests {
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3669,6 +3673,7 @@ mod tests {
             let (ctrl_tx, _) = mpsc::channel(8);
             let (terminal_ctrl_tx, _) = mpsc::channel(1);
             let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant,
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3865,6 +3870,7 @@ mod tests {
                 key.clone(),
                 buzz_db::moderation::RestrictionState {
                     banned: true,
+                    own_banned: true,
                     muted_until: None,
                 },
             );
@@ -3878,6 +3884,7 @@ mod tests {
                 key,
                 buzz_db::moderation::RestrictionState {
                     banned: false,
+                    own_banned: false,
                     muted_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
                 },
             );
@@ -3941,6 +3948,7 @@ mod tests {
             let key = (tenant.community(), user.public_key().to_bytes().to_vec());
             let banned = buzz_db::moderation::RestrictionState {
                 banned: true,
+                own_banned: true,
                 muted_until: None,
             };
             let scopes = buzz_auth::Scope::all_non_admin();
@@ -4028,6 +4036,7 @@ mod tests {
                 mpsc::channel::<axum::extract::ws::Message>(1);
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -4221,6 +4230,7 @@ mod tests {
                 mpsc::channel::<axum::extract::ws::Message>(1);
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,

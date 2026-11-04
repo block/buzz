@@ -830,6 +830,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       isMember: isMember,
       ttlSeconds: data.ttlSeconds,
       ttlDeadline: data.ttlDeadline,
+      isUnlisted: data.isUnlisted,
     );
   }
 

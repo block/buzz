@@ -58,7 +58,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
           Navigator.of(context).pop(created);
         }
       } catch (error) {
-        if (context.mounted) errorMessage.value = error.toString();
+        if (context.mounted) errorMessage.value = relayErrorMessage(error);
       } finally {
         if (context.mounted) isSubmitting.value = false;
       }

@@ -41,7 +41,7 @@ pub(crate) fn db_read_error(
     context: &str,
     e: &buzz_db::DbError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    read_error(context, e.is_statement_cancelled(), e)
+    read_error(context, e.is_statement_cancelled(), e.kind())
 }
 
 /// [`db_read_error`] for a search: a search cancelled by the search pool's
@@ -50,19 +50,20 @@ pub(crate) fn search_read_error(
     context: &str,
     e: &buzz_search::SearchError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    read_error(context, e.is_statement_cancelled(), e)
+    read_error(context, e.is_statement_cancelled(), e.kind())
 }
 
+/// Only the error kind is logged: DB error text can repeat a bound value.
 fn read_error(
     context: &str,
     statement_cancelled: bool,
-    e: &dyn std::fmt::Display,
+    kind: String,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if statement_cancelled {
-        tracing::warn!("{context}: {e}");
+        tracing::warn!(error_kind = %kind, "{context}");
         return api_error(StatusCode::SERVICE_UNAVAILABLE, QUERY_TIMED_OUT);
     }
-    internal_error(&format!("{context}: {e}"))
+    internal_error(&format!("{context}: {kind}"))
 }
 
 #[allow(dead_code)]
@@ -105,6 +106,7 @@ pub mod relay_members {
     use buzz_core::{tenant::CommunityId, TenantContext};
     use tracing::{debug, info};
 
+    use crate::access::AuthReason;
     use crate::state::AppState;
 
     /// Transport-neutral outcome of a relay-membership check.
@@ -120,39 +122,48 @@ pub mod relay_members {
         Denied,
     }
 
-    /// An HTTP relay-membership refusal.
+    /// An HTTP relay-membership refusal, with its access-log reason.
     #[derive(Debug)]
-    pub enum MembershipRefusal {
+    pub(crate) enum MembershipRefusal {
         /// The relay's own JSON refusal.
-        Api((StatusCode, Json<serde_json::Value>)),
+        Api(AuthReason, (StatusCode, Json<serde_json::Value>)),
         /// NIP-FI's fixed denial. A request carrying a verified agent token
         /// gets only this, so the response never shows which step refused it
         /// or whether the agent already has a stored owner.
-        NipFi(DenialClass),
+        NipFi(AuthReason, DenialClass),
     }
 
+    /// A refusal decided inside [`admit_member`], before the agent-token
+    /// rule picks its response shape, with shadow's `owner` reason when the
+    /// agent token's owner decided it.
+    type Refused = (
+        AuthReason,
+        (StatusCode, Json<serde_json::Value>),
+        Option<&'static str>,
+    );
+
     impl MembershipRefusal {
+        /// The access-log result for this refusal.
+        pub(crate) fn auth_result(&self) -> crate::access::AuthResult {
+            let (Self::Api(reason, _) | Self::NipFi(reason, _)) = self;
+            crate::access::AuthResult::Denied(*reason)
+        }
+
         /// The response status.
         pub fn status(&self) -> StatusCode {
             match self {
-                Self::Api((status, _)) => *status,
-                Self::NipFi(class) => StatusCode::from_u16(class.http_status())
+                Self::Api(_, (status, _)) => *status,
+                Self::NipFi(_, class) => StatusCode::from_u16(class.http_status())
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             }
-        }
-    }
-
-    impl From<(StatusCode, Json<serde_json::Value>)> for MembershipRefusal {
-        fn from(refusal: (StatusCode, Json<serde_json::Value>)) -> Self {
-            Self::Api(refusal)
         }
     }
 
     impl IntoResponse for MembershipRefusal {
         fn into_response(self) -> Response {
             match self {
-                Self::Api(refusal) => refusal.into_response(),
-                Self::NipFi(class) => crate::nip_fi_core::http_denial(class),
+                Self::Api(_, refusal) => refusal.into_response(),
+                Self::NipFi(_, class) => crate::nip_fi_core::http_denial(class),
             }
         }
     }
@@ -317,7 +328,7 @@ pub mod relay_members {
     ///
     /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
-    pub async fn enforce_relay_membership(
+    pub(crate) async fn enforce_relay_membership(
         state: &AppState,
         tenant: &TenantContext,
         pubkey_bytes: &[u8],
@@ -345,7 +356,7 @@ pub mod relay_members {
         signed_auth_created_at: Option<u64>,
         token_owner: Option<nostr::PublicKey>,
     ) -> Result<Option<nostr::PublicKey>, MembershipRefusal> {
-        admit_member(
+        let result = admit_member(
             state,
             tenant,
             pubkey_bytes,
@@ -353,14 +364,24 @@ pub mod relay_members {
             signed_auth_created_at,
             token_owner,
         )
-        .await
-        .map_err(|refusal| match token_owner {
-            None => MembershipRefusal::Api(refusal),
-            Some(_) if refusal.0.is_server_error() => {
-                MembershipRefusal::NipFi(DenialClass::AuthorizationUnavailable)
-            }
-            Some(_) => MembershipRefusal::NipFi(DenialClass::AuthorizationDenied),
+        .await;
+        // An agent token's owner-decided refusal is its request's NIP-FI
+        // verdict, as shadow's verdict includes it.
+        if let (Some(_), Err((_, refusal, Some(owner_reason)))) = (token_owner, &result) {
+            crate::nip_fi_http::owner_refused(refusal_class(refusal.0), owner_reason);
+        }
+        result.map_err(|(reason, refusal, _)| match token_owner {
+            None => MembershipRefusal::Api(reason, refusal),
+            Some(_) => MembershipRefusal::NipFi(reason, refusal_class(refusal.0)),
         })
+    }
+
+    fn refusal_class(status: StatusCode) -> DenialClass {
+        if status.is_server_error() {
+            DenialClass::AuthorizationUnavailable
+        } else {
+            DenialClass::AuthorizationDenied
+        }
     }
 
     async fn admit_member(
@@ -370,7 +391,7 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         token_owner: Option<nostr::PublicKey>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<Option<nostr::PublicKey>, Refused> {
         let community = tenant.community();
         let owner = match check_relay_membership(
             state,
@@ -386,16 +407,24 @@ pub mod relay_members {
             Ok(MembershipDecision::ViaOwner(owner)) => Some(owner),
             Ok(MembershipDecision::Denied) => {
                 return Err((
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": "relay_membership_required",
-                        "message": "You must be a relay member to access this relay"
-                    })),
+                    AuthReason::NotRelayMember,
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "relay_membership_required",
+                            "message": "You must be a relay member to access this relay"
+                        })),
+                    ),
+                    None,
                 ))
             }
             Err(e) => {
                 tracing::error!("relay membership check errored: {e}");
-                return Err(super::internal_error(&e));
+                return Err((
+                    AuthReason::MembershipUnavailable,
+                    super::internal_error(&e),
+                    None,
+                ));
             }
         };
         deny_banned(
@@ -409,17 +438,29 @@ pub mod relay_members {
         .await?;
         if let Some(token_owner) = token_owner {
             let Ok(agent) = nostr::PublicKey::from_slice(pubkey_bytes) else {
-                return Err(super::internal_error("invalid pubkey for owner link"));
+                return Err((
+                    AuthReason::MembershipUnavailable,
+                    super::internal_error("invalid pubkey for owner link"),
+                    None,
+                ));
             };
             match link_agent_owner(state, tenant, &agent, &token_owner).await {
                 OwnerLink::Linked => {}
                 OwnerLink::Conflict => {
-                    return Err(super::api_error(StatusCode::FORBIDDEN, OWNER_MISMATCH))
+                    return Err((
+                        AuthReason::OwnerMismatch,
+                        super::api_error(StatusCode::FORBIDDEN, OWNER_MISMATCH),
+                        Some("not_stored_owner"),
+                    ))
                 }
                 OwnerLink::Unavailable => {
-                    return Err(super::api_error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        crate::handlers::auth::OWNER_LINK_ERROR,
+                    return Err((
+                        AuthReason::NipOaOwnerUnlinked,
+                        super::api_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::handlers::auth::OWNER_LINK_ERROR,
+                        ),
+                        Some("owner_link_unavailable"),
                     ))
                 }
             }
@@ -439,11 +480,15 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
         signed_auth_created_at: Option<u64>,
         token_owner: Option<nostr::PublicKey>,
-    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<(), Refused> {
         let Ok(pubkey) = nostr::PublicKey::from_slice(pubkey_bytes) else {
-            return Err(super::internal_error("invalid pubkey for ban check"));
+            return Err((
+                AuthReason::MembershipUnavailable,
+                super::internal_error("invalid pubkey for ban check"),
+                None,
+            ));
         };
-        match crate::handlers::auth::community_ban_outcome(
+        let verdict = crate::handlers::auth::community_ban_verdict(
             state,
             community,
             pubkey,
@@ -452,18 +497,25 @@ pub mod relay_members {
             token_owner,
             true,
         )
-        .await
-        {
-            crate::handlers::auth::BanOutcome::Clear => Ok(()),
-            crate::handlers::auth::BanOutcome::Banned => Err(super::api_error(
-                StatusCode::FORBIDDEN,
-                "blocked: you are banned from this community",
-            )),
-            crate::handlers::auth::BanOutcome::DbError => Err(super::api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "error: internal error checking restriction state",
-            )),
-        }
+        .await;
+        let (reason, refusal) = match verdict.outcome {
+            crate::handlers::auth::BanOutcome::Clear => return Ok(()),
+            crate::handlers::auth::BanOutcome::Banned => (
+                AuthReason::Banned,
+                super::api_error(
+                    StatusCode::FORBIDDEN,
+                    "blocked: you are banned from this community",
+                ),
+            ),
+            crate::handlers::auth::BanOutcome::DbError => (
+                AuthReason::BanCheckUnavailable,
+                super::api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "error: internal error checking restriction state",
+                ),
+            ),
+        };
+        Err((reason, refusal, verdict.owner_reason()))
     }
 
     /// Extract NIP-OA owner from an auth tag without membership enforcement.

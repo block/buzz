@@ -2849,7 +2849,7 @@ void main() {
   });
 
   test(
-    'archived kind:39000 metadata sets Channel.isArchived (covers TTL auto-archive)',
+    'archived and unlisted kind:39000 flags reach Channel (covers TTL auto-archive)',
     () async {
       // The relay's TTL reaper auto-archives expired ephemeral channels and
       // republishes kind:39000 with `["archived", "true"]`. The Channel needs
@@ -2864,7 +2864,7 @@ void main() {
           _membership(_channelB, myPk),
         ],
         metadata: [
-          _meta(id: _channelA, name: 'active'),
+          _meta(id: _channelA, name: 'active', unlisted: true),
           _meta(
             id: _channelB,
             name: 'expired-ttl',
@@ -2883,6 +2883,10 @@ void main() {
       // The active channel must not be flagged archived.
       final active = channels.firstWhere((c) => c.name == 'active');
       expect(active.isArchived, isFalse);
+      // The bare `["unlisted"]` flag: an unlisted namesake does not hold a
+      // name in the relay's listed-name rule (starter setup relies on it).
+      expect(active.isUnlisted, isTrue);
+      expect(expired.isUnlisted, isFalse);
     },
   );
 
@@ -3132,6 +3136,7 @@ NostrEvent _meta({
   int createdAt = 1,
   int? ttlSeconds,
   bool archived = false,
+  bool unlisted = false,
   List<String> participants = const [],
 }) => NostrEvent(
   id: 'meta-$id',
@@ -3145,6 +3150,7 @@ NostrEvent _meta({
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
     if (archived) ['archived', 'true'],
+    if (unlisted) ['unlisted'],
     for (final participant in participants) ['p', participant],
   ],
   content: '',

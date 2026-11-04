@@ -83,6 +83,7 @@ Future<void> _waitForInviteRelay(Ref ref, bool Function() isScopeCurrent) {
 /// App-level bridge from invite joining to the channels feature.
 class MobileInviteJoinRecovery implements InviteJoinRecovery {
   final Future<List<Channel>> Function() _loadChannels;
+  final Future<Channel?> Function(String channelId) _fetchChannel;
   final Future<Channel> Function({
     required String channelId,
     required String name,
@@ -96,9 +97,11 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   final String _relayHttpOrigin;
   final bool Function() _isScopeCurrent;
 
-  /// Creates recovery from channel-loading, creation, and join operations.
+  /// Creates recovery from channel-loading, single-channel lookup, creation,
+  /// and join operations.
   MobileInviteJoinRecovery({
     required Future<List<Channel>> Function() loadChannels,
+    required Future<Channel?> Function(String channelId) fetchChannel,
     required Future<Channel> Function({
       required String channelId,
       required String name,
@@ -112,6 +115,7 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
     required String relayHttpOrigin,
     bool Function()? isScopeCurrent,
   }) : _loadChannels = loadChannels,
+       _fetchChannel = fetchChannel,
        _createChannel = createChannel,
        _joinChannel = joinChannel,
        _relayHttpOrigin = relayHttpOrigin,
@@ -121,7 +125,11 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   ///
   /// All starter work is fenced to the community and identity that started it.
   /// A partial setup remains recoverable, so a failed operation deliberately
-  /// propagates to the invite flow instead of being reported as success.
+  /// propagates to the invite flow instead of being reported as success. The
+  /// one exception is a starter whose name or id the relay reports as taken
+  /// by a channel the directory shows cannot serve as the starter, or an
+  /// archived channel at the starter's own id: both
+  /// are permanent, so the starter is skipped instead of blocking the join.
   @override
   Future<String?> ensureStarterChannels() async {
     _ensureScopeCurrent();
@@ -147,16 +155,43 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
           );
           _ensureScopeCurrent();
         } catch (error) {
-          if (!_isDuplicateChannelError(error)) rethrow;
+          final nameTaken = _isChannelNameTakenError(error);
+          final archivedAtId = _isArchivedChannelError(error);
+          if (!nameTaken && !archivedAtId && !_isDuplicateChannelError(error)) {
+            rethrow;
+          }
           _ensureScopeCurrent();
           channels = await _loadChannels();
           _ensureScopeCurrent();
-          channel =
+          final holder =
               _findStarterChannel(channels, starter.slug) ??
               channels
                   .where((candidate) => candidate.id == channelId)
-                  .firstOrNull;
-          if (channel == null) rethrow;
+                  .firstOrNull ??
+              (nameTaken ? _findListedNamesake(channels, starter.slug) : null);
+          if (holder == null) {
+            // The relay refuses a create at an archived channel's id before
+            // its duplicate check, and keeps that id, so the starter can never
+            // be created there.
+            if (archivedAtId) continue;
+            // The relay keeps the id (desktop uses the same one), so a
+            // duplicate with no match in the reload may be an archived
+            // starter whose metadata the reload did not return. Read that id
+            // directly.
+            if (!nameTaken && _isDuplicateChannelError(error)) {
+              final atId = await _fetchChannel(channelId);
+              _ensureScopeCurrent();
+              if (atId != null && atId.isArchived) continue;
+            }
+            // A holder not visible yet may still be usable, so keep the setup
+            // recoverable.
+            rethrow;
+          }
+          // The relay keeps a channel's id and a listed channel's name, archived
+          // ones included, so an unusable holder never frees the starter. Skip
+          // it rather than strand the invite in permanent recovery.
+          if (!_isUsableStarter(holder)) continue;
+          channel = holder;
         }
       }
 
@@ -182,21 +217,44 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   }
 }
 
-Channel? _findStarterChannel(List<Channel> channels, String name) {
-  final normalizedName = name.trim().toLowerCase();
-  return channels
-      .where(
-        (channel) =>
-            channel.name.trim().toLowerCase() == normalizedName &&
-            channel.isStream &&
-            channel.visibility == 'open' &&
-            !channel.isArchived,
-      )
-      .firstOrNull;
-}
+Channel? _findStarterChannel(List<Channel> channels, String name) => channels
+    .where((channel) => _hasName(channel, name) && _isUsableStarter(channel))
+    .firstOrNull;
+
+/// The channel that holds [name] in the relay's listed-name rule: an open,
+/// not unlisted stream or forum (`LISTED_CHANNEL_SQL` in buzz-db).
+Channel? _findListedNamesake(List<Channel> channels, String name) => channels
+    .where(
+      (channel) =>
+          _hasName(channel, name) &&
+          channel.visibility == 'open' &&
+          !channel.isUnlisted &&
+          (channel.isStream || channel.isForum),
+    )
+    .firstOrNull;
+
+bool _hasName(Channel channel, String name) =>
+    channel.name.trim().toLowerCase() == name.trim().toLowerCase();
+
+bool _isUsableStarter(Channel channel) =>
+    channel.isStream && channel.visibility == 'open' && !channel.isArchived;
 
 bool _isDuplicateChannelError(Object error) =>
     error.toString().contains('duplicate: channel already exists');
+
+/// The relay refuses any channel event whose `h` is an archived channel,
+/// a create at that id included: `invalid: channel is archived`.
+bool _isArchivedChannelError(Object error) =>
+    error.toString().contains('invalid: channel is archived');
+
+/// The relay refuses creating an open channel whose name another listed
+/// channel already holds, ignoring case:
+/// `invalid: an open channel named "general" already exists`.
+bool _isChannelNameTakenError(Object error) {
+  final message = error.toString().toLowerCase();
+  return message.contains('invalid: an open channel named') &&
+      message.contains('already exists');
+}
 
 /// Returns desktop's deterministic per-relay UUID for a public starter.
 @visibleForTesting
@@ -247,6 +305,14 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
           .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
+    },
+    fetchChannel: (channelId) async {
+      ensureScopeCurrent();
+      final channel = await ref
+          .read(channelsProvider.notifier)
+          .fetchOpenChannel(channelId);
+      ensureScopeCurrent();
+      return channel;
     },
     createChannel:
         ({

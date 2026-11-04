@@ -139,5 +139,8 @@ pub(crate) async fn discovery(
             count += 1;
         }
     }
-    (count > 0).then(|| serde_json::json!({"kind": 30382, "multiple_issuers": count > 1}))
+    // `searchable`: `POST /profiles/search` also matches and returns these.
+    (count > 0).then(
+        || serde_json::json!({"kind": 30382, "multiple_issuers": count > 1, "searchable": true}),
+    )
 }

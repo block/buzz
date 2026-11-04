@@ -39,6 +39,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   void Function()? _unsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
+  Future<bool>? _olderInFlight;
   bool _usingChannelWindow = false;
   NostrEvent? _legacyHistoryCursor;
   bool _initialWindowQueryInFlight = false;
@@ -1016,7 +1017,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   AsyncValue<List<NostrEvent>> get _historyState => state;
   set _historyState(AsyncValue<List<NostrEvent>> value) => state = value;
 
-  Future<bool> fetchOlder() => _fetchOlder();
+  /// Concurrent callers share one in-flight page; pages continue one cursor.
+  Future<bool> fetchOlder() => _olderInFlight ??= _fetchOlder().whenComplete(
+    () => _olderInFlight = null,
+  );
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;

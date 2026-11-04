@@ -1,6 +1,8 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'message_swipe_reply.dart';
+import 'bestie_welcome.dart';
+import 'bestie_welcome_storage.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -105,6 +107,7 @@ import 'timeline_message.dart';
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
+part 'channel_detail_page/hidden_history_paging.dart';
 part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
@@ -271,6 +274,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
 
   /// Uses personal assistant routing for a chat placed in Me.
   final bool personalChat;
+  final String? welcomeAgent;
   final bool placementKnown;
   final String? initialAssistant;
   final String? initialMessageId;
@@ -283,6 +287,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     super.key,
     required this.channel,
     required this.personalChat,
+    this.welcomeAgent,
     required this.placementKnown,
     this.initialAssistant,
     this.initialMessageId,
@@ -685,7 +690,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       // End events still update the original card through allMessages.
       timelineMessages
           .where(
-            (message) => !isCollapsedHuddleEnding(message, timelineMessages),
+            (message) =>
+                !isHiddenMembershipNotice(message) &&
+                !isCollapsedHuddleEnding(message, timelineMessages),
           )
           .toList(),
       flat: personalChat,
@@ -863,6 +870,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           ),
                           data: (events) {
                             return _MessageList(
+                              welcomeAgent: welcomeAgent,
                               notifier: ref.watch(messagesProvider.notifier),
                               inlineTyping:
                                   resolvedChannel.isMember &&

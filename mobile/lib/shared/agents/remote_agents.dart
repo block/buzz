@@ -118,6 +118,20 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
   return controller;
 });
 
+/// Changes when this device publishes or removes a remote agent registration,
+/// so caches of the owner's agent inventory can reload.
+final remoteAgentRegistrationRevisionProvider = Provider<int>((ref) {
+  final controller = ref.watch(remoteAgentControllerProvider);
+  final revision = controller.registrationRevision;
+  void changed() {
+    if (controller.registrationRevision != revision) ref.invalidateSelf();
+  }
+
+  controller.addListener(changed);
+  ref.onDispose(() => controller.removeListener(changed));
+  return revision;
+});
+
 /// The active community's remote agents that the signed-in owner's registry
 /// reports ACTIVE. Remote workers wake on messages, so this means available,
 /// not socket presence.
@@ -218,6 +232,10 @@ class RemoteAgentController extends ChangeNotifier {
   String? owner;
   List<Map<String, dynamic>> agents = [];
   Map<String, dynamic>? pending;
+
+  /// The agent the latest successful [create] finished, so its caller can
+  /// hand off to that exact agent rather than infer it from other state.
+  String? created;
   Set<String> deletedAgents = {};
   String? _scope;
   String? _loadedRelay;
@@ -596,6 +614,7 @@ class RemoteAgentController extends ChangeNotifier {
       );
     }
     final scope = _storageScope;
+    created = null;
     final resuming = pending != null;
     final selectedModel = modelId ?? pending?['model_id'] as String?;
     final selectedEffort =
@@ -724,6 +743,7 @@ class RemoteAgentController extends ChangeNotifier {
     await accountSecureStorage.delete(
       key: '$scope:instructions:${setup['request']}',
     );
+    created = pubkey;
   });
 
   /// Whether [pending] provably has no server identity: registration was never
