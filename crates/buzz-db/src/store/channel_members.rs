@@ -406,6 +406,9 @@ pub struct ChannelIdentity {
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
+    /// Active members with a recorded agent owner in this community.
+    /// This is positive evidence only; absence does not establish a human.
+    pub agent_pubkeys: Vec<Vec<u8>>,
     /// The channel's type, labels and creator, read on the same connection, so the
     /// roster carries the same identity tags as the channel's other
     /// group-state events. `None` when no channel row exists.
@@ -592,8 +595,13 @@ pub async fn lock_member_snapshot(
     let rows = sqlx::query(concat!(
         "SELECT cm.channel_id, cm.pubkey, ",
         member_role_label!(),
-        " AS role, cm.joined_at, cm.invited_by, cm.removed_at",
+        " AS role, cm.joined_at, cm.invited_by, cm.removed_at,",
         r#"
+        EXISTS (
+            SELECT 1 FROM users u
+            WHERE u.community_id = cm.community_id AND u.pubkey = cm.pubkey
+              AND u.agent_owner_pubkey IS NOT NULL
+        ) AS is_agent
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
@@ -604,9 +612,15 @@ pub async fn lock_member_snapshot(
     .bind(channel_id)
     .fetch_all(tx.conn())
     .await?;
+    let mut agent_pubkeys = Vec::new();
     let members = rows
         .into_iter()
-        .map(row_to_member_record)
+        .map(|row| {
+            if row.try_get::<bool, _>("is_agent")? {
+                agent_pubkeys.push(row.try_get("pubkey")?);
+            }
+            row_to_member_record(row)
+        })
         .collect::<Result<Vec<_>>>()?;
     let identity = sqlx::query_as::<_, (String, Vec<String>, Vec<u8>)>(
         "SELECT channel_type::text, labels, created_by FROM channels WHERE community_id = $1 AND id = $2",
@@ -622,6 +636,7 @@ pub async fn lock_member_snapshot(
     });
     Ok(LockedMemberSnapshot {
         members,
+        agent_pubkeys,
         identity,
         channel_id,
         relay_pubkey: relay_pubkey.to_vec(),
@@ -1825,10 +1840,9 @@ pub async fn list_large_channel_rosters_needing_reconciliation(
         .collect()
 }
 
-/// The channels where `pubkey` is an active ordinary member (`member` or
-/// `bot`). Recording an agent owner changes the label these rows show, so
-/// their rosters are republished.
-pub async fn list_ordinary_member_channels(
+/// The nondeleted channels where `pubkey` is an active member of any role.
+/// Recording an agent owner adds a roster trait even when the role stays the same.
+pub async fn list_active_member_channels(
     pool: &PgPool,
     community_id: CommunityId,
     pubkey: &[u8],
@@ -1842,7 +1856,7 @@ pub async fn list_ordinary_member_channels(
         "SELECT cm.channel_id FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id \
            AND c.deleted_at IS NULL \
-         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.role IN ('member', 'bot') \
+         WHERE cm.community_id = $1 AND cm.pubkey = $2 \
            AND cm.removed_at IS NULL \
          ORDER BY cm.channel_id",
     )
@@ -2529,14 +2543,14 @@ impl Db {
             .await
     }
 
-    /// Returns the channels where `pubkey` is an active ordinary member.
-    #[datastore_span(name = "list_ordinary_member_channels", system = "postgresql")]
-    pub async fn list_ordinary_member_channels(
+    /// Returns the nondeleted channels where `pubkey` is an active member of any role.
+    #[datastore_span(name = "list_active_member_channels", system = "postgresql")]
+    pub async fn list_active_member_channels(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
-        list_ordinary_member_channels(&self.pool, community_id, pubkey).await
+        list_active_member_channels(&self.pool, community_id, pubkey).await
     }
 
     /// Returns full channel records for all channels a user can access.
@@ -5934,6 +5948,9 @@ mod postgres_tests {
                         nostr::Tag::parse(["p", &hex::encode(&m.pubkey), "", &m.role])
                             .expect("p tag")
                     }))
+                    .chain(snapshot.agent_pubkeys.iter().map(|key| {
+                        nostr::Tag::parse(["agent", &hex::encode(key)]).expect("agent tag")
+                    }))
                     .collect::<Vec<_>>();
             nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
                 .tags(tags)
@@ -5965,6 +5982,7 @@ mod postgres_tests {
             .lock_member_snapshot(community, channel, &relay_pubkey)
             .await
             .expect("capture roster");
+        assert!(snapshot.agent_pubkeys.is_empty());
         let captured = roster(&snapshot, at);
         // The owner record does not take the membership lock, so it commits
         // while the publisher holds it.
@@ -5990,20 +6008,26 @@ mod postgres_tests {
             .lock_member_snapshot(community, channel, &relay_pubkey)
             .await
             .expect("capture roster for republish");
+        assert_eq!(snapshot.agent_pubkeys, vec![agent.clone()]);
         let republished = roster(&snapshot, at + 1);
         snapshot
             .replace_member_event(&republished)
             .await
             .expect("republish");
         snapshot.release().await.expect("commit republish");
-        assert_eq!(agent_label(&live_tags().await).as_deref(), Some("bot"));
+        let tags = live_tags().await;
+        assert_eq!(agent_label(&tags).as_deref(), Some("bot"));
+        assert!(tags
+            .as_array()
+            .expect("tags")
+            .contains(&serde_json::json!(["agent", hex::encode(&agent)])));
     }
 
-    /// The republish after an owner record lists the agent's active ordinary
-    /// memberships only.
+    /// Republish candidates cover every active role in this community, but not
+    /// removed memberships or deleted channels.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn ordinary_member_channels_list_only_active_ordinary_rows() {
+    async fn active_member_channels_exclude_removed_deleted_and_other_communities() {
         let pool = setup_pool().await;
         let community_id = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_id);
@@ -6014,25 +6038,67 @@ mod postgres_tests {
                 .await
                 .expect("ensure user");
         }
-        let member = open_test_channel(&pool, community_id, &creator).await;
-        let removed = open_test_channel(&pool, community_id, &creator).await;
-        let guest = open_test_channel(&pool, community_id, &creator).await;
-        for channel in [member, removed] {
-            add_member(&pool, community, channel, &agent, MemberRole::Member, None)
+        let mut expected = Vec::new();
+        for role in [
+            MemberRole::Member,
+            MemberRole::Bot,
+            MemberRole::Admin,
+            MemberRole::Owner,
+            MemberRole::Guest,
+        ] {
+            let channel = open_test_channel(&pool, community_id, &creator).await;
+            add_member(&pool, community, channel, &agent, role, Some(&creator))
                 .await
-                .expect("add agent");
+                .expect("add active agent");
+            expected.push(channel);
         }
-        add_member(&pool, community, guest, &agent, MemberRole::Guest, None)
+        let removed = open_test_channel(&pool, community_id, &creator).await;
+        let deleted = open_test_channel(&pool, community_id, &creator).await;
+        for channel in [removed, deleted] {
+            add_member(
+                &pool,
+                community,
+                channel,
+                &agent,
+                MemberRole::Admin,
+                Some(&creator),
+            )
             .await
-            .expect("add agent as guest");
+            .expect("add excluded agent");
+        }
         remove_member(&pool, community, removed, &agent, &agent)
             .await
             .expect("agent leaves");
+        sqlx::query("UPDATE channels SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+            .bind(community_id)
+            .bind(deleted)
+            .execute(&pool)
+            .await
+            .expect("delete channel");
+        let other_id = make_test_community(&pool).await;
+        let other = CommunityId::from_uuid(other_id);
+        for key in [&creator, &agent] {
+            ensure_user(&pool, other, key)
+                .await
+                .expect("ensure other user");
+        }
+        let other_channel = open_test_channel(&pool, other_id, &creator).await;
+        add_member(
+            &pool,
+            other,
+            other_channel,
+            &agent,
+            MemberRole::Admin,
+            Some(&creator),
+        )
+        .await
+        .expect("add agent in other community");
+        expected.sort();
         assert_eq!(
-            list_ordinary_member_channels(&pool, community, &agent)
+            list_active_member_channels(&pool, community, &agent)
                 .await
                 .expect("list channels"),
-            vec![member]
+            expected
         );
     }
 }

@@ -72,6 +72,12 @@ This installs a `commit-msg` hook that adds the sign-off trailer automatically f
 
 We review as capacity allows — focused PRs that follow this guide move fastest.
 
+For a PR based on another branch, set GitHub CLI's `branch.<branch>.gh-merge-base`
+Git setting to that base branch. The pre-push overlap guard uses this setting
+(default: `main`) and requires a successful fetch from `origin`. Keep it aligned
+with the PR's actual base, including after retargeting. Other local test lanes
+still select changes against `origin/main` and can run broader checks.
+
 ---
 
 ## Setting Up the Development Environment

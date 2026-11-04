@@ -1366,8 +1366,9 @@ fn group_members_tags(
     group_id: &str,
     identity: Option<&buzz_db::channel::ChannelIdentity>,
     members: &[MemberRecord],
+    agent_pubkeys: &[Vec<u8>],
 ) -> anyhow::Result<Vec<Tag>> {
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 3);
+    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + agent_pubkeys.len() + 3);
     tags.push(Tag::parse(["d", group_id])?);
     if let Some(identity) = identity {
         tags.extend(group_state_identity_tags(identity)?);
@@ -1377,6 +1378,9 @@ fn group_members_tags(
         // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
         // because the canonical relay is implicit (this event is signed by it).
         tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
+    }
+    for key in agent_pubkeys {
+        tags.push(Tag::parse(["agent", &hex::encode(key)])?);
     }
     Ok(tags)
 }
@@ -1390,6 +1394,7 @@ async fn store_group_members_event(
         &group_id,
         member_snapshot.identity.as_ref(),
         &member_snapshot.members,
+        &member_snapshot.agent_pubkeys,
     )?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4147,9 +4152,8 @@ async fn republish_roster_candidates(
 }
 
 /// Republish, in the background, the kind:39002 roster of every channel
-/// where `agent` is an active ordinary member. Call it after recording the
-/// agent's owner: rosters show `bot` for an owned agent, so each of those
-/// rosters now shows the wrong label.
+/// where `agent` is an active member. Call it after recording the agent's
+/// owner: every role gains an agent trait, and ordinary members show `bot`.
 ///
 /// The channels are listed inside the task, after the owner record has
 /// committed, so a channel the agent joins concurrently is either listed here
@@ -4158,14 +4162,14 @@ async fn republish_roster_candidates(
 /// writer. That lock can wait up to the lock timeout, so the caller does not
 /// wait: first AUTH must finish inside its own deadline. A failure is logged
 /// and counted and does not stop the other channels. A roster left stale (for
-/// example by a relay that stopped first) shows only the wrong label, which
-/// has the same permissions; the next membership change repairs it.
+/// example by a relay that stopped first) lacks the new trait or role label;
+/// permissions stay the same, and the next membership change repairs it.
 pub fn spawn_agent_roster_republish(tenant: &TenantContext, state: Arc<AppState>, agent: Vec<u8>) {
     let (community_id, host) = (tenant.community(), tenant.host().to_owned());
     tokio::spawn(async move {
         let channels = match state
             .db
-            .list_ordinary_member_channels(community_id, &agent)
+            .list_active_member_channels(community_id, &agent)
             .await
         {
             Ok(channels) => channels,
@@ -4752,7 +4756,7 @@ mod tests {
             labels: Vec::new(),
             created_by: vec![0xab; 32],
         };
-        let tags = group_members_tags(&channel_id.to_string(), Some(&identity), &members)
+        let tags = group_members_tags(&channel_id.to_string(), Some(&identity), &members, &[])
             .expect("build tags");
         assert_eq!(
             tags.len(),
