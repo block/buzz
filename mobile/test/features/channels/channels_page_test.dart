@@ -2637,6 +2637,96 @@ void main() {
     pending.complete(testChannels);
   });
 
+  testWidgets(
+    'a refused organization key closes the switcher before content loads',
+    (tester) async {
+      final communities = [
+        Community(
+          id: 'alpha',
+          name: 'Alpha',
+          relayUrl: 'wss://alpha.example.com',
+          addedAt: DateTime(2025),
+        ),
+        Community(
+          id: 'bravo',
+          name: 'Bravo',
+          relayUrl: 'wss://bravo.example.com',
+          addedAt: DateTime(2025),
+        ),
+      ];
+      final notifier = _FakeCommunityListNotifier(communities);
+      final pending = Completer<List<Channel>>();
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedIn;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (uri) => uri.host == 'bravo.example.com',
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            organizationSignInProvider.overrideWithValue(signIn),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                testChannels,
+                load: () => notifier.activeId == 'alpha'
+                    ? Future.value(testChannels)
+                    : pending.future,
+              ),
+            ),
+            communityListProvider.overrideWith(() => notifier),
+            activeCommunityProvider.overrideWith((ref) async {
+              await ref.watch(communityListProvider.future);
+              return communities.firstWhere(
+                (community) => community.id == notifier.activeId,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-menu-switch')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(notifier.switchedIds, ['bravo']);
+      // Signed in with no refusal yet: keep waiting for content.
+      expect(find.byKey(const Key('community-switcher-page')), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byKey(const Key('community-switcher-page'))),
+      );
+      auth.rejected(
+        container.read(relayConfigProvider),
+        'Bearer refused',
+        terminal: true,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+      expect(find.textContaining('taking longer to load'), findsNothing);
+      pending.complete(testChannels);
+    },
+  );
+
   for (final timeout in [false, true]) {
     testWidgets(
       'community loading failure can retry the active selection (timeout: $timeout)',
