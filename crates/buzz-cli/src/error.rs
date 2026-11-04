@@ -45,6 +45,11 @@ pub enum CliError {
     #[error("identity adapter error: {0}")]
     Adapter(String),
 
+    /// The local credential provider stayed `rate_limited` through its
+    /// bounded waits. It refused before acting, so a later re-run is safe.
+    #[error("rate limited: {0}")]
+    Throttled(String),
+
     /// Catch-all for unexpected failures
     #[error("{0}")]
     Other(String),
@@ -71,7 +76,8 @@ pub(crate) fn fmt_reqwest_error(e: &reqwest::Error) -> String {
 ///
 /// Transport-level network errors (connect failure, timeout, mid-request,
 /// mid-body transfer, or body decode failure) and relay overload responses
-/// (429 / 502 / 503 / 504) are retryable, as is an adapter that stayed
+/// (429 / 502 / 503 / 504) are retryable, as are a desktop that stayed
+/// `rate_limited` (`Throttled`) and an adapter that stayed
 /// unavailable (`Adapter`: nothing reached the relay).  `DeliveryUnknown` is never
 /// retryable: the operation may already have executed.  All other errors
 /// indicate a permanent failure: auth, bad input, builder errors, or logic
@@ -86,7 +92,7 @@ pub fn is_retryable_error(e: &CliError) -> bool {
                 || net_err.is_decode()
         }
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
-        CliError::Adapter(_) => true,
+        CliError::Adapter(_) | CliError::Throttled(_) => true,
         CliError::DeliveryUnknown(_) => false,
         _ => false,
     }
@@ -111,7 +117,7 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Conflict(_) => 5,
         CliError::NotFound(_) => 1,
         CliError::DeliveryUnknown(_) => 2,
-        CliError::Adapter(_) => 2,
+        CliError::Adapter(_) | CliError::Throttled(_) => 2,
         CliError::Other(_) => 4,
     }
 }
@@ -135,6 +141,7 @@ pub fn print_error(e: &CliError) {
         CliError::NotFound(_) => "not_found",
         CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Adapter(_) => "adapter_error",
+        CliError::Throttled(_) => "rate_limited",
         CliError::Other(_) => "error",
     };
     let obj = serde_json::json!({

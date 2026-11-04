@@ -870,6 +870,71 @@ mod tests {
         assert!(open_engram(&client, &valid, &a, &o, &a).await.is_err());
     }
 
+    /// A desktop that throttles partway through `buzz mem ls` is waited out,
+    /// and the list completes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_list_completes_when_the_desktop_throttles_partway() {
+        use crate::desktop_provider::{tests as dp, Provider};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let agent = nostr::Keys::generate();
+        let owner = nostr::Keys::generate().public_key();
+        let events: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                let body = Body::Memory {
+                    slug: format!("mem/{i}"),
+                    value: Some("v".into()),
+                };
+                let ev = engram::build_event(&agent, &owner, &body, 1).unwrap();
+                serde_json::to_value(&ev).unwrap()
+            })
+            .collect();
+        let app = axum::Router::new().route(
+            "/query",
+            axum::routing::post(move || async move { axum::Json(events) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // The second decrypt is refused once with `rate_limited`.
+        let decrypts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = decrypts.clone();
+        let answer = dp::desktop_answers(agent.clone(), vec![relay.clone()]);
+        let (endpoint, seen) = dp::provider(move |version, request| {
+            if request["method"] == "nip44_decrypt" && counted.fetch_add(1, Ordering::SeqCst) == 1 {
+                return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1});
+            }
+            answer(version, request)
+        })
+        .await;
+        let provider = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        let client = BuzzClient::new(relay, credentials).unwrap();
+
+        cmd_ls(&client, Some(&owner.to_hex()), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            decrypts.load(Ordering::SeqCst),
+            4,
+            "three entries, one retry"
+        );
+        let d_tags = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, r)| r["method"] == "engram_d_tag")
+            .count();
+        assert_eq!(d_tags, 3);
+    }
+
     fn test_client(keys: nostr::Keys) -> BuzzClient {
         BuzzClient::new(
             "http://127.0.0.1:9".into(),

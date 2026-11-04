@@ -34,6 +34,8 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MINT_ATTEMPTS: usize = 3;
 const MINT_BACKOFF: [Duration; MINT_ATTEMPTS - 1] =
     [Duration::from_millis(250), Duration::from_millis(750)];
+/// The longest adapter `Retry-After` the CLI waits out before a retry.
+const MINT_RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
 
 /// Re-mint this long before expiry, or at half-life for lifetimes up to
 /// twice this, so a short-lived assertion is not re-minted on every request.
@@ -76,6 +78,13 @@ struct DenialBody {
 /// The NIP-FA canonical relay URL: `wss://host[:port]`, default port omitted,
 /// no trailing slash, path, query or fragment.
 pub fn canonical_relay_url(relay_url: &str) -> Result<String, CliError> {
+    // `wss://host` means 443, so an explicit `:80` would silently alias it;
+    // NIP-FA has no relay on port 80.
+    if url::Url::parse(relay_url).is_ok_and(|u| u.port() == Some(80)) {
+        return Err(CliError::Usage(format!(
+            "NIP-FA does not support a relay on port 80: {relay_url}"
+        )));
+    }
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
     if authority.is_empty() {
         return Err(CliError::Usage(format!("invalid relay URL: {relay_url}")));
@@ -250,8 +259,12 @@ impl AdapterSession {
                          {MINT_ATTEMPTS} attempts ({transient}); retry later"
                     )));
                 }
-                Err(_) => {
-                    tokio::time::sleep(MINT_BACKOFF[attempt].mul_f64(rand::random::<f64>())).await;
+                Err(transient) => {
+                    let wait = transient.retry_after.map_or_else(
+                        || MINT_BACKOFF[attempt].mul_f64(rand::random::<f64>()),
+                        |d| d.min(MINT_RETRY_AFTER_MAX),
+                    );
+                    tokio::time::sleep(wait).await;
                     attempt += 1;
                 }
             }
@@ -264,7 +277,7 @@ impl AdapterSession {
         &self,
         relay_url: &str,
         credentials: &Credentials,
-    ) -> Result<Result<(String, u64), String>, CliError> {
+    ) -> Result<Result<(String, u64), Transient>, CliError> {
         let pubkey = credentials.public_key().to_hex();
         let body = serde_json::to_vec(&serde_json::json!({
             "relay_url": relay_url,
@@ -292,11 +305,20 @@ impl AdapterSession {
         let resp = match sent {
             Ok(resp) => resp,
             Err(e) if e.is_builder() => return Err(CliError::Network(e.without_url())),
-            Err(e) => return Ok(Err(crate::error::fmt_reqwest_error(&e.without_url()))),
+            Err(e) => return Ok(Err(Transient::from(e))),
         };
         let status = resp.status().as_u16();
         if status == 429 || resp.status().is_server_error() {
-            return Ok(Err(format!("HTTP {status}")));
+            // NIP-FA: honor `Retry-After` (delta-seconds) on 429 and 503.
+            let retry_after = matches!(status, 429 | 503)
+                .then(|| resp.headers().get(reqwest::header::RETRY_AFTER))
+                .flatten()
+                .and_then(|v| v.to_str().ok()?.trim().parse().ok())
+                .map(Duration::from_secs);
+            return Ok(Err(Transient {
+                why: format!("HTTP {status}"),
+                retry_after,
+            }));
         }
         let body = bounded_body(resp).await;
         if status != 200 {
@@ -311,8 +333,30 @@ impl AdapterSession {
         match body {
             Ok(body) => accept(body.as_deref(), &pubkey).map(Ok),
             // A 200 whose body never arrived is a transport failure, not a rejected 200.
-            Err(e) => Ok(Err(crate::error::fmt_reqwest_error(&e.without_url()))),
+            Err(e) => Ok(Err(Transient::from(e))),
         }
+    }
+}
+
+/// A mint failure worth another attempt, after `retry_after` when the
+/// adapter gave one.
+struct Transient {
+    why: String,
+    retry_after: Option<Duration>,
+}
+
+impl From<reqwest::Error> for Transient {
+    fn from(e: reqwest::Error) -> Self {
+        Self {
+            why: crate::error::fmt_reqwest_error(&e.without_url()),
+            retry_after: None,
+        }
+    }
+}
+
+impl std::fmt::Display for Transient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
     }
 }
 
@@ -382,6 +426,10 @@ mod tests {
             assert_eq!(canonical_relay_url(input).unwrap(), expected, "{input}");
         }
         assert!(canonical_relay_url("not a url").is_err());
+        assert!(matches!(
+            canonical_relay_url("wss://relay.example.com:80"),
+            Err(CliError::Usage(_))
+        ));
     }
 
     #[test]

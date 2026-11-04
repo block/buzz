@@ -27,10 +27,15 @@ const VERSION: u32 = 1;
 const VERSION_HEADER: &str = "Buzz-Credential-Provider";
 
 /// Methods the provider may hold open for a person's decision (up to 120s).
-const HELD_TIMEOUT: Duration = Duration::from_secs(150);
+pub(crate) const HELD_TIMEOUT: Duration = Duration::from_secs(150);
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
 const SAME_USER_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// `rate_limited` refuses before acting, so the same envelope is re-sent:
+/// up to this many times, each after `retry_after` capped at the wait below.
+const RATE_LIMIT_RETRIES: u32 = 4;
+const RATE_LIMIT_MAX_WAIT_SECS: u64 = 30;
 
 /// Re-ask for an assertion this long before its `exp`.
 const REFRESH_MARGIN_SECS: u64 = 30;
@@ -78,7 +83,7 @@ impl ProviderError {
                     "approval_required" => {
                         CliError::Auth(format!("approve this request in Buzz, then retry{detail}"))
                     }
-                    "rate_limited" => CliError::Auth(format!(
+                    "rate_limited" => CliError::Throttled(format!(
                         "the Buzz desktop is rate-limiting this CLI; retry in {}s{detail}",
                         retry_after.unwrap_or(1)
                     )),
@@ -283,7 +288,7 @@ fn proc_net_tcp_uid(table: &str, server: u16, client: u16) -> Option<u32> {
 /// macOS: `lsof` lists the socket's owning process with its UID.
 #[cfg(not(target_os = "linux"))]
 async fn server_side_uid(server: u16, client: u16) -> Option<u32> {
-    let output = tokio::process::Command::new("lsof")
+    let output = tokio::process::Command::new("/usr/sbin/lsof")
         .args(["-nP", "-F", "un", &format!("-iTCP@127.0.0.1:{server}")])
         .kill_on_drop(true)
         .output()
@@ -324,7 +329,9 @@ struct Envelope {
     versions: Option<Vec<u32>>,
 }
 
-/// Send one envelope and return its `result`, negotiating the version once.
+/// Send one envelope and return its `result`, negotiating the version once
+/// and waiting out `rate_limited` a bounded number of times. Transport
+/// failures are never re-sent: the provider may have acted.
 async fn call(
     endpoint: &Endpoint,
     token: Option<&str>,
@@ -333,7 +340,9 @@ async fn call(
     params: &[String],
 ) -> Result<String, ProviderError> {
     let mut version = VERSION;
-    for _ in 0..2 {
+    let mut negotiated = false;
+    let mut throttled = 0;
+    loop {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let body = serde_json::to_vec(&serde_json::json!({
             "id": id, "method": method, "params": params,
@@ -353,17 +362,18 @@ async fn call(
             .map_err(|_| ProviderError::Transport(format!("`{method}` timed out")))??;
         let envelope: Envelope = serde_json::from_slice(&raw)
             .map_err(|_| ProviderError::Transport("unreadable response".into()))?;
+        if envelope.id != id {
+            return Err(ProviderError::Transport("response id mismatch".into()));
+        }
         // Decide on `error`, never on the HTTP status.
         let Some(code) = envelope.error.filter(|c| !c.is_empty()) else {
-            if envelope.id != id {
-                return Err(ProviderError::Transport("response id mismatch".into()));
-            }
             return Ok(envelope.result);
         };
         match code.as_str() {
             "revoked" => return Err(ProviderError::Revoked),
             "unknown_method" => return Err(ProviderError::UnknownMethod),
-            "unsupported_version" => {
+            "unsupported_version" if !negotiated => {
+                negotiated = true;
                 let common = envelope
                     .versions
                     .unwrap_or_default()
@@ -375,6 +385,15 @@ async fn call(
                     None => return Err(ProviderError::NoCommonVersion),
                 }
             }
+            "unsupported_version" => return Err(ProviderError::NoCommonVersion),
+            "rate_limited" if throttled < RATE_LIMIT_RETRIES => {
+                throttled += 1;
+                let wait = envelope
+                    .retry_after
+                    .unwrap_or(1)
+                    .clamp(1, RATE_LIMIT_MAX_WAIT_SECS);
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
             other => {
                 return Err(ProviderError::Code {
                     code: known_code(other),
@@ -384,7 +403,6 @@ async fn call(
             }
         }
     }
-    Err(ProviderError::NoCommonVersion)
 }
 
 #[derive(serde::Deserialize)]
@@ -864,7 +882,7 @@ impl PairingStore for Keychain {
     /// `flock` on `~/.buzz-foundation/cli-pairings.lock` (no secret in it).
     fn lock(&self) -> Result<Box<dyn Held + '_>, CliError> {
         use std::os::fd::AsRawFd;
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
         let failed = |e: std::io::Error| CliError::Other(format!("pairing lock failed: {e}"));
         let dir = advertisement_dir()
             .and_then(|d| d.parent().map(std::path::Path::to_path_buf))
@@ -874,10 +892,13 @@ impl PairingStore for Keychain {
             .mode(0o700)
             .create(&dir)
             .map_err(failed)?;
+        // An existing directory keeps whatever mode it had; tighten it.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(dir.join("cli-pairings.lock"))
             .map_err(failed)?;
         // SAFETY: a valid open descriptor; flock has no other preconditions.
@@ -965,7 +986,7 @@ async fn inherited_link(
     token: String,
     relay_url: &str,
 ) -> Result<Arc<Provider>, CliError> {
-    match Provider::open(endpoint, token, false, relay_url).await? {
+    match Provider::open(endpoint, token, true, relay_url).await? {
         Ok(provider) => Ok(provider),
         Err(Skip::Revoked) => Err(CliError::Auth(
             "the Buzz desktop revoked this agent's credential; restart the agent in Buzz".into(),
@@ -1344,6 +1365,64 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn rate_limited_is_waited_out_then_reported_as_retryable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        let (endpoint, seen) = provider(move |_, _| match count.fetch_add(1, Ordering::SeqCst) {
+            0 => serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1}),
+            _ => serde_json::json!({"result": "signed"}),
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let result = call(&endpoint, Some("tok"), false, "sign_event", &[]).await;
+        assert_eq!(result.unwrap(), "signed");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "honors retry_after"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        let (endpoint, seen) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 0}),
+        )
+        .await;
+        // `retry_after: 0` still waits the 1 s floor, so this takes a few seconds.
+        let err = call(&endpoint, Some("tok"), false, "sign_event", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(seen.lock().unwrap().len(), 1 + RATE_LIMIT_RETRIES as usize);
+        let err = err.into_cli("sign_event");
+        assert!(matches!(err, CliError::Throttled(_)), "{err:?}");
+        assert!(crate::error::is_retryable_error(&err));
+    }
+
+    #[tokio::test]
+    async fn an_error_envelope_for_another_request_is_refused() {
+        let (endpoint, _) =
+            provider(|_, _| serde_json::json!({"result": "", "error": "revoked"})).await;
+        // The mock echoes the request id; a raw server that does not is below.
+        assert!(matches!(
+            call(&endpoint, Some("tok"), false, "describe", &[]).await,
+            Err(ProviderError::Revoked)
+        ));
+        let app = axum::Router::new().route(
+            "/rpc",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({"id": "other", "result": "", "error": "revoked"}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap();
+        assert!(matches!(
+            call(&endpoint, Some("tok"), false, "describe", &[]).await,
+            Err(ProviderError::Transport(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn an_unknown_error_code_is_denied() {
         let (endpoint, _) =
             provider(|_, _| serde_json::json!({"result": "", "error": "brand_new"})).await;
@@ -1383,7 +1462,15 @@ pub(crate) mod tests {
     /// (answering `invalid_request` for bad ciphertext, as #2260 does),
     /// derives engram `d` tags and hands out [`mock_assertion`].
     pub(crate) async fn desktop(keys: nostr::Keys, relays: Vec<String>) -> (Endpoint, Seen) {
-        provider(move |_, request| {
+        provider(desktop_answers(keys, relays)).await
+    }
+
+    /// [`desktop`]'s answers, for a provider that wraps them.
+    pub(crate) fn desktop_answers(
+        keys: nostr::Keys,
+        relays: Vec<String>,
+    ) -> impl Fn(&str, &serde_json::Value) -> serde_json::Value + Send + Sync + 'static {
+        move |_, request| {
             let params: Vec<String> =
                 serde_json::from_value(request["params"].clone()).unwrap_or_default();
             let peer = || PublicKey::from_hex(&params[0]).unwrap();
@@ -1419,8 +1506,7 @@ pub(crate) mod tests {
                 "federated_identity" => ok(mock_assertion()),
                 _ => serde_json::json!({"result": "", "error": "unknown_method"}),
             }
-        })
-        .await
+        }
     }
 
     #[derive(Default)]

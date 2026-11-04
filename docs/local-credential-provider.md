@@ -78,8 +78,9 @@ BUZZ_CREDENTIAL_PROVIDER={"url":"http://127.0.0.1:<port>/<path>","token":"<token
   MUST revoke it on the triggers in [Revocation](#revocation).
 - A caller MUST reject a `url` whose scheme is not `http`, whose host is not
   exactly `127.0.0.1`, or that carries user information.
-- Because the desktop handed the endpoint to the process directly, the caller
-  does not need the same-user check below for an inherited token.
+- A caller also runs the same-user check below for an inherited token: if the
+  desktop exits while the agent keeps running, another user may bind the
+  freed port.
 
 The desktop MUST set this variable only for processes it launches for an agent,
 and only in their own environment. It MUST NOT write the token to disk.

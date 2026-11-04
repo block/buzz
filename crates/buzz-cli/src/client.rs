@@ -1237,7 +1237,9 @@ impl BuzzClient {
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
         // Hard cap — inner wait ceilings sum to 70 s; connect time and network RTT are
-        // additional overhead absorbed by this budget.
+        // additional overhead absorbed by this budget. NIP-42 signing runs inside
+        // it too, and a desktop provider may hold `sign_event` for a person's
+        // decision, so the cap adds that allowance.
         // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
         // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
         let headers = self.upgrade_headers().await?;
@@ -1247,12 +1249,12 @@ impl BuzzClient {
             self.credentials.signer(),
             self.credentials.auth_tag().map(|t| &t.tag),
             headers,
-            75,
+            75 + crate::desktop_provider::HELD_TIMEOUT.as_secs(),
         )
         .await
-        .map_err(|e| match e.upgrade_rejection_status() {
+        .map_err(|e| match e.upgrade_rejection() {
             // A denial decided on the upgrade is an HTTP response (NIP-FI).
-            Some(status) => self.relay_error(status, String::new()),
+            Some((status, body)) => self.relay_error(status, body),
             // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
             None if matches!(e, buzz_ws_client::WsClientError::PolicyClose(_)) => {
                 CliError::Auth(e.to_string())
