@@ -82,6 +82,15 @@ async fn fixture(
         unavailable: false,
     });
     state.nip_fi_policy = source.clone();
+    for host in ["free.example", "required.example"] {
+        state.tenant_host_cache.insert(
+            host.into(),
+            (
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
+                std::time::Instant::now(),
+            ),
+        );
+    }
     (Arc::new(state), source, key, verifier)
 }
 
@@ -96,7 +105,7 @@ fn effective_mode_truth_table() {
         for required in [false, true] {
             let expected = match (global, required) {
                 (NipFiMode::DenyProtected, _) => NipFiMode::DenyProtected,
-                (_, true) => NipFiMode::Enforce,
+                (NipFiMode::Shadow, true) => NipFiMode::Enforce,
                 _ => global,
             };
             assert_eq!(effective(global, required), expected);
@@ -105,75 +114,56 @@ fn effective_mode_truth_table() {
 }
 
 #[tokio::test]
-async fn mixed_required_and_signed_unsigned_optional_admission() {
-    for global in [NipFiMode::Off, NipFiMode::Shadow] {
-        let (state, _, key, _) = fixture(global).await;
-        for signed in [false, true] {
-            // Optional controls retain both legacy proofs, regardless of attached FI.
-            let h = headers("free.example", false);
-            let result = admit_nip_fi_http_on_state(
-                &state,
-                &h,
-                &crate::access::AccessSlot::default(),
-                || {
-                    Ok(if signed {
-                        Nip98Proof::new(key, ())
+async fn mode_stored_requirement_and_proof_matrix() {
+    for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::Enforce] {
+        for stored in [false, true] {
+            let (state, source, key, verifier) = fixture(global).await;
+            source.required.store(stored, Ordering::SeqCst);
+            let required = global.enforces() || (global.observes_only() && stored);
+            for signed in [false, true] {
+                for assertion in [false, true] {
+                    let result = admit_nip_fi_http_on_state(
+                        &state,
+                        &headers("required.example", assertion),
+                        &crate::access::AccessSlot::default(),
+                        || {
+                            Ok(if signed {
+                                Nip98Proof::new(key, ())
+                            } else {
+                                Nip98Proof::unsigned(key, ())
+                            })
+                        },
+                    )
+                    .await;
+                    if required && (!signed || !assertion) {
+                        assert_eq!(
+                            result.err().unwrap().status(),
+                            StatusCode::UNAUTHORIZED,
+                            "{global:?} stored={stored} signed={signed} assertion={assertion}"
+                        );
                     } else {
-                        Nip98Proof::unsigned(key, ())
-                    })
-                },
-            )
-            .await;
-            assert!(result.is_ok(), "{global:?} signed={signed}");
-            let h = headers("required.example", true);
-            let result = admit_nip_fi_http_on_state(
-                &state,
-                &h,
-                &crate::access::AccessSlot::default(),
-                || {
-                    Ok(if signed {
-                        Nip98Proof::new(key, ())
-                    } else {
-                        Nip98Proof::unsigned(key, ())
-                    })
-                },
-            )
-            .await;
-            if signed {
-                assert!(result.is_ok());
-            } else {
-                assert_eq!(result.err().unwrap().status(), StatusCode::UNAUTHORIZED);
+                        assert!(
+                            result.is_ok(),
+                            "{global:?} stored={stored} signed={signed} assertion={assertion}"
+                        );
+                    }
+                }
+            }
+            if global.is_off() {
+                assert_eq!(
+                    source.calls.load(Ordering::SeqCst),
+                    0,
+                    "Off never reads FI policy for admission"
+                );
+                assert_eq!(verifier.calls(), 0, "Off never evaluates assertions");
             }
         }
-        let h = headers("required.example", false);
-        assert_eq!(
-            admit_nip_fi_http_on_state(&state, &h, &crate::access::AccessSlot::default(), || Ok(
-                Nip98Proof::new(key, ())
-            ))
-            .await
-            .err()
-            .unwrap()
-            .status(),
-            StatusCode::UNAUTHORIZED
-        );
     }
-    let (state, _, key, _) = fixture(NipFiMode::Enforce).await;
-    let h = headers("free.example", false);
-    assert_eq!(
-        admit_nip_fi_http_on_state(&state, &h, &crate::access::AccessSlot::default(), || Ok(
-            Nip98Proof::new(key, ())
-        ))
-        .await
-        .err()
-        .unwrap()
-        .status(),
-        StatusCode::UNAUTHORIZED
-    );
 }
 
 #[tokio::test]
 async fn required_retains_verifier_and_key_pairing_denials() {
-    for global in [NipFiMode::Off, NipFiMode::Shadow] {
+    for global in [NipFiMode::Shadow, NipFiMode::Enforce] {
         let (base, _, key, _) = fixture(global).await;
         for error in [
             VerifierError::UnknownIssuer,
@@ -221,7 +211,7 @@ async fn required_retains_verifier_and_key_pairing_denials() {
 
 #[tokio::test]
 async fn protected_routes_cannot_bypass_required_rows() {
-    for global in [NipFiMode::Off, NipFiMode::Shadow] {
+    for global in [NipFiMode::Shadow, NipFiMode::Enforce] {
         let (state, _, _, _) = fixture(global).await;
         let app = crate::router::build_router(state);
         for path in [
@@ -264,6 +254,94 @@ async fn protected_routes_cannot_bypass_required_rows() {
 }
 
 #[tokio::test]
+async fn off_routes_ignore_stored_policy_and_unavailable_fi_dependencies() {
+    let (base, source, _, _) = fixture(NipFiMode::Off).await;
+    let control = crate::router::build_router(base.clone());
+    let mut state = (*base).clone();
+    state.nip_fi_verifier = None;
+    state.nip_fi_deny_map = None;
+    Arc::make_mut(&mut state.config)
+        .nip_fi
+        .max_connection_lifetime_secs = 0;
+    let unavailable = Arc::new(Source {
+        required: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+        unavailable: true,
+    });
+    state.nip_fi_policy = unavailable.clone();
+    let app = crate::router::build_router(Arc::new(state));
+    for (method, path) in [
+        ("GET", "/"),
+        ("GET", "/huddle/00000000-0000-4000-8000-000000000001/audio"),
+        ("POST", "/query"),
+        ("POST", "/count"),
+        ("POST", "/events"),
+        ("GET", "/buzz/v1/sync"),
+        ("GET", "/git/o/r.git/info/refs?service=git-upload-pack"),
+        ("PUT", "/upload"),
+        ("GET", "/info"),
+    ] {
+        let request = || {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::HOST, "required.example");
+            if path == "/" || path.contains("/audio") {
+                req = req
+                    .header("Upgrade", "websocket")
+                    .header("Connection", "Upgrade")
+                    .header("Sec-WebSocket-Version", "13")
+                    .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+            }
+            req.body(Body::empty()).unwrap()
+        };
+        let expected = control.clone().oneshot(request()).await.unwrap().status();
+        let actual = app.clone().oneshot(request()).await.unwrap().status();
+        assert_eq!(
+            actual, expected,
+            "Off changed legacy response for {method} {path}"
+        );
+    }
+    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(unavailable.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn off_upgrade_uses_cached_tenant_without_fi_reads_and_rejects_long_hosts() {
+    let (state, source, _, _) = fixture(NipFiMode::Off).await;
+    let tenant_id = uuid::Uuid::new_v4();
+    state.tenant_host_cache.insert(
+        "cached.example".into(),
+        (
+            buzz_core::CommunityId::from_uuid(tenant_id),
+            std::time::Instant::now(),
+        ),
+    );
+    // The actual database is unreachable. Only ordinary cached routing can
+    // satisfy this call; a primary FI binding lookup cannot.
+    let (tenant, mode) = bind_for_upgrade(&state, "cached.example").await.unwrap();
+    assert_eq!(*tenant.community().as_uuid(), tenant_id);
+    assert!(mode.is_off());
+    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+    let long_host = "x".repeat(buzz_core::tenant::MAX_HOST_LEN + 1);
+    state.tenant_host_cache.insert(
+        long_host.clone(),
+        (
+            buzz_core::CommunityId::from_uuid(tenant_id),
+            std::time::Instant::now(),
+        ),
+    );
+    assert_eq!(
+        bind_for_upgrade(&state, &long_host)
+            .await
+            .err()
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn discovery_is_host_specific_compatible_uncached_and_consistent() {
     for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::Enforce] {
         let (state, source, _, _) = fixture(global).await;
@@ -291,7 +369,8 @@ async fn discovery_is_host_specific_compatible_uncached_and_consistent() {
                 let doc: serde_json::Value =
                     serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
                         .unwrap();
-                let required = host == "required.example" || global.enforces();
+                let required =
+                    !global.is_off() && (host == "required.example" || global.enforces());
                 let capability = global.evaluates() || required;
                 assert_eq!(doc["requires_nip_fi"], required);
                 assert_eq!(
@@ -308,13 +387,21 @@ async fn discovery_is_host_specific_compatible_uncached_and_consistent() {
             }
         }
         // One primary policy query per discovery request, no cross-host policy reuse.
-        assert_eq!(source.calls.load(Ordering::SeqCst), 6);
+        assert_eq!(
+            source.calls.load(Ordering::SeqCst),
+            if global.is_off() { 0 } else { 6 }
+        );
     }
 }
 
 #[tokio::test]
 async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
-    for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::DenyProtected] {
+    for global in [
+        NipFiMode::Off,
+        NipFiMode::Shadow,
+        NipFiMode::Enforce,
+        NipFiMode::DenyProtected,
+    ] {
         let (base, _, key, _) = fixture(global).await;
         for missing in ["verifier", "deny_map", "lifetime", "policy"] {
             let mut state = (*base).clone();
@@ -341,11 +428,15 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
                 || Ok(Nip98Proof::new(key, ())),
             )
             .await;
-            assert_eq!(
-                result.err().unwrap().status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "{global:?} {missing}"
-            );
+            if global.is_off() {
+                assert!(result.is_ok(), "Off ignores missing FI {missing}");
+            } else {
+                assert_eq!(
+                    result.err().unwrap().status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{global:?} {missing}"
+                );
+            }
             if global != NipFiMode::DenyProtected {
                 assert!(!state.nip_fi_required_admission_ready() || missing == "policy");
                 let app = crate::router::build_router(Arc::new(state));
@@ -363,7 +454,11 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
                         .unwrap();
                     assert_eq!(
                         response.status(),
-                        StatusCode::SERVICE_UNAVAILABLE,
+                        if global.is_off() {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        },
                         "{global:?} {missing} {path}"
                     );
                     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
@@ -375,7 +470,7 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
 
 #[tokio::test]
 async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries() {
-    let (state, source, key, _) = fixture(NipFiMode::Off).await;
+    let (state, source, key, _) = fixture(NipFiMode::Shadow).await;
     let h = headers("required.example", true);
     source.required.store(false, Ordering::SeqCst);
     let earlier = resolve(&state, &h).await.unwrap();
@@ -384,7 +479,7 @@ async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries
     assert!(!earlier.required);
     assert!(newer.required);
     with_policy(earlier, async {
-        assert!(mode(&state, &h).await.is_off());
+        assert!(mode(&state, &h).await.observes_only());
     })
     .await;
     // Finishing the old request cannot publish over the newer observation.
@@ -409,12 +504,13 @@ async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries
 
 #[tokio::test]
 async fn unmapped_legacy_rejection_scope_never_yields_an_admission_proof() {
-    let (state, _, key, _) = fixture(NipFiMode::Off).await;
+    let (state, _, key, _) = fixture(NipFiMode::Shadow).await;
     let policy = Policy {
         community_id: uuid::Uuid::nil(),
         mode: NipFiMode::Off,
         required: false,
         stored_required: false,
+
         mapped: false,
     };
     with_policy(policy, async {

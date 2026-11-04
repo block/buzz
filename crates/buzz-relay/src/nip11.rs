@@ -403,12 +403,34 @@ pub(crate) async fn nip11_document(
     state: &crate::state::AppState,
     raw_host: &str,
 ) -> Result<RelayInfo, axum::response::Response> {
+    use axum::response::IntoResponse;
     let mut headers = axum::http::HeaderMap::new();
     if let Ok(host) = axum::http::HeaderValue::from_str(raw_host) {
         headers.insert(axum::http::header::HOST, host);
     }
-    let policy = crate::nip_fi_policy::resolve(state, &headers).await?;
-    if policy.stored_required {
+    let policy = if state.config.nip_fi.mode.is_off() {
+        // Off discovery uses ordinary tenant routing, independent of FI policy
+        // and issuer dependencies. A missing tenant remains a routing refusal.
+        let tenant = crate::tenant::bind_community(state, raw_host)
+            .await
+            .map_err(|_| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    "relay: no community is configured for this host",
+                )
+                    .into_response()
+            })?;
+        crate::nip_fi_policy::Policy {
+            community_id: *tenant.community().as_uuid(),
+            mode: state.config.nip_fi.mode,
+            required: false,
+            stored_required: false,
+            mapped: true,
+        }
+    } else {
+        crate::nip_fi_policy::resolve(state, &headers).await?
+    };
+    if !state.config.nip_fi.mode.is_off() && policy.stored_required {
         // Required implies a usable binding and verifier, not merely a bit.
         state
             .nip_fi_communities()
@@ -574,6 +596,13 @@ mod tests {
             "postgres://127.0.0.1:1/none",
         )
         .await;
+        base.tenant_host_cache.insert(
+            "relay.example".into(),
+            (
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
+                std::time::Instant::now(),
+            ),
+        );
         let mut docs = Vec::new();
         for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
             let mut state = (*base).clone();

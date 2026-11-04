@@ -40,6 +40,7 @@ pub(crate) struct Policy {
     pub mode: NipFiMode,
     pub required: bool,
     pub stored_required: bool,
+
     // False only for the guard's legacy rejection scope after an authoritative
     // host miss. Such a scope must never yield an admission proof.
     pub mapped: bool,
@@ -114,7 +115,8 @@ pub(crate) async fn resolve(
     Ok(Policy {
         community_id: policy.community_id,
         mode: effective(global, policy.requires_nip_fi),
-        required: policy.requires_nip_fi || global.enforces(),
+        required: !global.is_off() && (policy.requires_nip_fi || global.enforces()),
+
         stored_required: policy.requires_nip_fi,
         mapped: true,
     })
@@ -123,6 +125,9 @@ pub(crate) async fn resolve(
 /// Preserve route-specific rejection ordering for an authoritative host miss.
 /// This is not admission: the full gate below still requires a mapped policy.
 pub(crate) async fn mode(state: &crate::state::AppState, headers: &HeaderMap) -> NipFiMode {
+    if state.config.nip_fi.mode.is_off() {
+        return state.config.nip_fi.mode;
+    }
     if state.config.nip_fi.mode.denies_unconditionally() {
         return NipFiMode::unavailable();
     }
@@ -140,8 +145,14 @@ pub(crate) async fn bind_for_upgrade(
     state: &crate::state::AppState,
     raw_host: &str,
 ) -> Result<(buzz_core::tenant::TenantContext, NipFiMode), Response<Body>> {
+    if state.config.nip_fi.mode.is_off() {
+        return crate::tenant::bind_community(state, raw_host)
+            .await
+            .map(|tenant| (tenant, state.config.nip_fi.mode))
+            .map_err(|_| not_found());
+    }
     let host = buzz_core::tenant::normalize_host(raw_host);
-    if host.is_empty() {
+    if host.is_empty() || host.chars().count() > buzz_core::tenant::MAX_HOST_LEN {
         return Err(not_found());
     }
     let binding = tokio::time::timeout(
@@ -158,7 +169,9 @@ pub(crate) async fn bind_for_upgrade(
     let policy = Policy {
         community_id: policy.community_id,
         mode: effective(state.config.nip_fi.mode, policy.requires_nip_fi),
-        required: policy.requires_nip_fi || state.config.nip_fi.mode.enforces(),
+        required: !state.config.nip_fi.mode.is_off()
+            && (policy.requires_nip_fi || state.config.nip_fi.mode.enforces()),
+
         stored_required: policy.requires_nip_fi,
         mapped: true,
     };
@@ -175,6 +188,9 @@ pub(crate) async fn admission_mode(
     state: &crate::state::AppState,
     headers: &HeaderMap,
 ) -> Result<NipFiMode, Response<Body>> {
+    if state.config.nip_fi.mode.is_off() {
+        return Ok(state.config.nip_fi.mode);
+    }
     if state.config.nip_fi.mode.denies_unconditionally() {
         return Ok(NipFiMode::unavailable());
     }
@@ -196,7 +212,10 @@ pub(crate) fn required_dependencies_ready(state: &crate::state::AppState) -> boo
 }
 
 fn configured_mode(state: &crate::state::AppState, policy: Policy) -> NipFiMode {
-    if policy.stored_required && !required_dependencies_ready(state) {
+    if !state.config.nip_fi.mode.is_off()
+        && policy.stored_required
+        && !required_dependencies_ready(state)
+    {
         NipFiMode::unavailable()
     } else {
         policy.mode

@@ -29,11 +29,12 @@ pub enum NipFiMode {
 }
 
 impl NipFiMode {
-    /// Add a durable community requirement without weakening repair mode.
+    /// Enforce stored community requirements only in Shadow; Off disables FI.
+    /// Repair mode remains unconditional.
     pub const fn with_requirement(self, required: bool) -> Self {
         if self.denies_unconditionally() {
             self
-        } else if required {
+        } else if self.observes_only() && required {
             Self::Enforce
         } else {
             self

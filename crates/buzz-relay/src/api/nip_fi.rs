@@ -2516,9 +2516,13 @@ mod route_integration_tests {
 
     #[tokio::test]
     #[allow(clippy::result_large_err)] // Real Axum admission closure.
-    async fn required_off_and_shadow_validate_real_assertion_crypto() {
+    async fn required_mode_matrix_validates_crypto_only_when_enabled() {
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-        for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Shadow] {
+        for mode in [
+            buzz_auth::NipFiMode::Off,
+            buzz_auth::NipFiMode::Shadow,
+            buzz_auth::NipFiMode::Enforce,
+        ] {
             let mut state = (*http_enforce_state().await).clone();
             Arc::make_mut(&mut state.config).nip_fi.mode = mode;
             Arc::make_mut(&mut state.config)
@@ -2570,7 +2574,7 @@ mod route_integration_tests {
                     || Ok(crate::nip_fi_http::Nip98Proof::new(key, ())),
                 )
                 .await;
-                if bad == "valid" {
+                if mode.is_off() || bad == "valid" {
                     assert!(result.is_ok(), "{mode:?} valid assertion");
                 } else {
                     assert_eq!(

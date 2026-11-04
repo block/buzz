@@ -170,8 +170,8 @@ working FI path or containing the affected community through the established
 archive/lifecycle controls. Coordinate any necessary issuer/configuration repair
 through its existing operator procedure; never broaden trust to make a probe pass.
 
-Disabling calls or rolling back code does not undo acceptance. Never restore a
-serving binary that ignores the durable requirement; retain effective enforcement
+Disabling calls or rolling back code does not undo acceptance. In Shadow, never
+restore a serving binary that ignores the durable requirement; retain effective enforcement
 or contain the community while repairing the FI path. There is no
 clear-policy API or routine SQL reset, and neither a timeout nor a mistaken call
 is permission to return the community to free admission. Recovery must retain
@@ -188,10 +188,14 @@ its unbound report still exposes them for explicit operator repair.
 
 ## Request enforcement and discovery (BUZZ-511)
 
-Each protected request resolves the normalized Host's active policy from the
-primary database, with a 500 ms budget. The effective requirement is the stored
-`requires_nip_fi` OR global `enforce`. Global `deny_protected` always returns 503
-before evidence checks; neither `off` nor `shadow` exempts a required row.
+Relay mode controls the effective requirement without changing durable storage:
+`off` disables FI for all communities, including stored `requires_nip_fi=true`;
+`shadow` enforces FI only for stored required communities and observes optional
+communities; `enforce` requires FI everywhere. `deny_protected` remains an
+unconditional repair refusal. Off ignores missing FI policy, verifier, deny map
+and issuer dependencies; ordinary tenant routing and Nostr authorization remain.
+Outside Off, each protected request reads its normalized Host's active policy
+from the primary database with a 500 ms budget.
 Existing Nostr proof, key pairing, deny map, membership and resource checks remain.
 Discovery, pairing, enrollment and operator exceptions keep their own authentication.
 
@@ -214,22 +218,25 @@ WebSocket upgrades also bind tenant identity and its policy from the same primar
 row. An earlier missing or optional policy result cannot authorize a socket for a
 required row that becomes serving during lookup (for example, on unarchive).
 Before upgrade, enforce that bound row's requirement even when the early check
-ran in Off or Shadow. This changes no discovery fields.
+ran in Shadow. Off never promotes a stored requirement. This changes no discovery fields.
 
-Database-sourced deployments construct the issuer resolver and verifier even in
-`off`, because some rows may require FI. Configure finite
+Database-sourced deployments load the FI binding snapshot and command components
+only in evaluating modes. Off does not depend on that snapshot and cannot report
+required-admission readiness. Configure finite
 `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS`, issuer JWKS and command configuration
-before enabling any row. Missing required components return 503. An optional row
+before enforcing any row in Shadow or Enforce. Missing required components return
+503 only when FI is enabled. An optional row
 still follows global off/shadow behavior, including signed and unsigned legacy
 proofs where the endpoint permits them.
 
 Both `GET /info` and root NIP-11 negotiation return `Cache-Control: no-store`.
-An unknown or non-serving Host returns generic 404; policy lookup failure returns
-503. The top-level `requires_nip_fi` is a host-specific boolean. Existing
+An unknown or non-serving Host returns generic 404. Outside Off, policy lookup
+failure returns 503. Off uses ordinary tenant routing and returns generic 404 on
+a tenant lookup failure, without consulting FI policy. The top-level `requires_nip_fi` is a host-specific boolean. Existing
 `limitation.federated_identity` and `federated_identity` descriptor fields retain
 capability semantics: advertise when global mode evaluates OR the host requires
-FI. Thus shadow optional hosts still advertise capability, and required off hosts
-advertise capability and requirement together. No issuer, audience or identity
+FI. Shadow optional hosts still advertise capability. Off hosts advertise neither
+FI capability nor an effective requirement, even when stored policy is required. No issuer, audience or identity
 provider address is added to discovery. Existing clients can keep reading their
 current fields; new clients must use the requirement field to distinguish optional
 capability from mandatory evidence.
@@ -240,11 +247,11 @@ activation; the operator receipt remains pending until that evidence is recorded
 
 ### Staging and containment
 
-This changes every serving host, including free hosts: protected routes and
-discovery now require a primary policy read. Unmapped discovery previously could
+Outside Off, this changes every serving host, including free hosts: protected
+routes and discovery require a primary policy read. Off retains ordinary routing. Unmapped discovery previously could
 return a generic document; it now returns 404. Policy failures return 503.
-Database-source startup loads its binding snapshot even in Off and fails startup
-if that load fails. The local dependency gauge
+Database-source startup loads its FI binding snapshot only in evaluating modes;
+Off does not load it. A failed load still fails startup in Shadow or Enforce. The local dependency gauge
 `buzz_nip_fi_required_admission_ready` must be 1 before accepting any upgrade;
 it covers verifier, deny map and finite lifetime, not fleet baseline verification.
 Binding and JWKS readiness must also be verified through a signed request.
@@ -268,7 +275,7 @@ them and the operator has reviewed measured results. Verify unknown-host 404 and
 dependency-failure 503 with no-store explicitly.
 
 Then test a disposable required community with complete FI dependencies, in both
-Off and Shadow: unsigned/missing evidence denies, signed valid FI succeeds,
+Shadow and Enforce: unsigned/missing evidence denies, signed valid FI succeeds,
 root/audio upgrades agree, discovery agrees, and a pending deletion request does
 not weaken the requirement. Before production acceptance, complete BUZZ-512's
 session application/drain and the production baseline-verifier gate. No such
@@ -276,11 +283,13 @@ production verification is established by this PR.
 
 Before any required row exists, an operator may stop the rollout and restore the
 previous binary after verifying the primary contains zero required rows. Once a
-requirement has been accepted, a pre-511 binary is unsafe: it ignores that row.
+requirement has been accepted, a pre-511 binary in Shadow is unsafe: it ignores
+that row. Off explicitly suspends FI; global Enforce still requires all hosts.
 Stop new upgrade calls, retain policy and receipt records, and keep an enforcing
 binary while repairing dependencies. If admission cannot be restored, contain the
 affected serving hosts with an operator-approved repair-mode/traffic action;
-never change them to Off as a bypass or clear accepted policy. No automatic fleet
+Off explicitly disables FI; use it only as an operator mode decision and never
+clear accepted policy. Returning to Shadow restores stored requirements. No automatic fleet
 drain or deployment is prescribed here. Existing receipt recovery remains usable
 while new acceptances are disabled.
 

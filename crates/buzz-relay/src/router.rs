@@ -176,7 +176,6 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
 ///
-/// In Off mode the middleware is fully transparent; in Shadow it only records.
 fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
     slot.method(AuthMethod::NipFi);
     slot.finish(AuthResult::Denied(
@@ -191,7 +190,7 @@ async fn nip_fi_assertion_guard(
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    if nip_fi_guard_exempts(&state, &request) {
+    if state.config.nip_fi.mode.is_off() || nip_fi_guard_exempts(&state, &request) {
         return next.run(request).await;
     }
     if state.config.nip_fi.mode.denies_unconditionally() {
@@ -210,6 +209,7 @@ async fn nip_fi_assertion_guard(
                 mode,
                 required: mode.enforces(),
                 stored_required: false,
+
                 mapped: false,
             };
             return crate::nip_fi_policy::with_policy(

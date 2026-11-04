@@ -750,10 +750,10 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
 // ── Duration helpers ──────────────────────────────────────────────────────────
 
 impl NipFiRelayConfig {
-    /// Database deployments resolve issuer bindings even in Off: a stored
-    /// community requirement still enforces. Repair mode needs no verifier.
+    /// Only evaluating modes load FI bindings. Off starts without an FI
+    /// snapshot and cannot establish required-admission readiness.
     pub fn builds_resolver(&self) -> bool {
-        self.source == CommunitySource::Database && !self.mode.denies_unconditionally()
+        self.source == CommunitySource::Database && self.mode.evaluates()
     }
 
     /// Returns the configured `max_connection_lifetime` as a `Duration`.
@@ -2003,10 +2003,10 @@ mod tests {
         }
     }
 
-    // Stored requirements still need issuer resolution under global Off.
+    // Off must not depend on an FI snapshot.
     // Repair mode remains unconditional and needs no snapshot.
     #[test]
-    fn database_source_builds_a_resolver_unless_in_repair_mode() {
+    fn database_source_builds_a_resolver_only_in_evaluating_modes() {
         let base = {
             let _guard = super::NIP_FI_ENV_LOCK
                 .lock()
@@ -2015,7 +2015,7 @@ mod tests {
             NipFiRelayConfig::from_env().expect("off config")
         };
         for (mode, source, expected) in [
-            (NipFiMode::Off, CommunitySource::Database, true),
+            (NipFiMode::Off, CommunitySource::Database, false),
             (NipFiMode::DenyProtected, CommunitySource::Database, false),
             (NipFiMode::Shadow, CommunitySource::Database, true),
             (NipFiMode::Enforce, CommunitySource::Database, true),

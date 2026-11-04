@@ -78,7 +78,7 @@ async fn bound_row_policy_wins_when_required_host_becomes_serving_after_initial_
     .unwrap();
     let key = Keys::generate();
     let token = sign_assertion("nip-fi+jwt", &key.public_key().to_hex(), None);
-    for global in [NipFiMode::Off, NipFiMode::Shadow] {
+    for global in [NipFiMode::Shadow, NipFiMode::Enforce] {
         for path in ["/", "/huddle/00000000-0000-4000-8000-000000000001/audio"] {
             for assertion in [false, true] {
                 sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
@@ -184,7 +184,7 @@ async fn real_required_root_audio_upgrades_retain_policy_during_pending_deletion
     .unwrap();
     let key = Keys::generate();
     let token = sign_assertion("nip-fi+jwt", &key.public_key().to_hex(), None);
-    for global in [NipFiMode::Off, NipFiMode::Shadow] {
+    for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::Enforce] {
         let mut state = (*base).clone();
         let config = Arc::make_mut(&mut state.config);
         config.nip_fi.mode = global;
@@ -194,6 +194,13 @@ async fn real_required_root_audio_upgrades_retain_policy_during_pending_deletion
             buzz_auth::TokenClass::DedicatedNipFi,
         )));
         state.nip_fi_deny_map = Some(Arc::new(buzz_auth::NipFiDenyMap::new(100, vec![])));
+        if global.is_off() {
+            state.nip_fi_verifier = None;
+            state.nip_fi_deny_map = None;
+            Arc::make_mut(&mut state.config)
+                .nip_fi
+                .max_connection_lifetime_secs = 0;
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = crate::router::build_router(Arc::new(state))
@@ -237,7 +244,7 @@ async fn real_required_root_audio_upgrades_retain_policy_during_pending_deletion
                     )
                     .await
                     .unwrap();
-                    if assertion {
+                    if assertion || global.is_off() {
                         let (mut socket, response) =
                             result.expect("valid signed assertion must upgrade");
                         assert_eq!(
@@ -287,7 +294,8 @@ async fn signed_unsigned_free_controls_and_required_discovery_use_real_host_rows
     .await
     .unwrap();
     let config = Arc::make_mut(&mut state.config);
-    config.nip_fi.mode = NipFiMode::Off;
+    // Stored requirements and primary policy binding apply in evaluating modes.
+    config.nip_fi.mode = NipFiMode::Shadow;
     config.nip_fi.max_connection_lifetime_secs = 3600;
     config.nip_fi.communities = crate::nip_fi_core::test_support::any_host("https://relay.example");
     config.relay_url = "wss://relay.example".to_owned();
@@ -358,6 +366,43 @@ async fn signed_unsigned_free_controls_and_required_discovery_use_real_host_rows
             serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(doc["requires_nip_fi"], host == &required);
     }
+    // The durable requirement remains stored, but Off admits ordinary HTTP
+    // without FI evidence and advertises no effective requirement.
+    let mut off = (*state).clone();
+    Arc::make_mut(&mut off.config).nip_fi.mode = NipFiMode::Off;
+    off.nip_fi_verifier = None;
+    off.nip_fi_deny_map = None;
+    let off_app = crate::router::build_router(Arc::new(off));
+    let response = off_app
+        .clone()
+        .oneshot(
+            Request::post("/count")
+                .header(header::HOST, &required)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-Pubkey", keys.public_key().to_hex())
+                .body(Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Off ignores stored FI requirements"
+    );
+    let response = off_app
+        .oneshot(
+            Request::get("/info")
+                .header(header::HOST, &required)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(doc["requires_nip_fi"], false);
     // Policy read overhead: 100 serial, uncached reads, measured by the real source.
     let start = std::time::Instant::now();
     for _ in 0..100 {
@@ -427,7 +472,8 @@ async fn remapped_host_uses_one_policy_tenant_for_query_and_discovery() {
         .insert(host.clone(), (old.id, std::time::Instant::now()));
     let mut state = (*base).clone();
     let config = Arc::make_mut(&mut state.config);
-    config.nip_fi.mode = NipFiMode::Off;
+    // Stored requirements and primary policy binding apply in evaluating modes.
+    config.nip_fi.mode = NipFiMode::Shadow;
     config.require_relay_membership = true;
     config.require_auth_token = true;
     config.relay_url = "wss://relay.example".into();
