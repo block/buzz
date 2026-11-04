@@ -1,19 +1,25 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'community_link_focus.dart';
 import '../../shared/widgets/ios_community_link_input.dart';
+
 import 'dart:async';
+
 import '../../shared/hosted/hosted_flow_provider.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_community_creation.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/hosted/hosted_flow_problem_message.dart';
+
 import 'dart:math' show sqrt2;
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+
 import '../../shared/widgets/frosted_app_bar.dart';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/gestures.dart';
@@ -316,7 +322,7 @@ class PairingPage extends HookConsumerWidget {
                 ref.read(pendingDeepLinkProvider.notifier).open(uri);
               },
               onSubmitPairing: (code) => unawaited(handleScannerResult(code)),
-              accountStatus: signedInOnboarding ? null : accountStatus,
+              accountStatus: accountStatus,
               busy:
                   isBusy ||
                   builderlabBusy ||
@@ -426,12 +432,46 @@ class PairingPage extends HookConsumerWidget {
 
     final appSurface = PopScope(
       key: const Key('pairing-pop-scope'),
+      canPop: !showLoading,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop && pairingState.status != PairingStatus.success) {
           ref.read(pairingProvider.notifier).reset();
         }
       },
-      child: pairingScaffold,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ExcludeFocus(
+            excluding: pairingState.status == PairingStatus.connecting,
+            child: Offstage(
+              offstage: pairingState.status == PairingStatus.connecting,
+              child: pairingScaffold,
+            ),
+          ),
+          if (pairingState.status == PairingStatus.connecting)
+            const CommunityLoadingSurface(
+              key: Key('pairing-community-loading'),
+            ),
+          if (pairingState.status == PairingStatus.connecting)
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: Material(
+                  color: Colors.transparent,
+                  child: TextButton(
+                    onPressed: () {
+                      ref.read(pairingProvider.notifier).reset();
+                      if (identityRecoveryOnly) {
+                        Navigator.of(context).pop();
+                      }
+                    },
+                    child: const Text('Cancel'),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
 
     if (!fallbackScannerVisible.value) {

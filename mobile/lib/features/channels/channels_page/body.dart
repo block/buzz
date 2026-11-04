@@ -285,7 +285,7 @@ class _SliverChannelsList extends HookConsumerWidget {
 
         final seeds = <String, int>{};
         for (final channel in visibleChannels) {
-          if (readState.effectiveTimestamp(channel.id) != null) {
+          if (readState.contexts.containsKey(channel.id)) {
             continue;
           }
 

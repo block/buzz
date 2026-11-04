@@ -6029,6 +6029,46 @@ void main() {
     },
   );
 
+  test('concurrent window pagination shares one page request', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'head', createdAt: 20),
+          _bounds(hasMore: true, cursorCreatedAt: 20, cursorId: 'head'),
+        ],
+        [
+          _event(id: 'older', createdAt: 10),
+          _bounds(dTag: '${_channelId.toLowerCase()}:20:head'),
+        ],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    final queriesBefore = relaySession.queryFilters.length;
+    final results = await Future.wait([
+      notifier.fetchOlder(),
+      notifier.fetchOlder(),
+    ]);
+
+    expect(results, [isTrue, isTrue]);
+    expect(relaySession.queryFilters.length - queriesBefore, 1);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['older', 'head'],
+    );
+  });
+
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [

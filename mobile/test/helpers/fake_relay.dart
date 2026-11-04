@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay_query_response.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/misc.dart';
@@ -48,6 +49,7 @@ class FakeRelay {
   Completer<void>? _echoHold;
   Completer<void>? _reqHold;
   Completer<void>? _authHold;
+  Completer<void>? _queryHold;
   final DateTime Function()? _now;
 
   String get pubkey => keys.public;
@@ -61,6 +63,7 @@ class FakeRelay {
       response.bodyBytes,
       response.headers['content-type'],
     ),
+    snapshotDecoder: (input) async => validateReadStateSnapshot(input),
     now: _now,
     random: _MidpointRandom(),
   );
@@ -144,6 +147,9 @@ class FakeRelay {
   /// would: they read stored events, start live fan-out and reach EOSE only
   /// once admitted. Events committed meanwhile reach them only through replay.
   Completer<void> holdReq() => _reqHold = Completer<void>();
+
+  /// Holds HTTP queries until the completer completes, as a slow relay would.
+  Completer<void> holdQuery() => _queryHold = Completer<void>();
 
   /// Keeps the next connection unauthenticated until the completer completes.
   /// Like the relay, it answers a REQ sent before AUTH with CLOSED.
@@ -337,6 +343,15 @@ class FakeRelay {
   }
 
   Future<http.Response> _handleHttp(http.Request request) async {
+    const community = 'abcdabcd-eeee-abcd-abcd-abcdefabcdef';
+    if (request.method == 'GET' && request.url.path == '/') {
+      return http.Response(
+        jsonEncode({
+          'read_state_snapshot': {'version': 1, 'community_id': community},
+        }),
+        200,
+      );
+    }
     if (request.method != 'POST' ||
         request.url.path != '/query' ||
         request.headers['Authorization'] == null) {
@@ -346,9 +361,41 @@ class FakeRelay {
     final filters = (jsonDecode(request.body) as List)
         .cast<Map<String, dynamic>>();
     queries.add(filters);
+    final hold = _queryHold;
+    if (hold != null) {
+      await hold.future;
+      if (identical(_queryHold, hold)) _queryHold = null;
+    }
     final failure = _queryFailures.indexWhere((f) => filters.any(f.match));
     if (failure >= 0) {
       return http.Response(_queryFailures.removeAt(failure).body, 503);
+    }
+    if (filters.length == 1 && filters.single['read_state_snapshot'] == 1) {
+      expect(filters.single, {
+        'kinds': [30078],
+        'authors': [pubkey],
+        'read_state_snapshot': 1,
+      });
+      // Atomic snapshots retain one NIP-33 head per coordinate, including
+      // unrelated own kind-30078 state, without a time or result-count cap.
+      final heads = <String, NostrEvent>{};
+      final own =
+          stored.where((e) => e.kind == 30078 && e.pubkey == pubkey).toList()
+            ..sort(_newestFirst);
+      for (final event in own) {
+        heads.putIfAbsent(event.getTagValue('d') ?? '', () => event);
+      }
+      return http.Response(
+        jsonEncode({
+          'read_state_snapshot': 1,
+          'complete': true,
+          'community_id': community,
+          'pubkey': pubkey,
+          'snapshot_id': 'a' * 64,
+          'events': [for (final e in heads.values) e.toJson()],
+        }),
+        200,
+      );
     }
     final events = filters.length == 1 && filters.single['top_level'] == true
         ? _channelWindow(filters.single)

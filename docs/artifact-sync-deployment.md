@@ -1,8 +1,8 @@
 # Incremental artifact reads deployment
 
 Incremental artifact reads use a 120-second overlap and database modification
-timestamps. `BUZZ_ARTIFACT_INCREMENTAL_ENABLED` is off by default. Enable it only
-after the schema, indexes, and every serving writer are upgraded.
+timestamps. The schema, indexes, and every serving writer must support
+incremental reads.
 
 ## Schema and indexes
 
@@ -49,22 +49,11 @@ After all index builds succeed, run `buzz-admin migrate` with the target
 then verifies and records `0078`. Direct SQL application does not record the
 migration ledger.
 
-## Enable and rollback
+## Serving fleet
 
-Deploy the timestamp writers to every relay instance with the gate off.
-Drain the old writers. All instances must use the same configured relay
-signing key, because that key authenticates the progress tokens. Then enable
-`BUZZ_ARTIFACT_INCREMENTAL_ENABLED=true` on the serving fleet. NIP-11 advertises
-`artifacts.incremental` only when the gate is enabled. The endpoint refuses incremental
-requests while the gate is off.
-
-Before a rollback to an old writer, disable the gate on every serving
-instance. Before enabling it again, upgrade every writer and advance
-`communities.artifact_policy_modified_at` for each affected active community
-in a reviewed maintenance transaction under community deletion admission.
-This forces clients to discover current records and revalidate saved IDs.
-No local absence scan is permitted.
+All instances must use the same configured relay signing key, because that key
+authenticates the progress tokens. NIP-11 advertises `artifacts.incremental`.
+Every serving writer must maintain the modification timestamps.
 
 The 120-second stamp-to-visibility bound remains an operating assumption.
-Runtime measurements are tracked separately. This PR does not authorize
-a deployment or a production maintenance write.
+Runtime measurements are tracked separately.

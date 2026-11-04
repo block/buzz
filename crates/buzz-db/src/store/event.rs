@@ -552,7 +552,7 @@ pub(crate) async fn query_events_with_operation(
         return answer;
     }
     let mut conn = crate::observability::acquire_writer(pool, operation).await?;
-    query_events_on(&mut conn, q).await
+    query_events_on(&mut conn, q, ReadDeadline::PerRead).await
 }
 
 /// [`query_events`] on a specific session — the replica-routing path runs
@@ -561,13 +561,14 @@ pub(crate) async fn query_events_with_operation(
 pub(crate) async fn query_events_on(
     conn: &mut sqlx::PgConnection,
     q: &EventQuery,
+    deadline: ReadDeadline,
 ) -> Result<Vec<StoredEvent>> {
     if let Some(answer) = answer_without_db(q) {
         return answer;
     }
 
     let mut qb = build_query_events_sql(q);
-    let rows = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q)).await?;
+    let rows = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q), deadline).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -671,31 +672,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown. Access-scope queries retain global events;
-    // explicit multi-value #h filters do not.
-    //
-    // SECURITY: Some(empty vec) means "match no channels". Access-scope
-    // queries still retain globals; explicit #h queries match nothing.
-    if let Some(ref ch_ids) = q.channel_ids {
-        if ch_ids.is_empty() {
-            if q.channel_ids_include_global {
-                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-            } else {
-                qb.push(" AND FALSE");
-            }
-        } else {
-            qb.push(" AND (");
-            if q.channel_ids_include_global {
-                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
-            }
-            qb.push(format!("{col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
-            qb.push("))");
-        }
-    }
+    push_channel_scope(&mut qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -877,6 +854,14 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
     }
 }
 
+/// [`READ_STATEMENT_TIMEOUT`] as a literal, so [`BEGIN_WITH_READ_DEADLINE_SQL`]
+/// can splice it into a static statement.
+macro_rules! read_statement_timeout {
+    () => {
+        "20s"
+    };
+}
+
 /// Server-side deadline for every generic event read ([`query_events_on`] and
 /// [`count_events_on`]: REQ history, `/query`, `/count`, aux closures), kept
 /// under the desktop's 30 s request timeout so a runaway query is cancelled
@@ -884,7 +869,7 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
 /// effective `statement_timeout`: a shorter operator or caller cap is kept,
 /// and a disabled (`0`) or longer one is lowered to 20 s. The limit is per
 /// statement, not per request.
-pub const READ_STATEMENT_TIMEOUT: &str = "20s";
+pub const READ_STATEMENT_TIMEOUT: &str = read_statement_timeout!();
 
 /// Lower `statement_timeout` to `$1` unless it is already tighter; `$2`
 /// selects transaction-local (`true`) or session (`false`) scope.
@@ -893,22 +878,78 @@ pub(crate) const TIGHTEN_STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('state
             OR current_setting('statement_timeout')::interval > $1::text::interval \
           THEN $1::text ELSE current_setting('statement_timeout') END, $2)";
 
+/// `BEGIN` plus the [`TIGHTEN_STATEMENT_TIMEOUT_SQL`] tighten to
+/// [`READ_STATEMENT_TIMEOUT`], transaction-local, as one simple-query message:
+/// one round trip instead of two.
+const BEGIN_WITH_READ_DEADLINE_SQL: &str = concat!(
+    "BEGIN; SELECT set_config('statement_timeout', \
+     CASE WHEN current_setting('statement_timeout')::interval = interval '0' \
+            OR current_setting('statement_timeout')::interval > interval '",
+    read_statement_timeout!(),
+    "' THEN '",
+    read_statement_timeout!(),
+    "' ELSE current_setting('statement_timeout') END, true)"
+);
+
+/// How an event read runs under [`READ_STATEMENT_TIMEOUT`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadDeadline {
+    /// The session already runs under it: every reader-pool connection
+    /// tightens its session `statement_timeout` once, at connect (see
+    /// `Db::read_pool_options`), so the read skips the tighten.
+    Session,
+    /// Tighten it for this read only, as writer sessions run under a longer
+    /// timeout of their own.
+    PerRead,
+}
+
+/// Lower `conn`'s session `statement_timeout` to [`READ_STATEMENT_TIMEOUT`]
+/// unless it is already tighter. For pools whose every statement is a read:
+/// run it once per new connection (`after_connect`), so no statement on that
+/// pool is unbounded.
+pub async fn tighten_session_read_statement_timeout(
+    conn: &mut sqlx::PgConnection,
+) -> sqlx::Result<()> {
+    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+        .bind(READ_STATEMENT_TIMEOUT)
+        .bind(false)
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
 /// Run an event read under [`READ_STATEMENT_TIMEOUT`] without changing the
-/// deadline for anything else on `conn`. `begin()` opens a transaction on an
-/// autocommit writer connection or a savepoint inside the replica's read
-/// transaction; rolling it back (the read has no writes to keep) reverts the
-/// transaction-local `set_config` in both cases.
+/// deadline for anything else on `conn`. Inside an open transaction the read
+/// takes a savepoint, so a failed or cancelled read leaves the transaction
+/// usable and the read's locks are released when it ends. With
+/// [`ReadDeadline::PerRead`] the savepoint tightens the deadline, and an
+/// autocommit connection opens a transaction whose `BEGIN` carries the
+/// transaction-local tighten. Rolling either back (the read has no writes to
+/// keep) reverts the tighten.
 async fn fetch_with_read_deadline(
     conn: &mut sqlx::PgConnection,
     qb: &mut QueryBuilder<sqlx::Postgres>,
     persistent: bool,
+    deadline: ReadDeadline,
 ) -> Result<Vec<sqlx::postgres::PgRow>> {
-    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
-        .bind(READ_STATEMENT_TIMEOUT)
-        .bind(true)
-        .execute(&mut *tx)
-        .await?;
+    use sqlx::Connection as _;
+    let mut tx = match (conn.is_in_transaction(), deadline) {
+        (false, ReadDeadline::Session) => {
+            return Ok(qb.build().persistent(persistent).fetch_all(conn).await?);
+        }
+        (false, ReadDeadline::PerRead) => conn.begin_with(BEGIN_WITH_READ_DEADLINE_SQL).await?,
+        (true, _) => {
+            let mut tx = conn.begin().await?;
+            if deadline == ReadDeadline::PerRead {
+                sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+                    .bind(READ_STATEMENT_TIMEOUT)
+                    .bind(true)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx
+        }
+    };
     let rows = qb
         .build()
         .persistent(persistent)
@@ -971,6 +1012,38 @@ fn push_tag_value_filters(
         qb.push(" AND ");
         push_exact_tag_match(qb, col_prefix, name, values);
     }
+}
+
+/// AND the [`EventQuery::channel_ids`] scope, before `LIMIT`. Access-scope
+/// queries retain channel-less global events; explicit multi-value `#h`
+/// filters do not.
+///
+/// SECURITY: `Some(empty vec)` means "match no channels": access-scope queries
+/// still retain globals, explicit `#h` queries match nothing.
+///
+/// The set is one array bind, so a viewer's channel count does not change the
+/// SQL text. One `IN ($n, …)` bind per channel made a new statement for every
+/// arity, so a read rarely reused its cached plan and was planned again on
+/// each call, over every `events` partition when it has no `since`.
+fn push_channel_scope(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    let Some(ref ch_ids) = q.channel_ids else {
+        return;
+    };
+    if ch_ids.is_empty() {
+        if q.channel_ids_include_global {
+            qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+        } else {
+            qb.push(" AND FALSE");
+        }
+        return;
+    }
+    qb.push(" AND (");
+    if q.channel_ids_include_global {
+        qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+    }
+    qb.push(format!("{col_prefix}channel_id = ANY("))
+        .push_bind(ch_ids.clone())
+        .push("))");
 }
 
 /// Return only membership notices whose channel type the query may see
@@ -1091,13 +1164,17 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
         crate::observability::WriterOperation::SubscriptionHistory,
     )
     .await?;
-    count_events_on(&mut conn, q).await
+    count_events_on(&mut conn, q, ReadDeadline::PerRead).await
 }
 
 /// [`count_events`] on a specific session — the replica-routing path runs
 /// the count on the exact reader connection whose heartbeat observation
 /// proved its predicate.
-pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuery) -> Result<i64> {
+pub(crate) async fn count_events_on(
+    conn: &mut sqlx::PgConnection,
+    q: &EventQuery,
+    deadline: ReadDeadline,
+) -> Result<i64> {
     // Empty list means "match nothing" — return 0 immediately.
     if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
         return Ok(0);
@@ -1115,7 +1192,7 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
     // stall indefinitely either.
-    let row = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q))
+    let row = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q), deadline)
         .await?
         .into_iter()
         .next()
@@ -1157,28 +1234,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown for COUNT. Access-scope queries retain global
-    // events; explicit multi-value #h filters do not.
-    if let Some(ref ch_ids) = q.channel_ids {
-        if ch_ids.is_empty() {
-            if q.channel_ids_include_global {
-                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-            } else {
-                qb.push(" AND FALSE");
-            }
-        } else {
-            qb.push(" AND (");
-            if q.channel_ids_include_global {
-                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
-            }
-            qb.push(format!("{col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
-            qb.push("))");
-        }
-    }
+    push_channel_scope(&mut qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -1453,6 +1509,18 @@ async fn purge_retention_free_events(
     };
 
     Ok(purged as u64)
+}
+
+/// An event a NIP-09 (kind 5) or NIP-29 (kind 9005) deletion soft-deletes in
+/// the deletion's own insert transaction, with the thread it belongs to.
+#[derive(Clone, Copy, Debug)]
+pub struct DeletionTarget<'a> {
+    /// The event to soft-delete.
+    pub event_id: &'a [u8],
+    /// Its direct parent, whose `reply_count` drops when it is deleted.
+    pub parent_event_id: Option<&'a [u8]>,
+    /// Its thread root, whose `descendant_count` drops when it is deleted.
+    pub root_event_id: Option<&'a [u8]>,
 }
 
 /// Atomically soft-delete an event and decrement thread reply counters.
@@ -2379,7 +2447,9 @@ impl Db {
             .await
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::query_events_on(&mut tx, q).await {
+                match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
+                    .await
+                {
                     Ok(events) => {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
@@ -2441,7 +2511,9 @@ impl Db {
             .await
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::query_events_on(&mut tx, q).await {
+                match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
+                    .await
+                {
                     Ok(events) => {
                         Self::record_route(path, "replica", reason);
                         Ok(events)
@@ -2505,7 +2577,9 @@ impl Db {
             .await
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::count_events_on(&mut tx, q).await {
+                match crate::event::count_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
+                    .await
+                {
                     Ok(count) => {
                         Self::record_route(path, "replica", reason);
                         Ok(count)
@@ -2831,6 +2905,57 @@ impl Db {
         Ok(result)
     }
 
+    /// Store a kind 5 / 9005 deletion and soft-delete its `targets` in one
+    /// transaction, so an accepted deletion never leaves its target live.
+    ///
+    /// The targets are soft-deleted even when the deletion is a duplicate, so
+    /// resending a deletion repairs a target an earlier write left live. Ingest
+    /// accepts the resend only within its timestamp window, so this does not
+    /// repair older rows.
+    /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
+    /// tells whether `targets[i]` was soft-deleted by this call.
+    #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
+    pub async fn insert_deletion_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+        targets: &[crate::event::DeletionTarget<'_>],
+    ) -> Result<(StoredEvent, bool, Vec<bool>)> {
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            channel_id,
+            thread_meta,
+        )
+        .await?;
+        if inserted {
+            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
+        }
+        let mut deleted = Vec::with_capacity(targets.len());
+        for target in targets {
+            deleted.push(
+                crate::event::soft_delete_event_and_update_thread_in_tx(
+                    &mut tx,
+                    target.event_id,
+                    target.parent_event_id,
+                    target.root_event_id,
+                )
+                .await?,
+            );
+        }
+        tx.commit().await?;
+        Ok((stored, inserted, deleted))
+    }
+
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
     #[datastore_span(name = "soft_delete_discovery_events", system = "postgresql")]
     pub async fn soft_delete_discovery_events(
@@ -2949,6 +3074,40 @@ mod e_tag_filter_shape_tests {
         assert!(!unbounded.contains("m.event_created_at <="));
         assert!(!unbounded.contains("m.event_kind"));
     }
+
+    /// The channel scope is one array bind: a viewer's channel count must not
+    /// change the SQL text, or each count is its own statement that is planned
+    /// again on every call. Holds for the `#p` join and plain reads, for
+    /// access scope and explicit `#h`, in both the page SELECT and the COUNT.
+    #[test]
+    fn channel_scope_sql_does_not_depend_on_channel_count() {
+        let sql = |p_tag: bool, include_global: bool, n: usize| {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.p_tag_hex = p_tag.then(|| "ab".repeat(32));
+            q.kinds = Some(vec![9]);
+            q.channel_ids = Some((0..n).map(|_| uuid::Uuid::new_v4()).collect());
+            q.channel_ids_include_global = include_global;
+            (
+                build_query_events_sql(&q).sql().as_str().to_owned(),
+                count_events_sql(&q).sql().as_str().to_owned(),
+            )
+        };
+        for p_tag in [true, false] {
+            for include_global in [true, false] {
+                let one = sql(p_tag, include_global, 1);
+                assert_eq!(one, sql(p_tag, include_global, 40));
+                for text in [&one.0, &one.1] {
+                    assert!(text.contains("channel_id = ANY($"), "{text}");
+                    assert!(!text.contains("channel_id IN ("), "{text}");
+                    assert_eq!(
+                        text.contains("channel_id IS NULL OR "),
+                        include_global,
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3023,31 +3182,140 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let mut conn = pool.acquire().await.expect("acquire");
-        sqlx::query("DEALLOCATE ALL")
-            .execute(&mut *conn)
+        // Clear SQLx's statement cache and Postgres's prepared statements
+        // together; a raw `DEALLOCATE ALL` would leave the client cache
+        // pointing at statements the server no longer has.
+        sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
         let mut q = EventQuery::for_community(community);
         q.kinds = Some(vec![39000]);
         q.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
         for _ in 0..6 {
-            query_events_on(&mut conn, &q).await.expect("label query");
-            count_events_on(&mut conn, &q).await.expect("label count");
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("label query");
+            count_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("label count");
         }
         assert_eq!(prepared_like(&mut conn, "%tags @> ANY(%").await, 0);
 
         // Control: the same query without a tag match stays a cached statement,
         // so the check above can see one.
         q.tag_values.clear();
-        query_events_on(&mut conn, &q).await.expect("plain query");
+        query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+            .await
+            .expect("plain query");
         assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
+    }
+
+    /// Access-scoped `#p` reads for viewers with different channel counts
+    /// share one cached statement on a connection, so Postgres can keep its
+    /// plan instead of planning every read again. Every scope, empty included,
+    /// still returns and counts exactly its own rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_scoped_mention_reads_share_one_prepared_statement() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let mut channels = Vec::new();
+        for _ in 0..3 {
+            channels.push(make_test_channel(&pool, community_uuid, None).await);
+        }
+        let mut conn = pool.acquire().await.expect("acquire");
+        // Clear SQLx's statement cache and Postgres's prepared statements
+        // together; a raw `DEALLOCATE ALL` would leave the client cache
+        // pointing at statements the server no longer has.
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        for n in 1..=channels.len() {
+            let q = EventQuery {
+                kinds: Some(vec![9]),
+                p_tag_hex: Some("ab".repeat(32)),
+                channel_ids: Some(channels[..n].to_vec()),
+                ..EventQuery::for_community(community)
+            };
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+                .await
+                .expect("mention read");
+        }
+        assert_eq!(
+            prepared_like(&mut conn, "%JOIN event_mentions%").await,
+            1,
+            "one statement for every channel count"
+        );
+        drop(conn);
+
+        // The array bind keeps each scope's rows: one mention of the target in
+        // each scoped channel, one global, and one in a channel no scope names.
+        let db = crate::Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let target = "ab".repeat(32);
+        let mention = |content: String| {
+            EventBuilder::new(Kind::Custom(9), content)
+                .tags([Tag::parse(["p", target.as_str()]).expect("p tag")])
+                .sign_with_keys(&author)
+                .expect("sign mention")
+        };
+        let mut in_channel = Vec::new();
+        for (i, channel) in channels.iter().enumerate() {
+            let event = mention(format!("in channel {i}"));
+            db.insert_event(community, &event, Some(*channel))
+                .await
+                .expect("insert channel mention");
+            in_channel.push(event.id);
+        }
+        let global = mention("global".into());
+        db.insert_event(community, &global, None)
+            .await
+            .expect("insert global mention");
+        let outside_channel = make_test_channel(&pool, community_uuid, None).await;
+        db.insert_event(community, &mention("outside".into()), Some(outside_channel))
+            .await
+            .expect("insert out-of-scope mention");
+
+        for n in 0..=channels.len() {
+            for include_global in [true, false] {
+                let q = EventQuery {
+                    kinds: Some(vec![9]),
+                    p_tag_hex: Some(target.clone()),
+                    channel_ids: Some(channels[..n].to_vec()),
+                    channel_ids_include_global: include_global,
+                    ..EventQuery::for_community(community)
+                };
+                let mut expected = in_channel[..n].to_vec();
+                if include_global {
+                    expected.push(global.id);
+                }
+                expected.sort();
+                let mut page: Vec<_> = query_events(&pool, &q)
+                    .await
+                    .expect("mention page")
+                    .into_iter()
+                    .map(|stored| stored.event.id)
+                    .collect();
+                page.sort();
+                assert_eq!(
+                    page, expected,
+                    "{n} channels, include_global={include_global}: page"
+                );
+                assert_eq!(
+                    count_events(&pool, &q).await.expect("mention count"),
+                    expected.len() as i64,
+                    "{n} channels, include_global={include_global}: count"
+                );
+            }
+        }
     }
 
     /// Effective `statement_timeout` observed *inside* the read deadline, and
     /// the value restored on `conn` afterwards.
     async fn deadline_inside_and_after(conn: &mut sqlx::PgConnection) -> (String, String) {
         let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
-        let rows = fetch_with_read_deadline(conn, &mut qb, true)
+        let rows = fetch_with_read_deadline(conn, &mut qb, true, ReadDeadline::PerRead)
             .await
             .expect("deadline read");
         let inside: String = rows[0].get(0);
@@ -3244,7 +3512,7 @@ mod postgres_tests {
             .expect("set session timeout");
         // Autocommit connection (writer path).
         let mut qb = QueryBuilder::new("SELECT 1/0");
-        let err = fetch_with_read_deadline(&mut conn, &mut qb, true).await;
+        let err = fetch_with_read_deadline(&mut conn, &mut qb, true, ReadDeadline::PerRead).await;
         assert!(err.is_err(), "division by zero must fail");
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *conn)
@@ -3256,7 +3524,7 @@ mod postgres_tests {
         // the failed savepoint must roll back and leave the outer tx usable.
         let mut tx = sqlx::Connection::begin(&mut *conn).await.expect("begin");
         let mut qb = QueryBuilder::new("SELECT 1/0");
-        let err = fetch_with_read_deadline(&mut tx, &mut qb, true).await;
+        let err = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::PerRead).await;
         assert!(err.is_err(), "division by zero must fail");
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *tx)
@@ -3268,6 +3536,47 @@ mod postgres_tests {
             .execute(&mut *conn)
             .await
             .expect("reset");
+    }
+
+    /// Inside a replica read session's transaction, `ReadDeadline::Session`
+    /// skips the tighten (the reader pool installs the deadline at connect)
+    /// but still reads under a savepoint, so the read's locks end with it and
+    /// a later DDL on the replica is not blocked by an idle session.
+    /// `PerRead` in the same transaction still tightens.
+    /// Mutation: tighten for `Session`, or drop its savepoint → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn session_deadline_reads_skip_the_tighten_and_release_locks() {
+        let pool = setup_pool().await;
+        let mut tx = pool.begin().await.expect("begin session");
+        sqlx::query("SET LOCAL statement_timeout = '1min'")
+            .execute(&mut *tx)
+            .await
+            .expect("set session timeout");
+        let mut qb = QueryBuilder::new(
+            "SELECT current_setting('statement_timeout'), (SELECT count(*) FROM events)",
+        );
+        let rows = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::Session)
+            .await
+            .expect("session read");
+        let inside: String = rows[0].get(0);
+        assert_eq!(inside, "1min", "Session must not tighten");
+        let held: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks \
+             WHERE pid = pg_backend_pid() AND relation = 'events'::regclass",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("count locks");
+        assert_eq!(held, 0, "a Session read must release its locks");
+
+        let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
+        let rows = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::PerRead)
+            .await
+            .expect("per-read read");
+        let inside: String = rows[0].get(0);
+        assert_eq!(inside, READ_STATEMENT_TIMEOUT, "PerRead tightens");
+        tx.rollback().await.expect("rollback");
     }
 
     /// Pins the dispatch: a plain (non-`#e`) read — the agent `#p` + `#h` +
@@ -3298,7 +3607,7 @@ mod postgres_tests {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(40),
-            query_events_on(&mut conn, &q),
+            query_events_on(&mut conn, &q, ReadDeadline::PerRead),
         )
         .await
         .expect("deadline must fire before the 40 s guard");
@@ -3338,7 +3647,7 @@ mod postgres_tests {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(40),
-            count_events_on(&mut conn, &q),
+            count_events_on(&mut conn, &q, ReadDeadline::PerRead),
         )
         .await
         .expect("deadline must fire before the 40 s guard");
@@ -5472,6 +5781,157 @@ mod postgres_tests {
             thread_meta_count, 0,
             "thread metadata must not persist when mention indexing fails atomically"
         );
+    }
+
+    async fn target_deleted_at(pool: &PgPool, community: Uuid, id: &[u8]) -> Option<DateTime<Utc>> {
+        sqlx::query_scalar("SELECT deleted_at FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read target deleted_at")
+    }
+
+    async fn event_count(pool: &PgPool, community: Uuid, id: &[u8]) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count event rows")
+    }
+
+    fn deletion_of(target: &nostr::Event) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(5), "")
+            .tags(vec![Tag::parse(["e", &target.id.to_hex()]).expect("e tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign deletion")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_deletion_event_target_failure_stores_nothing_and_resend_applies() {
+        let (pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "deletion_target_rollback",
+        )
+        .await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let reaction = make_event_with_kind_and_tags(7, vec![]);
+        db.insert_event(community, &reaction, Some(channel))
+            .await
+            .expect("insert reaction");
+        let deletion = deletion_of(&reaction);
+        let targets = [DeletionTarget {
+            event_id: reaction.id.as_bytes(),
+            parent_event_id: None,
+            root_event_id: None,
+        }];
+
+        sqlx::query(
+            "CREATE FUNCTION reject_test_soft_delete() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected soft-delete failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_soft_delete BEFORE UPDATE ON events \
+             FOR EACH ROW WHEN (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL) \
+             EXECUTE FUNCTION reject_test_soft_delete()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure injection");
+
+        let error = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect_err("a failed target soft-delete must fail the deletion");
+        assert!(
+            error.to_string().contains("injected soft-delete failure"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            event_count(&pool, community_uuid, deletion.id.as_bytes()).await,
+            0,
+            "the deletion must not be stored while its target stays live"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_none(),
+            "the failed transaction must leave the target as it was"
+        );
+
+        sqlx::query("DROP TRIGGER reject_test_soft_delete ON events")
+            .execute(&pool)
+            .await
+            .expect("remove failure injection");
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend after the failure clears");
+        assert!(inserted, "the resend stores the deletion");
+        assert_eq!(deleted, vec![true]);
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_deletion_event_resend_repairs_a_live_target() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let reaction = make_event_with_kind_and_tags(7, vec![]);
+        db.insert_event(community, &reaction, Some(channel))
+            .await
+            .expect("insert reaction");
+        // A deletion stored by a write that never soft-deleted its target.
+        let deletion = deletion_of(&reaction);
+        db.insert_event(community, &deletion, Some(channel))
+            .await
+            .expect("insert torn deletion");
+        let targets = [DeletionTarget {
+            event_id: reaction.id.as_bytes(),
+            parent_event_id: None,
+            root_event_id: None,
+        }];
+
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend the deletion");
+        assert!(!inserted, "the deletion was already stored");
+        assert_eq!(
+            deleted,
+            vec![true],
+            "the resend soft-deletes the live target"
+        );
+        assert!(
+            target_deleted_at(&pool, community_uuid, reaction.id.as_bytes())
+                .await
+                .is_some()
+        );
+
+        let (_, inserted, deleted) = db
+            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .await
+            .expect("resend again");
+        assert!(!inserted);
+        assert_eq!(deleted, vec![false], "an applied deletion changes nothing");
     }
 
     #[tokio::test]

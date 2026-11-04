@@ -146,7 +146,7 @@ class FakeRegistry extends BuilderlabAccountClient {
 
 /// Fakes only relay publication; registry logic stays real.
 class RelayFakeController extends RemoteAgentController {
-  RelayFakeController(FakeRegistry account)
+  RelayFakeController(FakeRegistry account, {super.onCreated})
     : super(
         account: account,
         keys: AccountIdentityStore(),

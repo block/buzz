@@ -95,7 +95,7 @@ class HomePage extends HookConsumerWidget {
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           (
-            label: 'Switch workspace',
+            label: 'Switch community',
             symbol: 'arrow.left.arrow.right',
             onPressed: openSwitcher,
           ),

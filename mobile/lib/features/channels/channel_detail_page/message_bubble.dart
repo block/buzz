@@ -186,15 +186,11 @@ class _MessageBubble extends HookConsumerWidget {
                         child: Padding(
                           padding: EdgeInsets.only(
                             right: ownMessage
-                                ? messageAvatarSize +
-                                      messageAvatarContentGap +
-                                      Grid.xxs
+                                ? messageAvatarSize + messageAvatarContentGap
                                 : 0,
                             left: ownMessage
                                 ? 0
-                                : messageAvatarSize +
-                                      messageAvatarContentGap +
-                                      Grid.xxs,
+                                : messageAvatarSize + messageAvatarContentGap,
                           ),
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -203,18 +199,24 @@ class _MessageBubble extends HookConsumerWidget {
                                 : CrossAxisAlignment.start,
                             children: [
                               if (message.reactions.isNotEmpty)
-                                ReactionRow(
-                                  combined: true,
-                                  messageId: message.id,
-                                  channelId: currentChannelId,
-                                  reactions: message.reactions,
-                                  onToggle: (emoji) =>
-                                      toggleReaction(ref, message, emoji),
-                                  showAddButton: isMember && !isArchived,
-                                  onAddReaction: () => showAddReactionPicker(
-                                    context: context,
-                                    ref: ref,
-                                    message: message,
+                                Padding(
+                                  padding: EdgeInsets.only(
+                                    right: ownMessage ? Grid.xxs : 0,
+                                    left: ownMessage ? 0 : Grid.xxs,
+                                  ),
+                                  child: ReactionRow(
+                                    combined: true,
+                                    messageId: message.id,
+                                    channelId: currentChannelId,
+                                    reactions: message.reactions,
+                                    onToggle: (emoji) =>
+                                        toggleReaction(ref, message, emoji),
+                                    showAddButton: isMember && !isArchived,
+                                    onAddReaction: () => showAddReactionPicker(
+                                      context: context,
+                                      ref: ref,
+                                      message: message,
+                                    ),
                                   ),
                                 ),
                               if (replyFooter != null)

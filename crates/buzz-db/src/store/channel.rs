@@ -1655,6 +1655,31 @@ pub async fn soft_delete_channel(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<bool> {
+    Ok(
+        soft_delete_channel_capturing_members(pool, community_id, channel_id)
+            .await?
+            .is_some(),
+    )
+}
+
+/// A deleted channel's type and the members active when it was deleted.
+#[derive(Debug, Clone)]
+pub struct DeletedChannel {
+    /// The channel's type, e.g. `stream`.
+    pub channel_type: String,
+    /// The pubkeys of its active members, oldest first.
+    pub members: Vec<Vec<u8>>,
+}
+
+/// [`soft_delete_channel`], also returning who was a member at the deletion's
+/// serialization point: read under the same membership lock, so a join either
+/// commits first and is included, or waits and is then refused. `None` when the
+/// channel was already deleted or never existed.
+pub async fn soft_delete_channel_capturing_members(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Option<DeletedChannel>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -1663,12 +1688,31 @@ pub async fn soft_delete_channel(
     .await?;
     let mut writer = match lock_channel_for_delete(&mut tx, channel_id).await {
         Ok(writer) => writer,
-        Err(DbError::ChannelNotFound(_)) => return Ok(false),
+        Err(DbError::ChannelNotFound(_)) => return Ok(None),
         Err(error) => return Err(error),
     };
+    let channel_type: String = sqlx::query_scalar(
+        "SELECT channel_type::text FROM channels WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(writer.tx.conn())
+    .await?;
+    let members: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL \
+         ORDER BY joined_at ASC",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(writer.tx.conn())
+    .await?;
     soft_delete_on(&mut writer).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(DeletedChannel {
+        channel_type,
+        members,
+    }))
 }
 
 async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
@@ -2059,6 +2103,16 @@ impl Db {
         channel_id: Uuid,
     ) -> Result<bool> {
         soft_delete_channel(&self.pool, community_id, channel_id).await
+    }
+
+    /// See [`soft_delete_channel_capturing_members`].
+    #[datastore_span(name = "soft_delete_channel_capturing_members", system = "postgresql")]
+    pub async fn soft_delete_channel_capturing_members(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<DeletedChannel>> {
+        soft_delete_channel_capturing_members(&self.pool, community_id, channel_id).await
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.
@@ -2846,6 +2900,84 @@ mod postgres_tests {
             .await
             .expect("members");
         assert_eq!(members.len(), 1, "only the first creator is a member");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn soft_delete_captures_members_at_its_serialization_point() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let early = random_pubkey();
+        let late = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "delete-captures-members",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        let channel_id = channel.id;
+
+        // Queue a join, then the delete, behind a held membership lock: the
+        // join is serialized before the delete, so the delete must see it.
+        let snapshot =
+            crate::channel_members::lock_member_snapshot(&pool, community, channel_id, &[9u8; 32])
+                .await
+                .expect("hold membership lock");
+        let join_pool = crate::test_support::named_pool("join-before-delete").await;
+        let early_key = early.clone();
+        let join = tokio::spawn(async move {
+            crate::channel_members::add_member(
+                &join_pool,
+                community,
+                channel_id,
+                &early_key,
+                MemberRole::Member,
+                None,
+            )
+            .await
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "join-before-delete").await;
+        let delete_pool = crate::test_support::named_pool("delete-after-join").await;
+        let delete = tokio::spawn(async move {
+            soft_delete_channel_capturing_members(&delete_pool, community, channel_id).await
+        });
+        crate::test_support::wait_for_lock_wait(&pool, "delete-after-join").await;
+        snapshot.release().await.expect("release membership lock");
+
+        join.await.expect("join task").expect("join before delete");
+        let deleted = delete
+            .await
+            .expect("delete task")
+            .expect("delete")
+            .expect("channel was live");
+        assert_eq!(deleted.channel_type, "stream");
+        assert_eq!(deleted.members, vec![owner, early]);
+
+        // A join after the delete is refused, so nobody is left un-notified.
+        assert!(crate::channel_members::add_member(
+            &pool,
+            community,
+            channel_id,
+            &late,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .is_err());
+        assert!(
+            soft_delete_channel_capturing_members(&pool, community, channel_id)
+                .await
+                .expect("second delete")
+                .is_none()
+        );
     }
 
     #[tokio::test]
