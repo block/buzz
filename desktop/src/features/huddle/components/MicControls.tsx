@@ -29,6 +29,12 @@ type MicControlsProps = {
   audioDevices: AudioInputDevice[];
   selectedDeviceId: string;
   onSelectDevice: (id: string) => void;
+  /**
+   * Called when the device picker opens. The device list is demand-driven
+   * (no `devicechange` listener), so opening the picker is the moment to
+   * refresh it.
+   */
+  onPickerOpen?: () => void;
   micGain: number;
   onGainChange: (value: number) => void;
 };
@@ -102,6 +108,7 @@ export function MicControls({
   audioDevices,
   selectedDeviceId,
   onSelectDevice,
+  onPickerOpen,
   micGain,
   onGainChange,
 }: MicControlsProps) {
@@ -138,7 +145,11 @@ export function MicControls({
       : null;
 
   return (
-    <Popover>
+    <Popover
+      onOpenChange={(open) => {
+        if (open) onPickerOpen?.();
+      }}
+    >
       <div
         className={cn(
           "flex items-center rounded-md",

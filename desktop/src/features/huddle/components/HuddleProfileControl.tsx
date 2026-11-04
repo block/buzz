@@ -42,6 +42,7 @@ export function HuddleProfileControl({
     leaveHuddle,
     micConnected,
     micGain,
+    refreshAudioDevices,
     selectedDeviceId,
     setMicGain,
     setSelectedDeviceId,
@@ -152,6 +153,7 @@ export function HuddleProfileControl({
           micGain={micGain}
           micLevel={micLevel}
           onGainChange={setMicGain}
+          onPickerOpen={refreshAudioDevices}
           onSelectDevice={setSelectedDeviceId}
           onSelectVoiceInputMode={setVoiceInputMode}
           onToggleMute={toggleMute}

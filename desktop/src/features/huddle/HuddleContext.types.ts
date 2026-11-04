@@ -28,6 +28,13 @@ export interface HuddleContextValue {
   audioDevices: AudioInputDevice[];
   selectedDeviceId: string;
   setSelectedDeviceId: (id: string) => void;
+  /**
+   * Demand-driven input-device re-enumeration (mic picker open, after
+   * getUserMedia). Never event-driven — a `devicechange`-fed enumeration is a
+   * self-sustaining FD leak on WebKitGTK; see
+   * docs/linux-media-device-enumeration-loop.md.
+   */
+  refreshAudioDevices: () => Promise<void>;
   micGain: number;
   setMicGain: (value: number) => void;
   outputDevices: { name: string; is_default: boolean }[];
