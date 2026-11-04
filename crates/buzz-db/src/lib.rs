@@ -110,7 +110,9 @@ pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use leader_lock::SessionLeader;
-pub use live_authorization::{LiveAuthorizationState, LiveAuthorizationTarget};
+pub use live_authorization::{
+    LiveAuthorizationState, LiveAuthorizationTarget, LIVE_AUTHORIZATION_QUERY_TIMEOUT,
+};
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
