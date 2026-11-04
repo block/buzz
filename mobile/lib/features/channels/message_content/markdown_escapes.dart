@@ -8,13 +8,16 @@ import 'link_normalizer.dart';
 /// form, so text the renderer shows without restoring it still reads right.
 /// An authored [_marker] becomes two markers, so authored text comes back from
 /// [unshieldMarkdownEscapes] unchanged.
+///
+/// A backslash inside an angle autolink such as `<https://e.com/a\>` is
+/// literal (CommonMark), so autolinks keep theirs and only double markers.
 String shieldMarkdownEscapes(String text) => _needsShield(text)
-    ? text.replaceAllMapped(
-        _escape,
-        (m) => m[1] == null
+    ? text.replaceAllMapped(_escape, (m) {
+        if (m[2] != null) return m[2]!.replaceAll(_marker, '$_marker$_marker');
+        return m[1] == null
             ? '$_marker$_marker'
-            : '$_marker${String.fromCharCode(_fullwidthOffset + m[1]!.codeUnitAt(0))}',
-      )
+            : '$_marker${String.fromCharCode(_fullwidthOffset + m[1]!.codeUnitAt(0))}';
+      })
     : text;
 
 /// [shieldMarkdownEscapes] applied outside inline and fenced code, where a
@@ -51,4 +54,7 @@ const _marker = '\u2060';
 // ASCII 0x21-0x7E to FULLWIDTH 0xFF01-0xFF5E.
 const _fullwidthOffset = 0xFEE0;
 // CommonMark: a backslash escapes any ASCII punctuation character.
-final _escape = RegExp(r'\\([!-/:-@\[-`{-~])|\u2060');
+// An escaped `\<` matches first, so it never opens an autolink.
+final _escape = RegExp(
+  r'\\([!-/:-@\[-`{-~])|(<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>)|\u2060',
+);

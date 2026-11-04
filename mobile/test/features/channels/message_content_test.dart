@@ -585,17 +585,17 @@ void main() {
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // A quoted fence ends with its quote, so later prose is parsed.
         ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
-        // Known limitation: gpt_markdown's raw-text fallback for this
-        // unclaimed strike skips inline components, so the stand-in shows.
-        // Its fullwidth form still reads as #.
-        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A strike spanning lines still restores its escapes.
+        ('~~a\nb \\#c~~', 'b #c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
         (r'*https://example.com/a\**', '*'),
         (r'see \<https://example.com/b>', 'see <'),
         (r'see \https://example.com/c', r'see \'),
-        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        // Stays one autolink. gpt_markdown 1.3.4 drops the backslash before
+        // `>` (CommonMark keeps it), so the link ends at `a`.
+        (r'see <https://example.com/a\>', 'see https://example.com/a'),
         (
           '![shot \\#1](https://example.com/a.png)\n'
               '![shot \\#2](https://example.com/b.png)',
@@ -615,7 +615,7 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
-          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          if (content.contains('\u2060')) continue;
           expect(
             find.textContaining(
               RegExp('\u2060|\\]\\(http'),
