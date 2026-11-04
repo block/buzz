@@ -8,28 +8,39 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Serve explicit artifact queries; `None` leaves the request to the generic
-/// path (including existing extensions such as `#buzz-channel`).
+/// path (including existing extensions such as `#buzz-channel`). `routed`
+/// runs once the request is known to be an artifact read, before any of its
+/// work awaits, so a request dropped mid-read is still described.
 pub(super) async fn query(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &nostr::PublicKey,
     filters: &[Value],
     count: bool,
+    routed: impl FnOnce(),
 ) -> Option<Result<Json<Value>, (StatusCode, Json<Value>)>> {
-    let mut artifact = false;
+    let mut artifact = Ok(false);
     for filter in filters {
         match route_filter(filter) {
             FilterRoute::Generic => {}
-            FilterRoute::Artifact => artifact = true,
+            FilterRoute::Artifact => artifact = Ok(true),
             FilterRoute::Rejected(reason) => {
-                return Some(Err(api_error(StatusCode::BAD_REQUEST, reason)))
+                artifact = Err(reason);
+                break;
             }
         }
     }
-    if !artifact {
-        return None;
+    match artifact {
+        Ok(false) => None,
+        Ok(true) => {
+            routed();
+            Some(execute(state, tenant, reader, filters, count).await)
+        }
+        Err(reason) => {
+            routed();
+            Some(Err(api_error(StatusCode::BAD_REQUEST, reason)))
+        }
     }
-    Some(execute(state, tenant, reader, filters, count).await)
 }
 
 async fn execute(

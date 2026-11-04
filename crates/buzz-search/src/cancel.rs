@@ -57,13 +57,15 @@ pub const CANCEL_SQL: &str = concat!(
     " = $2"
 );
 
-/// Run `query` on a connection from `pool`, cancelling its statement on the
-/// server if the returned future is dropped before it completes.
+/// Run `query` on `conn`, a connection from `pool`, cancelling its statement
+/// on the server if the returned future is dropped before it completes.
+/// Callers pass the connection so earlier steps of the same search reuse one
+/// pool checkout.
 pub(crate) async fn fetch_all(
     pool: &PgPool,
+    mut conn: PoolConnection<Postgres>,
     query: Query<'_, Postgres, PgArguments>,
 ) -> Result<Vec<PgRow>, sqlx::Error> {
-    let mut conn = pool.acquire().await?;
     let backend: (i32, i64) = sqlx::query_as(BACKEND_SQL).fetch_one(&mut *conn).await?;
     let mut armed = CancelOnDrop {
         pool: pool.clone(),
@@ -119,7 +121,7 @@ async fn cancel(pool: &PgPool, (pid, started_us): (i32, i64)) -> &'static str {
         let mut conn = match tokio::time::timeout(CANCEL_ACQUIRE_TIMEOUT, pool.acquire()).await {
             Ok(Ok(conn)) => conn,
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, pid, "search cancel could not get a connection");
+                tracing::warn!(error_kind = %buzz_db::error::sqlx_error_kind(&e), pid, "search cancel could not get a connection");
                 return "error";
             }
             Err(_) => return "pool_busy",
@@ -133,7 +135,7 @@ async fn cancel(pool: &PgPool, (pid, started_us): (i32, i64)) -> &'static str {
             Ok(None) => elsewhere.push(conn),
             Ok(Some(signalled)) => return signal_outcome(signalled),
             Err(e) => {
-                tracing::warn!(error = %e, pid, "search cancel failed");
+                tracing::warn!(error_kind = %buzz_db::error::sqlx_error_kind(&e), pid, "search cancel failed");
                 return "error";
             }
         }

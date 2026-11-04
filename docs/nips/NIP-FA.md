@@ -12,6 +12,8 @@ Federated Identity Adapter
 
 This NIP defines a provider-neutral HTTP contract between a Nostr client and an enterprise identity adapter. The adapter authenticates a user through a browser login, holds an adapter session for that user, and issues short-lived [NIP-FI](NIP-FI.md) assertions that bind the user to a Nostr key the client proves it controls with [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md).
 
+It also defines how a client obtains and uses an owner-authorized grant for an agent key.
+
 The adapter MAY use an OIDC or SAML provider, LDAP, or any other upstream identity system behind this boundary. Clients do not implement or depend on that upstream protocol. Discovery of which relays require enterprise identity, and of which adapter serves them, is outside this NIP.
 
 ## Terminology
@@ -20,6 +22,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 - **adapter**: The HTTP service implementing this NIP. `{adapter_base}` is its base URL. The adapter is a NIP-FI assertion issuer, or fronts one: the assertions it returns are verified by relays exactly as NIP-FI assertions from that issuer.
 - **adapter session**: The opaque `session_token` the adapter issues after browser login, and the fixed lifetime it describes.
+- **agent grant**: The opaque credential an adapter issues for one agent key under an owner authorization.
 - **handoff secret**: A high-entropy random value the client generates per login and reveals only during code exchange.
 
 ## Browser login
@@ -132,7 +135,7 @@ Success response (`200`, `Cache-Control: no-store`):
 
 Adapters MUST issue dedicated [NIP-FI](NIP-FI.md) assertions whose protected `typ` is exactly `nip-fi+jwt` and that carry the NIP-FI required claims; as NIP-FI requires, `sub` is never an email address. The assertion's `aud` MUST be `https://` followed by the authority of the canonical `relay_url`, unchanged: `wss://community.example.com` maps to `https://community.example.com`, `wss://c.example.com:8443` to `https://c.example.com:8443`, and `wss://[2001:db8::1]:8443` to `https://[2001:db8::1]:8443`. This is the canonical host URI of the community the relay resolves from the connection's `Host`. The assertion's `nostr_pubkey` MUST be the key that signs the NIP-42 relay login; the relay rejects any other key. Clients MUST reject a response whose `nostr_pubkey` differs from the key sent in the request.
 
-An adapter MUST NOT issue an assertion for an agent key through a user's own authentication. It MUST issue agent-key assertions only under an owner-authorized grant: a durable record, created through the owner's own authentication, that binds the agent key to the owner. A grant MAY be held by the agent as a credential or kept by the adapter for agents it operates. The adapter MUST issue only while the owner authorization recorded in the grant remains valid. Revoking the owner MUST invalidate every grant the owner authorized before the revocation, and a later authentication by the owner MUST NOT revalidate them. Agent-key assertions follow NIP-FI "Agent keys".
+An adapter MUST NOT issue an assertion for an agent key through a user's own authentication. It MUST issue agent-key assertions only under an owner-authorized grant: a durable record, created through the owner's own authentication, that binds the agent key to the owner. A grant MAY be held by the agent as a credential or kept by the adapter for agents it operates. The adapter MUST issue only while the owner authorization recorded in the grant remains valid. Revoking the owner MUST invalidate every grant the owner authorized before the revocation, and a later authentication by the owner MUST NOT revalidate them. Agent-key assertions follow NIP-FI "Agent keys". [Agent keys](#agent-keys) defines the grant routes.
 
 A client that rejects a `200` response, including one it cannot parse, MUST treat it as a refusal: keep the session, show it as refused, and not retry automatically.
 
@@ -158,9 +161,110 @@ A missing session MUST be reported as 401 `session_required`, never 400. Clients
 
 An adapter MAY return `session_required` for an invalid, expired, or revoked credential; adapters that distinguish ended sessions MAY return `session_expired`. Clients MUST handle both identically.
 
+## Agent keys
+
+An agent key acts for an owner key under an owner-authorized grant (see [Relay assertion](#relay-assertion)). This section defines the grant a client holds for an agent key it controls, the assertion request made with it, and the owner's revocation. An adapter that operates an agent itself MAY keep the grant internally and issue that agent's assertions without these routes.
+
+The owner authorization is a [NIP-OA](NIP-OA.md) `auth` tag, sent as the compact JSON array of its four strings. The adapter MUST verify the tag as NIP-OA defines, with the agent key as `event.pubkey`, and MUST refuse a tag whose owner is not the owner key the adapter has bound to the authenticating user. Adapters MUST accept tags with empty conditions, and MUST refuse a tag carrying any condition clause they do not support.
+
+### Agent grant
+
+A client holding both the owner's adapter session and the agent key exchanges them for an agent grant, using the [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693) token exchange. The client MUST send it with an HTTP client that does not follow redirects, and MUST treat any 3xx response as a failed exchange.
+
+```http
+POST /v1/nip-fi/agent-grant
+Content-Type: application/x-www-form-urlencoded
+Nostr-Authorization: Nostr {base64-NIP-98-event}
+
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange
+&subject_token={session_token}
+&subject_token_type=urn%3Anostr%3Aparams%3Aoauth%3Atoken-type%3Anip-fa-session
+&requested_token_type=urn%3Anostr%3Aparams%3Aoauth%3Atoken-type%3Anip-fi-agent-grant
+&agent_pubkey={64-char lowercase hex agent public key}
+&owner_attestation={NIP-OA auth tag JSON}
+```
+
+- The body MUST contain exactly these six fields, each once. Unknown or repeated fields MUST be rejected with 400 `invalid_request`. `grant_type`, `subject_token_type`, and `requested_token_type` MUST have exactly the values shown.
+- The session travels only as `subject_token`. The adapter MUST reject the request with 400 `invalid_request` when it also carries an `Authorization` header or a cookie.
+- The NIP-98 event MUST be signed by `agent_pubkey` and follow the [Relay assertion](#relay-assertion) proof rules for this endpoint's URL and the exact form body bytes. A request without exactly one `Nostr-Authorization` header MUST be rejected with 400 `invalid_request`.
+- Each proof is single-use on the agent grant and agent assertion routes: the adapter MUST reject a proof whose event `id` it has already accepted on that route, with 400 `invalid_request`, and clients MUST sign a fresh proof for every attempt, including retries.
+- The body is limited to 8192 bytes and MUST NOT be content-encoded.
+
+Success response (`200`, `Cache-Control: no-store`), in the [RFC 8693 §2.2.1](https://www.rfc-editor.org/rfc/rfc8693#section-2.2.1) shape:
+
+```json
+{
+  "access_token": "opaque-agent-grant",
+  "issued_token_type": "urn:nostr:params:oauth:token-type:nip-fi-agent-grant",
+  "token_type": "N_A",
+  "expires_in": 691200,
+  "nostr_owner_pubkey": "<64-char lowercase hex owner public key>",
+  "nip_fi_issuer": "https://issuer.example.com"
+}
+```
+
+The grant's lifetime, and whether use extends it, is adapter policy; `expires_in` describes it when issued. Clients MUST reject a response whose `issued_token_type` or `token_type` differs from the values shown, whose `nostr_owner_pubkey` differs from the owner in the tag sent, or whose `access_token` or `nip_fi_issuer` is empty.
+
+An agent key belongs to one owner for good. A successful enrollment, by this exchange or any other enrollment method an adapter offers, replaces every earlier grant for that agent key. The adapter MUST refuse with 400 `invalid_grant` an enrollment of an agent key it has bound to a different owner, or of an agent key that has been revoked. An expired grant does not end the enrollment: the owner MAY enroll the same agent key again under a valid owner authorization.
+
+Exchange denials use the body shape of [Denials](#denials):
+
+| Status | `error` | Meaning | Client action |
+|---|---|---|---|
+| 400 | `invalid_request` | Malformed form, a header rule above was broken, the NIP-98 proof failed verification, or the `subject_token` is invalid or unacceptable, including a session whose owner may not enroll agents, as [RFC 8693 §2.2.2](https://www.rfc-editor.org/rfc/rfc8693#section-2.2.2) requires | Show the error, do not retry automatically |
+| 400 | `invalid_grant` | The owner authorization is invalid, or the agent key cannot be enrolled | Show the refusal, do not retry automatically |
+| 403 | `agent_unsupported` | The adapter does not issue agent grants | Show the refusal, do not retry automatically |
+| 413 | `request_too_large` | The body exceeds 8192 bytes | Show the error, do not retry automatically |
+| 429 | `rate_limited` | Too many requests or agents | Retry with bounded backoff |
+| 503 | `issuance_unavailable` | The adapter could not issue a grant | Retry with bounded backoff |
+
+### Agent assertion
+
+The client requests an agent-key assertion with the grant in place of the adapter session:
+
+```http
+POST /v1/nip-fi/agent-assertion
+Authorization: Bearer {agent_grant}
+Nostr-Authorization: Nostr {base64-NIP-98-event}
+Content-Type: application/json
+
+{
+  "relay_url": "wss://community.example.com",
+  "nostr_pubkey": "<64-char lowercase hex agent public key>"
+}
+```
+
+The body, the NIP-98 proof (signed by the agent key, for this endpoint's URL), the success response, and the client's response checks are those of [Relay assertion](#relay-assertion), except that the assertion's protected `typ` is exactly `nip-fi-agent+jwt` and it carries `nostr_owner_pubkey` as [NIP-FI](NIP-FI.md) "Agent keys" requires, and that its `exp` is not capped by any adapter session's expiry: the adapter MUST issue only while the grant and the owner authorization recorded in it are valid, and the assertion lifetime limits otherwise apply unchanged. Clients MUST reject an assertion whose `nostr_owner_pubkey` differs from the grant's, or whose `iss` differs from the grant response's `nip_fi_issuer`. The adapter MUST NOT accept an adapter session on this route, and MUST reject with 400 `invalid_request` a `nostr_pubkey` other than the grant's agent key.
+
+Denials follow [Denials](#denials), with the grant in place of the session:
+
+| Status | `error` | Meaning | Client action |
+|---|---|---|---|
+| 401 | `invalid_grant` | No grant was presented, or the grant is unknown, expired, or revoked, or its owner authorization has ended | Discard the grant; enroll again only through a new owner authorization |
+| 403 | `authorization_denied` | The relay is not authorized for this agent's assertions | Keep the grant, disconnect from that relay, show access denied, do not retry automatically |
+| 403 | `agent_unsupported` | The adapter does not issue agent assertions | Keep the grant, show the refusal, do not retry automatically |
+
+The remaining codes and the rules for 429, 5xx, network failures, and undefined codes are as in [Denials](#denials), with "keep the session" read as "keep the grant".
+
+### Agent revocation
+
+The owner revokes one of their agents with their adapter session:
+
+```http
+POST /v1/nip-fi/agent-revoke
+Authorization: Bearer {session_token}
+Content-Type: application/x-www-form-urlencoded
+
+agent_pubkey={64-char lowercase hex agent public key}
+```
+
+The body MUST contain exactly one field, `agent_pubkey`; any other form MUST be rejected with 400 `invalid_request`. The body is limited to 1024 bytes; a larger body MUST be rejected with 413 `request_too_large`.
+
+Success response (`200`, `Cache-Control: no-store`): `{"revoked": true}`. Revocation is idempotent: revoking an agent the owner already revoked succeeds and changes nothing. The adapter MUST invalidate every grant for that agent key and stop issuing assertions for it, and MUST disconnect it with the [NIP-FI](NIP-FI.md) Admin disconnect API. Revocation MUST NOT affect the owner's own key or sessions. An agent key the session's owner never enrolled, including another owner's, MUST be answered as 404 `agent_not_found`, so revocation does not reveal other owners' agents. Session denials are as in [Session check](#session-check); a missing session is 401 `session_required`.
+
 ## NIP-FI assertion transport
 
-The adapter session header above is only for client-to-adapter requests. It is not the relay's NIP-FI proof transport, and adapter sessions MUST use only `Authorization: Bearer`.
+The adapter session header above is only for client-to-adapter requests. It is not the relay's NIP-FI proof transport, and adapter sessions MUST use only `Authorization: Bearer`, except in the [Agent grant](#agent-grant) exchange, where the session travels only as `subject_token`. The origin and redirect rules in [Security Considerations](#security-considerations) apply to it there too.
 
 For HTTP routes protected by NIP-98, the relay proof uses the headers defined by [NIP-FI](NIP-FI.md):
 
@@ -174,7 +278,8 @@ WebSocket connections send only `Nostr-Federated-Identity` on the upgrade reques
 ## Security Considerations
 
 - Clients MUST send `session_token` only to the adapter's origin (the scheme, host, and port of `{adapter_base}`), and MUST NOT send it to a relay or any other origin. A leaked session token lets its holder request assertions for a key they control until the adapter binds the user to a key.
-- Clients and adapters MUST NOT log credentials: the `Authorization` and `Nostr-Authorization` header values on every adapter request, including `/v1/session`, and the `handoff_secret` and `session_token` values in the code exchange request and response.
+- Clients MUST send agent grants only to the adapter's origin, under the same rule. Clients MUST NOT send a session token or agent grant through, or replay it to, a redirect target.
+- Clients and adapters MUST NOT log credentials: the `Authorization` and `Nostr-Authorization` header values on every adapter request, including `/v1/session`; the `handoff_secret` and `session_token` values in the code exchange request and response; `subject_token`, `owner_attestation`, and `access_token` in the agent grant exchange.
 
 ## Privacy
 

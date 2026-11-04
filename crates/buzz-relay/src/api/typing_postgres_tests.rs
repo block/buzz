@@ -167,6 +167,7 @@ async fn typing_uses_cached_restriction_row() {
         (f.community, f.member.public_key().to_bytes().to_vec()),
         buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         },
     );
@@ -200,6 +201,7 @@ async fn typing_ban_gate_uses_cached_restriction_row() {
         (f.community, member),
         buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: None,
         },
     );
@@ -221,6 +223,7 @@ async fn persistent_post_ban_gate_uses_cached_restriction_row() {
         (f.community, f.member.public_key().to_bytes().to_vec()),
         buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         },
     );

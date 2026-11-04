@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
@@ -10,6 +11,9 @@ import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/storage/secure_storage.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -259,6 +263,48 @@ void main() {
         registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
         'wss://test.${HostedEnvironment.communitySuffix}',
       );
+      expect(
+        registry.calls.where((call) => call == 'register-agent'),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'Bestie save failure resumes the same completed agent identity',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      await AccountIdentityStore()
+          .forSubject(fakeSubject)
+          .create(fakeOwner.nsec);
+      var fail = true;
+      var completions = 0;
+      final controller = RelayFakeController(
+        registry,
+        onCreated: (community, pubkey) async {
+          expect(pubkey, fakeAgent);
+          expect(registry.calls, contains('publish-policy'));
+          completions++;
+          if (fail) throw StateError('Bestie save unavailable');
+        },
+      );
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      Future<bool> create() => controller.create(
+        _community(),
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      );
+      expect(await create(), isFalse);
+      expect(controller.pending?['pubkey'], fakeAgent);
+      fail = false;
+      expect(await create(), isTrue);
+      expect(controller.pending, isNull);
+      expect(completions, 2);
       expect(
         registry.calls.where((call) => call == 'register-agent'),
         hasLength(1),
@@ -901,6 +947,8 @@ void main() {
     final relay = _AgentRelay();
     final container = ProviderContainer(
       overrides: [
+        ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+        myPubkeyProvider.overrideWithValue(fakeOwner.public),
         presenceCacheProvider.overrideWith(_AgentPresence.new),
         activeCommunityProvider.overrideWith((ref) async => _community()),
         remoteAgentControllerProvider.overrideWithValue(controller),
@@ -909,7 +957,9 @@ void main() {
     );
     addTearDown(container.dispose);
     await container.read(activeCommunityProvider.future);
-    await controller.run(controller.refresh);
+    expect(controller.registryLoaded, isFalse);
+    await controller.load(_community().relayUrl);
+    expect(controller.registryLoaded, isTrue);
 
     expect(await container.read(availableRemoteAgentsProvider.future), isEmpty);
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
@@ -955,6 +1005,121 @@ void main() {
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
   }, skip: !HostedEnvironment.enabled);
 
+  test(
+    'Solo agent choices reload after this device creates an agent',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final relay = _InventoryRelay();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relay),
+          meSyncProvider.overrideWithValue(
+            MeSync(
+              relay,
+              RelayConfig(baseUrl: 'https://relay.test', nsec: fakeOwner.nsec),
+            ),
+          ),
+          meArchivedAgentsProvider.overrideWith((ref) async => {}),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+        ],
+      );
+      addTearDown(container.dispose);
+      final choices = container.listen(meAssistantsProvider, (_, _) {});
+      addTearDown(choices.close);
+      expect(await container.read(meAssistantsProvider.future), isEmpty);
+
+      relay.listed = true;
+      expect(
+        await controller.create(
+          _community(),
+          'Scout',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
+        isTrue,
+      );
+      expect(
+        (await container.read(
+          meAssistantsProvider.future,
+        )).map((a) => a.pubkey),
+        [fakeAgent],
+      );
+    },
+    skip: !HostedEnvironment.enabled,
+  );
+
+  test(
+    'runtime absence and deletion survive sign-out and a fresh owner-scoped load',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      ProviderContainer open(String owner) => ProviderContainer(
+        overrides: [
+          myPubkeyProvider.overrideWithValue(owner),
+          ownedAgentDirectoryProvider.overrideWith(
+            (ref) async => [
+              OwnedAgentDirectoryEntry(
+                pubkey: fakeAgent,
+                runtime: 'block.builderlab/builderlab',
+              ),
+            ],
+          ),
+          presenceCacheProvider.overrideWith(_AgentPresence.new),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+          availableRemoteAgentsProvider.overrideWith((ref) async => {}),
+        ],
+      );
+      final container = open(fakeOwner.public);
+      addTearDown(container.dispose);
+      await container.read(ownedAgentDirectoryProvider.future);
+      await container.read(availableRemoteAgentsProvider.future);
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
+      await controller.run(controller.refresh);
+      await container.pump();
+      expect(controller.registryLoaded, isTrue);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      registry.signedIn = false;
+      expect(controller.registryLoaded, isFalse);
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      final restarted = open(fakeOwner.public);
+      addTearDown(restarted.dispose);
+      await restarted.read(ownedAgentDirectoryProvider.future);
+      await restarted.read(savedRemoteAvailabilityProvider.future);
+      expect(restarted.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      final otherOwner = open(_keys('3').public);
+      addTearDown(otherOwner.dispose);
+      await otherOwner.read(ownedAgentDirectoryProvider.future);
+      await otherOwner.read(savedRemoteAvailabilityProvider.future);
+      expect(otherOwner.read(presentedPresenceProvider)[fakeAgent], 'online');
+
+      // A confirmed deletion must also survive an old ACTIVE registry row.
+      registry.signedIn = true;
+      registry.listed = [
+        {
+          'agent_pubkey': fakeAgent,
+          'agent_id': 'remote-id',
+          'status': 'BEEKEEPER_AGENT_STATUS_ACTIVE',
+        },
+      ];
+      await controller.run(controller.refresh);
+      expect(
+        await controller.deleteAgent(
+          pubkey: fakeAgent,
+          community: _community(),
+          isCurrent: () => true,
+          fetch: (_) async => [],
+        ),
+        isTrue,
+      );
+      registry.signedIn = false;
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+    },
+  );
+
   test('owner proof verifies for only the provisioned agent key', () {
     final other = nostr.Keys('0' * 63 + '3');
     final auth = signOwnerAuthorization(fakeOwner, fakeAgent);
@@ -982,6 +1147,8 @@ void main() {
     () async {
       final container = ProviderContainer(
         overrides: [
+          ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+          myPubkeyProvider.overrideWithValue(fakeOwner.public),
           presenceCacheProvider.overrideWith(_Presence.new),
           availableRemoteAgentsProvider.overrideWith((ref) async => {'remote'}),
         ],
@@ -1033,6 +1200,41 @@ class _AgentRelay extends RelaySessionNotifier {
   }) async => switch (filter.kinds.single) {
     0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
     30177 when live => [_registration(fakeAgent)],
+    _ => [],
+  };
+}
+
+/// Serves Solo's inventory reads: the owner's signed registration once
+/// [listed], and the agent's attested profile.
+class _InventoryRelay extends RelaySessionNotifier {
+  bool listed = false;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => switch (filters.single.kinds.single) {
+    0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+    30177 when listed => [
+      NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 30177,
+          content: jsonEncode({
+            'name': 'Scout',
+            'parallelism': 1,
+            'respond_to': 'owner-only',
+          }),
+          secretKey: fakeOwner.secret,
+          createdAt: 1,
+          tags: [
+            ['d', fakeAgent],
+          ],
+        ).toMap(),
+      ),
+    ],
     _ => [],
   };
 }

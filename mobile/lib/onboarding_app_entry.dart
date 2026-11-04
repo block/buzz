@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -12,6 +13,7 @@ import 'shared/hosted/use_known_communities.dart';
 import 'shared/hosted/hosted_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
+import 'shared/widgets/confirmation_dialog.dart';
 
 /// Navigation over the existing branded welcome surface.
 class OnboardingAppEntry extends HookConsumerWidget {
@@ -93,7 +95,10 @@ class OnboardingAppEntry extends HookConsumerWidget {
         flow.accountOnly &&
         (flow.stage == HostedFlowStage.working ||
             flow.stage == HostedFlowStage.signIn);
-    final connected = flow?.account.account != null;
+    final account = flow?.account.account;
+    final connected = account != null;
+    final signedInLanding = connected && !addingCommunity && !signingIn;
+    final email = account?.email?.trim();
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
       active:
@@ -113,11 +118,37 @@ class OnboardingAppEntry extends HookConsumerWidget {
         ? hostedFlowProblemMessage(problem)
         : busy
         ? null
+        : connected
+        ? email != null && email.isNotEmpty
+              ? 'Signed in as $email'
+              : 'Signed in to BuilderLab'
         : flow.noCommunitiesToAdd
         ? 'No communities available to add. Scan a QR code or use an invite link.'
-        : connected
-        ? 'Scan a QR code or enter a community link.'
         : null;
+    final confirmingSignOut = useRef(false);
+    Future<void> confirmSignOut() async {
+      if (confirmingSignOut.value) return;
+      confirmingSignOut.value = true;
+      try {
+        final confirmed = await showDestructiveConfirmation(
+          context: context,
+          title: 'Sign out of BuilderLab?',
+          message:
+              '${email != null && email.isNotEmpty ? 'You’re signed in as $email. ' : ''}'
+              'Your saved Buzz identities will stay on this device.',
+          confirmLabel: 'Sign out',
+        );
+        if (!context.mounted ||
+            !confirmed ||
+            flow?.account.account?.subject != account?.subject) {
+          return;
+        }
+        await flow?.signOutAccount();
+      } finally {
+        confirmingSignOut.value = false;
+      }
+    }
+
     final handlingBack = useRef(false);
     void back() {
       // Nested page and entry PopScopes receive the same system Back event.
@@ -126,6 +157,14 @@ class OnboardingAppEntry extends HookConsumerWidget {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         handlingBack.value = false;
       });
+      if (signedInLanding &&
+          !busy &&
+          !existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value) {
+        unawaited(confirmSignOut());
+        return;
+      }
       if (!existingUser.value &&
           !enteringCommunityLink.value &&
           !creating.value &&
@@ -147,6 +186,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
     return PopScope(
       canPop:
+          !signedInLanding &&
           onExit == null &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
@@ -161,7 +201,8 @@ class OnboardingAppEntry extends HookConsumerWidget {
           return;
         }
         if (!didPop &&
-            (existingUser.value ||
+            (signedInLanding ||
+                existingUser.value ||
                 creating.value ||
                 enteringCommunityLink.value)) {
           back();

@@ -1348,7 +1348,7 @@ void main() {
     List<MainTimelineEntry> entries(List<NostrEvent> events) =>
         buildMainTimelineEntries(formatTimeline(events));
 
-    test('groups consecutive additions by one actor within five minutes', () {
+    test('groups consecutive additions by one actor', () {
       final grouped = groupMembershipTimelineEntries(
         entries([
           _systemMsg(
@@ -1389,112 +1389,108 @@ void main() {
       ]);
     });
 
-    test('groups self-joins from different people', () {
-      final grouped = groupMembershipTimelineEntries(
-        entries([
-          _systemMsg(
-            id: threadIdA,
-            payload: {
-              'type': 'member_joined',
-              'actor': 'alice',
-              'target': 'alice',
-            },
-            createdAt: 1000,
-          ),
-          _systemMsg(
-            id: 'b',
-            payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
-            createdAt: 1060,
-          ),
-        ]),
-      );
+    NostrEvent change(String id, Map<String, Object> payload, int createdAt) =>
+        _systemMsg(id: id, payload: payload, createdAt: createdAt);
 
-      expect(grouped.single, hasLength(2));
+    test('hides self-joins and both shapes of voluntary leave', () {
+      final messages = formatTimeline([
+        change(threadIdA, {
+          'type': 'member_joined',
+          'actor': 'alice',
+          'target': 'alice',
+        }, 1000),
+        // A normal Leave (kind 9022) carries only the actor.
+        change('b', {'type': 'member_left', 'actor': 'bob'}, 1010),
+        // Removing yourself (kind 9001) also names the target.
+        change('c', {
+          'type': 'member_left',
+          'actor': 'carol',
+          'target': 'carol',
+        }, 1020),
+        change('d', {
+          'type': 'member_joined',
+          'actor': 'dave',
+          'target': 'erin',
+        }, 1030),
+        change('e', {
+          'type': 'member_removed',
+          'actor': 'dave',
+          'target': 'dave',
+        }, 1040),
+        change('f', {'type': 'topic_changed', 'actor': 'dave'}, 1050),
+      ]);
+
+      expect(messages.map(isHiddenMembershipNotice), [
+        true,
+        true,
+        true,
+        false,
+        false,
+        false,
+      ]);
     });
 
-    test('uses a fixed window anchored on the newest addition', () {
-      final grouped = groupMembershipTimelineEntries(
-        entries([
-          _systemMsg(
-            id: threadIdA,
-            payload: {
-              'type': 'member_joined',
-              'actor': 'alice',
-              'target': 'bob',
-            },
-            createdAt: 1000,
-          ),
-          _systemMsg(
-            id: 'b',
-            payload: {
-              'type': 'member_joined',
-              'actor': 'alice',
-              'target': 'carol',
-            },
-            createdAt: 1240,
-          ),
-          _systemMsg(
-            id: 'c',
-            payload: {
-              'type': 'member_joined',
-              'actor': 'alice',
-              'target': 'dave',
-            },
-            createdAt: 1301,
-          ),
-        ]),
-      );
-
-      expect(grouped.map((group) => group.length), [1, 2]);
-    });
-
-    test('actor changes, messages, and day boundaries break groups', () {
+    test('groups additions and removals by anyone across hours and days', () {
       final dayOne =
           DateTime(2026, 7, 14, 23, 59).millisecondsSinceEpoch ~/ 1000;
-      final dayTwo = DateTime(2026, 7, 15).millisecondsSinceEpoch ~/ 1000;
+      final dayTwo = DateTime(2026, 7, 16, 9).millisecondsSinceEpoch ~/ 1000;
       final grouped = groupMembershipTimelineEntries(
         entries([
-          _systemMsg(
-            id: threadIdA,
-            payload: {
-              'type': 'member_joined',
-              'actor': 'alice',
-              'target': 'bob',
-            },
-            createdAt: dayOne,
-          ),
-          _systemMsg(
-            id: 'b',
-            payload: {
-              'type': 'member_joined',
-              'actor': 'carol',
-              'target': 'dave',
-            },
-            createdAt: dayOne + 30,
-          ),
-          _textMsg(id: 'message', createdAt: dayOne + 40),
-          _systemMsg(
-            id: 'c',
-            payload: {
-              'type': 'member_joined',
-              'actor': 'carol',
-              'target': 'erin',
-            },
-            createdAt: dayOne + 50,
-          ),
-          _systemMsg(
-            id: 'd',
-            payload: {
-              'type': 'member_joined',
-              'actor': 'carol',
-              'target': 'frank',
-            },
-            createdAt: dayTwo,
-          ),
+          change(threadIdA, {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'bob',
+          }, dayOne),
+          change('b', {
+            'type': 'member_removed',
+            'actor': 'carol',
+            'target': 'dave',
+          }, dayOne + 5 * 3600),
+          change('c', {
+            'type': 'member_removed',
+            'actor': 'erin',
+            'target': 'frank',
+          }, dayTwo),
+          change('d', {
+            'type': 'member_joined',
+            'actor': 'gina',
+            'target': 'hank',
+          }, dayTwo + 60),
         ]),
       );
 
-      expect(grouped.map((group) => group.length), [1, 1, 1, 1, 1]);
+      expect(grouped.single, hasLength(4));
+    });
+
+    test('messages and other channel events break groups', () {
+      final grouped = groupMembershipTimelineEntries(
+        entries([
+          change(threadIdA, {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'bob',
+          }, 1000),
+          change('b', {
+            'type': 'member_joined',
+            'actor': 'carol',
+            'target': 'dave',
+          }, 1030),
+          _textMsg(id: 'message', createdAt: 1040),
+          change('c', {
+            'type': 'member_joined',
+            'actor': 'carol',
+            'target': 'erin',
+          }, 1050),
+          change('d', {'type': 'topic_changed', 'actor': 'carol'}, 1060),
+          change('e', {
+            'type': 'member_removed',
+            'actor': 'carol',
+            'target': 'erin',
+          }, 1070),
+        ]),
+      );
+
+      expect(grouped.map((group) => group.length), [2, 1, 1, 1, 1]);
     });
   });
 }
