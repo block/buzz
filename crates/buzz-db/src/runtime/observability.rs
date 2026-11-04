@@ -112,9 +112,9 @@ impl PoolOperation {
 
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
-            Self::ReaderBootstrap
-            | Self::ReaderAuthorization
-            | Self::ReaderSubscriptionHistory => DbPoolRole::Reader.as_str(),
+            Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
+                DbPoolRole::Reader.as_str()
+            }
             _ => DbPoolRole::Writer.as_str(),
         }
     }
