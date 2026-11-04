@@ -1,6 +1,7 @@
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
+import 'dart:convert';
 import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -102,7 +103,14 @@ class _Relay extends FakeRelay {
               signedAgentProfile(
                 fakeAgentKeys,
                 fakeOwner,
-                content: '{"name":"Scout"}',
+                // Beekeeper publishes the agent's renamed profile.
+                content: jsonEncode({
+                  'name':
+                      harness
+                          .registry
+                          .bodies['/v3/beekeeper/update-agent-profile']?['agent_name'] ??
+                      'Scout',
+                }),
               ),
           ];
   }
