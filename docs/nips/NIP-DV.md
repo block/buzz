@@ -93,7 +93,9 @@ After the relay accepts and commits a DM command that changes a viewer's hide st
 1. On `kind:41012` (hide): the viewer's `hidden_at` for the target channel is set.
 2. On `kind:41010` (open/re-open) that clears an existing `hidden_at`: the viewer's hide state for the target channel is cleared.
 
-In both cases the relay recomputes the viewer's full hidden-DM set from its authoritative state (active, non-removed DM memberships with `hidden_at IS NOT NULL`) and publishes a fresh `kind:30622` snapshot signed by the relay identity, with `d` = the viewer's pubkey and one `h` tag per hidden DM.
+3. On a newly accepted message (`kind:9`, `40002`, or `40008`): clear hidden state for active participants in that DM in the message insertion transaction. Duplicate deliveries, edits, reactions, and typing do not clear it.
+
+In each case the relay recomputes the viewer's full hidden-DM set from its authoritative state (active, non-removed DM memberships with `hidden_at IS NOT NULL`) and publishes a fresh `kind:30622` snapshot signed by the relay identity, with `d` = the viewer's pubkey and one `h` tag per hidden DM.
 
 The recompute-and-replace shape means the latest snapshot is always the complete, authoritative hidden set. There is no delta event to merge and no ordering hazard between hide and unhide: a stale snapshot is simply superseded by the newer one under NIP-01 parameterized-replaceable semantics.
 
@@ -106,6 +108,7 @@ A client that rebuilds its DM list from `kind:39002` membership SHOULD additiona
 1. Query its own latest snapshot: `kinds: [30622]`, `#p: [<my-pubkey>]`, `limit: 1`. The query is keyed by `#p` (not `#d`) because that is the tag the relay's read-authorization gate checks.
 2. If a snapshot exists, collect its `h` tag values into a set of hidden DM channel ids.
 3. Filter the DM list, dropping any DM whose channel id is in that set. Non-DM channels MUST NOT be affected.
+4. Subscribe to the same private snapshot and apply newer updates so a new message restores a hidden conversation without requiring a manual refresh. Refresh the snapshot after reconnecting if replay coverage is incomplete.
 
 A client SHOULD verify that the snapshot is signed by the relay identity before trusting it (see §Security Considerations for the current implementation posture). A client that finds no snapshot MUST treat the hidden set as empty (no DMs hidden).
 

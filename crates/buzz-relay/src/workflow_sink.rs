@@ -439,9 +439,9 @@ impl ActionSink for RelayActionSink {
                 },
             });
 
-            let (stored_event, was_inserted) = state
+            let inserted = state
                 .db
-                .insert_event_with_thread_metadata(
+                .insert_event_with_dm_restoration(
                     tenant.community(),
                     &event,
                     Some(channel_uuid),
@@ -449,6 +449,18 @@ impl ActionSink for RelayActionSink {
                 )
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            for viewer in inserted.restored_viewers {
+                if let Err(error) = crate::handlers::side_effects::publish_dm_visibility_snapshot(
+                    &tenant, &state, &viewer,
+                )
+                .await
+                {
+                    tracing::error!(%error, "Failed to publish restored DM visibility");
+                }
+            }
+            let stored_event = inserted.stored;
+            let was_inserted = inserted.inserted;
 
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).

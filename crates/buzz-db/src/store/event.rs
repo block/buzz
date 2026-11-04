@@ -38,6 +38,16 @@ pub const ARTIFACT_KINDS: [i32; 2] = [
     buzz_core::kind::KIND_ARTIFACT_REMOVAL as i32,
 ];
 
+/// An event insert and the DM participants restored by that same commit.
+pub struct EventInsertWithDmRestoration {
+    /// Stored event, including for a duplicate insert.
+    pub stored: StoredEvent,
+    /// Whether this call inserted the event.
+    pub inserted: bool,
+    /// Viewers needing a fresh private visibility snapshot.
+    pub restored_viewers: Vec<Vec<u8>>,
+}
+
 /// Optional filters for [`query_events`].
 #[derive(Debug, Clone)]
 pub struct EventQuery {
@@ -2883,6 +2893,21 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
+        let result = self
+            .insert_event_with_dm_restoration(community_id, event, channel_id, thread_meta)
+            .await?;
+        Ok((result.stored, result.inserted))
+    }
+
+    /// Insert an event and atomically restore hidden DMs for new messages only.
+    /// Duplicate deliveries, edits, reactions and non-DM events never restore a DM.
+    pub async fn insert_event_with_dm_restoration(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<EventInsertWithDmRestoration> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
@@ -2901,8 +2926,29 @@ impl Db {
         if result.1 {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
+        let restored_viewers = if result.1 && matches!(event.kind.as_u16(), 9 | 40002 | 40008) {
+            sqlx::query_scalar::<_, Vec<u8>>(
+                "UPDATE channel_members cm SET hidden_at = NULL \
+                 FROM channels c \
+                 WHERE cm.community_id = $1 AND cm.channel_id = $2 \
+                   AND cm.hidden_at IS NOT NULL AND cm.removed_at IS NULL \
+                   AND c.community_id = cm.community_id AND c.id = cm.channel_id \
+                   AND c.channel_type = 'dm' AND c.deleted_at IS NULL \
+                 RETURNING cm.pubkey",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_all(tx.conn())
+            .await?
+        } else {
+            Vec::new()
+        };
         tx.commit().await?;
-        Ok(result)
+        Ok(EventInsertWithDmRestoration {
+            stored: result.0,
+            inserted: result.1,
+            restored_viewers,
+        })
     }
 
     /// Store a kind 5 / 9005 deletion and soft-delete its `targets` in one
@@ -3162,6 +3208,79 @@ mod postgres_tests {
         .await
         .expect("insert test channel");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn new_messages_restore_hidden_dms_atomically_but_duplicates_and_edits_do_not() {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("database");
+        let db = Db::from_pool(pool.clone());
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let sender = Keys::generate();
+        let receiver = Keys::generate();
+        let sender_pk = sender.public_key().to_bytes();
+        let receiver_pk = receiver.public_key().to_bytes();
+        let channel = db
+            .create_dm(community, &[&sender_pk, &receiver_pk], &sender_pk)
+            .await
+            .expect("DM");
+        for kind in [9u16, 40002, 40008] {
+            db.hide_dm(community, channel.id, &receiver_pk)
+                .await
+                .expect("hide");
+            let event = EventBuilder::new(Kind::Custom(kind), "new message")
+                .tags([Tag::parse(["h", &channel.id.to_string()]).expect("tag")])
+                .sign_with_keys(&sender)
+                .expect("sign");
+            let result = db
+                .insert_event_with_dm_restoration(community, &event, Some(channel.id), None)
+                .await
+                .expect("insert");
+            assert!(result.inserted);
+            assert_eq!(result.restored_viewers, vec![receiver_pk.to_vec()]);
+            assert!(db
+                .list_hidden_dms(community, &receiver_pk)
+                .await
+                .expect("visibility")
+                .is_empty());
+            db.hide_dm(community, channel.id, &receiver_pk)
+                .await
+                .expect("hide again");
+            let duplicate = db
+                .insert_event_with_dm_restoration(community, &event, Some(channel.id), None)
+                .await
+                .expect("duplicate");
+            assert!(!duplicate.inserted);
+            assert!(duplicate.restored_viewers.is_empty());
+            assert_eq!(
+                db.list_hidden_dms(community, &receiver_pk)
+                    .await
+                    .expect("visibility"),
+                vec![channel.id]
+            );
+        }
+        for kind in [7u16, 40003, 20002] {
+            let event = EventBuilder::new(Kind::Custom(kind), "not a new message")
+                .tags([Tag::parse(["h", &channel.id.to_string()]).expect("tag")])
+                .sign_with_keys(&sender)
+                .expect("sign");
+            let result = db
+                .insert_event_with_dm_restoration(community, &event, Some(channel.id), None)
+                .await;
+            if kind == 20002 {
+                assert!(result.is_err());
+            } else {
+                assert!(result.expect("insert").restored_viewers.is_empty());
+            }
+            assert_eq!(
+                db.list_hidden_dms(community, &receiver_pk)
+                    .await
+                    .expect("visibility"),
+                vec![channel.id]
+            );
+        }
     }
 
     /// Statements on `conn` that Postgres holds as prepared, matching `like`.

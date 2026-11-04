@@ -3533,6 +3533,7 @@ async fn ingest_event_inner(
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
     let atomic_deletion = crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
     let mut message = String::new();
+    let mut restored_dm_viewers = Vec::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
         let channel = buzz_db::channel::NewChannel {
@@ -3702,15 +3703,13 @@ async fn ingest_event_inner(
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
             .db
-            .insert_event_with_thread_metadata(
-                tenant.community(),
-                &event,
-                channel_id,
-                thread_params,
-            )
+            .insert_event_with_dm_restoration(tenant.community(), &event, channel_id, thread_params)
             .await
         {
-            Ok(result) => result,
+            Ok(result) => {
+                restored_dm_viewers = result.restored_viewers;
+                (result.stored, result.inserted)
+            }
             Err(e) => {
                 return Err(match e {
                     buzz_db::DbError::AuthEventRejected => {
@@ -3730,6 +3729,16 @@ async fn ingest_event_inner(
             accepted: true,
             message: "duplicate:".into(),
         });
+    }
+
+    // Visibility changed atomically with acceptance, before broadcasting the message.
+    // Publish only for participants whose hidden membership actually changed.
+    for viewer in restored_dm_viewers {
+        if let Err(error) =
+            super::side_effects::publish_dm_visibility_snapshot(tenant, state, &viewer).await
+        {
+            error!(%error, "Failed to publish restored DM visibility");
+        }
     }
 
     // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and
@@ -7467,6 +7476,98 @@ mod postgres_tests {
             .await
             .expect("connect test Postgres");
         build_canvas_ingest_state(&db_url, &pool).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn incoming_dm_message_publishes_restored_visibility_through_ingest() {
+        let state = ingest_state().await;
+        let host = format!("dm-incoming-{}.test", Uuid::new_v4());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let tenant = TenantContext::resolved(community, host);
+        let receiver = nostr::Keys::generate();
+        let sender = nostr::Keys::generate();
+        for keys in [&receiver, &sender] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("user");
+        }
+        let dm = state
+            .db
+            .create_dm(
+                community,
+                &[
+                    receiver.public_key().as_bytes(),
+                    sender.public_key().as_bytes(),
+                ],
+                receiver.public_key().as_bytes(),
+            )
+            .await
+            .expect("DM");
+        let auth = |keys: &nostr::Keys| IngestAuth::Nip42 {
+            pubkey: keys.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+        let hide = EventBuilder::new(Kind::Custom(41012), "")
+            .tags([nostr::Tag::parse(["h", &dm.id.to_string()]).expect("h")])
+            .sign_with_keys(&receiver)
+            .expect("hide");
+        assert!(
+            ingest_event(&state, &tenant, hide, auth(&receiver))
+                .await
+                .expect("hide accepted")
+                .accepted
+        );
+        assert_eq!(
+            state
+                .db
+                .list_hidden_dms(community, receiver.public_key().as_bytes())
+                .await
+                .expect("hidden"),
+            vec![dm.id]
+        );
+        let message = EventBuilder::new(Kind::Custom(9), "A new DM message")
+            .tags([nostr::Tag::parse(["h", &dm.id.to_string()]).expect("h")])
+            .sign_with_keys(&sender)
+            .expect("message");
+        assert!(
+            ingest_event(&state, &tenant, message, auth(&sender))
+                .await
+                .expect("message accepted")
+                .accepted
+        );
+        let snapshots = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![30622]),
+                d_tag: Some(receiver.public_key().to_hex()),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(community)
+            })
+            .await
+            .expect("private snapshot");
+        assert_eq!(snapshots.len(), 1);
+        assert!(!snapshots[0]
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().is_some_and(|name| name == "h")));
+        assert!(state
+            .db
+            .list_hidden_dms(community, receiver.public_key().as_bytes())
+            .await
+            .expect("restored")
+            .is_empty());
     }
 
     /// An owner's timeout reaches its agent, and it is enforced before command

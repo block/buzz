@@ -4656,7 +4656,7 @@ pub async fn publish_nipia_archival_list(
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
 /// `viewer`. The event is parameterized-replaceable (`d` = viewer pubkey) and
 /// carries one `h` tag per DM the viewer currently has hidden. Called after any
-/// hide (41012) or unhide (41010 that clears `hidden_at`); the latest event is
+/// hide (41012), reopen (41010), or new message that clears `hidden_at`; the latest event is
 /// always the authoritative hidden set, so no client-side delta merge is needed.
 pub async fn publish_dm_visibility_snapshot(
     tenant: &TenantContext,
@@ -4664,82 +4664,92 @@ pub async fn publish_dm_visibility_snapshot(
     viewer: &[u8],
 ) -> anyhow::Result<()> {
     let viewer_hex = hex::encode(viewer);
-    let hidden = state.db.list_hidden_dms(tenant.community(), viewer).await?;
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    const MAX_REPLACEMENT_ATTEMPTS: usize = 8;
+    for _ in 0..MAX_REPLACEMENT_ATTEMPTS {
+        let hidden = state.db.list_hidden_dms(tenant.community(), viewer).await?;
+        #[cfg(test)]
+        dm_visibility_postgres_tests::after_list(tenant.community()).await;
+        let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(hidden.len() + 2);
-    tags.push(
-        Tag::parse(["d", &viewer_hex])
-            .map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
-    );
-    // `p` = viewer so the relay's `#p`-gated read path scopes the snapshot to
-    // its owner; no one else may query another viewer's hidden-DM set.
-    tags.push(
-        Tag::parse(["p", &viewer_hex])
-            .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-    );
-    for channel_id in &hidden {
+        let mut tags: Vec<Tag> = Vec::with_capacity(hidden.len() + 2);
         tags.push(
-            Tag::parse(["h", &channel_id.to_string()])
-                .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?,
+            Tag::parse(["d", &viewer_hex])
+                .map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
         );
-    }
+        // `p` = viewer so the relay's `#p`-gated read path scopes the snapshot to
+        // its owner; no one else may query another viewer's hidden-DM set.
+        tags.push(
+            Tag::parse(["p", &viewer_hex])
+                .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
+        );
+        for channel_id in &hidden {
+            tags.push(
+                Tag::parse(["h", &channel_id.to_string()])
+                    .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?,
+            );
+        }
 
-    // Force created_at strictly past any prior snapshot for this viewer: a same-second
-    // replacement whose random event id sorts higher is rejected by stale-write
-    // protection, so a hide→re-open within one second could otherwise strand the stale
-    // snapshot. Same guard as emit_addressable_discovery_event.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let ts = {
-        let existing = state
+        // Force created_at strictly past any prior snapshot for this viewer: a same-second
+        // replacement whose random event id sorts higher is rejected by stale-write
+        // protection, so a hide→re-open within one second could otherwise strand the stale
+        // snapshot. Same guard as emit_addressable_discovery_event.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let ts = {
+            let existing = state
+                .db
+                .query_events_for_event_write(&buzz_db::event::EventQuery {
+                    kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
+                    pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                    d_tag: Some(viewer_hex.clone()),
+                    limit: Some(1),
+                    ..buzz_db::event::EventQuery::for_community(tenant.community())
+                })
+                .await?;
+            existing
+                .first()
+                .map(|e| (e.event.created_at.as_secs() + 1).max(now))
+                .unwrap_or(now)
+        };
+
+        let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(ts))
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
+
+        let (stored, was_inserted) = state
             .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
-                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
-                d_tag: Some(viewer_hex.clone()),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
+            .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
             .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now)
-    };
+            .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
+        if !was_inserted || state.db.list_hidden_dms(tenant.community(), viewer).await? != hidden {
+            continue;
+        }
+        {
+            dispatch_persistent_event(
+                tenant,
+                state,
+                &stored,
+                KIND_DM_VISIBILITY,
+                &relay_pubkey_hex,
+                None,
+            )
+            .await;
+        }
 
-    let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
-
-    let (stored, was_inserted) = state
-        .db
-        .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_DM_VISIBILITY,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
+        info!(
+            viewer = %viewer_hex,
+            hidden_count = hidden.len(),
+            "NIP-DV DM visibility snapshot published"
+        );
+        return Ok(());
     }
-
-    info!(
-        viewer = %viewer_hex,
-        hidden_count = hidden.len(),
-        "NIP-DV DM visibility snapshot published"
-    );
-    Ok(())
+    anyhow::bail!(
+        "failed to publish DM visibility after {MAX_REPLACEMENT_ATTEMPTS} concurrent replacements"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5077,5 +5087,91 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+}
+
+#[cfg(test)]
+mod dm_visibility_postgres_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tokio::sync::{oneshot, Notify};
+
+    type Gate = (buzz_core::CommunityId, oneshot::Sender<()>, Arc<Notify>);
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    pub(super) async fn after_list(community: buzz_core::CommunityId) {
+        let gate = {
+            let mut slot = GATE.lock().unwrap();
+            if slot.as_ref().is_some_and(|gate| gate.0 == community) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = gate {
+            let _ = arrived.send(());
+            release.notified().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delayed_restoration_snapshot_cannot_undo_a_later_hide() {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("test database");
+        let pool = sqlx::PgPool::connect(&url).await.expect("database");
+        let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let host = format!("dm-restore-{}.test", community.as_uuid());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("community");
+        let tenant = TenantContext::resolved(community, host);
+        let viewer = nostr::Keys::generate().public_key().to_bytes();
+        let sender = nostr::Keys::generate().public_key().to_bytes();
+        let dm = state
+            .db
+            .create_dm(community, &[&viewer, &sender], &viewer)
+            .await
+            .expect("DM");
+        let (arrived, reached) = oneshot::channel();
+        let release = Arc::new(Notify::new());
+        *GATE.lock().unwrap() = Some((community, arrived, release.clone()));
+        let old_state = state.clone();
+        let old_tenant = tenant.clone();
+        let delayed = tokio::spawn(async move {
+            publish_dm_visibility_snapshot(&old_tenant, &old_state, &viewer).await
+        });
+        reached.await.expect("publisher read empty visibility");
+        state
+            .db
+            .hide_dm(community, dm.id, &viewer)
+            .await
+            .expect("hide after restoration");
+        publish_dm_visibility_snapshot(&tenant, &state, &viewer)
+            .await
+            .expect("publish hide");
+        release.notify_one();
+        delayed.await.expect("join").expect("converged snapshot");
+        let events = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                d_tag: Some(hex::encode(viewer)),
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(community)
+            })
+            .await
+            .expect("snapshot");
+        assert!(events[0]
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["h", &dm.id.to_string()]));
     }
 }

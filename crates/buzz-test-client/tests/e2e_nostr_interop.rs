@@ -2006,3 +2006,26 @@ async fn test_channel_window_rejects_half_cursor_and_client_overlay_kinds() {
     }
     ws.disconnect().await.expect("disconnect");
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_incoming_message_restores_hidden_dm_snapshot() {
+    let sender = Keys::generate();
+    let receiver = Keys::generate();
+    let channel = create_dm(&receiver, &sender.public_key().to_hex()).await;
+    let mut client = BuzzTestClient::connect(&relay_url(), &receiver)
+        .await
+        .expect("receiver");
+    post_signed_event(&receiver, 41012, vec![Tag::parse(["h", &channel]).unwrap()]).await;
+    assert!(
+        read_hidden_dms(&mut client, &receiver.public_key().to_hex())
+            .await
+            .contains(&channel)
+    );
+    send_rest_message(&sender, &channel, "A new message restores the DM").await;
+    assert!(
+        !read_hidden_dms(&mut client, &receiver.public_key().to_hex())
+            .await
+            .contains(&channel)
+    );
+}
