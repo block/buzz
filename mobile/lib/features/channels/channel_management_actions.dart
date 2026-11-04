@@ -267,40 +267,68 @@ class ChannelActions {
   /// Sets the role people get when they join [channelId]: `member` lets them
   /// participate, `guest` lets them only view. Existing members keep theirs.
   Future<void> setChannelJoinRole(String channelId, String role) =>
-      _setAdmission(channelId, [
-        'join_role',
-        role,
-      ], (admission) => admission.joinRole == role);
+      _setAdmission(channelId, ['join_role', role]);
 
   /// Makes [channelId] a default channel, which the relay joins every new
   /// community member to. Only community owners and admins may change it.
   Future<void> setDefaultChannel(String channelId, {required bool enabled}) =>
-      _setAdmission(channelId, [
-        'auto_join',
-        enabled.toString(),
-      ], (admission) => admission.autoJoin == enabled);
+      _setAdmission(channelId, ['auto_join', enabled.toString()]);
 
   /// Sends one partial kind:9002 change, then confirms it from fresh relay
-  /// metadata. An accepted change that does not read back is reported as
-  /// [ChannelChangeUnconfirmed], never as success, and is not resent.
-  Future<void> _setAdmission(
-    String channelId,
-    List<String> tag,
-    bool Function(ChannelAdmission admission) applied,
-  ) async {
-    _ensureCommunityValid();
-    await _signedEventRelay.submit(
-      kind: 9002,
-      content: '',
-      tags: [
-        ['h', channelId],
-        tag,
-      ],
+  /// metadata. A change the relay may have applied without showing it, or
+  /// whose acknowledgement was lost, is held as uncertain and reported as
+  /// [ChannelChangeUnconfirmed]; nothing more is published for the channel
+  /// until [checkAdmissionChange] confirms it.
+  Future<void> _setAdmission(String channelId, List<String> tag) async {
+    final uncertain = _ref.read(
+      uncertainAdmissionChangeProvider(channelId).notifier,
     );
+    if (_ref.read(uncertainAdmissionChangeProvider(channelId)) != null) {
+      throw const ChannelChangeUnconfirmed();
+    }
     _ensureCommunityValid();
+    var sent = false;
     try {
+      await _signedEventRelay.submit(
+        kind: 9002,
+        content: '',
+        tags: [
+          ['h', channelId],
+          tag,
+        ],
+        // From here the relay may apply the change even if its answer is lost.
+        onSigned: (_) {
+          sent = true;
+          uncertain.hold(tag);
+        },
+      );
+    } on RelayEventRejected {
+      uncertain.clear();
+      rethrow;
+    } catch (_) {
+      if (!sent) rethrow;
+      _ref.invalidate(channelAdmissionProvider(channelId));
+      throw const ChannelChangeUnconfirmed();
+    }
+    await checkAdmissionChange(channelId);
+  }
+
+  /// Reads [channelId]'s metadata, without publishing, to resolve an
+  /// uncertain admission change. Throws [ChannelChangeUnconfirmed] while the
+  /// relay still does not show it.
+  Future<void> checkAdmissionChange(String channelId) async {
+    final uncertain = _ref.read(
+      uncertainAdmissionChangeProvider(channelId).notifier,
+    );
+    final tag = _ref.read(uncertainAdmissionChangeProvider(channelId));
+    if (tag == null) return;
+    try {
+      _ensureCommunityValid();
       final admission = await _fetchChannelAdmission(_session, channelId);
-      if (!applied(admission)) throw const ChannelChangeUnconfirmed();
+      if (!admissionShows(admission, tag)) {
+        throw const ChannelChangeUnconfirmed();
+      }
+      uncertain.clear();
     } on ChannelChangeUnconfirmed {
       rethrow;
     } catch (_) {

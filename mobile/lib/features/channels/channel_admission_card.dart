@@ -2,7 +2,9 @@ part of 'channel_actions_sheet.dart';
 
 /// Who joins an open channel and how: the role newcomers get, and whether the
 /// relay joins every new community member to it. Every value comes from fresh
-/// relay metadata, and a change shows only after the relay confirms it.
+/// relay metadata, and a change shows only after the relay confirms it. A
+/// change the relay may have applied blocks further changes until a read-only
+/// check confirms it.
 class _ChannelAdmissionCard extends HookConsumerWidget {
   const _ChannelAdmissionCard({
     required this.channel,
@@ -18,18 +20,45 @@ class _ChannelAdmissionCard extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // Only community owners and admins choose default channels, and only an
     // open, unarchived stream can be one.
+    final mayBeDefault = channel.isStream && !channel.isArchived;
+    final communityRole = ref.watch(currentCommunityRoleProvider);
     final managesDefault =
-        channel.isStream &&
-        !channel.isArchived &&
-        managesCommunity(ref.watch(currentCommunityRoleProvider).value);
+        mayBeDefault && managesCommunity(communityRole.value);
+    // Without the role the setting cannot be offered, so say why and retry.
+    final roleUnknown =
+        mayBeDefault && !managesDefault && communityRole.hasError;
     final admissionAsync = ref.watch(channelAdmissionProvider(channel.id));
+    final uncertain = ref.watch(uncertainAdmissionChangeProvider(channel.id));
     final saving = useState(false);
-    if (!canEditJoinRole && !managesDefault) return const SizedBox.shrink();
+    if (!canEditJoinRole && !managesDefault && !roleUnknown) {
+      return const SizedBox.shrink();
+    }
 
     final admission = admissionAsync.asData?.value;
-    final ready = admission != null && !admissionAsync.isLoading;
-    final canToggleDefault =
-        managesDefault && ready && admission.canBeDefault && !saving.value;
+    final ready =
+        admission != null &&
+        !admissionAsync.isLoading &&
+        uncertain == null &&
+        !saving.value;
+    final canToggleDefault = managesDefault && ready && admission.canBeDefault;
+
+    void showError(Object error) {
+      if (!context.mounted) return;
+      // Replace, not queue, so the message always matches the latest result.
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showFeedbackSnackBar(
+          SnackBar(
+            content: Text(
+              error is ChannelChangeUnconfirmed
+                  ? 'Buzz couldn’t confirm the change yet. Check its status '
+                        'before trying again.'
+                  : 'Couldn’t change channel access. Try again.',
+            ),
+          ),
+          kind: ToastKind.error,
+        );
+    }
 
     Future<void> save(Future<void> Function(ChannelActions) change) async {
       if (saving.value) return;
@@ -37,19 +66,7 @@ class _ChannelAdmissionCard extends HookConsumerWidget {
       try {
         await change(ref.read(channelActionsProvider));
       } catch (error) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showFeedbackSnackBar(
-            SnackBar(
-              content: Text(
-                error is ChannelChangeUnconfirmed
-                    ? 'Buzz couldn’t confirm the change yet. Check again '
-                          'before trying again.'
-                    : 'Couldn’t change channel access. Try again.',
-              ),
-            ),
-            kind: ToastKind.error,
-          );
-        }
+        showError(error);
       } finally {
         if (context.mounted) saving.value = false;
       }
@@ -108,6 +125,32 @@ class _ChannelAdmissionCard extends HookConsumerWidget {
       label: 'General access',
       verticalPadding: _channelDetailsSectionPadding,
       children: [
+        if (roleUnknown)
+          AppListRow(
+            key: const ValueKey('channel-community-role-retry'),
+            icon: BuzzIcons.triangleAlert,
+            title: 'Default channel unavailable',
+            subtitle: 'Couldn’t check your community role. Tap to try again.',
+            onTap: () => ref.invalidate(communityMembershipProvider),
+          ),
+        if (uncertain != null)
+          AppListRow(
+            key: const ValueKey('channel-access-check'),
+            icon: BuzzIcons.triangleAlert,
+            title: 'Change not confirmed',
+            subtitle: 'It may have saved. Tap to check its status.',
+            trailing: saving.value
+                ? const BuzzLoadingIndicator(
+                    size: 20,
+                    semanticLabel: 'Checking save status',
+                  )
+                : null,
+            onTap: saving.value
+                ? null
+                : () => save(
+                    (actions) => actions.checkAdmissionChange(channel.id),
+                  ),
+          ),
         if (admissionAsync.hasError && admission == null)
           AppListRow(
             key: const ValueKey('channel-access-retry'),
@@ -127,13 +170,15 @@ class _ChannelAdmissionCard extends HookConsumerWidget {
                 'member' => 'Member',
                 _ => null,
               },
-              trailing: ready && !saving.value
+              trailing: ready
                   ? const _ChannelDetailsChevron()
+                  : uncertain != null
+                  ? null
                   : const BuzzLoadingIndicator(
                       size: 20,
                       semanticLabel: 'Loading access settings',
                     ),
-              onTap: ready && !saving.value ? chooseJoinRole : null,
+              onTap: ready ? chooseJoinRole : null,
             ),
           if (managesDefault)
             MergeSemantics(

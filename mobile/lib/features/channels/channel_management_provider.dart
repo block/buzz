@@ -609,7 +609,44 @@ final channelAdmissionProvider = FutureProvider.autoDispose
       );
     });
 
-/// The relay accepted a change that its metadata does not show yet.
+/// Whether [admission] shows the kind:9002 admission [tag] as applied.
+///
+/// Archived and private channels keep a stored default-channel flag without
+/// advertising it, so only an eligible channel's metadata proves either value.
+bool admissionShows(ChannelAdmission admission, List<String> tag) =>
+    switch (tag) {
+      ['join_role', final role] => admission.joinRole == role,
+      ['auto_join', final value] =>
+        admission.canBeDefault && admission.autoJoin == (value == 'true'),
+      _ => false,
+    };
+
+/// An admission change the relay may have applied but has not shown yet.
+///
+/// It outlives the channel details page so an uncertain change cannot be
+/// published again by closing and reopening it; switching communities clears it.
+class UncertainAdmissionChange extends Notifier<List<String>?> {
+  UncertainAdmissionChange(this.channelId);
+
+  final String channelId;
+
+  @override
+  List<String>? build() {
+    ref.watch(relayConfigProvider);
+    return null;
+  }
+
+  void hold(List<String> tag) => state = tag;
+
+  void clear() => state = null;
+}
+
+final uncertainAdmissionChangeProvider =
+    NotifierProvider.family<UncertainAdmissionChange, List<String>?, String>(
+      UncertainAdmissionChange.new,
+    );
+
+/// The relay may have applied a change that its metadata does not show yet.
 class ChannelChangeUnconfirmed implements Exception {
   const ChannelChangeUnconfirmed();
 }

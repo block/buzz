@@ -1025,7 +1025,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          Exception(message.isNotEmpty ? message : 'Event rejected'),
+          RelayEventRejected(message.isNotEmpty ? message : 'Event rejected'),
         );
       }
     }
