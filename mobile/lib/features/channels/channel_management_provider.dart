@@ -233,20 +233,6 @@ class DirectoryUser {
 const bool mockDmDirectoryEnabled =
     kDebugMode && bool.fromEnvironment('BUZZ_MOCK_DM_DIRECTORY');
 
-/// Whether the new-DM picker should use local preview identities.
-///
-/// Debug builds fall back automatically while disconnected. Production builds
-/// always use the active relay directory.
-final dmDirectoryPreviewEnabledProvider = Provider<bool>((ref) {
-  if (mockDmDirectoryEnabled) {
-    return true;
-  }
-  final relayStatus = ref.watch(
-    relaySessionProvider.select((session) => session.status),
-  );
-  return kDebugMode && relayStatus != SessionStatus.connected;
-});
-
 String _mockEmojiAvatar(String emoji, String color) {
   return Uri.dataFromString(
     '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">'

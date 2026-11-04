@@ -46,6 +46,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
@@ -95,7 +96,6 @@ void main() {
   });
   Widget buildTestable({
     required List<Override> overrides,
-    bool previewDirectory = false,
     Brightness brightness = Brightness.light,
     double keyboardInset = 0,
     bool disableAnimations = false,
@@ -123,9 +123,6 @@ void main() {
           if (loadCommunityIcon != null) return loadCommunityIcon(relayUrl);
           return communityIcons[relayUrl];
         }),
-        dmDirectoryPreviewEnabledProvider.overrideWith(
-          (ref) => previewDirectory,
-        ),
         appLifecycleProvider.overrideWith(() => _CommunitySettingsLifecycle()),
         ...overrides,
       ],
@@ -3143,206 +3140,235 @@ void main() {
     ),
   );
 
-  testWidgets('new message sheet lists and selects relay members', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(390, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets(
+    'new DM sheet finds and selects people like mention autocomplete',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    final waits = <bool>[];
-    const directoryUsers = [
-      DirectoryUser(
-        pubkey: 'alice',
-        displayName: 'Alice',
-        nip05Handle: 'alice@example.com',
-      ),
-      DirectoryUser(pubkey: 'bob', displayName: 'Bob'),
-      DirectoryUser(pubkey: 'charlie', displayName: 'Charlie'),
-      DirectoryUser(pubkey: 'danielle', displayName: 'Danielle'),
-    ];
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => directoryUsers,
-          ),
-          relayDirectorySearchProvider.overrideWith((ref, query) async {
-            return directoryUsers
-                .where(
-                  (user) =>
-                      user.label.toLowerCase().contains(query.toLowerCase()),
-                )
-                .toList();
-          }),
-          channelActionsProvider.overrideWith(
-            (ref) => _PendingDmActions(waits),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('New DM'));
-    await tester.pumpAndSettle();
-
-    final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(dmSheetRect.top, 0);
-    expect(dmSheetRect.height, 800);
-    expect(find.text('New message'), findsOneWidget);
-    expect(find.byTooltip('Close'), findsOneWidget);
-    expect(
-      tester
-          .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
-          .onPressed,
-      isNull,
-    );
-    expect(find.text('To:'), findsOneWidget);
-    expect(find.text('Search for a person'), findsOneWidget);
-    final recipientField = find.byKey(const Key('new-dm-recipient-field'));
-    final initialRecipientWidth = tester.getSize(recipientField).width;
-    expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
-    expect(find.byKey(const Key('new-dm-person-alice')), findsOneWidget);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byKey(const Key('new-dm-person-alice')),
-        matching: find.byType(AvatarImage),
-      ),
-      findsOneWidget,
-    );
-
-    await tester.enterText(find.byKey(const Key('new-dm-search')), 'bob');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('new-dm-person-alice')), findsNothing);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-
-    await tester.enterText(find.byKey(const Key('new-dm-search')), '');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-dm-person-alice')));
-    await tester.pump();
-
-    final aliceChip = find.byKey(const Key('new-dm-selected-alice'));
-    final inlineSearch = find.byKey(const Key('new-dm-search'));
-    final aliceRect = tester.getRect(aliceChip);
-    final inlineSearchRect = tester.getRect(inlineSearch);
-    expect(inlineSearchRect.left, greaterThan(aliceRect.right));
-    expect(
-      (inlineSearchRect.center.dy - aliceRect.center.dy).abs(),
-      lessThan(1),
-    );
-    expect(find.text('Search for a person'), findsNothing);
-    expect(tester.widget<TextField>(inlineSearch).focusNode?.hasFocus, isTrue);
-    expect(tester.getSize(recipientField).width, initialRecipientWidth);
-    expect(tester.getSize(aliceChip).height, 40);
-    expect(tester.getSize(aliceChip).width, lessThanOrEqualTo(224));
-    final aliceChipMaterial = tester.widget<Material>(
-      find.descendant(of: aliceChip, matching: find.byType(Material)).first,
-    );
-    expect(aliceChipMaterial.shape, isA<StadiumBorder>());
-    expect(
-      aliceChipMaterial.color,
-      Theme.of(tester.element(aliceChip)).colorScheme.surfaceContainerHighest,
-    );
-    expect(
-      tester
-          .widget<AvatarImage>(
-            find.descendant(of: aliceChip, matching: find.byType(AvatarImage)),
-          )
-          .radius,
-      16,
-    );
-    expect(
-      tester
-          .widget<Text>(
-            find.descendant(of: aliceChip, matching: find.text('Alice')),
-          )
-          .style
-          ?.fontSize,
-      16,
-    );
-    expect(
-      find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
-      findsNothing,
-    );
-    expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('new-dm-person-bob')));
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('new-dm-person-charlie')));
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('new-dm-person-danielle')));
-    await tester.pump();
-
-    expect(aliceChip, findsOneWidget);
-    expect(find.byKey(const Key('new-dm-selected-bob')), findsOneWidget);
-    expect(find.byKey(const Key('new-dm-selected-charlie')), findsOneWidget);
-    final danielleChip = find.byKey(const Key('new-dm-selected-danielle'));
-    expect(danielleChip, findsOneWidget);
-    expect(tester.getSize(recipientField).width, initialRecipientWidth);
-    expect(
-      tester.getRect(danielleChip).top,
-      greaterThan(tester.getRect(aliceChip).top),
-    );
-    final recipientScrollViews = tester.widgetList<SingleChildScrollView>(
-      find.ancestor(
-        of: aliceChip,
-        matching: find.byType(SingleChildScrollView),
-      ),
-    );
-    expect(
-      recipientScrollViews.every(
-        (scrollView) => scrollView.scrollDirection == Axis.vertical,
-      ),
-      isTrue,
-    );
-    expect(
-      find.ancestor(
-        of: aliceChip,
-        matching: find.byKey(const Key('new-dm-recipient-wrap')),
-      ),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const Key('new-dm-selected-bob')));
-    await tester.pump();
-    expect(find.byKey(const Key('new-dm-selected-bob')), findsNothing);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-    expect(tester.widget<TextField>(inlineSearch).focusNode?.hasFocus, isTrue);
-    expect(find.text('Cancel'), findsNothing);
-    expect(find.text('Open DM'), findsNothing);
-    final searchField = tester.widget<TextField>(
-      find.byKey(const Key('new-dm-search')),
-    );
-    expect(searchField.textInputAction, TextInputAction.done);
-    expect(searchField.onSubmitted, isNotNull);
-
-    // The header action opens the DM without waiting on the full channel list.
-    await tester.tap(find.byKey(const Key('new-dm-submit')));
-    await tester.pump();
-    expect(waits, [false]);
-    expect(
-      tester
-          .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
-          .onPressed,
-      isNull,
-    );
-    expect(
-      tester
-          .widget<IconButton>(
-            find.byWidgetPredicate(
-              (widget) => widget is IconButton && widget.tooltip == 'Close',
+      final waits = <bool>[];
+      final alice = _dmKey(0);
+      final bob = _dmKey(1);
+      final charlie = _dmKey(2);
+      final danielle = _dmKey(3);
+      final session = _DmDirectorySession({
+        alice: 'Alice',
+        bob: 'Bob',
+        charlie: 'Charlie',
+        danielle: 'Danielle',
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            relaySessionProvider.overrideWith(() => session),
+            channelActionsProvider.overrideWith(
+              (ref) => _PendingDmActions(waits),
             ),
-          )
-          .onPressed,
-      isNull,
-    );
-  });
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New DM'));
+      await tester.pumpAndSettle();
+
+      final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
+      expect(dmSheetRect.top, 0);
+      expect(dmSheetRect.height, 800);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet).last,
+          matching: find.text('New DM'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+            .onPressed,
+        isNull,
+      );
+      expect(find.text('To:'), findsOneWidget);
+      expect(find.text('Search for people or agents'), findsOneWidget);
+      final recipientField = find.byKey(const Key('new-dm-recipient-field'));
+      final initialRecipientWidth = tester.getSize(recipientField).width;
+      expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
+      // No directory dump: people are found by name, as with `@`.
+      expect(
+        find.text('Type a name to find people or agents.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('new-dm-search')))
+            .autofocus,
+        isTrue,
+      );
+
+      await _searchDm(tester, 'b');
+      expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(Key('new-dm-person-$bob')),
+          matching: find.byType(AvatarImage),
+        ),
+        findsOneWidget,
+      );
+      // A longer query keeps the shown rows while its own search runs.
+      await tester.enterText(find.byKey(const Key('new-dm-search')), 'bo');
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      // A query searched before shows its people at once.
+      await tester.enterText(find.byKey(const Key('new-dm-search')), 'b');
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(session.searches, ['b', 'bo']);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+
+      await _searchDm(tester, 'al');
+      await tester.tap(find.byKey(Key('new-dm-person-$alice')));
+      await tester.pump();
+
+      final aliceChip = find.byKey(Key('new-dm-selected-$alice'));
+      final inlineSearch = find.byKey(const Key('new-dm-search'));
+      final aliceRect = tester.getRect(aliceChip);
+      final inlineSearchRect = tester.getRect(inlineSearch);
+      expect(inlineSearchRect.left, greaterThan(aliceRect.right));
+      expect(
+        (inlineSearchRect.center.dy - aliceRect.center.dy).abs(),
+        lessThan(1),
+      );
+      expect(find.text('Search for people or agents'), findsNothing);
+      expect(
+        tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,
+        isTrue,
+      );
+      expect(tester.getSize(recipientField).width, initialRecipientWidth);
+      expect(tester.getSize(aliceChip).height, 40);
+      expect(tester.getSize(aliceChip).width, lessThanOrEqualTo(224));
+      final aliceChipMaterial = tester.widget<Material>(
+        find.descendant(of: aliceChip, matching: find.byType(Material)).first,
+      );
+      expect(aliceChipMaterial.shape, isA<StadiumBorder>());
+      expect(
+        aliceChipMaterial.color,
+        Theme.of(tester.element(aliceChip)).colorScheme.surfaceContainerHighest,
+      );
+      expect(
+        tester
+            .widget<AvatarImage>(
+              find.descendant(
+                of: aliceChip,
+                matching: find.byType(AvatarImage),
+              ),
+            )
+            .radius,
+        16,
+      );
+      expect(
+        tester
+            .widget<Text>(
+              find.descendant(of: aliceChip, matching: find.text('Alice')),
+            )
+            .style
+            ?.fontSize,
+        16,
+      );
+      expect(
+        find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
+        findsNothing,
+      );
+      expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
+
+      for (final (query, key) in [
+        ('bob', bob),
+        ('ch', charlie),
+        ('da', danielle),
+      ]) {
+        await _searchDm(tester, query);
+        await tester.tap(find.byKey(Key('new-dm-person-$key')));
+        await tester.pump();
+      }
+
+      expect(aliceChip, findsOneWidget);
+      expect(find.byKey(Key('new-dm-selected-$bob')), findsOneWidget);
+      expect(find.byKey(Key('new-dm-selected-$charlie')), findsOneWidget);
+      final danielleChip = find.byKey(Key('new-dm-selected-$danielle'));
+      expect(danielleChip, findsOneWidget);
+      expect(tester.getSize(recipientField).width, initialRecipientWidth);
+      expect(
+        tester.getRect(danielleChip).top,
+        greaterThan(tester.getRect(aliceChip).top),
+      );
+      final recipientScrollViews = tester.widgetList<SingleChildScrollView>(
+        find.ancestor(
+          of: aliceChip,
+          matching: find.byType(SingleChildScrollView),
+        ),
+      );
+      expect(
+        recipientScrollViews.every(
+          (scrollView) => scrollView.scrollDirection == Axis.vertical,
+        ),
+        isTrue,
+      );
+      expect(
+        find.ancestor(
+          of: aliceChip,
+          matching: find.byKey(const Key('new-dm-recipient-wrap')),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(Key('new-dm-selected-$bob')));
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-selected-$bob')), findsNothing);
+      await _searchDm(tester, 'bo');
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(
+        tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,
+        isTrue,
+      );
+      expect(find.text('Cancel'), findsNothing);
+      expect(find.text('Open DM'), findsNothing);
+      final searchField = tester.widget<TextField>(
+        find.byKey(const Key('new-dm-search')),
+      );
+      expect(searchField.textInputAction, TextInputAction.done);
+      expect(searchField.onSubmitted, isNotNull);
+
+      // The header action opens the DM without waiting on the full channel list.
+      await tester.tap(find.byKey(const Key('new-dm-submit')));
+      await tester.pump();
+      expect(waits, [false]);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byWidgetPredicate(
+                (widget) => widget is IconButton && widget.tooltip == 'Close',
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+    },
+  );
 
   testWidgets('wraps many recipients without overflowing above the keyboard', (
     tester,
@@ -3352,22 +3378,17 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    final directoryUsers = [
+    final people = {
       for (var index = 0; index < 9; index++)
-        DirectoryUser(
-          pubkey: 'person-$index',
-          displayName: 'Long recipient name number $index',
-        ),
-    ];
+        _dmKey(index): 'Long recipient name number $index',
+    };
 
     await tester.pumpWidget(
       buildTestable(
         keyboardInset: 300,
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => directoryUsers,
-          ),
+          relaySessionProvider.overrideWith(() => _DmDirectorySession(people)),
         ],
       ),
     );
@@ -3378,8 +3399,9 @@ void main() {
     await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
 
-    for (final user in directoryUsers.take(8)) {
-      final result = find.byKey(Key('new-dm-person-${user.pubkey}'));
+    for (var index = 0; index < 8; index++) {
+      await _searchDm(tester, 'Long recipient name number $index');
+      final result = find.byKey(Key('new-dm-person-${_dmKey(index)}'));
       await tester.ensureVisible(result);
       await tester.pumpAndSettle();
       await tester.tap(result);
@@ -3395,14 +3417,15 @@ void main() {
       find.text('DMs support up to nine people, including you.'),
       findsOneWidget,
     );
-    expect(find.byKey(const Key('new-dm-person-person-8')), findsNothing);
-    final lastChip = find.byKey(const Key('new-dm-selected-person-7'));
+    await _searchDm(tester, 'Long recipient name number 8');
+    expect(find.byKey(Key('new-dm-person-${_dmKey(8)}')), findsNothing);
+    final lastChip = find.byKey(Key('new-dm-selected-${_dmKey(7)}'));
     await tester.ensureVisible(lastChip);
     await tester.pumpAndSettle();
     await tester.tap(lastChip);
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('new-dm-selected-person-7')), findsNothing);
-    final ninthRecipient = find.byKey(const Key('new-dm-person-person-8'));
+    expect(find.byKey(Key('new-dm-selected-${_dmKey(7)}')), findsNothing);
+    final ninthRecipient = find.byKey(Key('new-dm-person-${_dmKey(8)}'));
     final listScroll = find
         .descendant(
           of: find.byType(BottomSheet).last,
@@ -3421,53 +3444,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(ninthRecipient.hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('shows local preview people when the relay is offline', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(390, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(
-      buildTestable(
-        previewDirectory: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('New DM'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Could not load people from this relay.'), findsNothing);
-    expect(find.text('Maya Chen'), findsOneWidget);
-    expect(find.text('Jordan Brooks'), findsOneWidget);
-    expect(find.text('Priya Shah'), findsOneWidget);
-
-    await tester.tap(
-      find.byKey(
-        const Key(
-          'new-dm-person-'
-          '1111111111111111111111111111111111111111111111111111111111111111',
-        ),
-      ),
-    );
-    await tester.pump();
-    expect(find.text('Maya Chen'), findsWidgets);
-
-    await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pump();
-    expect(
-      find.text('Preview only — mock people cannot be messaged.'),
-      findsOneWidget,
-    );
   });
 
   testWidgets('hides unjoined and archived channels from the main list', (

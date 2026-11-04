@@ -132,7 +132,6 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
         ..._state,
         'dark': theme.brightness == Brightness.dark,
         'pageColor': theme.colorScheme.surface.toARGB32(),
-        'rowColor': theme.colorScheme.surfaceContainerHighest.toARGB32(),
       });
       _presented = true;
       if (!mounted) {

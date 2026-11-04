@@ -99,7 +99,6 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
-  private let rowColor: UIColor
   private var selected: [[String: Any]] { state["selected"] as? [[String: Any]] ?? [] }
   private var users: [[String: Any]] {
     let selectedKeys = Set(selected.compactMap { $0["pubkey"] as? String })
@@ -117,9 +116,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     self.state = state
     self.loadAvatar = loadAvatar
     self.send = send
-    pageColor = Self.color(state["pageColor"]) ?? .systemGroupedBackground
-    rowColor = Self.color(state["rowColor"]) ?? .secondarySystemGroupedBackground
-    super.init(style: .insetGrouped)
+    pageColor = Self.color(state["pageColor"]) ?? .systemBackground
+    super.init(style: .plain)
     title = state["title"] as? String ?? "Add members"
   }
 
@@ -157,8 +155,13 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    search.isActive = true
-    search.searchBar.becomeFirstResponder()
+    // Activating in the same pass as the appearance is ignored, so focus
+    // the field on the next turn of the run loop.
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.view.window != nil else { return }
+      self.search.isActive = true
+      self.search.searchBar.searchTextField.becomeFirstResponder()
+    }
   }
 
   func update(_ data: [String: Any]) {
@@ -202,8 +205,6 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     let query = searchController.searchBar.text ?? ""
     guard query != (state["query"] as? String ?? "") else { return }
     state["query"] = query
-    state["loading"] = true
-    tableView.reloadData()
     send("query", ["value": searchController.searchBar.text ?? ""])
   }
 
@@ -215,27 +216,42 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     send("submit", [:])
   }
 
+  /// The status row after the results: the selection limit, a failed
+  /// search, or why there are no results. Results stay shown while a search
+  /// refreshes them.
+  private var status: String? {
+    if atLimit { return "DMs support up to nine people, including you." }
+    if loadError { return "Couldn't search people or agents. Tap to retry." }
+    if !users.isEmpty { return nil }
+    if loading { return "Searching…" }
+    return (state["query"] as? String ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+      ? "Type a name to find people or agents."
+      : "No matching people or agents."
+  }
+  private var shownUsers: [[String: Any]] { atLimit ? [] : users }
+  private func isStatus(_ indexPath: IndexPath) -> Bool {
+    indexPath.section == 1 && indexPath.row >= shownUsers.count
+  }
+
   override func numberOfSections(in tableView: UITableView) -> Int { 2 }
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    section == 0 ? selected.count : (atLimit || loading || loadError || users.isEmpty ? 1 : users.count)
-  }
-  override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-    section == 0 ? (selected.isEmpty ? nil : "Selected") : "People and agents"
+    section == 0 ? selected.count : shownUsers.count + (status == nil ? 0 : 1)
   }
   override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
     let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
-    cell.backgroundColor = rowColor
+    cell.backgroundColor = pageColor
     var content = cell.defaultContentConfiguration()
     var avatarRequest: (String, String)?
     var memberLabel: String?
-    if indexPath.section == 1 && (atLimit || loading || loadError || users.isEmpty) {
-      content.text = atLimit ? "DMs support up to nine people, including you." : loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
-      content.textProperties.color = .secondaryLabel
+    if isStatus(indexPath) {
+      content.text = status
+      content.textProperties.color = loadError && !atLimit ? .systemRed : .secondaryLabel
       content.textProperties.numberOfLines = 0
-      cell.selectionStyle = loadError && !loading ? .default : .none
-      if loadError && !loading && !atLimit { cell.accessibilityTraits.insert(.button) }
+      cell.selectionStyle = loadError && !atLimit ? .default : .none
+      if loadError && !atLimit { cell.accessibilityTraits.insert(.button) }
     } else {
-      let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
+      let user = indexPath.section == 0 ? selected[indexPath.row] : shownUsers[indexPath.row]
+      let unavailable = user["unavailable"] as? Bool == true
       content.text = user["name"] as? String
       content.secondaryText = user["detail"] as? String
       memberLabel = [content.text, content.secondaryText]
@@ -249,6 +265,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
         avatarRequest = (pubkey, key)
       }
       cell.accessoryType = indexPath.section == 0 ? .checkmark : .none
+      if unavailable {
+        content.textProperties.color = .secondaryLabel
+        cell.selectionStyle = .none
+        cell.accessibilityTraits.insert(.notEnabled)
+      }
       cell.accessibilityTraits.insert(.button)
       if indexPath.section == 0 { cell.accessibilityTraits.insert(.selected) }
     }
@@ -277,12 +298,21 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     guard !busy else { return }
-    if indexPath.section == 1 && (atLimit || loading || loadError || users.isEmpty) {
-      if loadError && !loading && !atLimit { send("retry", [:]) }
+    if isStatus(indexPath) {
+      if loadError && !atLimit { send("retry", [:]) }
       return
     }
-    let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
-    if let pubkey = user["pubkey"] as? String { send("toggle", ["pubkey": pubkey]) }
+    let user = indexPath.section == 0 ? selected[indexPath.row] : shownUsers[indexPath.row]
+    if user["unavailable"] as? Bool == true { return }
+    guard let pubkey = user["pubkey"] as? String else { return }
+    send("toggle", ["pubkey": pubkey])
+    // A pick ends its query, as an inserted mention does, so the next name
+    // starts fresh.
+    if indexPath.section == 1 && !(search.searchBar.text ?? "").isEmpty {
+      search.searchBar.text = ""
+      state["query"] = ""
+      send("query", ["value": ""])
+    }
   }
 
   private func fallbackAvatar(_ user: [String: Any]) -> UIImage {

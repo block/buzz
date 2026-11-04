@@ -180,97 +180,154 @@ final mentionCandidatesProvider = Provider.family
         sessionStatus: sessionStatus,
         cachedMembers: cachedMembers,
       );
-      final relayAgents =
-          ref.watch(agentDirectoryProvider).asData?.value ??
-          const <AgentDirectoryEntry>[];
-      final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
-      // Null while loading or failed: nothing is known to be unlisted.
-      final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
-      final channels = channelsAsync.asData?.value ?? const <Channel>[];
-      final userCache = ref.watch(userCacheProvider);
-      final currentPubkey = ref.watch(currentPubkeyProvider);
-      final channel = ref.watch(channelByIdProvider(args.channelId));
       // Archived channels take no mentions.
+      final channel = ref.watch(channelByIdProvider(args.channelId));
       if (channel?.isArchived == true) return const [];
-      final directory = channel?.mentionsOutsidePeople ?? false;
-      final searches = ref.watch(mentionSearchCacheProvider);
-
-      final sharedChannelIds = {
-        for (final channel in channels)
-          if (channel.isMember && !channel.isArchived) channel.id,
-      };
-
-      // The directory search matches self-declared names only. A person
-      // outside the channel whose cached verified name matches joins the
-      // results, so the name headers show finds them, not only an impostor
-      // who copied it into kind 0.
-      final verified = ref.watch(verifiedProfilesProvider);
-      final verifiedMatches = directory
-          ? verifiedMentionMatches(verified, args.query, userCache)
-          : const <UserProfile>[];
-
-      List<MentionCandidate> build(List<UserProfile> searchResults) => [
-        for (final candidate in buildMentionCandidates(
-          members: members,
-          relayAgents: relayAgents,
-          sharedChannelIds: sharedChannelIds,
-          userCache: userCache,
-          ownerByAgentPubkey: owners,
-          searchResults: [...searchResults, ...verifiedMatches],
-          currentPubkey: currentPubkey,
-          ownedAgents: ownedAgents,
-          // Desktop offers the owner's agents where they can be added.
-          offerOwnedAgents:
-              channel != null && (channel.isStream || channel.isForum),
-        ))
-          if (isMentionKey(candidate.pubkey)) candidate,
-      ];
-
-      // Admission does not gate the search: `@Mary J` can name a person
-      // outside the channel, so the search runs and admission is checked
-      // again with the people it finds (portable mention rules, section 2).
-      var candidates = build(
-        directory
-            ? searches.seed(args.query) ?? const <UserProfile>[]
-            : const <UserProfile>[],
-      );
-      if (directory) {
-        final search = ref.watch(mentionUserSearchProvider(args.query));
-        final page = search.asData?.value;
-        if (page != null) candidates = build(page);
-      }
-      // A verified name replaces the self-declared one for matching, ranking
-      // and the inserted text, so typing it finds the verified person.
-      candidates = [
-        for (final candidate in candidates)
-          switch (verified[candidate.pubkey.toLowerCase()]) {
-            final profile? => candidate.withVerifiedName(profile.displayName),
-            null => candidate,
-          },
-      ];
-      if (!matchesMentionQuery(args.query, [
-        for (final candidate in candidates) ...candidate.searchNames,
-      ])) {
-        return const [];
-      }
-
-      final names = mentionPickerNames(
-        ref.watch(identityNameSourcesProvider),
-        candidates,
-      );
-      loadIdentityNameOwners(ref, names);
-      final presence = ref.watch(presentedPresenceProvider);
-      return rankMentionCandidates(
-        [
-          for (final candidate in candidates)
-            candidate.withContextLabel(names.labelFor(candidate.pubkey)),
-        ],
-        args.query,
-        viewer: currentPubkey,
-        history: ref.watch(mentionHistoryProvider)[args.channelId] ?? const {},
-        presence: (key) => presence[key] ?? 'unknown',
+      return _chooserCandidates(
+        ref,
+        members: members,
+        query: args.query,
+        directory: channel?.mentionsOutsidePeople ?? false,
+        // Desktop offers the owner's agents where they can be added.
+        offerOwnedAgents:
+            channel != null && (channel.isStream || channel.isForum),
+        historyKey: args.channelId,
       );
     });
+
+/// [mentionHistoryProvider] key for choices made in the New DM picker.
+const newDmMentionHistoryKey = 'new-dm';
+
+/// Ranked New DM recipients for [query], chosen exactly like mention
+/// autocomplete in a stream: no channel members yet, the viewer's own agents
+/// offered unprompted, agents shared with the viewer, and people from the
+/// community directory search, with the same debounce and search cache.
+final newDmCandidatesProvider = Provider.family
+    .autoDispose<List<MentionCandidate>, String>((ref, query) {
+      final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      return [
+        for (final candidate in _chooserCandidates(
+          ref,
+          members: const [],
+          query: query,
+          directory: true,
+          offerOwnedAgents: true,
+          historyKey: newDmMentionHistoryKey,
+        ))
+          if (candidate.pubkey != currentPubkey) candidate,
+      ];
+    });
+
+/// Whether the New DM directory search for [query] is still running.
+final newDmSearchPendingProvider = Provider.family.autoDispose<bool, String>(
+  (ref, query) =>
+      query.trim().isNotEmpty &&
+      ref.watch(mentionUserSearchProvider(query)).isLoading,
+);
+
+/// Whether the New DM directory search for [query] failed.
+final newDmSearchFailedProvider = Provider.family.autoDispose<bool, String>((
+  ref,
+  query,
+) {
+  final search = ref.watch(mentionUserSearchProvider(query));
+  return search.hasError && !search.isLoading;
+});
+
+List<MentionCandidate> _chooserCandidates(
+  Ref ref, {
+  required List<ChannelMember> members,
+  required String query,
+  required bool directory,
+  required bool offerOwnedAgents,
+  required String historyKey,
+}) {
+  final channels =
+      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+  final relayAgents =
+      ref.watch(agentDirectoryProvider).asData?.value ??
+      const <AgentDirectoryEntry>[];
+  final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+  // Null while loading or failed: nothing is known to be unlisted.
+  final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
+  final userCache = ref.watch(userCacheProvider);
+  final currentPubkey = ref.watch(currentPubkeyProvider);
+  final searches = ref.watch(mentionSearchCacheProvider);
+
+  final sharedChannelIds = {
+    for (final channel in channels)
+      if (channel.isMember && !channel.isArchived) channel.id,
+  };
+
+  // The directory search matches self-declared names only. A person
+  // outside the channel whose cached verified name matches joins the
+  // results, so the name headers show finds them, not only an impostor
+  // who copied it into kind 0.
+  final verified = ref.watch(verifiedProfilesProvider);
+  final verifiedMatches = directory
+      ? verifiedMentionMatches(verified, query, userCache)
+      : const <UserProfile>[];
+
+  List<MentionCandidate> build(List<UserProfile> searchResults) => [
+    for (final candidate in buildMentionCandidates(
+      members: members,
+      relayAgents: relayAgents,
+      sharedChannelIds: sharedChannelIds,
+      userCache: userCache,
+      ownerByAgentPubkey: owners,
+      searchResults: [...searchResults, ...verifiedMatches],
+      currentPubkey: currentPubkey,
+      ownedAgents: ownedAgents,
+      offerOwnedAgents: offerOwnedAgents,
+    ))
+      if (isMentionKey(candidate.pubkey)) candidate,
+  ];
+
+  // Admission does not gate the search: `@Mary J` can name a person
+  // outside the channel, so the search runs and admission is checked
+  // again with the people it finds (portable mention rules, section 2).
+  var candidates = build(
+    directory
+        ? searches.seed(query) ?? const <UserProfile>[]
+        : const <UserProfile>[],
+  );
+  if (directory) {
+    final search = ref.watch(mentionUserSearchProvider(query));
+    final page = search.asData?.value;
+    if (page != null) candidates = build(page);
+  }
+  // A verified name replaces the self-declared one for matching, ranking
+  // and the inserted text, so typing it finds the verified person.
+  candidates = [
+    for (final candidate in candidates)
+      switch (verified[candidate.pubkey.toLowerCase()]) {
+        final profile? => candidate.withVerifiedName(profile.displayName),
+        null => candidate,
+      },
+  ];
+  if (!matchesMentionQuery(query, [
+    for (final candidate in candidates) ...candidate.searchNames,
+  ])) {
+    return const [];
+  }
+
+  final names = mentionPickerNames(
+    ref.watch(identityNameSourcesProvider),
+    candidates,
+  );
+  loadIdentityNameOwners(ref, names);
+  final presence = ref.watch(presentedPresenceProvider);
+  return rankMentionCandidates(
+    [
+      for (final candidate in candidates)
+        candidate.withContextLabel(names.labelFor(candidate.pubkey)),
+    ],
+    query,
+    viewer: currentPubkey,
+    history: ref.watch(mentionHistoryProvider)[historyKey] ?? const {},
+    presence: (key) => presence[key] ?? 'unknown',
+  );
+}
 
 /// People whose verified name matches a non-empty [query], as directory
 /// search results. Their cached kind 0 profile is kept when known.

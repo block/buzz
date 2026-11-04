@@ -50,6 +50,7 @@ import '../../shared/emoji/emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
+import 'mentions/stable_mention_rows.dart';
 import 'photo_library.dart';
 import 'voice_note_attachment.dart';
 import 'voice_note_composer_recorder.dart';

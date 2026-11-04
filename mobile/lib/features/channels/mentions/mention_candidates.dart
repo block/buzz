@@ -40,6 +40,23 @@ String? formatOwnerLabel(
   return shortPubkey(ownerPubkey);
 }
 
+/// The detail line New DM shows under [candidate], as the mention chooser's
+/// info line reads outside a channel: agents say who manages them; people
+/// have none.
+String? newDmRowDetail(
+  MentionCandidate candidate,
+  String? currentPubkey,
+  Map<String, UserProfile> userCache,
+) {
+  if (!candidate.isAgent) return null;
+  final owner = formatOwnerLabel(
+    candidate.ownerPubkey,
+    currentPubkey,
+    userCache,
+  );
+  return owner == null ? 'agent' : 'agent \u00b7 managed by $owner';
+}
+
 /// Assemble the full mention candidate list: channel members first-class,
 /// then the viewer's own agents where they can be invited, then eligible
 /// non-member relay agents, then global user-search results.
