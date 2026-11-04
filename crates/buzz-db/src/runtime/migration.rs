@@ -2933,6 +2933,8 @@ mod postgres_tests {
         );
 
         for table in [
+            "communities",
+            "community_auth_upgrades",
             "entity_deletion_requests",
             "entity_deletion_stage_history",
             "user_deletion_fences",
