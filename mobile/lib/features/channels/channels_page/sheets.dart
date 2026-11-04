@@ -419,6 +419,8 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         state: {
           'title': 'New DM',
           'confirmWithCheckmark': true,
+          'clearQueryOnPick': true,
+          'emptyQueryHint': 'Type a name to find people or agents.',
           'selectionLimit': 8,
           'completed': completedChannel.value != null,
           'query': query.value,

@@ -224,9 +224,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     if loadError { return "Couldn't search people or agents. Tap to retry." }
     if !users.isEmpty { return nil }
     if loading { return "Searching…" }
-    return (state["query"] as? String ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-      ? "Type a name to find people or agents."
-      : "No matching people or agents."
+    if (state["query"] as? String ?? "").trimmingCharacters(in: .whitespaces).isEmpty,
+      let hint = state["emptyQueryHint"] as? String {
+      return hint
+    }
+    return "No matching people or agents."
   }
   private var shownUsers: [[String: Any]] { atLimit ? [] : users }
   private func isStatus(_ indexPath: IndexPath) -> Bool {
@@ -306,9 +308,10 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     if user["unavailable"] as? Bool == true { return }
     guard let pubkey = user["pubkey"] as? String else { return }
     send("toggle", ["pubkey": pubkey])
-    // A pick ends its query, as an inserted mention does, so the next name
-    // starts fresh.
-    if indexPath.section == 1 && !(search.searchBar.text ?? "").isEmpty {
+    // Where asked (New DM), a pick ends its query, as an inserted mention
+    // does, so the next name starts fresh.
+    if indexPath.section == 1 && state["clearQueryOnPick"] as? Bool == true
+      && !(search.searchBar.text ?? "").isEmpty {
       search.searchBar.text = ""
       state["query"] = ""
       send("query", ["value": ""])

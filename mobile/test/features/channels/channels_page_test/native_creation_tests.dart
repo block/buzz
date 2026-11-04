@@ -35,6 +35,7 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       expect(find.byType(BottomSheet), findsNothing);
       expect(states.last['title'], 'New DM');
       expect(states.last['confirmWithCheckmark'], true);
+      expect(states.last['clearQueryOnPick'], true);
       final session = states.last['session'];
       Future<void> event(
         String method, [
