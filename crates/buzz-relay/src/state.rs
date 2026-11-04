@@ -110,24 +110,35 @@ pub const LIVE_AUTHORIZATION_REVALIDATION_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(5);
 /// A short database outage may preserve the most recent decision for this long.
 pub(crate) const LIVE_AUTHORIZATION_DB_FAILURE_GRACE: std::time::Duration =
-    std::time::Duration::from_secs(10);
+    std::time::Duration::from_secs(5);
+/// Spread outage-driven closes across scans without extending the 30s budget.
+const LIVE_AUTHORIZATION_OUTAGE_JITTER: std::time::Duration = std::time::Duration::from_secs(9);
 /// A live session must not keep a stale authorization decision beyond this budget.
 pub(crate) const LIVE_AUTHORIZATION_MAX_STALENESS: std::time::Duration =
     std::time::Duration::from_secs(30);
 const LIVE_AUTHORIZATION_BATCH_SIZE: usize = 500;
 const LIVE_AUTHORIZATION_QUERY_CONCURRENCY: usize = 4;
-const LIVE_AUTHORIZATION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const LIVE_AUTHORIZATION_QUERY_TIMEOUT: std::time::Duration =
+    buzz_db::LIVE_AUTHORIZATION_QUERY_TIMEOUT;
 const LIVE_AUTHORIZATION_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-// Conservative schedule: allow the grace plus a full current/next scan, the
+// Conservative schedule: allow grace and jitter plus a full current/next scan, the
 // cadence, and one query deadline. Keep the documented session budget above it.
 const LIVE_AUTHORIZATION_WORST_CASE_STALENESS_SECS: u64 = LIVE_AUTHORIZATION_DB_FAILURE_GRACE
     .as_secs()
+    + LIVE_AUTHORIZATION_OUTAGE_JITTER.as_secs()
     + LIVE_AUTHORIZATION_REVALIDATION_INTERVAL.as_secs()
     + 2 * LIVE_AUTHORIZATION_SCAN_TIMEOUT.as_secs()
     + LIVE_AUTHORIZATION_QUERY_TIMEOUT.as_secs();
 const _: () = assert!(
     LIVE_AUTHORIZATION_WORST_CASE_STALENESS_SECS <= LIVE_AUTHORIZATION_MAX_STALENESS.as_secs()
 );
+fn live_authorization_failure_grace(connection_id: Uuid) -> std::time::Duration {
+    // Connection IDs are server-generated random UUIDs. A stable offset means
+    // repeated failures cannot move a session's cutoff or add timers per socket.
+    let offset_ms = (connection_id.as_u128() % LIVE_AUTHORIZATION_OUTAGE_JITTER.as_millis()) as u64;
+    LIVE_AUTHORIZATION_DB_FAILURE_GRACE + std::time::Duration::from_millis(offset_ms)
+}
+
 #[derive(Clone)]
 struct LiveAuthorizationRecord {
     pubkey: [u8; 32],
@@ -1281,7 +1292,7 @@ async fn revalidate_live_authorization_sessions(
                 let now = TokioInstant::now();
                 for session in sessions {
                     if now.saturating_duration_since(session.last_checked_at)
-                        < LIVE_AUTHORIZATION_DB_FAILURE_GRACE
+                        < live_authorization_failure_grace(session.connection_id)
                     {
                         continue;
                     }
@@ -7216,6 +7227,49 @@ mod live_authorization_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn outage_closes_are_spread_across_scans_within_revocation_budget() {
+        let registry = CommunityConnectionRegistry::new();
+        let manager = ConnectionManager::new();
+        let tenant = community(0x2722);
+        let checked_at = TokioInstant::now();
+        // Same target and successful snapshot, but three different socket cutoffs.
+        let sessions = [0, 5000, 8999].map(|offset| {
+            register_audio_authorization_session_at(
+                &registry,
+                tenant,
+                Uuid::from_u128(9000 + offset),
+                [0x49; 32],
+                checked_at,
+            )
+        });
+        let mut closes = Vec::new();
+        for _ in 0..3 {
+            tokio::time::advance(LIVE_AUTHORIZATION_REVALIDATION_INTERVAL).await;
+            let report = revalidate_live_authorization_sessions(
+                &registry,
+                &manager,
+                true,
+                true,
+                &CancellationToken::new(),
+                database_failure_lookup(),
+            )
+            .await;
+            closes.push(report.closed_for_db_failure);
+        }
+        assert_eq!(
+            closes,
+            [1, 1, 1],
+            "outage does not close all sibling sockets in one sweep"
+        );
+        assert!(sessions.iter().all(|(_, cancel)| cancel.is_cancelled()));
+        assert!(checked_at.elapsed() <= LIVE_AUTHORIZATION_MAX_STALENESS);
+        assert!(
+            LIVE_AUTHORIZATION_WORST_CASE_STALENESS_SECS
+                <= LIVE_AUTHORIZATION_MAX_STALENESS.as_secs()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn incomplete_batch_does_not_refresh_any_target_authorization() {
         let registry = CommunityConnectionRegistry::new();
         let manager = ConnectionManager::new();
@@ -7264,7 +7318,10 @@ mod live_authorization_tests {
         assert!(!first.cancel.is_cancelled());
         assert!(!second.cancel.is_cancelled());
 
-        tokio::time::advance(LIVE_AUTHORIZATION_DB_FAILURE_GRACE).await;
+        tokio::time::advance(
+            LIVE_AUTHORIZATION_DB_FAILURE_GRACE + LIVE_AUTHORIZATION_OUTAGE_JITTER,
+        )
+        .await;
         let expired = revalidate_live_authorization_sessions(
             &registry,
             &manager,
@@ -7590,7 +7647,10 @@ mod live_authorization_tests {
             .iter()
             .all(|session| !session.cancel.is_cancelled()));
 
-        tokio::time::advance(std::time::Duration::from_secs(9)).await;
+        tokio::time::advance(
+            LIVE_AUTHORIZATION_DB_FAILURE_GRACE - std::time::Duration::from_secs(1),
+        )
+        .await;
         let repeated_failure = revalidate_live_authorization_sessions(
             &registry,
             &manager,
@@ -7601,7 +7661,8 @@ mod live_authorization_tests {
         )
         .await;
         assert_eq!(repeated_failure.closed_sessions, 0);
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::time::advance(LIVE_AUTHORIZATION_OUTAGE_JITTER + std::time::Duration::from_secs(1))
+            .await;
         let expired_grace = revalidate_live_authorization_sessions(
             &registry,
             &manager,
@@ -7667,7 +7728,7 @@ mod live_authorization_tests {
         assert_eq!(first.failed_targets, 1);
         assert_eq!(first.closed_sessions, 0);
         tokio::time::advance(
-            LIVE_AUTHORIZATION_DB_FAILURE_GRACE
+            LIVE_AUTHORIZATION_DB_FAILURE_GRACE + LIVE_AUTHORIZATION_OUTAGE_JITTER
                 - LIVE_AUTHORIZATION_QUERY_TIMEOUT.saturating_mul(2),
         )
         .await;

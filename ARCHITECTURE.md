@@ -270,22 +270,25 @@ keeps the immediate local disconnect and Redis fan-out paths; this scan is the
 durable backstop when a pod misses fan-out.
 
 The maximum authorization-staleness budget is 30 seconds. A database failure
-may preserve the last successful decision for 10 seconds, measured from the
+may preserve the last successful decision for 5 seconds plus a stable per-socket
+offset below 9 seconds, measured from the
 start of that session's last successful authoritative check; repeated failures
-never extend the grace. The worker handles up to 500 distinct
+never extend the cutoff. The offset comes from the server-generated connection
+UUID, spreading outage closes across scans without a timer per socket. The worker handles up to 500 distinct
 `(community, principal, captured owner)`
 targets per query, runs at most 4 queries at a time, gives each query 1 second,
 and starts one shared 5-second lookup deadline before it snapshots and groups
 the live-session registry. No database batch starts after that deadline;
 unresolved targets are treated as lookup failures. Closing decisions are then applied in one
-bounded sweep over the connection snapshot. At the default 10,000-connection
-limit, the in-memory regression harness processed a full 10,000-session scan in
-70 ms in the latest measured workstation run. A disposable PostgreSQL run
-fetched all 10,000 authorization targets in 129 ms through the same 500-row,
-four-query batching shape. Database lookups are bounded by the shared 5-second
-deadline. The conservative staleness bound is 10 seconds of database grace, one
-5-second cadence, two 5-second scan windows, and one 1-second query deadline:
-26 seconds, below the 30-second budget. The relay's shared
+bounded sweep over the connection snapshot. Each query runs in a transaction used only for the read with a server-side statement
+limit of at most 900 ms, below the shared 1-second client deadline; a tighter
+operator limit is preserved. Rollback restores the writer session's limit.
+Cancelled or failed lookups close the checked-out connection under SQLx's
+bounded close path rather than waiting on its return-to-pool ping. The server
+limit also stops work when PostgreSQL has not yet noticed a disconnect.
+The conservative staleness bound is 5 seconds of base grace, 9 seconds of jitter,
+one 5-second cadence, two 5-second scan windows, and one 1-second query deadline:
+30 seconds, matching the budget. The relay's shared
 `BUZZ_MAX_CONNECTIONS` semaphore caps root and audio sockets together at
 10,000 by default; that is at most 20 batches and five query waves. The worker
 creates no per-socket timers or per-connection revalidation queries. A scan
@@ -313,7 +316,7 @@ at admission does not become a membership requirement. Moderation timeouts are
 not read by this worker because they restrict writes, not an established
 socket. All membership, ownership, and ban predicates include the bound
 community. When the delegation check did not already establish the captured
-owner's membership, admission makes a bounded writer-authoritative membership
+owner's membership, admission makes a writer-authoritative membership
 read to record whether that owner was already a relay member. This adds a writer
 dependency to admission; a failed point read refuses the socket with an
 authorization-unavailable AUTH response. The baseline distinguishes a later
@@ -346,9 +349,12 @@ Targets are ordered within each scan by the oldest last-successful-check time
 among their sessions, then by community, principal, and captured owner. A target
 missed at a deadline therefore gets priority on the next scan while it remains
 live. Under sustained writer saturation, deadlines can still leave targets
-unresolved and close sessions after grace. This path does not jitter
-authorization-driven closes, so many sockets on a pod can still close together
-and create a reconnect herd.
+unresolved. Each unresolved socket closes at its own grace-plus-offset cutoff.
+The five-second scan cadence spreads closes over two or three sweeps rather
+than continuously. Compared with the former ten-second grace, a six-to-ten-second
+blip can now close some sockets; the stable offsets reduce the peak reconnect
+load while preserving the thirty-second bound. Confirmed revocations still
+close immediately when an authoritative snapshot denies access.
 
 ### Step 5: Cleanup
 
