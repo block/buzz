@@ -1,7 +1,10 @@
 import 'agent_avatar_hero.dart';
 import 'agent_character_artwork.dart';
+
 import 'dart:math';
+
 import 'agent_model_picker.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -57,26 +60,25 @@ class CreateAgentPage extends HookConsumerWidget {
     final draft = controller.pending == null ? initialDraft : null;
     final model = useState(controller.pending?['model_id'] as String?);
     final effort = useState(controller.pending?['reasoning_effort'] as String?);
-    // Draft model hints apply to the first catalog that loads (after a failed
-    // load, the one Retry fetches), and only if it offers them.
-    final hintsApplied = useRef(false);
+    // A fresh setup starts from the first catalog that loads (after a failed
+    // load, the one Retry fetches): the draft's model if offered, otherwise
+    // the default. A resumed setup keeps its saved choice.
+    final startApplied = useRef(controller.pending != null);
     useEffect(() {
       final entries = catalog.data;
-      if (draft == null ||
-          hintsApplied.value ||
+      if (startApplied.value ||
           catalog.connectionState != ConnectionState.done ||
           entries == null) {
         return null;
       }
-      hintsApplied.value = true;
-      final match = entries
-          .where((entry) => entry.id == draft.modelId)
-          .firstOrNull;
-      if (match == null) return null;
-      model.value = match.id;
-      effort.value = match.efforts.contains(draft.reasoningEffort)
-          ? draft.reasoningEffort
-          : null;
+      startApplied.value = true;
+      final (startModel, startEffort) = startingAgentModel(
+        entries,
+        draftModel: draft?.modelId,
+        draftEffort: draft?.reasoningEffort,
+      );
+      model.value = startModel;
+      effort.value = startEffort;
       return null;
     }, [catalog.connectionState]);
     final name = useTextEditingController(
