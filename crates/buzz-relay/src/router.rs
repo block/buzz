@@ -177,6 +177,14 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// `admit_nip_fi_http_on_state`.
 ///
 /// In Off mode the middleware is fully transparent; in Shadow it only records.
+fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
+    slot.method(AuthMethod::NipFi);
+    slot.finish(AuthResult::Denied(
+        crate::access::AuthReason::AuthorizationUnavailable,
+    ));
+    http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+}
+
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,
@@ -187,7 +195,7 @@ async fn nip_fi_assertion_guard(
         return next.run(request).await;
     }
     if state.config.nip_fi.mode.denies_unconditionally() {
-        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        return nip_fi_unavailable(&slot);
     }
     let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
         Ok(policy) => policy,
@@ -211,6 +219,10 @@ async fn nip_fi_assertion_guard(
             .await;
         }
         Err(response) => {
+            slot.method(AuthMethod::NipFi);
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::AuthorizationUnavailable,
+            ));
             if state.config.nip_fi.mode.observes_only() {
                 crate::nip_fi_shadow::record_for(
                     "http",
@@ -228,7 +240,7 @@ async fn nip_fi_assertion_guard(
         }
     };
     if policy.stored_required && state.nip_fi_deny_map.is_none() {
-        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+        return nip_fi_unavailable(&slot);
     }
     crate::nip_fi_policy::with_policy(
         policy,
