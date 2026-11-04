@@ -27,6 +27,11 @@ pub enum WsClientError {
     #[error("Connection closed unexpectedly")]
     ConnectionClosed,
 
+    /// The relay closed the connection with a policy close (1008), as a
+    /// NIP-FI denial does; the string is the close reason.
+    #[error("Connection refused by relay policy: {0}")]
+    PolicyClose(String),
+
     /// The relay sent a message that was not expected at this point.
     #[error("Unexpected relay message: {0}")]
     UnexpectedMessage(String),
@@ -47,5 +52,18 @@ pub enum WsClientError {
 impl From<nostr::event::builder::Error> for WsClientError {
     fn from(e: nostr::event::builder::Error) -> Self {
         WsClientError::EventBuilder(e.to_string())
+    }
+}
+
+impl WsClientError {
+    /// The HTTP status when the relay refused the WebSocket upgrade with an
+    /// HTTP response (e.g. a NIP-FI `401`/`403` decided at upgrade time).
+    pub fn upgrade_rejection_status(&self) -> Option<u16> {
+        match self {
+            WsClientError::WebSocket(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                Some(response.status().as_u16())
+            }
+            _ => None,
+        }
     }
 }

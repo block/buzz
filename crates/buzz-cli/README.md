@@ -20,6 +20,32 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+### Federated identity (NIP-FI)
+
+A relay that enforces federated identity also needs an identity assertion on
+every protected request (`docs/nips/NIP-FI.md`). Give the CLI your NIP-FA
+adapter session and it requests one; the adapter mints it
+(`docs/nips/NIP-FA.md` §Relay assertion). The CLI caches the assertion for the
+process, requests a new one shortly before it expires, and sends it as
+`Nostr-Federated-Identity` on HTTP requests and the WebSocket upgrade.
+
+The session is a human sign-in for your own key: the adapter issues
+assertions only for the key bound to the signed-in user. It is not an agent
+grant, and it cannot authorize an agent key.
+
+```bash
+export BUZZ_PRIVATE_KEY="nsec1..."
+export BUZZ_FEDERATED_IDENTITY_ADAPTER="https://adapter.example"
+export BUZZ_FEDERATED_IDENTITY_TOKEN="..."   # your adapter session token; env only, never a flag
+buzz channels list
+```
+
+The token goes only to the adapter, never through a redirect, and never into
+output. Adapter outages (network errors, 429, 5xx) are retried a bounded number
+of times and then fail as a retryable `adapter_error` before anything reaches
+the relay; an adapter refusal is an `auth_error` and is not retried. On relays without NIP-FI, leave both unset: nothing changes. An
+enforcing relay's `401` without them is an `auth_error` naming both settings.
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
@@ -196,6 +222,9 @@ buzz <group> <subcommand> [flags]
     ├─ main.rs ──▶ commands/*.rs ──▶ client.rs ──▶ Buzz Relay REST API
     │  (clap)       (handlers)       (reqwest)
     │
+    ├─ credentials.rs        (identity, signer, NIP-FI evidence; every request
+    │                         is authorized through client.rs `authorize`)
+    ├─ federated_identity.rs (NIP-FA adapter session → NIP-FI assertion)
     ├─ validate.rs   (UUID, hex, content size, percent-encode)
     └─ error.rs      (CliError → JSON stderr + exit code)
 
