@@ -25,7 +25,9 @@ import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useConversationDensity } from "@/shared/lib/conversationDensityPreference";
 import { channelChrome } from "@/shared/layout/chromeLayout";
+import { AgentGroupRow } from "./AgentGroupRow";
 import { DayDivider } from "./DayDivider";
 import { MessageRowItem, SystemRow } from "./TimelineMessageRow";
 import { TimelineRowShell } from "./TimelineRowShell";
@@ -205,9 +207,21 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 
   // The flattened item stream, memoized on the entries and the unread boundary
   // (the unread divider is its own item, so it shifts subsequent rows).
+  const conversationDensity = useConversationDensity();
   const itemsResult = React.useMemo(
-    () => buildTimelineItems(entries, firstUnreadMessageId),
-    [entries, firstUnreadMessageId],
+    () =>
+      buildTimelineItems(entries, firstUnreadMessageId, {
+        currentPubkey,
+        foldAgentRuns: conversationDensity === "condensed",
+        highlightedMessageId,
+      }),
+    [
+      conversationDensity,
+      currentPubkey,
+      entries,
+      firstUnreadMessageId,
+      highlightedMessageId,
+    ],
   );
   const dayGroups = React.useMemo(
     () => buildTimelineDayGroups(itemsResult.items),
@@ -241,6 +255,21 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onToggleReaction={onToggleReaction}
               profiles={profiles}
               ownerProfiles={ownerProfiles}
+            />
+          );
+        case "agent-group":
+          return (
+            <AgentGroupRow
+              entries={item.entries}
+              renderEntry={(entry) =>
+                renderItem({
+                  kind: "message",
+                  key: entry.message.renderKey ?? entry.message.id,
+                  entry,
+                  isContinuation: false,
+                  isFollowedByContinuation: false,
+                })
+              }
             />
           );
         case "message":
@@ -379,7 +408,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 });
 
 function timelineItemMessageIds(item: TimelineNonDayItem): string[] {
-  if (item.kind === "system-group") {
+  if (item.kind === "system-group" || item.kind === "agent-group") {
     return item.entries.map((entry) => entry.message.id);
   }
   return item.kind === "message" || item.kind === "system"

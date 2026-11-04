@@ -23,6 +23,7 @@ const preference = await import("./conversationDensityPreference.ts");
 test("defaults invalid and missing conversation densities to comfortable", () => {
   assert.equal(preference.parseConversationDensity(null), "comfortable");
   assert.equal(preference.parseConversationDensity("dense"), "comfortable");
+  assert.equal(preference.parseConversationDensity("condensed"), "condensed");
   assert.equal(preference.parseConversationDensity("compact"), "compact");
   assert.equal(
     preference.parseConversationDensity("comfortable"),

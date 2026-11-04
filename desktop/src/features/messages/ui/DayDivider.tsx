@@ -16,7 +16,7 @@ export function DayDivider({
       className={cn(
         sticky
           ? cn(
-              "pointer-events-none sticky z-20 flex justify-center",
+              "pointer-events-none sticky z-20 flex justify-center [:root[data-conversation-density=condensed]_&]:justify-start [:root[data-conversation-density=condensed]_&]:pl-3",
               channelChrome.stickyTimelineTop,
             )
           : "pointer-events-none flex justify-center",

@@ -158,6 +158,7 @@ export function estimateRowHeight(
 // estimate honest without a content scan.
 const DIVIDER_HEIGHT = 56;
 const SYSTEM_GROUP_HEIGHT = 80;
+const AGENT_GROUP_HEIGHT = 28;
 
 /**
  * `contain-intrinsic-size` for a `timeline-row-cv` wrapper. A credible per-row
@@ -174,7 +175,9 @@ export function estimateTimelineItemHeight(item: TimelineItem): number {
       ? estimateRowHeight(item.entry.message)
       : item.kind === "system-group"
         ? SYSTEM_GROUP_HEIGHT
-        : DIVIDER_HEIGHT;
+        : item.kind === "agent-group"
+          ? AGENT_GROUP_HEIGHT
+          : DIVIDER_HEIGHT;
 }
 
 export function timelineRowReserveStyle(

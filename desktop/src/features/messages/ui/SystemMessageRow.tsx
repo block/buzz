@@ -882,28 +882,37 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
       className={cn(
         "group/message relative mx-1 transition-colors",
         isMembershipActivity
-          ? "pb-2 pt-4"
+          ? "pb-2 pt-4 [:root[data-conversation-density=condensed]_&]:pb-0 [:root[data-conversation-density=condensed]_&]:pt-0 [:root[data-conversation-density=condensed]_&]:px-2"
           : "rounded-2xl px-2 py-1 hover:bg-muted/50 focus-within:bg-muted/50",
       )}
       data-testid="system-message-row"
     >
       {isMembershipActivity ? (
-        <div className={cn(MESSAGE_MARKDOWN_CLASS, "flex flex-col gap-1.5")}>
-          <div className="flex justify-center">
-            <div className="flex min-w-0 max-w-[min(40rem,80%)] items-center gap-2">
-              <MembershipAvatarStack
-                agentPubkeys={agentPubkeys}
-                currentPubkey={currentPubkey}
-                personaLookup={personaLookup}
-                profiles={profiles}
-                pubkeys={membershipPubkeys}
-              />
+        <div
+          className={cn(
+            MESSAGE_MARKDOWN_CLASS,
+            "flex flex-col gap-1.5 [:root[data-conversation-density=condensed]_&]:gap-0",
+          )}
+        >
+          <div className="flex justify-center [:root[data-conversation-density=condensed]_&]:justify-start">
+            <div className="flex min-w-0 max-w-[min(40rem,80%)] items-center gap-2 [:root[data-conversation-density=condensed]_&]:max-w-full [:root[data-conversation-density=condensed]_&]:gap-2.5">
+              <div className="flex shrink-0 [:root[data-conversation-density=condensed]_&]:min-w-9">
+                <MembershipAvatarStack
+                  agentPubkeys={agentPubkeys}
+                  currentPubkey={currentPubkey}
+                  personaLookup={personaLookup}
+                  profiles={profiles}
+                  pubkeys={membershipPubkeys}
+                />
+              </div>
               <p className="min-w-0 text-left text-xs font-normal leading-4 text-muted-foreground/70">
                 {description.title} {description.action}
               </p>
             </div>
           </div>
-          <div className="flex justify-center">{reactionsContent}</div>
+          <div className="flex justify-center [:root[data-conversation-density=condensed]_&]:justify-start [:root[data-conversation-density=condensed]_&]:pl-[3.125rem]">
+            {reactionsContent}
+          </div>
         </div>
       ) : (
         <div className="flex items-start gap-2.5">

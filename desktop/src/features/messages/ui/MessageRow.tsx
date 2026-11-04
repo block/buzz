@@ -633,7 +633,10 @@ export const MessageRow = React.memo(
 
     const inlineMetadataNode = (
       <div className="flex shrink-0 items-baseline gap-2 text-xs">
-        <MessageTimestamp createdAt={message.createdAt} />
+        <MessageTimestamp
+          className="[:root[data-conversation-density=condensed]_&]:text-muted-foreground/40"
+          createdAt={message.createdAt}
+        />
         {statusMetadataNode}
       </div>
     );
@@ -656,7 +659,7 @@ export const MessageRow = React.memo(
     const headerNode = isDisplayedAsContinuation ? null : (
       // pe reserves the measured action-rail footprint (0px until measured) so
       // header content ends before the rail's left edge in every rail state.
-      <MessageHeaderRow className="pe-[var(--message-action-rail-width,0px)]">
+      <MessageHeaderRow className="pe-[var(--message-action-rail-width,0px)] [:root[data-conversation-density=condensed]_&]:pe-0">
         {message.pubkey ? (
           <MessageAuthorWithIndicators
             authorName={message.author}

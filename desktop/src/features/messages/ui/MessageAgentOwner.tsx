@@ -13,6 +13,11 @@ export function MessageAgentOwner({
     <span
       className="inline-flex min-w-0 max-w-56 items-baseline gap-1 text-xs leading-4 text-muted-foreground/65"
       data-testid="message-agent-owner"
+      title={
+        ownerLabel
+          ? `Agent managed by ${ownerLabel}`
+          : "Agent; owner unavailable"
+      }
     >
       <span className="sr-only">
         {ownerLabel ? "Agent managed by" : "Agent; owner unavailable"}
@@ -37,7 +42,10 @@ export function MessageAgentOwner({
       />
       {ownerPubkey && ownerLabel ? (
         <>
-          <span aria-hidden="true" className="shrink-0">
+          <span
+            aria-hidden="true"
+            className="shrink-0 [:root[data-conversation-density=condensed]_&]:hidden"
+          >
             managed by
           </span>
           <UserProfilePopover
@@ -45,13 +53,16 @@ export function MessageAgentOwner({
             triggerAriaLabel={ownerLabel}
             triggerElement="span"
           >
-            <span className="min-w-0 truncate rounded font-semibold text-foreground/85 hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+            <span className="min-w-0 truncate rounded font-semibold [:root[data-conversation-density=condensed]_&]:hidden text-foreground/85 hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
               {ownerLabel}
             </span>
           </UserProfilePopover>
         </>
       ) : (
-        <span aria-hidden="true" className="min-w-0 truncate">
+        <span
+          aria-hidden="true"
+          className="min-w-0 truncate [:root[data-conversation-density=condensed]_&]:hidden"
+        >
           owner unavailable
         </span>
       )}

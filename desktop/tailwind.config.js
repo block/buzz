@@ -73,6 +73,7 @@ export default {
         4.5: "1.125rem",
         "status-indicator": "0.9375rem", // 15px at the default root size
         "conversation-body": "var(--conversation-body-gap)",
+        "conversation-gap": "var(--conversation-row-gap)",
         "conversation-list": "var(--conversation-list-item-gap)",
         "conversation-paragraph": "var(--conversation-paragraph-gap)",
         "conversation-row": "var(--conversation-row-padding-block)",

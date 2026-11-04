@@ -96,6 +96,10 @@ const CONVERSATION_DENSITY_OPTIONS: readonly {
   label: string;
 }[] = [
   {
+    value: "condensed",
+    label: "Condensed",
+  },
+  {
     value: "compact",
     label: "Compact",
   },

@@ -1,7 +1,11 @@
 import * as React from "react";
 
 /** Device-level spacing used across conversation surfaces. */
-export type ConversationDensity = "compact" | "comfortable" | "spacious";
+export type ConversationDensity =
+  | "condensed"
+  | "compact"
+  | "comfortable"
+  | "spacious";
 
 export const CONVERSATION_DENSITY_STORAGE_KEY =
   "buzz.appearance.conversationDensity";
@@ -14,7 +18,10 @@ let listeningForStorageChanges = false;
 export function parseConversationDensity(
   value: string | null | undefined,
 ): ConversationDensity {
-  return value === "compact" || value === "comfortable" || value === "spacious"
+  return value === "condensed" ||
+    value === "compact" ||
+    value === "comfortable" ||
+    value === "spacious"
     ? value
     : DEFAULT_CONVERSATION_DENSITY;
 }

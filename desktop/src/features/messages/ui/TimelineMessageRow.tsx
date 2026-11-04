@@ -45,7 +45,7 @@ export function SystemRow({
   if (!firstEntry) return null;
 
   return (
-    <div className="flex flex-col gap-1 pb-2.5">
+    <div className="flex flex-col gap-1 pb-conversation-gap">
       <SystemMessageRow
         groupedMessages={groupedMessages}
         message={firstEntry.message}
@@ -200,7 +200,7 @@ export function MessageRowItem({
     <div
       className={cn(
         "flex flex-col gap-1",
-        isFollowedByContinuation ? "pb-0" : "pb-2.5",
+        isFollowedByContinuation ? "pb-0" : "pb-conversation-gap",
       )}
     >
       <MessageRow

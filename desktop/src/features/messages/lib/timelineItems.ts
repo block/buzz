@@ -17,7 +17,11 @@ import {
   isWithinGroupingWindow,
   startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import {
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
+  KIND_SYSTEM_MESSAGE,
+} from "@/shared/constants/kinds";
 
 /**
  * One renderable row in the flattened timeline. Dividers carry no message and
@@ -34,6 +38,7 @@ export type TimelineItem =
       key: string;
       entries: MainTimelineEntry[];
     }
+  | { kind: "agent-group"; key: string; entries: MainTimelineEntry[] }
   | {
       kind: "message";
       key: string;
@@ -166,6 +171,73 @@ function buildMembershipGroups(
   return groups;
 }
 
+const AGENT_GROUP_MIN_RUN = 3;
+const AGENT_GROUP_MAX_BODY_LENGTH = 160;
+
+export type AgentGroupOptions = {
+  currentPubkey?: string;
+  foldAgentRuns?: boolean;
+  highlightedMessageId?: string | null;
+};
+
+function isFoldableAgentEntry(
+  { message, summary }: MainTimelineEntry,
+  { currentPubkey, highlightedMessageId }: AgentGroupOptions,
+): boolean {
+  const viewer = currentPubkey?.toLowerCase();
+  return (
+    message.isAgent === true &&
+    (message.kind === KIND_STREAM_MESSAGE ||
+      message.kind === KIND_STREAM_MESSAGE_V2) &&
+    !message.pending &&
+    !message.highlighted &&
+    message.id !== highlightedMessageId &&
+    !summary &&
+    !message.reactions?.length &&
+    message.body.length <= AGENT_GROUP_MAX_BODY_LENGTH &&
+    !message.body.includes("\n\n") &&
+    message.pubkey?.toLowerCase() !== viewer &&
+    !(
+      viewer &&
+      message.tags?.some(
+        (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === viewer,
+      )
+    )
+  );
+}
+
+/** Anchored on the newest entry, like membership groups, for stable keys. */
+function buildAgentGroups(
+  entries: readonly MainTimelineEntry[],
+  barrierIndexes: ReadonlySet<number>,
+  options: AgentGroupOptions,
+): Map<number, MainTimelineEntry[]> {
+  const groups = new Map<number, MainTimelineEntry[]>();
+
+  for (let end = entries.length - 1; end >= 0; ) {
+    if (!isFoldableAgentEntry(entries[end], options)) {
+      end -= 1;
+      continue;
+    }
+
+    let start = end;
+    while (
+      start > 0 &&
+      !barrierIndexes.has(start) &&
+      isFoldableAgentEntry(entries[start - 1], options)
+    ) {
+      start -= 1;
+    }
+
+    if (end - start + 1 >= AGENT_GROUP_MIN_RUN) {
+      groups.set(start, entries.slice(start, end + 1));
+    }
+    end = start - 1;
+  }
+
+  return groups;
+}
+
 /**
  * Walks the (already top-level-filtered) entries once, emitting a day-divider
  * at each calendar-day boundary and an unread-divider above the first unread
@@ -174,6 +246,7 @@ function buildMembershipGroups(
 export function buildTimelineItems(
   entries: MainTimelineEntry[],
   firstUnreadMessageId: string | null,
+  agentGroupOptions: AgentGroupOptions = {},
 ): TimelineItemsResult {
   const items: TimelineItem[] = [];
   let previousGroupEntry: MainTimelineEntry | null = null;
@@ -199,6 +272,9 @@ export function buildTimelineItems(
     entries,
     membershipBarrierIndexes,
   );
+  const agentGroupsByStartIndex = agentGroupOptions.foldAgentRuns
+    ? buildAgentGroups(entries, membershipBarrierIndexes, agentGroupOptions)
+    : new Map<number, MainTimelineEntry[]>();
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
@@ -240,6 +316,19 @@ export function buildTimelineItems(
       }
 
       items.push({ kind, key: renderKey, entry });
+      continue;
+    }
+
+    const agentGroup = agentGroupsByStartIndex.get(i);
+    if (agentGroup) {
+      previousGroupEntry = null;
+      previousMessageItemIndex = null;
+      items.push({
+        kind: "agent-group",
+        key: entryRenderKey(agentGroup[agentGroup.length - 1]),
+        entries: agentGroup,
+      });
+      i += agentGroup.length - 1;
       continue;
     }
 

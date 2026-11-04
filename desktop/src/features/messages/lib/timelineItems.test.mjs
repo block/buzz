@@ -615,3 +615,103 @@ test("buildTimelineDayGroups: preserves leading rows without a day divider", () 
     },
   ]);
 });
+
+const foldOptions = { currentPubkey: "me", foldAgentRuns: true };
+
+function agentEntry(id, offset, overrides = {}) {
+  return entry({
+    id,
+    pubkey: `agent-${id}`,
+    isAgent: true,
+    body: "short update",
+    createdAt: dayAt(2026, 6, 14) + offset,
+    ...overrides,
+  });
+}
+
+function foldKinds(entries, firstUnread = null, options = foldOptions) {
+  return kinds(buildTimelineItems(entries, firstUnread, options).items);
+}
+
+test("agent fold: folds a run of three agent messages", () => {
+  const entries = [
+    agentEntry("a", 0),
+    agentEntry("b", 60),
+    agentEntry("c", 120),
+  ];
+  const { items } = buildTimelineItems(entries, null, foldOptions);
+  assert.deepEqual(kinds(items), ["day-divider", "agent-group"]);
+  assert.equal(items[1].entries.length, 3);
+  assert.equal(items[1].key, "c");
+});
+
+test("agent fold: does not fold two, or when the flag is off", () => {
+  const three = [agentEntry("a", 0), agentEntry("b", 60), agentEntry("c", 120)];
+  assert.deepEqual(foldKinds(three.slice(0, 2)), [
+    "day-divider",
+    "message",
+    "message",
+  ]);
+  assert.deepEqual(foldKinds(three, null, {}), [
+    "day-divider",
+    "message",
+    "message",
+    "message",
+  ]);
+});
+
+test("agent fold: breakers split the run", () => {
+  const breakers = [
+    { isAgent: false },
+    { reactions: [{ emoji: "x", count: 1 }] },
+    { pubkey: "me" },
+    { tags: [["p", "me"]] },
+    { body: "a\n\nb" },
+    { body: "x".repeat(161) },
+    { pending: true },
+  ];
+  for (const overrides of breakers) {
+    const entries = [
+      agentEntry("a", 0),
+      agentEntry("b", 60),
+      agentEntry("x", 90, overrides),
+      agentEntry("c", 120),
+      agentEntry("d", 180),
+    ];
+    assert.ok(
+      !foldKinds(entries).includes("agent-group"),
+      JSON.stringify(overrides),
+    );
+  }
+  const withThread = [
+    agentEntry("a", 0),
+    agentEntry("b", 60),
+    { ...agentEntry("x", 90), summary: { replyCount: 1 } },
+    agentEntry("c", 120),
+  ];
+  assert.ok(!foldKinds(withThread).includes("agent-group"));
+});
+
+test("agent fold: day and unread barriers split the run", () => {
+  const entries = [
+    agentEntry("a", 0),
+    agentEntry("b", 60),
+    agentEntry("c", 120),
+    agentEntry("d", 180),
+  ];
+  assert.deepEqual(foldKinds(entries, "c"), [
+    "day-divider",
+    "message",
+    "message",
+    "unread-divider",
+    "message",
+    "message",
+  ]);
+  const nextDay = [
+    agentEntry("a", 0),
+    agentEntry("b", 60),
+    agentEntry("c", 120, { createdAt: dayAt(2026, 6, 15) }),
+    agentEntry("d", 180, { createdAt: dayAt(2026, 6, 15, 12, 5) }),
+  ];
+  assert.ok(!foldKinds(nextDay).includes("agent-group"));
+});

@@ -7,7 +7,7 @@ export function UnreadDivider() {
   return (
     <section
       aria-label="New messages"
-      className="relative flex items-center py-1"
+      className="relative flex items-center py-1 [:root[data-conversation-density=condensed]_&]:py-0"
       data-testid="message-unread-divider"
     >
       <div className="h-px flex-1 bg-primary/40" />
