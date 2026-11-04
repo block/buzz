@@ -852,6 +852,97 @@ void main() {
     );
   });
 
+  for (final overlaps in [false, true]) {
+    test(
+      'mixed notice ranges respect the unique cap: overlaps=$overlaps',
+      () async {
+        const id = _paddedId;
+        final shortPages = [
+          for (var page = 0; page < 4; page++)
+            [
+              for (var i = 0; i < 499; i++)
+                _joinNotice(
+                  id('p$page-${i.toString().padLeft(3, '0')}'),
+                  page == 3 ? 2000 : 6000 - page * 1000 - i,
+                ),
+            ],
+        ];
+        final tail = [
+          for (var i = 0; i < (overlaps ? 498 : 500); i++)
+            _joinNotice(id('tail-${i.toString().padLeft(3, '0')}'), 1999 - i),
+        ];
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            for (var page = 0; page < 6; page++)
+              [
+                _event(id: id('a$page'), createdAt: 5000 - page * 1000),
+                _bounds(
+                  hasMore: page < 5,
+                  cursorCreatedAt: 5000 - page * 1000,
+                  cursorId: id('a$page'),
+                  dTag: page == 0
+                      ? null
+                      : '${_channelId.toLowerCase()}:${6000 - page * 1000}:${id('a${page - 1}')}',
+                ),
+              ],
+          ],
+        );
+        relaySession.noticeResults.addAll([
+          ...shortPages,
+          [if (overlaps) ...shortPages.last.take(2), ...tail],
+        ]);
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        for (var page = 1; page < 5; page++) {
+          expect(await notifier.fetchOlder(), isTrue);
+          await _pumpEventQueue();
+        }
+        final retained = container
+            .read(channelMessagesProvider(_channelId))
+            .requireValue
+            .where((event) => event.kind == EventKind.systemMessage)
+            .toList();
+        expect(retained, hasLength(2000));
+        expect(retained.map((event) => event.id).toSet(), hasLength(2000));
+        expect(
+          retained.map((event) => event.id),
+          containsAll(tail.take(4).map((e) => e.id)),
+        );
+        final discarded = tail.skip(4).map((e) => e.id).toSet();
+        expect(
+          retained.map((event) => event.id),
+          isNot(anyElement(isIn(discarded))),
+        );
+        expect(
+          relaySession.auxFilters.expand(
+            (filter) => filter.tags['#e'] ?? const <String>[],
+          ),
+          isNot(anyElement(isIn(discarded))),
+          reason:
+              'excess notices must not fetch reactions or deletion metadata',
+        );
+        final reads = relaySession.noticeFilters.length;
+        expect(await notifier.fetchOlder(), isTrue);
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(reads));
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .requireValue
+              .map((event) => event.id),
+          contains(id('a5')),
+          reason: 'reaching the notice cap must not stop message paging',
+        );
+      },
+    );
+  }
+
   test('retains historical and live Huddle end events in the window', () async {
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
