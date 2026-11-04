@@ -108,7 +108,7 @@ pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
-pub use store::{ArtifactSnapshot, SnapshotDenied};
+pub use store::{ArtifactSnapshot, RelayArtifactState, SnapshotDenied};
 pub use usage::SessionLeader;
 
 /// A value read from the database, with when its reading connection was
