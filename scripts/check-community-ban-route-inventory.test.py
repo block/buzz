@@ -47,7 +47,7 @@ def build_router(extra: str = "") -> str:
 
 
 class RouteScannerFixtures(unittest.TestCase):
-    def scan(self, router: str, admin: str = ADMIN):
+    def scan(self, router: str, admin: str = ADMIN, extra_sources=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / "crates/buzz-relay/src"
@@ -57,6 +57,10 @@ class RouteScannerFixtures(unittest.TestCase):
             (src / "api/gifs.rs").write_text(GIFS)
             (src / "api/profiles.rs").write_text(PROFILES)
             (src / "api/admin.rs").write_text(admin)
+            for relative, source in (extra_sources or {}).items():
+                path = src / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source)
             saved = scanner.ROOT, scanner.RELAY_SRC
             scanner.ROOT, scanner.RELAY_SRC = root, src
             try:
@@ -87,6 +91,30 @@ class RouteScannerFixtures(unittest.TestCase):
             r"allow-listed \.merge registration appears more than once",
             build_router(".merge(media_router).merge(media_router)"),
         )
+
+    def test_git_settings_merge_requires_root_parent(self):
+        sources = {
+            "api/git/transport.rs": """
+pub fn git_router(state: State) -> Router {
+    Router::new()
+        .route("/git/{owner}/{repo}/info/refs", get(info))
+        .merge(super::settings::router())
+}
+""",
+            "api/git/settings.rs": """
+pub fn router() -> Router {
+    Router::new().route("/git/{owner}/{repo}/default-branch", get(read).put(write))
+}
+""",
+        }
+        routes = self.scan(build_router(".merge(git_router)"), extra_sources=sources)
+        self.assertIn(("relay", "GET", "/git/{owner}/{repo}/default-branch"), routes)
+        self.assertIn(("relay", "PUT", "/git/{owner}/{repo}/default-branch"), routes)
+        with self.assertRaisesRegex(ValueError, r"allow-listed \.merge in a nested builder"):
+            self.scan(
+                build_router('.nest("/alternate", api::git::transport::git_router(state))'),
+                extra_sources=sources,
+            )
 
     def test_root_merge_alias_moved_inside_nest_is_rejected(self):
         self.assert_rejected(
