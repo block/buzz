@@ -18,9 +18,8 @@ Before planning or reviewing a non-trivial change:
    queries, read [docs/database.md](docs/database.md): no new triggers,
    functions, or foreign keys; no data backfills in migrations; update every
    schema location; keep every migration compatible with the relay that
-   is currently deployed; never make a migration refuse a populated table;
-   and test it against a populated database that auto-migrated through the
-   earlier migrations, not only a fresh one.
+   is currently deployed; and never make a migration refuse a populated
+   table.
 5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 

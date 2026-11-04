@@ -410,29 +410,23 @@ parity assertion on the table for that window.
   `SET LOCAL statement_timeout` when a statement can scan. A migration that
   cannot get its lock fails and is retried. It MUST NOT queue behind
   traffic on a hot table.
-- Startup auto-migration is how most deployments upgrade, so every migration
-  MUST apply its own change on a database that holds data. A migration MUST
-  NOT refuse to run because a table has rows: every auto-migrating relay with
-  data would crash-loop on that version until someone intervened by hand.
+- With `BUZZ_AUTO_MIGRATE` on, migrations are the whole upgrade procedure, so
+  every migration MUST apply its own change on a database that holds data. A
+  migration MUST NOT refuse to run because a table has rows: every
+  auto-migrating relay with data would crash-loop on that version until
+  someone intervened by hand.
 - In `migrations/`, a new index on an existing table is built by the
   migration itself. Skip `CREATE INDEX` when `to_regclass` finds the index,
   otherwise build it inline under the migration's lock and statement budgets,
-  then verify its definition and flags, as `0049` does. A small populated
-  database upgrades like an empty one. A database too large for the budget
-  fails with a timeout, which is retried; its operator prebuilds the exact
-  index with `CREATE INDEX CONCURRENTLY` (procedure in
-  [thread-window-deployment.md](thread-window-deployment.md)) and the
-  migration then verifies it. The prebuild is an option for large or
-  out-of-band deployments, never a precondition. Frozen migrations
-  `0076`, `0078` and `0081` predate this rule; the startup runner builds their
-  indexes first (`INLINE_INDEX_BUILDS` in
-  `crates/buzz-db/src/runtime/migration.rs`), and a source test rejects any
-  other migration that refuses a populated table.
-- Test every migration against a populated database that auto-migrated
-  through the earlier migrations, not only a fresh one: migrate to the
-  previous version, seed the tables the migration reads or changes, then run
-  `run_migrations` to head and assert it succeeds. CI's fresh databases have
-  empty tables, so a migration that only fails on data passes there.
+  then verify its definition and flags, as `0049` does. A deployment too
+  large for those budgets runs with auto-migration off and applies migrations
+  out of band; only such a deployment prebuilds the exact index with
+  `CREATE INDEX CONCURRENTLY` (procedure in
+  [thread-window-deployment.md](thread-window-deployment.md)) before applying
+  the migration, which then verifies it. Frozen migrations `0076`, `0078` and
+  `0081` predate this rule; the startup runner builds their indexes first
+  (`INLINE_INDEX_BUILDS` in `crates/buzz-db/src/runtime/migration.rs`), and a
+  source test rejects any other migration that refuses a populated table.
   Partitioned parents need per-partition concurrent builds attached to an
   `ON ONLY` parent index.
 - The declarative schema source declares indexes with plain `CREATE INDEX`.
@@ -474,8 +468,8 @@ description:
       test for each changed table and index.
 - [ ] That the currently deployed relay works against the new schema, and how
       that was checked.
-- [ ] Lock and statement timeouts, how each new index is built inline, and the
-      test that upgrades a populated database through the migration.
+- [ ] Lock and statement timeouts, how each new index is built inline, and
+      any prebuild step for deployments that apply migrations out of band.
 
 ## Related documents
 

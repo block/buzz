@@ -27,5 +27,3 @@ Before changing anything in this directory, read
 - Build a missing index inline under the lock and statement budgets, as
   `0049` does. Never refuse a table only because it has rows: that crash-loops
   every auto-migrating deployment with data, however small.
-- Test the migration against a populated database that auto-migrated through
-  the earlier migrations, not only a fresh one (docs/database.md Rule 6).

@@ -14,9 +14,10 @@ redaction, and move source. Changes to channel listing also require recovery. Ol
 stamps, so mixed-version serving cannot advertise incremental correctness.
 
 Relay startup migration and `buzz-admin migrate` build the indexes below
-themselves within the migrations' budgets, which is enough for a small
-database. For a database too large for that, first build the revision lookup
-index outside a transaction, before migration `0076`:
+themselves within the migrations' budgets. A deployment too large for those
+budgets runs with auto-migration off; before applying the migrations out of
+band, first build the revision lookup index outside a transaction, before
+migration `0076`:
 
 ```sql
 CREATE INDEX CONCURRENTLY idx_artifact_revisions_artifact
