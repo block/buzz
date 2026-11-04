@@ -75,7 +75,7 @@ a conservative bound for the relevant sync stamps. Repeated changes in the trans
 Rollback removes both the changes and the record. An uncertain commit leaves
 both committed or neither committed. Recovery does not require a caller retry.
 
-Every relay starts a recovery worker, even when the incremental gate is off.
+Every relay starts a recovery worker.
 The worker reads bounded batches. It rotates across communities, including
 after a failed attempt. It locks pending rows with `SKIP LOCKED`. Each tick
 has a five-second work budget and at most 100 batches. Each batch has at most
@@ -106,8 +106,7 @@ listing, TTL, and deletion changes; DM creation; and admin member removals.
 Archive state and hidden DMs do not change artifact access. Incremental reads
 exclude TTL channels. Whole-community deletion stops reads and purges pending
 records. Operator SQL and mixed old writers cannot provide this guarantee.
-Keep the gate off during a mixed rollout. Use the existing reset procedure
-before enablement or after a rollback to an old writer.
+The full guarantee starts after old writers drain. Use the existing reset
+procedure after the fleet upgrade or a rollback to an old writer.
 
-This change does not authorize deployment, gate enablement, or a production
-maintenance write.
+This change does not authorize deployment or a production maintenance write.

@@ -89,7 +89,7 @@ mod external_infra_process {
         let relay_keys = Keys::generate();
         let owner = Keys::generate();
         let log = tempfile::NamedTempFile::new().unwrap();
-        let spawn = |enabled: bool| {
+        let spawn = || {
             let output = log.reopen().unwrap();
             Relay(
                 Command::new(env!("CARGO_BIN_EXE_buzz-relay"))
@@ -106,7 +106,6 @@ mod external_infra_process {
                     .env("BUZZ_REQUIRE_AUTH_TOKEN", "true")
                     .env("BUZZ_REQUIRE_RELAY_MEMBERSHIP", "false")
                     .env("BUZZ_AUTO_MIGRATE", "true")
-                    .env("BUZZ_ARTIFACT_INCREMENTAL_ENABLED", enabled.to_string())
                     .env("BUZZ_PUSH_ENABLED", "false")
                     .env("BUZZ_AUDIT_ENABLED", "false")
                     .env("BUZZ_GIT_CONFORMANCE_PROBE", "false")
@@ -120,7 +119,7 @@ mod external_infra_process {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let mut relay = spawn(true);
+        let mut relay = spawn();
         ready(&client, &base, &log).await;
         let channel = Uuid::new_v4();
         let create = EventBuilder::new(Kind::Custom(9007), "")
@@ -174,7 +173,7 @@ mod external_infra_process {
         .bind(community).bind(first["startedAt"].as_str().unwrap()).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
 
-        relay = spawn(true);
+        relay = spawn();
         ready(&client, &base, &log).await;
         let mut reset = false;
         for _ in 0..30 {
@@ -226,26 +225,9 @@ mod external_infra_process {
         let (status, ordinary) = post(&client, &base, &owner, "/query", json!([query])).await;
         assert_eq!(status, 200);
         assert!(ordinary.to_string().contains(&event.id.to_hex()));
-        drop(relay);
-
-        let _relay = spawn(false);
-        ready(&client, &base, &log).await;
-        let (status, body) = post(
-            &client,
-            &base,
-            &owner,
-            "/query",
-            json!([{
-                "artifact":"incremental", "query":query
-            }]),
-        )
-        .await;
-        assert_eq!(status, 503);
-        assert_eq!(body["code"], "incremental_unavailable");
-        let (status, ordinary) = post(&client, &base, &owner, "/query", json!([query])).await;
-        assert_eq!(status, 200);
-        assert!(ordinary.to_string().contains(&event.id.to_hex()));
-        println!("PASS signed HTTP, durable restart recovery, existing checkpoints, ordinary reads, gate off");
+        println!(
+            "PASS signed HTTP, durable restart recovery, existing checkpoints, ordinary reads"
+        );
     }
 
     async fn ready(client: &reqwest::Client, base: &str, log: &tempfile::NamedTempFile) {
