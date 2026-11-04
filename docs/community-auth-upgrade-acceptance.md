@@ -170,6 +170,34 @@ FI-denial, drain and activation expectations in A–D assume an evaluating mode
 with the target required. E covers Off and mode changes; do not apply those
 FI-enforcement expectations to Off.
 
+### Dedicated staging scope for deployment-wide switches
+
+A6 and E1–E5 run on a dedicated relay deployment in bb-public staging, serving
+only run-owned fixture communities. Both `BUZZ_NIP_FI_MODE` and
+`BUZZ_NIP_FI_UPGRADES_ENABLED` are deployment-wide settings; isolated community
+names alone do not isolate their effects. Never change these settings on the
+shared staging relay to satisfy a row. Without the dedicated deployment and its
+separately authorized scope, these rows remain blocked staging evidence.
+
+Before execution, the operator must authorize and record the deployment ID,
+namespace, candidate images, canonical hosts, community allowlist, routing and
+DB/Redis isolation boundaries, initial settings, planned setting transitions and
+expected control admission/drain outcomes for each mode. Prove shared staging
+traffic cannot route to it and its faults cannot affect shared dependencies.
+Keep shared staging controls under observation without changing their settings.
+Account for every dedicated serving incarnation in its own audited baseline and
+obligation ledger. Record pre/post-transition config and boot IDs; restarts or
+replacement during a switch must preserve outstanding generation/boot obligations
+and require reviewed drain or permanent-non-serving evidence, never implicit
+retirement. Returning to Shadow cannot reuse an old ACK as proof of completion.
+
+Only effects explicitly predicted for allowlisted fixtures by that authorized
+mode transition are intentional (for example, Enforce denying a proofless
+optional control). Compare these controls with the mode-specific baseline.
+Unexpected effects, any drain outside that allowlist, or any shared staging
+control regression still trigger the stop rules. This procedure grants no
+permission to provision, restart or reconfigure a live deployment.
+
 | ID | Stimulus | Required observation |
 | --- | --- | --- |
 | A1 | Invoke the authenticated module through the normal BUZZ-515 graph with the owner fixture | Durable tuple identifies the requested community, actor, operation and generation; saved policy is distinct from active |
@@ -230,8 +258,9 @@ modes; an unavailable FI dependency must not turn Off into FI enforcement.
 Before each injection, record its target boot, affected connection, operation and
 generation, the exact injector command, its scope and its inverse. Use isolated
 test infrastructure for shared DB/Redis faults unless staging has a reviewed way
-to constrain the fault. Do not change whole-fleet policy or drain unrelated
-communities as a fallback. If an injector cannot preserve these boundaries,
+to constrain the fault. Deployment-wide setting changes are confined to the dedicated staging scope
+above; do not change shared-fleet policy or drain unrelated communities as a
+fallback. If an injector cannot preserve these boundaries,
 record the scenario blocked and use a deterministic local integration fixture.
 The local fixture supplies supplemental evidence only. Every matrix row is
 mandatory for this ticket, including the required staging fault observations.
@@ -260,8 +289,10 @@ record. Keep a resource ledger of fault injectors, sessions, Jobs and fixtures;
 never reuse a normal community as a disposable target.
 
 Stop issuing upgrades or starting new injections immediately if a free/enforced
-control regresses, an unrelated community drains, scope no longer matches the
-allowlist, or evidence shows a false active result. Apply the recorded inverse
+control deviates from its authorized mode-specific baseline, a community outside
+the dedicated allowlist drains, scope no longer matches the allowlist, or evidence
+shows a false active result. Only the explicitly predicted fixture effects of an
+authorized mode transition are exempt; shared staging regressions never are. Apply the recorded inverse
 of each reversible fault, stop the fixture traffic and record the run as failed.
 Notify the operator and reviewer with affected scope, operation/generation and
 the current recovery status. Recovery does not erase the failed observation.
