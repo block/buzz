@@ -21,7 +21,6 @@ void main() {
                 showIdentity: false,
                 nameColor: Colors.black,
                 metadataColor: Colors.grey,
-                mark: const Icon(Icons.verified),
               ),
             ),
           ),

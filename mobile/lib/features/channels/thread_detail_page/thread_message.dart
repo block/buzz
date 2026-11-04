@@ -244,9 +244,6 @@ class _ThreadMessage extends HookConsumerWidget {
                                                       message.pubkey,
                                                       currentPubkey,
                                                     ),
-                                                mark: ownMessage
-                                                    ? null
-                                                    : VerifiedMark(pubkey: pk),
                                                 showTimestamp: true,
                                                 reversed: false,
                                                 alignment: ownMessage
