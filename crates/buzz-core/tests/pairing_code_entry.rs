@@ -14,6 +14,54 @@ fn input(code: &str) -> Zeroizing<String> {
     Zeroizing::new(code.into())
 }
 
+#[test]
+fn both_devices_bind_authorization_to_the_same_live_exchange() {
+    let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+    assert!(source.binding().is_err());
+    let (mut target, offer) = PairingSession::new_target_with_desktop_code(&qr).unwrap();
+    source.handle_offer_with_confirmation(&offer).unwrap();
+    let expected = source.binding().unwrap();
+    assert_eq!(expected, target.binding().unwrap());
+    assert_eq!(expected.source_pubkey, source.pubkey());
+    assert_eq!(expected.target_pubkey, target.pubkey());
+    let (other, _) = PairingSession::new_target_with_desktop_code(&qr).unwrap();
+    assert_ne!(
+        expected.transcript_hash,
+        other.binding().unwrap().transcript_hash
+    );
+    let (code, challenge) = source.start_desktop_code().unwrap();
+    target.handle_desktop_code(&challenge).unwrap();
+    let submission = target.submit_desktop_code(input(&code)).unwrap();
+    let (proof, _) = source.handle_target_code(&submission).unwrap();
+    target.handle_sas_confirm(&proof).unwrap();
+    assert_eq!(expected, source.binding().unwrap());
+    assert_eq!(expected, target.binding().unwrap());
+    target.confirm_target_sas().unwrap();
+    let payload = source
+        .send_payload(PayloadType::Custom, input("test"))
+        .unwrap();
+    assert!(source.binding().is_err());
+    target.handle_payload(&payload).unwrap();
+    assert!(target.binding().is_err());
+    source
+        .handle_complete(&target.send_complete().unwrap())
+        .unwrap();
+    assert!(source.binding().is_err());
+    assert!(target.binding().is_err());
+}
+
+#[test]
+fn cancelled_exchange_cannot_produce_an_authorization_binding() {
+    let (mut source, mut target) = setup();
+    let abort = source
+        .abort(buzz_core::pairing::AbortReason::UserDenied)
+        .unwrap()
+        .unwrap();
+    target.handle_abort(&abort).unwrap();
+    assert!(source.binding().is_err());
+    assert!(target.binding().is_err());
+}
+
 fn wrong(code: &str) -> &'static str {
     if code == "000000" {
         "000001"

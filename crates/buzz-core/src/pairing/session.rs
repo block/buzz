@@ -62,6 +62,20 @@ pub enum Role {
     Target,
 }
 
+/// Public channel binding for independently authenticated application approval.
+/// This identifies the locked peers and transcript, not their account identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingBinding {
+    /// Identifier derived from this QR session's random secret.
+    pub session_id: [u8; 32],
+    /// The initiating device's ephemeral public key.
+    pub source_pubkey: PublicKey,
+    /// The receiving device's ephemeral public key.
+    pub target_pubkey: PublicKey,
+    /// The commitment verified by `sas-confirm`.
+    pub transcript_hash: [u8; 32],
+}
+
 /// Protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -639,6 +653,45 @@ impl PairingSession {
             session_secret: self.session_secret,
             relays: self.relay_urls.clone(),
         }))
+    }
+
+    /// Capture the live exchange's public channel binding, in source/target
+    /// order on both devices. Source must first accept an offer. Applications
+    /// submit this independently through each user's authenticated session;
+    /// no application credential needs to travel over the pairing protocol.
+    /// This method does not authorize exporting identity material.
+    pub fn binding(&self) -> Result<PairingBinding, PairingError> {
+        self.check_expired()?;
+        if !matches!(
+            self.state,
+            SessionState::Confirming
+                | SessionState::AwaitingConfirmation
+                | SessionState::Transferring
+        ) {
+            return Err(PairingError::UnexpectedMessage {
+                expected: "live pairing with a locked peer".into(),
+                got: "unbound or terminal session".into(),
+            });
+        }
+        let peer = self.peer_pubkey.ok_or(PairingError::SasMismatch)?;
+        let sas_input = self.sas_input.ok_or(PairingError::SasMismatch)?;
+        let own = self.keys.public_key();
+        let (source_pubkey, target_pubkey) = match self.role {
+            Role::Source => (own, peer),
+            Role::Target => (peer, own),
+        };
+        Ok(PairingBinding {
+            session_id: self.session_id,
+            source_pubkey,
+            target_pubkey,
+            transcript_hash: derive_transcript_hash(
+                &self.session_id,
+                &source_pubkey.to_bytes(),
+                &target_pubkey.to_bytes(),
+                &sas_input,
+                &self.session_secret,
+            ),
+        })
     }
 }
 
