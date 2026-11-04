@@ -887,6 +887,7 @@ class PairingNotifier extends Notifier<PairingState> {
       await validator(relayUrl: community.relayUrl, nsec: community.nsec);
 
       if (generation != _pairingGeneration) return;
+      state = const PairingState(status: PairingStatus.storing);
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(

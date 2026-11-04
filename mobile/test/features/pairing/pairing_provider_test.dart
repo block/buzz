@@ -1,5 +1,6 @@
 import '../../helpers/controllable_pairing_socket.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
@@ -109,6 +110,65 @@ void main() {
         expect(auth.lastCommunity, isNotNull);
       },
     );
+
+    for (final entry in ['pairing', 'add', 'inline']) {
+      testWidgets('legacy storage blocks Back from $entry', (tester) async {
+        final auth = FakeAuthNotifier()
+          ..entered = Completer<void>()
+          ..authentication = Completer<void>();
+        final notifier = PairingNotifier(
+          credentialValidator: ({required relayUrl, required nsec}) async {},
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => auth),
+          ],
+        );
+        var exits = 0;
+        final navigator = GlobalKey<NavigatorState>();
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              navigatorKey: navigator,
+              home: const Scaffold(body: Text('Previous page')),
+            ),
+          ),
+        );
+        navigator.currentState!.push(
+          MaterialPageRoute<void>(
+            builder: (_) => entry != 'pairing'
+                ? OnboardingAppEntry(
+                    addingCommunity: true,
+                    restoreAccount: false,
+                    onExit: entry == 'inline' ? () => exits++ : null,
+                  )
+                : const PairingPage(),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final pending = notifier.pair(
+          _encodePairingCode(nsec: nostr.Keys.generate().nsec),
+        );
+        await auth.entered!.future;
+        await tester.pump();
+        expect(container.read(pairingProvider).status, PairingStatus.storing);
+        expect(find.text('Cancel'), findsNothing);
+        expect(await navigator.currentState!.maybePop(), isTrue);
+        await tester.pump();
+        await tester.binding.handlePopRoute();
+        await tester.pump();
+        expect(find.byType(PairingPage), findsOneWidget);
+        expect(exits, 0);
+        expect(container.read(pairingProvider).status, PairingStatus.storing);
+        auth.authentication!.complete();
+        await pending;
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        await tester.pumpWidget(const SizedBox.shrink());
+      });
+    }
 
     test(
       'organization relays are admitted by their session, not pre-validated',
