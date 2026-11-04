@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -39,6 +41,8 @@ export function EncryptedBackupProvider({
   children: React.ReactNode;
   onOpenSettings: () => void;
 }) {
+  useUiLanguage();
+
   const [state, dispatch] = React.useReducer(
     encryptedBackupReducer,
     initialEncryptedBackupState,
@@ -98,7 +102,7 @@ export function EncryptedBackupProvider({
             message:
               err instanceof Error
                 ? err.message
-                : "Failed to encrypt your key.",
+                : uiT("Failed to encrypt your key."),
           });
         });
     };
@@ -114,8 +118,10 @@ export function EncryptedBackupProvider({
 
   React.useEffect(() => {
     if (state.downloadPending) {
-      toast.loading("Preparing backup…", {
-        description: "You can close this window while Buzz finishes.",
+      toast.loading(uiT("Preparing backup…"), {
+        get description() {
+          return uiT("You can close this window while Buzz finishes.");
+        },
         duration: Number.POSITIVE_INFINITY,
         id: BACKUP_READY_TOAST_ID,
       });
@@ -126,7 +132,7 @@ export function EncryptedBackupProvider({
       state.passphrase.length === 0 &&
       !state.ncryptsec
     ) {
-      toast.error("Couldn’t create backup", {
+      toast.error(uiT("Couldn’t create backup"), {
         description: state.createError,
         id: BACKUP_READY_TOAST_ID,
       });
@@ -142,14 +148,16 @@ export function EncryptedBackupProvider({
     (description: string, error = false) => {
       const options = {
         action: {
-          label: "Open settings",
+          get label() {
+            return uiT("Open settings");
+          },
           onClick: () => onOpenSettingsRef.current(),
         },
         description,
         id: BACKUP_READY_TOAST_ID,
       };
-      if (error) toast.error("Backup ready to download", options);
-      else toast.success("Backup ready to download", options);
+      if (error) toast.error(uiT("Backup ready to download"), options);
+      else toast.success(uiT("Backup ready to download"), options);
     },
     [],
   );
@@ -160,7 +168,9 @@ export function EncryptedBackupProvider({
       setIsSaving(true);
       setSaveError(null);
       toast("Saving backup…", {
-        description: "The download window will open when it’s ready.",
+        get description() {
+          return uiT("The download window will open when it’s ready.");
+        },
         id: BACKUP_READY_TOAST_ID,
       });
       try {

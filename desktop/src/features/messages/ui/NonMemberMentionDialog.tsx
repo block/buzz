@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   AlertDialog,
@@ -36,6 +38,8 @@ export function NonMemberMentionDialog({
   open,
   onRestoreFocus,
 }: NonMemberMentionDialogProps) {
+  useUiLanguage();
+
   const safeActionRef = React.useRef<HTMLButtonElement>(null);
   const restoreFocusRef = React.useRef(onRestoreFocus);
   return (
@@ -63,18 +67,20 @@ export function NonMemberMentionDialog({
       >
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Mention people outside this channel?
+            {uiT("Mention people outside this channel?")}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {names.join(", ")} {names.length === 1 ? "is" : "are"} not in this
-            channel.{" "}
-            {onDoNothing
-              ? canInvite
-                ? "Invite them to the channel, or send without inviting them."
-                : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`
-              : canInvite
-                ? "Invite them to the channel, or cancel to keep your draft."
-                : PRIVATE_CHANNEL_ADD_DENIED_MESSAGE}
+            {uiT("{0} {1} not in this channel. {2}", {
+              p0: names.join(", "),
+              p1: names.length === 1 ? "is" : "are",
+              p2: onDoNothing
+                ? canInvite
+                  ? "Invite them to the channel, or send without inviting them."
+                  : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`
+                : canInvite
+                  ? "Invite them to the channel, or cancel to keep your draft."
+                  : PRIVATE_CHANNEL_ADD_DENIED_MESSAGE,
+            })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {error ? (
@@ -96,9 +102,9 @@ export function NonMemberMentionDialog({
           >
             {onDoNothing
               ? canInvite
-                ? "Do nothing"
-                : "Send anyway"
-              : "Cancel"}
+                ? uiT("Do nothing")
+                : uiT("Send anyway")
+              : uiT("Cancel")}
           </Button>
           {canInvite ? (
             <Button
@@ -107,7 +113,7 @@ export function NonMemberMentionDialog({
               size="sm"
               type="button"
             >
-              {isInvitePending ? "Inviting..." : "Invite"}
+              {isInvitePending ? uiT("Inviting...") : uiT("Invite")}
             </Button>
           ) : null}
         </AlertDialogFooter>

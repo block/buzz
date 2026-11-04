@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { MoreHorizontal, Trash2 } from "lucide-react";
 import * as React from "react";
 
@@ -17,6 +19,8 @@ type DeleteActionMenuProps = {
 };
 
 export function DeleteActionMenu({ label, onConfirm }: DeleteActionMenuProps) {
+  useUiLanguage();
+
   const [isOpen, setIsOpen] = React.useState(false);
   const iconClass = "h-4 w-4";
 
@@ -38,7 +42,7 @@ export function DeleteActionMenu({ label, onConfirm }: DeleteActionMenuProps) {
             onClick={() => setIsOpen(true)}
           >
             <Trash2 className="mr-2 h-4 w-4" />
-            Delete {label}
+            {uiT("Delete {0}", { p0: label })}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -38,6 +40,8 @@ function SkeletonReveal({
   skeletonClassName,
   ...props
 }: SkeletonRevealProps) {
+  useUiLanguage();
+
   const rootRef = React.useRef<HTMLDivElement>(null);
   const previousLoadingRef = React.useRef(loading);
   const [isResetting, setIsResetting] = React.useState(false);

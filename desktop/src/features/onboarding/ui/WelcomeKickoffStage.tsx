@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -39,6 +41,8 @@ export function WelcomeKickoffStage({
   onExitComplete: () => void;
   phase: WelcomeKickoffStagePhase;
 }) {
+  useUiLanguage();
+
   const handleAnimationEnd = React.useCallback(
     (event: React.AnimationEvent<HTMLDivElement>) => {
       if (event.animationName === STAGE_EXIT_ANIMATION) {

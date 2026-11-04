@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -31,6 +33,8 @@ export function WaveMessageAttachment({
   huddleMemberPubkeysPending = false,
   searchQuery,
 }: WaveMessageAttachmentProps) {
+  useUiLanguage();
+
   const queryClient = useQueryClient();
   const { isStarting, startHuddle } = useHuddle();
   const startHuddleDisabled =
@@ -78,7 +82,7 @@ export function WaveMessageAttachment({
           />
         </AttachmentTitle>
         <AttachmentDescription>
-          Start a huddle to talk to them.
+          {uiT("Start a huddle to talk to them.")}
         </AttachmentDescription>
       </AttachmentContent>
       <AttachmentActions>
@@ -88,7 +92,7 @@ export function WaveMessageAttachment({
           size="xs"
           type="button"
         >
-          Start huddle
+          {uiT("Start huddle")}
         </AttachmentAction>
       </AttachmentActions>
     </Attachment>

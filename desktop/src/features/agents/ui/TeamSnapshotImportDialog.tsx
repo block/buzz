@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertCircle, Upload } from "lucide-react";
 
@@ -45,6 +47,8 @@ export function TeamSnapshotImportDialog({
   onConfirm,
   onOpenChange,
 }: TeamSnapshotImportDialogProps) {
+  useUiLanguage();
+
   const [keepAllowlist, setKeepAllowlist] = React.useState(false);
 
   // Reset choice whenever the dialog opens with new data.
@@ -67,7 +71,9 @@ export function TeamSnapshotImportDialog({
         <DialogHeader className="space-y-0">
           <div className="flex items-center justify-between gap-4">
             <DialogTitle>
-              {phase === "result" ? "Team imported" : "Import team snapshot"}
+              {phase === "result"
+                ? uiT("Team imported")
+                : uiT("Import team snapshot")}
             </DialogTitle>
             <div className="flex items-center gap-2">
               {phase === "preview" ? (
@@ -81,7 +87,7 @@ export function TeamSnapshotImportDialog({
                     variant="default"
                   >
                     <Upload className="h-4 w-4" />
-                    Import
+                    {uiT("Import")}
                   </Button>
                   <DialogClose asChild>
                     <Button
@@ -90,14 +96,14 @@ export function TeamSnapshotImportDialog({
                       type="button"
                       variant="ghost"
                     >
-                      Cancel
+                      {uiT("Cancel")}
                     </Button>
                   </DialogClose>
                 </>
               ) : (
                 <DialogClose asChild>
                   <Button size="sm" type="button" variant="ghost">
-                    Close
+                    {uiT("Close")}
                   </Button>
                 </DialogClose>
               )}
@@ -126,7 +132,7 @@ export function TeamSnapshotImportDialog({
           </div>
         ) : phase === "confirming" ? (
           <div className="py-4 text-center text-sm text-muted-foreground">
-            Creating team…
+            {uiT("Creating team…")}
           </div>
         ) : result !== null ? (
           <ResultBody result={result} />
@@ -163,15 +169,16 @@ function PreviewBody({
       </div>
 
       <p className="text-sm text-muted-foreground">
-        A new team will be created with fresh keypairs for all members. The
-        imported team is independent of the source — identity never travels.
+        {uiT(
+          "A new team will be created with fresh keypairs for all members. The imported team is independent of the source — identity never travels.",
+        )}
       </p>
 
       {/* Member list */}
       {preview.members.length > 0 ? (
         <div className="space-y-1">
           <p className="text-sm font-medium">
-            Members ({preview.members.length})
+            {uiT("Members ({0})", { p0: preview.members.length })}
           </p>
           <div className="max-h-36 space-y-1 overflow-y-auto rounded-md border border-border p-2">
             {preview.members.map((member, idx) => (
@@ -195,10 +202,11 @@ function PreviewBody({
           className="space-y-2 rounded-md border border-border p-3"
           data-testid="team-snapshot-import-allowlist-section"
         >
-          <p className="text-sm font-medium">Respond-to allowlist</p>
+          <p className="text-sm font-medium">{uiT("Respond-to allowlist")}</p>
           <p className="text-xs text-muted-foreground">
-            This snapshot includes source-environment pubkey allowlists for one
-            or more members. Those identities are not meaningful on your relay.
+            {uiT(
+              "This snapshot includes source-environment pubkey allowlists for one or more members. Those identities are not meaningful on your relay.",
+            )}
           </p>
           <div className="flex flex-col gap-1.5">
             <label className="flex cursor-pointer items-center gap-2">
@@ -210,7 +218,8 @@ function PreviewBody({
                 type="radio"
               />
               <span className="text-sm">
-                <strong>Clear</strong> — start with empty allowlists (safer)
+                <strong>{uiT("Clear")}</strong>{" "}
+                {uiT(" — start with empty allowlists (safer)")}
               </span>
             </label>
             <label className="flex cursor-pointer items-center gap-2">
@@ -222,7 +231,8 @@ function PreviewBody({
                 type="radio"
               />
               <span className="text-sm">
-                <strong>Keep</strong> — copy source allowlists to new members
+                <strong>{uiT("Keep")}</strong>{" "}
+                {uiT(" — copy source allowlists to new members")}
               </span>
             </label>
           </div>
@@ -254,10 +264,18 @@ function ResultBody({ result }: { result: TeamSnapshotImportResult }) {
   return (
     <div className="space-y-3 py-1">
       <p className="text-sm">
-        <span className="font-medium">{result.team.name}</span> was created
+        <span className="font-medium">{result.team.name}</span>{" "}
+        {uiT(" was created")}
         {profileSyncFailures.length > 0
-          ? `, but ${profileSyncFailures.length} member${profileSyncFailures.length === 1 ? "" : "s"} failed to publish ${profileSyncFailures.length === 1 ? "a profile" : "profiles"}.`
-          : ` successfully with ${result.members.length} member${result.members.length === 1 ? "" : "s"}.`}
+          ? uiT(", but {0} member{1} failed to publish {2}.", {
+              p0: profileSyncFailures.length,
+              p1: profileSyncFailures.length === 1 ? "" : "s",
+              p2: profileSyncFailures.length === 1 ? "a profile" : "profiles",
+            })
+          : uiT("successfully with {0} member{1}.", {
+              p0: result.members.length,
+              p1: result.members.length === 1 ? "" : "s",
+            })}
       </p>
 
       {profileSyncFailures.length > 0 ? (
@@ -267,7 +285,7 @@ function ResultBody({ result }: { result: TeamSnapshotImportResult }) {
         >
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="flex flex-col gap-1">
-            <p>Profile sync failed for:</p>
+            <p>{uiT("Profile sync failed for:")}</p>
             <ul className="mt-1 max-h-32 space-y-0.5 overflow-y-auto text-xs">
               {profileSyncFailures.map((m) => (
                 <li key={m.pubkey} className="break-all font-mono">
@@ -288,10 +306,14 @@ function ResultBody({ result }: { result: TeamSnapshotImportResult }) {
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="flex flex-col gap-1">
               <p>
-                Memory partially restored: {totalMemoryWritten} of{" "}
-                {totalMemoryTotal} entr
-                {totalMemoryTotal === 1 ? "y" : "ies"} written across all
-                members.
+                {uiT(
+                  "Memory partially restored: {0} of {1} entr {2} written across all members.",
+                  {
+                    p0: totalMemoryWritten,
+                    p1: totalMemoryTotal,
+                    p2: totalMemoryTotal === 1 ? "y" : "ies",
+                  },
+                )}
               </p>
               {totalMemoryErrors > 0 ? (
                 <ul
@@ -318,8 +340,10 @@ function ResultBody({ result }: { result: TeamSnapshotImportResult }) {
             className="text-xs text-muted-foreground"
             data-testid="team-snapshot-import-memory-success"
           >
-            {totalMemoryTotal} memory entr
-            {totalMemoryTotal === 1 ? "y" : "ies"} restored across all members.
+            {uiT("{0} memory entr {1} restored across all members.", {
+              p0: totalMemoryTotal,
+              p1: totalMemoryTotal === 1 ? "y" : "ies",
+            })}
           </p>
         )
       ) : null}

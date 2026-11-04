@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Bot, Pin, Users } from "lucide-react";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
@@ -83,6 +85,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onDismiss,
   position = "above",
 }: MentionAutocompleteProps) {
+  useUiLanguage();
+
   const rootRef = React.useRef<HTMLDivElement>(null);
   const optionsSurfaceRef = React.useRef<HTMLDivElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
@@ -208,14 +212,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   }}
                 >
                   <span className="whitespace-nowrap text-sm font-medium">
-                    Automatically mention agents
+                    {uiT("Automatically mention agents")}
                   </span>
                   <span className="text-2xs text-muted-foreground">
-                    Address selected agents in thread replies
+                    {uiT("Address selected agents in thread replies")}
                   </span>
                 </label>
                 <Switch
-                  aria-label="Automatically mention agents"
+                  aria-label={uiT("Automatically mention agents")}
                   checked={keepMentionedAgentsPinned}
                   className="shrink-0 shadow-none [&>span]:shadow-none"
                   data-testid="mention-keep-agents-pinned-toggle"
@@ -293,7 +297,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 key={suggestionKey}
               >
                 <button
-                  aria-label={`Mention ${suggestion.displayName}`}
+                  aria-label={uiT("Mention {0}", {
+                    p0: suggestion.displayName,
+                  })}
                   className={cn(
                     "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
                     canAlwaysAddress && "pr-11",
@@ -341,7 +347,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         {suggestion.kind === "team" ? (
                           <span className="inline-flex shrink-0 items-center gap-1">
                             <Users aria-hidden="true" className="h-3.5 w-3.5" />
-                            team · {suggestion.teamMembers?.length ?? 0} agents
+                            {uiT("team · ")}
+                            {suggestion.teamMembers?.length ?? 0}{" "}
+                            {uiT(" agents")}
                           </span>
                         ) : suggestion.isAgent ? (
                           <span className="inline-flex shrink-0 items-center gap-1">
@@ -350,7 +358,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                               className="h-3.5 w-3.5"
                               data-testid="mention-agent-icon"
                             />
-                            agent
+                            {uiT("agent")}
                             {showAgentProvenanceMarker ? (
                               <OtherSetupAgentMarker testId="mention-agent-provenance" />
                             ) : null}
@@ -368,17 +376,21 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                             className="min-w-0 truncate"
                             title={
                               ownerLabel && suggestion.notInChannel
-                                ? `managed by ${ownerLabel} · not in channel`
+                                ? uiT("managed by {0} · not in channel", {
+                                    p0: ownerLabel,
+                                  })
                                 : ownerLabel
-                                  ? `managed by ${ownerLabel}`
-                                  : "not in channel"
+                                  ? uiT("managed by {0}", { p0: ownerLabel })
+                                  : uiT("not in channel")
                             }
                           >
                             {ownerLabel && suggestion.notInChannel
-                              ? `managed by ${ownerLabel} · not in channel`
+                              ? uiT("managed by {0} · not in channel", {
+                                  p0: ownerLabel,
+                                })
                               : ownerLabel
-                                ? `managed by ${ownerLabel}`
-                                : "not in channel"}
+                                ? uiT("managed by {0}", { p0: ownerLabel })
+                                : uiT("not in channel")}
                           </span>
                         ) : null}
                         {collisionNpub ? (
@@ -430,8 +442,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     >
                       <span>
                         {isAlwaysAddressed
-                          ? "Don't automatically mention in this thread"
-                          : "Automatically mention"}
+                          ? uiT("Don't automatically mention in this thread")
+                          : uiT("Automatically mention")}
                       </span>
                       {alwaysAddressShortcut ? (
                         <kbd className="flex items-center gap-0.5 rounded border border-secondary-foreground/20 bg-secondary-foreground/10 px-1 py-0 font-mono text-sm text-secondary-foreground">

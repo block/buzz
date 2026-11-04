@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -210,7 +212,9 @@ export function useAgentManagement() {
       return true;
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not save this agent.",
+        cause instanceof Error
+          ? cause.message
+          : uiT("Could not save this agent."),
       );
       return false;
     }
@@ -232,7 +236,9 @@ export function useAgentManagement() {
       return true;
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not save this agent.",
+        cause instanceof Error
+          ? cause.message
+          : uiT("Could not save this agent."),
       );
       return false;
     }

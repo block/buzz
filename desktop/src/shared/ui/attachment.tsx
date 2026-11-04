@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 
@@ -18,6 +20,8 @@ function Attachment({
   state = "done",
   ...props
 }: AttachmentProps) {
+  useUiLanguage();
+
   const attachmentRef = React.useRef<HTMLDivElement | null>(null);
   useSmoothCorners(attachmentRef);
 

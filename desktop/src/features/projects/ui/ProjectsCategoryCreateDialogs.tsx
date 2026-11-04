@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -24,6 +26,8 @@ export function ProjectsCategoryCreateDialogs({
   ownerControlAgentPubkeyFor: (project: Project) => string | undefined;
   repositoryOpen: boolean;
 }) {
+  useUiLanguage();
+
   const { goChannel, goProject } = useAppNavigation();
   const [channelProjectId, setChannelProjectId] = React.useState("");
   const channelProject =
@@ -49,8 +53,8 @@ export function ProjectsCategoryCreateDialogs({
         channelKind={channelOpen ? "stream" : null}
         description={
           channelProject
-            ? `Add another stream to ${channelProject.name}.`
-            : "Choose a project for this channel."
+            ? uiT("Add another stream to {0}.", { p0: channelProject.name })
+            : uiT("Choose a project for this channel.")
         }
         isCreating={createChannelMutation.isPending}
         onCreate={async (input) => {
@@ -60,15 +64,17 @@ export function ProjectsCategoryCreateDialogs({
             ownerControlAgentPubkey: ownerControlAgentPubkeyFor(channelProject),
             project: channelProject,
           });
-          toast.success(`Channel "#${result.channel.name}" created.`);
+          toast.success(
+            uiT('Channel "#{0}" created.', { p0: result.channel.name }),
+          );
           await goChannel(result.channel.id);
         }}
         onOpenChange={onChannelOpenChange}
         testId="create-project-channel-dialog"
-        title="Create a project channel"
+        title={uiT("Create a project channel")}
       >
         <label className="block space-y-1.5 text-sm font-medium">
-          <span>Project</span>
+          <span>{uiT("Project")}</span>
           <select
             className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
             data-testid="create-project-channel-project"
@@ -92,7 +98,9 @@ export function ProjectsCategoryCreateDialogs({
             ...input,
             ownerControlAgentPubkey: ownerControlAgentPubkeyFor(input.project),
           });
-          toast.success(`Repository "${result.repository.name}" created.`);
+          toast.success(
+            uiT('Repository "{0}" created.', { p0: result.repository.name }),
+          );
           await goProject(input.project.id, {
             repositoryId: result.repository.id,
           });

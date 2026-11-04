@@ -1,3 +1,4 @@
+import { uiT } from "@/shared/i18n/uiTranslation";
 const MINUTE = 60;
 const HOUR = 3600;
 const DAY = 86400;
@@ -7,19 +8,19 @@ export function formatRelativeTime(unixSeconds: number): string {
   const delta = Math.max(0, now - unixSeconds);
 
   if (delta < MINUTE) {
-    return "just now";
+    return uiT("just now");
   }
 
   if (delta < HOUR) {
     const minutes = Math.floor(delta / MINUTE);
-    return `${minutes}m ago`;
+    return uiT("{0}m ago", { p0: minutes });
   }
 
   if (delta < DAY) {
     const hours = Math.floor(delta / HOUR);
-    return `${hours}h ago`;
+    return uiT("{0}h ago", { p0: hours });
   }
 
   const days = Math.floor(delta / DAY);
-  return `${days}d ago`;
+  return uiT("{0}d ago", { p0: days });
 }

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
 export type HarnessConnectionMethod = "subscription" | "api";
@@ -34,8 +36,8 @@ export function runtimeUnavailableDescription(
   runtime: AcpRuntimeCatalogEntry,
 ): string {
   return runtime.availability === "adapter_outdated"
-    ? `${runtime.label} needs an ACP adapter update.`
-    : `${runtime.label} is not detected on this computer.`;
+    ? uiT("{0} needs an ACP adapter update.", { p0: runtime.label })
+    : uiT("{0} is not detected on this computer.", { p0: runtime.label });
 }
 
 export function getRuntimesForConnectionMethod(

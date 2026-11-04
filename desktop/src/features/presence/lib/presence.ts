@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 // Live kind:20001 events are self-signed by their author; the subject is
@@ -74,11 +76,11 @@ export function resolveAutomaticPresenceStatus(
 export function getPresenceLabel(status: PresenceStatus) {
   switch (status) {
     case "online":
-      return "Online";
+      return uiT("Online");
     case "away":
-      return "Away";
+      return uiT("Away");
     case "offline":
-      return "Offline";
+      return uiT("Offline");
   }
 }
 

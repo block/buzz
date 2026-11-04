@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Component, type ReactNode } from "react";
 
 type RootErrorBoundaryProps = {
@@ -38,17 +40,20 @@ export class RootErrorBoundary extends Component<
     if (error) {
       return (
         <div className="flex h-screen w-screen flex-col items-center justify-center gap-3 bg-background px-6 text-foreground">
-          <p className="text-base font-semibold">Buzz failed to start</p>
+          <p className="text-base font-semibold">
+            {uiT("Buzz failed to start")}
+          </p>
           <p className="max-w-md text-center text-sm text-muted-foreground">
-            Reload Buzz to try again. If this keeps happening, check that Buzz
-            can access website data, then contact support.
+            {uiT(
+              "Reload Buzz to try again. If this keeps happening, check that Buzz can access website data, then contact support.",
+            )}
           </p>
           <button
             type="button"
             className="rounded-md border border-border bg-secondary px-4 py-2 text-sm hover:bg-secondary/80"
             onClick={() => window.location.reload()}
           >
-            Reload
+            {uiT("Reload")}
           </button>
         </div>
       );

@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import type { ReactNode } from "react";
 
 import type { ChannelVisibility } from "@/shared/api/types";
@@ -44,6 +46,8 @@ export function CreateChannelDialog({
   testId = "create-channel-dialog",
   title,
 }: CreateChannelDialogProps) {
+  useUiLanguage();
+
   const open = channelKind !== null;
 
   const form = useCreateChannelForm({
@@ -54,7 +58,7 @@ export function CreateChannelDialog({
     onCreated: () => onOpenChange(false),
   });
 
-  const kindLabel = channelKind === "forum" ? "forum" : "channel";
+  const kindLabel = channelKind === "forum" ? uiT("forum") : uiT("channel");
 
   return (
     <Dialog
@@ -70,12 +74,12 @@ export function CreateChannelDialog({
         data-testid={testId}
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        title={title ?? `Create a new ${kindLabel}`}
+        title={title ?? uiT("Create a new {0}", { p0: kindLabel })}
         description={
           description ??
           (channelKind === "forum"
-            ? "Forums organize threaded discussions around a topic."
-            : "Channels are real-time streams for team conversation.")
+            ? uiT("Forums organize threaded discussions around a topic.")
+            : uiT("Channels are real-time streams for team conversation."))
         }
         footer={<CreateChannelFormFooter form={form} />}
       >

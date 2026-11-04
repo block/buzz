@@ -1,3 +1,6 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
+import { i18n } from "@/i18n";
 import type { Workflow } from "@/shared/api/types";
 import {
   scheduleFormFromTrigger,
@@ -120,17 +123,17 @@ function getScheduleCardClause(trigger: Record<string, unknown>): string {
 
   switch (schedule.frequency) {
     case "daily":
-      return `Every day at ${schedule.time} UTC`;
+      return uiT("Every day at {0} UTC", { p0: schedule.time });
     case "weekly":
-      return `Every week at ${schedule.time} UTC`;
+      return uiT("Every week at {0} UTC", { p0: schedule.time });
     case "monthly":
-      return `Every month at ${schedule.time} UTC`;
+      return uiT("Every month at {0} UTC", { p0: schedule.time });
     case "custom_interval":
       return schedule.customInterval
-        ? `Every ${schedule.customInterval}`
-        : "On a schedule";
+        ? uiT("Every {0}", { p0: schedule.customInterval })
+        : uiT("On a schedule");
     case "custom_cron":
-      return "On a custom schedule";
+      return uiT("On a custom schedule");
     default:
       return SCHEDULE_FREQUENCY_LABELS[schedule.frequency];
   }
@@ -142,29 +145,29 @@ function getTriggerCardClause(
 ): string {
   const trigger = asRecord(definition.trigger);
   const triggerType = nonEmptyString(trigger?.on);
-  if (!trigger || !triggerType) return "When this workflow starts";
+  if (!trigger || !triggerType) return uiT("When this workflow starts");
 
   switch (triggerType) {
     case "message_posted":
       return nonEmptyString(trigger.filter)
-        ? "When a matching message is posted"
-        : "When a message is posted";
+        ? uiT("When a matching message is posted")
+        : uiT("When a message is posted");
     case "reaction_added": {
       const emoji = nonEmptyString(presentedReaction ?? trigger.emoji);
       return emoji
-        ? `When someone reacts with ${emoji}`
-        : "When someone adds a reaction";
+        ? uiT("When someone reacts with {0}", { p0: emoji })
+        : uiT("When someone adds a reaction");
     }
     case "diff_posted":
       return nonEmptyString(trigger.filter)
-        ? "When a matching diff is posted"
-        : "When a diff is posted";
+        ? uiT("When a matching diff is posted")
+        : uiT("When a diff is posted");
     case "webhook":
-      return "When a webhook arrives";
+      return uiT("When a webhook arrives");
     case "schedule":
       return getScheduleCardClause(trigger);
     default:
-      return `When ${humanizeIdentifier(triggerType)} happens`;
+      return uiT("When {0} happens", { p0: humanizeIdentifier(triggerType) });
   }
 }
 
@@ -331,33 +334,35 @@ function getActionCardClause(
   switch (action) {
     case "delay": {
       return configuredDetail
-        ? `wait ${configuredDetail}`
-        : "wait for a moment";
+        ? uiT("wait {0}", { p0: configuredDetail })
+        : uiT("wait for a moment");
     }
     case "send_message":
-      if (!configuredDetail) return "send a channel message";
+      if (!configuredDetail) return uiT("send a channel message");
       return nonEmptyString(step.text)
-        ? `send ${configuredDetail}`
-        : `send a message in ${configuredDetail}`;
+        ? uiT("send {0}", { p0: configuredDetail })
+        : uiT("send a message in {0}", { p0: configuredDetail });
     case "call_webhook":
-      return configuredDetail ? `call ${configuredDetail}` : "call a webhook";
+      return configuredDetail
+        ? uiT("call {0}", { p0: configuredDetail })
+        : uiT("call a webhook");
     case "send_dm":
       return configuredDetail
-        ? `send ${configuredDetail}`
-        : "send a direct message";
+        ? uiT("send {0}", { p0: configuredDetail })
+        : uiT("send a direct message");
     case "request_approval":
       return configuredDetail
-        ? `request approval: ${configuredDetail}`
-        : "request approval";
+        ? uiT("request approval: {0}", { p0: configuredDetail })
+        : uiT("request approval");
     case "add_reaction": {
       return configuredDetail
-        ? `add a ${configuredDetail} reaction`
-        : "add a reaction";
+        ? uiT("add a {0} reaction", { p0: configuredDetail })
+        : uiT("add a reaction");
     }
     case "set_channel_topic":
       return configuredDetail
-        ? `set the channel topic to ${configuredDetail}`
-        : "update the channel topic";
+        ? uiT("set the channel topic to {0}", { p0: configuredDetail })
+        : uiT("update the channel topic");
     default: {
       return (actionLabel ?? humanizeIdentifier(action)).toLocaleLowerCase();
     }
@@ -380,16 +385,27 @@ export function getWorkflowCardLabel(
   } = {},
 ): string {
   const triggerConfig = getWorkflowTriggerConfig(definition);
-  const triggerClause =
-    getPresentedTriggerCardClause(options.triggerDescription) ??
-    getPresentedTriggerCardClause(
-      triggerConfig?.filter && !options.triggerReaction
-        ? workflowTriggerDescription(triggerConfig, {
-            omitUnresolvedReferences: true,
-          })
-        : undefined,
-    ) ??
-    getTriggerCardClause(definition, options.triggerReaction);
+  const triggerClause = (() => {
+    if (i18n.resolvedLanguage === "ko") {
+      return triggerConfig && triggerConfig.on !== "schedule"
+        ? (options.triggerDescription ??
+            workflowTriggerDescription(triggerConfig, {
+              omitUnresolvedReferences: true,
+            }))
+        : getTriggerCardClause(definition, options.triggerReaction);
+    }
+    return (
+      getPresentedTriggerCardClause(options.triggerDescription) ??
+      getPresentedTriggerCardClause(
+        triggerConfig?.filter && !options.triggerReaction
+          ? workflowTriggerDescription(triggerConfig, {
+              omitUnresolvedReferences: true,
+            })
+          : undefined,
+      ) ??
+      getTriggerCardClause(definition, options.triggerReaction)
+    );
+  })();
   const steps = getWorkflowSteps(definition);
   const firstAction = steps[0]
     ? getActionCardClause(steps[0], options.actionChannelLabel)
@@ -399,9 +415,12 @@ export function getWorkflowCardLabel(
   const remainingStepCount = steps.length - 1;
   if (remainingStepCount === 0) return `${triggerClause}, ${firstAction}`;
 
-  return `${triggerClause}, ${firstAction}, then ${remainingStepCount} more ${
-    remainingStepCount === 1 ? "step" : "steps"
-  }`;
+  return uiT("{0}, {1}, then {2} more {3}", {
+    p0: triggerClause,
+    p1: firstAction,
+    p2: remainingStepCount,
+    p3: remainingStepCount === 1 ? "step" : "steps",
+  });
 }
 
 export function getWorkflowDescription(

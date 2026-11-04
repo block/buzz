@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Check, Plus } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
@@ -46,7 +48,7 @@ function AgentRow({
       {inChannel ? (
         <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground">
           <Check className="h-4 w-4" />
-          In channel
+          {uiT("In channel")}
         </span>
       ) : (
         <span
@@ -78,10 +80,10 @@ function CreateAgentRow({ onCreateAgent }: { onCreateAgent: () => void }) {
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-medium text-foreground">
-          Create a new agent
+          {uiT("Create a new agent")}
         </span>
         <span className="block text-xs text-muted-foreground">
-          Give it a name, purpose, and instructions.
+          {uiT("Give it a name, purpose, and instructions.")}
         </span>
       </span>
     </button>
@@ -127,14 +129,14 @@ export function AddChannelBotPersonasSection({
 
       {isLoading ? (
         <p className="px-3 text-sm text-muted-foreground">
-          Loading your agents…
+          {uiT("Loading your agents…")}
         </p>
       ) : null}
 
       {!isLoading && available.length > 0 ? (
         <div className="space-y-1">
           <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
-            Your agents
+            {uiT("Your agents")}
           </div>
           {available.map((persona) => (
             <AgentRow
@@ -151,7 +153,7 @@ export function AddChannelBotPersonasSection({
 
       {!isLoading && available.length === 0 && inChannel.length > 0 ? (
         <p className="px-3 text-sm text-muted-foreground">
-          All of your agents are already in this channel.
+          {uiT("All of your agents are already in this channel.")}
         </p>
       ) : null}
 
@@ -162,7 +164,7 @@ export function AddChannelBotPersonasSection({
       {!isLoading && inChannel.length > 0 ? (
         <div className="space-y-1 border-t border-border pt-3">
           <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
-            In this channel
+            {uiT("In this channel")}
           </div>
           {inChannel.map((persona) => (
             <AgentRow

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -28,6 +30,8 @@ export const ChannelAutocomplete = React.memo(function ChannelAutocomplete({
   onSelect,
   position = "above",
 }: ChannelAutocompleteProps) {
+  useUiLanguage();
+
   const listRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {

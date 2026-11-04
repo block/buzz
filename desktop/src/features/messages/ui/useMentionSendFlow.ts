@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { claimDraftSend } from "@/features/messages/lib/useDrafts";
 import { toast } from "sonner";
@@ -648,7 +650,9 @@ export function useMentionSendFlow({
             onError: (error) => {
               restoreComposerAfterFailure();
               toast.error(
-                `Upload failed: ${getErrorMessage(error, "Unknown error")}`,
+                uiT("Upload failed: {0}", {
+                  p0: getErrorMessage(error, "Unknown error"),
+                }),
               );
               settleUpload();
             },

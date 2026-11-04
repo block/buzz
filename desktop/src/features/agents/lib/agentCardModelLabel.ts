@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   formatAgentModelLabel,
   resolveModelLabel,
@@ -49,6 +51,8 @@ export function formatDefaultModelLabel(
 ) {
   const model = defaultModel.trim();
   return model
-    ? `Default model (${resolveModelLabel(model, undefined, provider)})`
-    : "Default model";
+    ? uiT("Default model ({0})", {
+        p0: resolveModelLabel(model, undefined, provider),
+      })
+    : uiT("Default model");
 }

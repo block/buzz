@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Clock } from "lucide-react";
 
 import { formatTimeoutRemaining } from "@/features/moderation/lib/timeout";
@@ -15,6 +17,8 @@ import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
  * the hook's effect clears the store — flipping the flag and unmounting this.
  */
 export function ComposerTimeoutBanner() {
+  useUiLanguage();
+
   const { expiresAtMs } = useTimeoutState();
   const remaining = formatTimeoutRemaining(expiresAtMs);
 
@@ -26,8 +30,10 @@ export function ComposerTimeoutBanner() {
       <Clock aria-hidden className="h-4 w-4 shrink-0 text-amber-600" />
       <span className="min-w-0">
         {remaining
-          ? `You're timed out by community moderators — ${remaining} left.`
-          : "You're timed out by community moderators."}
+          ? uiT("You're timed out by community moderators — {0} left.", {
+              p0: remaining,
+            })
+          : uiT("You're timed out by community moderators.")}
       </span>
     </div>
   );

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { motion, useReducedMotion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
@@ -11,6 +13,8 @@ export function DrawerPanelIcon({
   side: "left" | "right";
   testId?: string;
 }) {
+  useUiLanguage();
+
   const prefersReducedMotion = useReducedMotion();
   const isOpen = side === "left";
 

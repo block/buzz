@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { Button } from "@/shared/ui/button";
@@ -7,16 +9,20 @@ import {
 } from "./ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
 export function UpdateChecker() {
+  useUiLanguage();
+
   const { status, checkForUpdate, installAndRelaunch } = useUpdaterContext();
 
   return (
     <section className="min-w-0" data-testid="settings-updates">
       <SettingsSectionHeader
-        title="Software Updates"
-        description="Keep Buzz up to date with the latest features and fixes."
+        title={uiT("Software Updates")}
+        description={uiT(
+          "Keep Buzz up to date with the latest features and fixes.",
+        )}
       />
 
-      <SettingsOptionGroup title="Update status">
+      <SettingsOptionGroup title={uiT("Update status")}>
         {status.state === "idle" && (
           <SettingsOptionRow>
             <div className="min-w-0">
@@ -24,11 +30,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Check if a new version is available.
+                {uiT("Check if a new version is available.")}
               </p>
             </div>
             <Button size="sm" onClick={checkForUpdate}>
-              Check for Updates
+              {uiT("Check for Updates")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -40,7 +46,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Checking for updates...
+                {uiT("Checking for updates...")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -53,11 +59,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                You're on the latest version.
+                {uiT("You're on the latest version.")}
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
-              Check Again
+              {uiT("Check Again")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -69,12 +75,13 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Automatic updates aren't available on this build. Download the
-                latest release manually.
+                {uiT(
+                  "Automatic updates aren't available on this build. Download the latest release manually.",
+                )}
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
-              Check Again
+              {uiT("Check Again")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -83,19 +90,22 @@ export function UpdateChecker() {
           <SettingsOptionRow>
             <div className="min-w-0">
               <p className="text-sm font-medium">
-                Update available — v{status.version}
+                {uiT("Update available — v{0}", { p0: status.version })}
               </p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                In-app updates aren't supported on this Linux package. Download
-                the new version from GitHub.{" "}
-                <span>Switch to the AppImage build for automatic updates.</span>
+                {uiT(
+                  "In-app updates aren't supported on this Linux package. Download the new version from GitHub.",
+                )}{" "}
+                <span>
+                  {uiT("Switch to the AppImage build for automatic updates.")}
+                </span>
               </p>
             </div>
             <Button size="sm" onClick={() => void openUrl(status.releaseUrl)}>
-              Download Update
+              {uiT("Download Update")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -107,7 +117,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Preparing update...
+                {uiT("Preparing update...")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -120,7 +130,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Downloading update...
+                {uiT("Downloading update...")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -133,7 +143,7 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Installing update...
+                {uiT("Installing update...")}
               </p>
             </div>
           </SettingsOptionRow>
@@ -146,11 +156,11 @@ export function UpdateChecker() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Update downloaded. Click to apply.
+                {uiT("Update downloaded. Click to apply.")}
               </p>
             </div>
             <Button size="sm" onClick={installAndRelaunch}>
-              Update Now
+              {uiT("Update Now")}
             </Button>
           </SettingsOptionRow>
         )}
@@ -159,11 +169,11 @@ export function UpdateChecker() {
           <SettingsOptionRow>
             <div className="min-w-0">
               <p className="text-sm font-normal text-destructive">
-                Update failed: {status.message}
+                {uiT("Update failed: {0}", { p0: status.message })}
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
-              Retry
+              {uiT("Retry")}
             </Button>
           </SettingsOptionRow>
         )}

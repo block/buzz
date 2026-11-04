@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   AgentActivityDescriptor,
   AgentActivityRenderClass,
@@ -177,7 +179,7 @@ function describePermissionRequest(payload: Record<string, unknown>) {
     asString(params.title) ??
     asString(params.message) ??
     asString(params.reason) ??
-    "Permission requested";
+    uiT("Permission requested");
   const toolCallId =
     asString(params.toolCallId) ?? asString(params.tool_call_id);
   const options = Array.isArray(params.options)
@@ -216,7 +218,9 @@ function describePermissionRequest(payload: Record<string, unknown>) {
     optionNames,
     descriptor: {
       renderClass: "permission" as const,
-      label: "Permission requested",
+      get label() {
+        return uiT("Permission requested");
+      },
       preview: title,
       action: { verb: "Requested", object: title },
       tone: "admin" as const,
@@ -513,7 +517,9 @@ function upsertPlan(
         id: updateMarkerId ?? `${id}:update:${timestamp}`,
         type: "plan",
         renderClass: "plan",
-        title: "Plan updated",
+        get title() {
+          return uiT("Plan updated");
+        },
         text: summarizePlanUpdate(text),
         timestamp,
         isUpdate: true,
@@ -775,7 +781,9 @@ export function processTranscriptEvent(
     const error = asString(payload.error) ?? "Unknown error";
     const displayError = friendlyTurnErrorCopy(error, payload.code);
     const title =
-      event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
+      event.kind === "agent_panic"
+        ? uiT("Agent error (crash)")
+        : uiT("Turn error");
     upsertTextItem(
       d,
       `${event.kind}:${ch}:${event.turnId ?? event.seq}`,

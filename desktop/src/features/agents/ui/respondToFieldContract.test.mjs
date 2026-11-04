@@ -16,7 +16,9 @@ const collapsedSource = respondToFieldSource.replace(/\s+/g, " ");
 
 for (const label of ["Only me (default)", "Selected people", "Anyone"]) {
   test(`respond-to control uses the plain-language label: ${label}`, () => {
-    assert.ok(respondToFieldSource.includes(`label: "${label}"`));
+    assert.ok(
+      collapsedSource.includes(`get label() { return uiT("${label}"); }`),
+    );
   });
 }
 
@@ -61,7 +63,7 @@ test("the Only me line names the owner's agents, not the owner alone", () => {
   // on that, so a line promising the owner alone would overstate the boundary.
   assert.match(
     collapsedSource,
-    /mode === "owner-only" \? \( <p[^>]*> Only you and your agents can send instructions\./,
+    /mode === "owner-only" \? \( <p[^>]*> \{uiT\("Only you and your agents can send instructions\."\)\}/,
   );
 });
 

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { isTauri } from "@tauri-apps/api/core";
 
@@ -60,6 +62,8 @@ export function TerminalBootstrap({
   npub: string | null;
   relayUrl: string | null;
 }) {
+  useUiLanguage();
+
   const context =
     channelId && npub && relayUrl
       ? {

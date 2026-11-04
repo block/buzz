@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useEffect, useEffectEvent } from "react";
 import {
   type QueryClient,
@@ -813,7 +815,7 @@ export function useDeleteMessageMutation(channel: Channel | null) {
       );
     },
     onError: (error) => {
-      toast.error(`Failed to delete message: ${error.message}`);
+      toast.error(uiT("Failed to delete message: {0}", { p0: error.message }));
     },
   });
 }

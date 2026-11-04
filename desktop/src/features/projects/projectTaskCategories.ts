@@ -1,7 +1,24 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 export const PROJECT_TASK_CATEGORIES = [
-  { label: "Issue", value: "issue" },
-  { label: "Change request", value: "change-request" },
-  { label: "Improvement", value: "improvement" },
+  {
+    get label() {
+      return uiT("Issue");
+    },
+    value: "issue",
+  },
+  {
+    get label() {
+      return uiT("Change request");
+    },
+    value: "change-request",
+  },
+  {
+    get label() {
+      return uiT("Improvement");
+    },
+    value: "improvement",
+  },
 ] as const;
 
 export type ProjectTaskCategory =
@@ -30,7 +47,7 @@ export function projectTaskCategoryFromLabels(
 export function projectTaskCategoryLabel(category: ProjectTaskCategory) {
   return (
     PROJECT_TASK_CATEGORIES.find((option) => option.value === category)
-      ?.label ?? "Issue"
+      ?.label ?? uiT("Issue")
   );
 }
 

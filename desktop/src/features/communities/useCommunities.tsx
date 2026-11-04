@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   createContext,
   useCallback,
@@ -158,6 +160,8 @@ export type UseCommunitiesReturn = {
 const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
 
 export function CommunitiesProvider({ children }: { children: ReactNode }) {
+  useUiLanguage();
+
   const value = useCommunitiesInternal();
   return (
     <CommunitiesContext.Provider value={value}>

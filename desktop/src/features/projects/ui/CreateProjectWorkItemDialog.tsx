@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -47,6 +49,8 @@ export function CreateProjectWorkItemDialog({
   title: string;
   titlePlaceholder: string;
 }) {
+  useUiLanguage();
+
   const [workItemTitle, setWorkItemTitle] = React.useState("");
   const [body, setBody] = React.useState("");
   const [category, setCategory] = React.useState<ProjectTaskCategory>("issue");
@@ -54,7 +58,7 @@ export function CreateProjectWorkItemDialog({
   const titleInputRef = React.useRef<HTMLInputElement>(null);
   const submitInFlightRef = React.useRef(false);
   const testIdPrefix = `create-${itemName}`;
-  const itemLabel = itemName === "issue" ? "task" : "review";
+  const itemLabel = itemName === "issue" ? uiT("task") : uiT("review");
 
   React.useEffect(() => {
     if (!open) return;
@@ -87,7 +91,7 @@ export function CreateProjectWorkItemDialog({
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : `Failed to create ${itemLabel}.`,
+          : uiT("Failed to create {0}.", { p0: itemLabel }),
       );
     } finally {
       submitInFlightRef.current = false;
@@ -119,7 +123,9 @@ export function CreateProjectWorkItemDialog({
               form={`${testIdPrefix}-form`}
               type="submit"
             >
-              {isCreating ? "Creating…" : `Create ${itemLabel}`}
+              {isCreating
+                ? uiT("Creating…")
+                : uiT("Create {0}", { p0: itemLabel })}
             </Button>
           </div>
         }
@@ -139,7 +145,7 @@ export function CreateProjectWorkItemDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor={`${testIdPrefix}-category`}
               >
-                Category
+                {uiT("Category")}
               </label>
               <div className={FIELD_SHELL_CLASS}>
                 <select
@@ -169,7 +175,7 @@ export function CreateProjectWorkItemDialog({
               className="text-sm font-medium text-foreground"
               htmlFor={`${testIdPrefix}-title`}
             >
-              Title
+              {uiT("Title")}
             </label>
             <div
               className={cn(
@@ -198,9 +204,9 @@ export function CreateProjectWorkItemDialog({
               className="text-sm font-medium text-foreground"
               htmlFor={`${testIdPrefix}-body`}
             >
-              Description
+              {uiT("Description")}
               <span className="ml-1 text-xs font-normal text-muted-foreground/50">
-                Optional
+                {uiT("Optional")}
               </span>
             </label>
             <div className={FIELD_SHELL_CLASS}>

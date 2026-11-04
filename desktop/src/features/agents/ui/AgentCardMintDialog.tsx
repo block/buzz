@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   AlertCircle,
@@ -48,9 +50,24 @@ const OPENAI_KEYS_URL = "https://platform.openai.com/api-keys";
 
 /** Same three levels as snapshot export; "Agent only" is the safe default. */
 const MEMORY_LEVELS: { value: SnapshotMemoryLevel; label: string }[] = [
-  { value: "none", label: "Agent only" },
-  { value: "core", label: "Agent + core memory" },
-  { value: "everything", label: "Agent + all memories" },
+  {
+    value: "none",
+    get label() {
+      return uiT("Agent only");
+    },
+  },
+  {
+    value: "core",
+    get label() {
+      return uiT("Agent + core memory");
+    },
+  },
+  {
+    value: "everything",
+    get label() {
+      return uiT("Agent + all memories");
+    },
+  },
 ];
 
 /**
@@ -72,8 +89,9 @@ function FreeSharePathRow({
       data-testid="agent-card-free-path"
     >
       <p className="text-xs text-muted-foreground">
-        Don’t want to spend money? Ordinary export shares the same importable
-        agent — free, just without the card art.
+        {uiT(
+          "Don’t want to spend money? Ordinary export shares the same importable agent — free, just without the card art.",
+        )}
       </p>
       {onExportInstead ? (
         <Button
@@ -84,7 +102,7 @@ function FreeSharePathRow({
           size="sm"
           variant="outline"
         >
-          Share without card art
+          {uiT("Share without card art")}
         </Button>
       ) : null}
     </div>
@@ -125,6 +143,8 @@ export function AgentCardMintDialog({
   onExportInstead?: () => void;
   onOpenChange: (open: boolean) => void;
 }) {
+  useUiLanguage();
+
   const [styleNotes, setStyleNotes] = React.useState("");
   const [lockCard, setLockCard] = React.useState(false);
   const [memoryLevel, setMemoryLevel] =
@@ -172,11 +192,15 @@ export function AgentCardMintDialog({
       setKeyDraft("");
       setEditingKey(false);
       toast.success(
-        "API key saved to your agent defaults. Running agents pick it up on their next restart.",
+        uiT(
+          "API key saved to your agent defaults. Running agents pick it up on their next restart.",
+        ),
       );
     },
     onError: (error) =>
-      toast.error(typeof error === "string" ? error : "Couldn't save the key."),
+      toast.error(
+        typeof error === "string" ? error : uiT("Couldn't save the key."),
+      ),
   });
 
   function beginMint() {
@@ -198,11 +222,12 @@ export function AgentCardMintDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Sparkles className="h-4 w-4" />
-            {`Create ${agentName}'s card`}
+            {uiT("Create {0}'s card", { p0: agentName })}
           </DialogTitle>
           <DialogDescription>
-            Mint a collectible trading card that doubles as a shareable,
-            importable copy of this agent.
+            {uiT(
+              "Mint a collectible trading card that doubles as a shareable, importable copy of this agent.",
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -225,34 +250,41 @@ export function AgentCardMintDialog({
                   data-testid="agent-card-key-readonly"
                 >
                   {keyLayer === "agent"
-                    ? "This agent's OpenAI key is set in its own agent settings — update it there."
+                    ? uiT(
+                        "This agent's OpenAI key is set in its own agent settings — update it there.",
+                      )
                     : keyLayer === "persona"
-                      ? "This agent's OpenAI key comes from its linked persona settings — update it there."
-                      : "This agent's OpenAI key is set in the process environment — update it in your shell or launch config."}
+                      ? uiT(
+                          "This agent's OpenAI key comes from its linked persona settings — update it there.",
+                        )
+                      : uiT(
+                          "This agent's OpenAI key is set in the process environment — update it in your shell or launch config.",
+                        )}
                 </p>
               ) : (
                 <>
                   <p className="text-xs text-muted-foreground">
-                    Minting a card costs money — it generates the art and card
-                    text through the OpenAI API with your key (typically well
-                    under a dollar per mint, billed by OpenAI). The key is saved
-                    as <code className="font-mono">OPENAI_API_KEY</code> in your
-                    agent defaults env — that's the row to update in Settings if
-                    you ever need to change it there.
+                    {uiT(
+                      "Minting a card costs money — it generates the art and card text through the OpenAI API with your key (typically well under a dollar per mint, billed by OpenAI). The key is saved as ",
+                    )}
+                    <code className="font-mono">OPENAI_API_KEY</code>{" "}
+                    {uiT(
+                      " in your agent defaults env — that's the row to update in Settings if you ever need to change it there.",
+                    )}
                   </p>
                   <Button
                     className="w-fit px-0 text-xs"
                     data-testid="agent-card-key-link"
                     onClick={() =>
                       void openUrl(OPENAI_KEYS_URL).catch(() => {
-                        toast.error("Failed to open link");
+                        toast.error(uiT("Failed to open link"));
                       })
                     }
                     size="sm"
                     variant="link"
                   >
                     <ExternalLink className="mr-1 h-3 w-3" />
-                    Get a key at platform.openai.com
+                    {uiT("Get a key at platform.openai.com")}
                   </Button>
                   <Input
                     autoFocus
@@ -281,7 +313,7 @@ export function AgentCardMintDialog({
                   }}
                   variant="outline"
                 >
-                  Cancel
+                  {uiT("Cancel")}
                 </Button>
               ) : null}
               {!keyIsReadOnly ? (
@@ -294,8 +326,8 @@ export function AgentCardMintDialog({
                 >
                   <KeyRound className="mr-2 h-4 w-4" />
                   {saveKeyMutation.isPending
-                    ? "Saving…"
-                    : "Save key & continue"}
+                    ? uiT("Saving…")
+                    : uiT("Save key & continue")}
                 </Button>
               ) : null}
             </div>
@@ -305,31 +337,35 @@ export function AgentCardMintDialog({
             <div className="flex flex-col gap-1.5">
               <Textarea
                 onChange={(e) => setStyleNotes(e.target.value)}
-                placeholder="Optional style notes for the art and card text"
+                placeholder={uiT(
+                  "Optional style notes for the art and card text",
+                )}
                 rows={3}
                 value={styleNotes}
               />
               <p className="text-xs text-muted-foreground">
-                E.g. art “stormy night, lightning motif” or ability “Verify —
-                scry 2”. Your directions take priority; anything you leave open
-                is designed for you.
+                {uiT(
+                  "E.g. art “stormy night, lightning motif” or ability “Verify — scry 2”. Your directions take priority; anything you leave open is designed for you.",
+                )}
               </p>
             </div>
             <div className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
               <div className="flex flex-col gap-0.5">
                 <span className="flex items-center gap-1.5 text-sm font-medium">
                   <Brain className="h-3.5 w-3.5" />
-                  Memories
+                  {uiT("Memories")}
                 </span>
                 <span className="text-xs text-muted-foreground">
                   {canLock
-                    ? "Choose how much memory the embedded agent carries."
-                    : "Including memory needs a linked agent instance — start this agent once to enable it."}
+                    ? uiT("Choose how much memory the embedded agent carries.")
+                    : uiT(
+                        "Including memory needs a linked agent instance — start this agent once to enable it.",
+                      )}
                 </span>
               </div>
               {canLock ? (
                 <SnapshotOptionMenu
-                  ariaLabel="Memories"
+                  ariaLabel={uiT("Memories")}
                   className="font-medium text-foreground"
                   onValueChange={(value) =>
                     setMemoryLevel(value as SnapshotMemoryLevel)
@@ -343,7 +379,7 @@ export function AgentCardMintDialog({
                   className="inline-flex h-8 w-auto shrink-0 items-center justify-end px-2 text-sm font-medium"
                   data-testid="agent-card-memory-value"
                 >
-                  Agent only
+                  {uiT("Agent only")}
                 </span>
               )}
             </div>
@@ -354,9 +390,11 @@ export function AgentCardMintDialog({
               >
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                 <p>
-                  Memory is stored as <strong>plaintext</strong> in the card,
-                  readable by anyone who has the PNG — and cards are made for
-                  sharing. Lock the card or only share it with people you trust.
+                  {uiT("Memory is stored as ")}
+                  <strong>{uiT("plaintext")}</strong>{" "}
+                  {uiT(
+                    " in the card, readable by anyone who has the PNG — and cards are made for sharing. Lock the card or only share it with people you trust.",
+                  )}
                 </p>
               </div>
             ) : null}
@@ -364,12 +402,16 @@ export function AgentCardMintDialog({
               <div className="flex flex-col gap-0.5">
                 <span className="flex items-center gap-1.5 text-sm font-medium">
                   <Lock className="h-3.5 w-3.5" />
-                  Lock card
+                  {uiT("Lock card")}
                 </span>
                 <span className="text-xs text-muted-foreground">
                   {canLock
-                    ? "Encrypt the embedded agent so only you and this agent can import it. Anyone else sees just the image."
-                    : "Locking needs a linked agent instance — start this agent once to enable it."}
+                    ? uiT(
+                        "Encrypt the embedded agent so only you and this agent can import it. Anyone else sees just the image.",
+                      )
+                    : uiT(
+                        "Locking needs a linked agent instance — start this agent once to enable it.",
+                      )}
                 </span>
               </div>
               <Switch
@@ -385,7 +427,7 @@ export function AgentCardMintDialog({
                 data-testid="agent-card-key-status"
               >
                 <KeyRound className="h-3 w-3 shrink-0" />
-                <span>Using your saved OpenAI key</span>
+                <span>{uiT("Using your saved OpenAI key")}</span>
                 <span aria-hidden>·</span>
                 <Button
                   className="h-auto p-0 text-xs"
@@ -394,7 +436,7 @@ export function AgentCardMintDialog({
                   size="sm"
                   variant="link"
                 >
-                  Update
+                  {uiT("Update")}
                 </Button>
               </div>
             ) : null}
@@ -406,10 +448,10 @@ export function AgentCardMintDialog({
                 <KeyRound className="h-3 w-3 shrink-0" />
                 <span>
                   {keyLayer === "agent"
-                    ? "OpenAI key from agent settings"
+                    ? uiT("OpenAI key from agent settings")
                     : keyLayer === "persona"
-                      ? "OpenAI key from persona settings"
-                      : "OpenAI key from environment"}
+                      ? uiT("OpenAI key from persona settings")
+                      : uiT("OpenAI key from environment")}
                 </span>
                 <span aria-hidden>·</span>
                 <Button
@@ -419,7 +461,7 @@ export function AgentCardMintDialog({
                   size="sm"
                   variant="link"
                 >
-                  Why?
+                  {uiT("Why?")}
                 </Button>
               </div>
             ) : null}
@@ -427,10 +469,9 @@ export function AgentCardMintDialog({
               className="text-xs text-muted-foreground"
               data-testid="agent-card-cost-note"
             >
-              Minting calls the OpenAI API with your key and costs money —
-              typically well under a dollar per mint, billed by OpenAI. It runs
-              in the background (takes a few minutes); you can keep using Buzz
-              while it works.
+              {uiT(
+                "Minting calls the OpenAI API with your key and costs money — typically well under a dollar per mint, billed by OpenAI. It runs in the background (takes a few minutes); you can keep using Buzz while it works.",
+              )}
             </p>
             <FreeSharePathRow
               disabled={false}
@@ -448,11 +489,11 @@ export function AgentCardMintDialog({
                 variant="link"
               >
                 <GalleryVerticalEnd className="mr-1 h-3 w-3" />
-                View minted cards
+                {uiT("View minted cards")}
               </Button>
               <Button onClick={beginMint} data-testid="agent-card-mint">
                 <Sparkles className="mr-2 h-4 w-4" />
-                Mint card
+                {uiT("Mint card")}
               </Button>
             </div>
           </div>

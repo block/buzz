@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -212,6 +214,8 @@ export function MessageThreadPanel({
   autoSendDraftKey = null,
   onAutoSubmitComplete,
 }: MessageThreadPanelProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
@@ -389,6 +393,7 @@ export function MessageThreadPanel({
       startIndex,
     };
   }, [deferredThreadReplies, hoveredCollapseBranchId, threadHeadId]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Display copy and dates depend on the selected UI language.
   const threadReplyRenderItems = React.useMemo(() => {
     if (!threadHead) {
       return [];
@@ -427,8 +432,8 @@ export function MessageThreadPanel({
               depth: ancestor.message.depth,
               label:
                 ancestor.message.id === threadHead.id
-                  ? "Collapse thread"
-                  : "Collapse replies",
+                  ? uiT("Collapse thread")
+                  : uiT("Collapse replies"),
               message: ancestor.message,
             }))
           : undefined;
@@ -468,6 +473,7 @@ export function MessageThreadPanel({
     hoveredCollapseBranchId,
     isHuddleTranscript,
     threadHead,
+    __buzzLanguage,
   ]);
 
   const {
@@ -672,7 +678,7 @@ export function MessageThreadPanel({
                           channelId={channelId}
                           currentPubkey={currentPubkey}
                           collapseDepthGuideActions={collapseDepthGuideActions}
-                          collapseDescendantsLabel="Collapse replies"
+                          collapseDescendantsLabel={uiT("Collapse replies")}
                           connectDescendants={
                             shouldShowThreadBranchGuides &&
                             connectsToVisibleChild
@@ -807,8 +813,11 @@ export function MessageThreadPanel({
           >
             <ArrowDown aria-hidden />
             {newMessageCount > 0
-              ? `${newMessageCount} new message${newMessageCount === 1 ? "" : "s"}`
-              : "Jump to latest"}
+              ? uiT("{0} new message{1}", {
+                  p0: newMessageCount,
+                  p1: newMessageCount === 1 ? "" : "s",
+                })
+              : uiT("Jump to latest")}
           </Button>
         </div>
       ) : null}
@@ -858,8 +867,8 @@ export function MessageThreadPanel({
               onSend={onSend}
               placeholder={
                 isHuddleTranscript
-                  ? "Message the huddle"
-                  : `Reply in thread to ${threadHead.author}`
+                  ? uiT("Message the huddle")
+                  : uiT("Reply in thread to {0}", { p0: threadHead.author })
               }
               profiles={profiles}
               recentMentionPubkeys={recentMentionPubkeys}

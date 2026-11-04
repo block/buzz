@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -59,6 +61,8 @@ export function TypingIndicatorRow({
   typingPubkeys,
   variant = "default",
 }: TypingIndicatorRowProps) {
+  useUiLanguage();
+
   const isActivityVariant = variant === "activity";
   const labels = React.useMemo(
     () =>

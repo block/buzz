@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Hash } from "lucide-react";
 import * as React from "react";
 
@@ -136,7 +138,7 @@ function useChannelNameLookup(channelIds: readonly string[]) {
  */
 export function DiscussedInChannels({
   className,
-  entityLabel = "this",
+  entityLabel = uiT("this"),
   originChannelId,
   originCreatedAt,
   originPubkey,
@@ -153,6 +155,8 @@ export function DiscussedInChannels({
   query: string;
   testId?: string;
 }) {
+  useUiLanguage();
+
   const {
     channels: discussed,
     hits,
@@ -206,7 +210,7 @@ export function DiscussedInChannels({
       data-testid={testId}
     >
       <h4 className="border-b border-border/40 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Related Conversations
+        {uiT("Related Conversations")}
       </h4>
       <div className="divide-y divide-border/40">
         {visible.map((channel) => {
@@ -229,15 +233,15 @@ export function DiscussedInChannels({
               <button
                 aria-label={
                   latestHit
-                    ? `Open conversation in #${name}`
-                    : `Open channel #${name}`
+                    ? uiT("Open conversation in #{0}", { p0: name })
+                    : uiT("Open channel #{0}", { p0: name })
                 }
                 className="absolute inset-0"
                 onClick={openConversation}
                 title={
                   latestHit
-                    ? `Open the latest conversation in #${name}`
-                    : `Open #${name}`
+                    ? uiT("Open the latest conversation in #{0}", { p0: name })
+                    : uiT("Open #{0}", { p0: name })
                 }
                 type="button"
               />
@@ -257,13 +261,13 @@ export function DiscussedInChannels({
                   <span className="text-muted-foreground">
                     {" "}
                     {latestHit
-                      ? `discussed ${entityLabel} in`
-                      : `created ${entityLabel} from`}{" "}
+                      ? uiT("discussed {0} in", { p0: entityLabel })
+                      : uiT("created {0} from", { p0: entityLabel })}{" "}
                   </span>
                   <button
                     className="pointer-events-auto font-medium text-foreground hover:underline"
                     onClick={() => void goChannel(channel.id)}
-                    title={`Open #${name}`}
+                    title={uiT("Open #{0}", { p0: name })}
                     type="button"
                   >
                     #{name}
@@ -289,13 +293,15 @@ export function DiscussedInChannels({
           onClick={() => setExpanded(true)}
           type="button"
         >
-          Show {hiddenCount} more{" "}
-          {hiddenCount === 1 ? "conversation" : "conversations"}
+          {uiT("Show {0} more {1}", {
+            p0: hiddenCount,
+            p1: hiddenCount === 1 ? "conversation" : "conversations",
+          })}
         </button>
       ) : null}
       {isTruncated ? (
         <p className="border-t border-border/40 px-3 py-1.5 text-xs text-muted-foreground">
-          Showing mentions from the 500 most recent search results.
+          {uiT("Showing mentions from the 500 most recent search results.")}
         </p>
       ) : null}
     </div>
@@ -357,8 +363,7 @@ function DiscussionNameList({
       })}
       {others > 0 ? (
         <span className="font-medium text-foreground">
-          {" "}
-          and {others} others
+          {uiT("and {0} others", { p0: others })}
         </span>
       ) : null}
     </>
@@ -379,6 +384,8 @@ export function DiscussionChannelsPanel({
   query: string;
   repositoryName: string;
 }) {
+  useUiLanguage();
+
   const { channels, hits, isLoading, isTruncated } =
     useDiscussionChannels(query);
   const { goChannel, openSearchHit } = useAppNavigation();
@@ -397,15 +404,17 @@ export function DiscussionChannelsPanel({
   const profiles = profilesQuery.data?.profiles;
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading channel discussions" />;
+    return <BuzzLoadingState label={uiT("Loading channel discussions")} />;
   }
   if (channels.length === 0) {
     return (
       <ProjectPanelState
         className="px-4"
-        description="Paste this repository, review, or task link in a channel and it will appear here."
+        description={uiT(
+          "Paste this repository, review, or task link in a channel and it will appear here.",
+        )}
         testId="project-discussion-channels-panel"
-        title="No linked channels yet"
+        title={uiT("No linked channels yet")}
       />
     );
   }
@@ -472,8 +481,9 @@ export function DiscussionChannelsPanel({
       </ul>
       {isTruncated ? (
         <p className="border-t border-border/50 px-4 py-2 text-xs text-muted-foreground">
-          Showing the latest {DISCUSSION_SEARCH_LIMIT} mentions; totals may be
-          higher.
+          {uiT("Showing the latest {0} mentions; totals may be higher.", {
+            p0: DISCUSSION_SEARCH_LIMIT,
+          })}
         </p>
       ) : null}
     </div>

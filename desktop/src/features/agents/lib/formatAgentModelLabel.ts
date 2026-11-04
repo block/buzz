@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   canonicalizeProvider,
   databricksRegistryLabel,
@@ -79,7 +81,7 @@ export function formatAgentModelLabel(
   provider?: string | null | undefined,
 ) {
   const trimmed = model?.trim();
-  if (!trimmed) return "Auto";
+  if (!trimmed) return uiT("Auto");
   return resolveModelLabel(trimmed, null, provider);
 }
 

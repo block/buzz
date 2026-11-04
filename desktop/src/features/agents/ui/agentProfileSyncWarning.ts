@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { toast } from "sonner";
 
 export function showAgentProfileSyncWarning(
@@ -6,6 +8,9 @@ export function showAgentProfileSyncWarning(
 ) {
   if (!profileSyncError) return;
   toast.warning(
-    `${agentName} was saved locally, but relay sync failed: ${profileSyncError}. Remote users may still see the previous name or access policy until Buzz retries the sync.`,
+    uiT(
+      "{0} was saved locally, but relay sync failed: {1}. Remote users may still see the previous name or access policy until Buzz retries the sync.",
+      { p0: agentName, p1: profileSyncError },
+    ),
   );
 }

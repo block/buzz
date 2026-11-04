@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { EnvVarsValue } from "./EnvVarsEditor";
@@ -80,13 +82,13 @@ export function getProviderApiKeyFieldState({
               : null;
   const inheritedLabel =
     source === "persona"
-      ? "Inherited from agent profile"
+      ? uiT("Inherited from agent profile")
       : source === "global"
-        ? "Inherited from global config"
+        ? uiT("Inherited from global config")
         : source === "build"
-          ? "Inherited from build"
+          ? uiT("Inherited from build")
           : source === "file"
-            ? "Set in runtime config"
+            ? uiT("Set in runtime config")
             : "";
 
   return {

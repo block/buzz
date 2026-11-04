@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, ChevronDown } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
@@ -17,19 +19,69 @@ import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 
 const TTL_OPTIONS: { label: string; value: number }[] = [
-  { label: "1 day", value: 24 * 60 * 60 },
-  { label: "3 days", value: 3 * 24 * 60 * 60 },
-  { label: "7 days", value: 7 * 24 * 60 * 60 },
-  { label: "30 days", value: 30 * 24 * 60 * 60 },
+  {
+    get label() {
+      return uiT("1 day");
+    },
+    value: 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("3 days");
+    },
+    value: 3 * 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("7 days");
+    },
+    value: 7 * 24 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("30 days");
+    },
+    value: 30 * 24 * 60 * 60,
+  },
 ];
 
 const MAX_USE_OPTIONS: { label: string; value: number | null }[] = [
-  { label: "No limit", value: null },
-  { label: "1 use", value: 1 },
-  { label: "3 uses", value: 3 },
-  { label: "5 uses", value: 5 },
-  { label: "10 uses", value: 10 },
-  { label: "25 uses", value: 25 },
+  {
+    get label() {
+      return uiT("No limit");
+    },
+    value: null,
+  },
+  {
+    get label() {
+      return uiT("1 use");
+    },
+    value: 1,
+  },
+  {
+    get label() {
+      return uiT("3 uses");
+    },
+    value: 3,
+  },
+  {
+    get label() {
+      return uiT("5 uses");
+    },
+    value: 5,
+  },
+  {
+    get label() {
+      return uiT("10 uses");
+    },
+    value: 10,
+  },
+  {
+    get label() {
+      return uiT("25 uses");
+    },
+    value: 25,
+  },
 ];
 
 export const DEFAULT_INVITE_TTL_SECS = TTL_OPTIONS[1].value;
@@ -51,6 +103,8 @@ export function InviteLinkSection({
   onTtlSecsChange: (ttlSecs: number) => void;
   ttlSecs: number;
 }) {
+  useUiLanguage();
+
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
   const [generationStatus, setGenerationStatus] =
     React.useState<GenerationStatus>("generating");
@@ -65,19 +119,20 @@ export function InviteLinkSection({
   );
   const shouldReduceMotion = useReducedMotion();
   const ttlLabel =
-    TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
+    TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ??
+    uiT("3 days");
   const maxUsesLabel =
     MAX_USE_OPTIONS.find((option) => option.value === maxUses)?.label ??
-    "No limit";
+    uiT("No limit");
   const isGenerating = generationStatus === "generating";
   const hasGenerationFailed = generationStatus === "failed";
   const inviteSettingsKey = `${ttlSecs}:${maxUses ?? "no-limit"}`;
   const isWorking = isGenerating || copyStatus === "copying";
   const copyLabel = hasGenerationFailed
-    ? "Retry"
+    ? uiT("Retry")
     : copyStatus === "copied"
-      ? "Copied"
-      : "Copy link";
+      ? uiT("Copied")
+      : uiT("Copy link");
   const copyButtonWidth = isWorking
     ? "6.25rem"
     : copyStatus === "copied"
@@ -120,7 +175,7 @@ export function InviteLinkSection({
       }
       if (generationRequestId.current === requestId) {
         setGenerationStatus("failed");
-        toast.error("Couldn’t create an invite link.");
+        toast.error(uiT("Couldn’t create an invite link."));
       }
     }
   }, [inviteSettingsKey, maxUses, ttlSecs]);
@@ -143,10 +198,10 @@ export function InviteLinkSection({
     try {
       await writeTextToClipboard(inviteUrl);
       setCopyStatus("copied");
-      toast.success("Invite link copied");
+      toast.success(uiT("Invite link copied"));
     } catch {
       setCopyStatus("idle");
-      toast.error("Couldn’t copy the invite link. Try again.");
+      toast.error(uiT("Couldn’t copy the invite link. Try again."));
     }
   }
 
@@ -154,14 +209,14 @@ export function InviteLinkSection({
     <section data-testid="community-invite-link-section">
       <div className="relative">
         <Input
-          aria-label="Community invite link"
+          aria-label={uiT("Community invite link")}
           className="h-11 pr-28 text-transparent caret-transparent selection:bg-transparent"
           data-testid="invite-link-url"
           disabled={isGenerating}
           placeholder={
             hasGenerationFailed
-              ? "Couldn’t create invite link"
-              : "Creating invite link…"
+              ? uiT("Couldn’t create invite link")
+              : uiT("Creating invite link…")
           }
           readOnly
           value={inviteUrl}
@@ -207,11 +262,11 @@ export function InviteLinkSection({
 
       <div className="mt-3 space-y-3">
         <div className="flex items-center justify-between gap-4">
-          <span className="text-sm font-medium">Expires after</span>
+          <span className="text-sm font-medium">{uiT("Expires after")}</span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                aria-label="Choose invite expiry"
+                aria-label={uiT("Choose invite expiry")}
                 className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                 data-testid="invite-link-ttl-trigger"
                 disabled={isGenerating || copyStatus === "copying"}
@@ -242,11 +297,13 @@ export function InviteLinkSection({
           </DropdownMenu>
         </div>
         <div className="flex items-center justify-between gap-4">
-          <span className="text-sm font-medium">Limit number of uses</span>
+          <span className="text-sm font-medium">
+            {uiT("Limit number of uses")}
+          </span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                aria-label="Choose maximum invite uses"
+                aria-label={uiT("Choose maximum invite uses")}
                 className="h-8 shrink-0 gap-1.5 px-2 text-sm text-muted-foreground"
                 data-testid="invite-link-max-uses-trigger"
                 disabled={isGenerating || copyStatus === "copying"}

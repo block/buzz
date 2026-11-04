@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
 import {
@@ -101,6 +103,8 @@ function MessageComposerImpl({
   typingParentEventId = null,
   typingRootEventId = null,
 }: MessageComposerProps) {
+  useUiLanguage();
+
   const {
     contentRef,
     isContentEmpty,
@@ -273,11 +277,14 @@ function MessageComposerImpl({
     });
   }, []);
   const computedPlaceholder = editTarget
-    ? "Edit your message"
+    ? uiT("Edit your message")
     : (placeholder ??
       (replyTarget
-        ? `Reply to ${replyTarget.author} in #${channelName}`
-        : `Message #${channelName}`));
+        ? uiT("Reply to {0} in #{1}", {
+            p0: replyTarget.author,
+            p1: channelName,
+          })
+        : uiT("Message #{0}", { p0: channelName })));
   const richText = useRichTextEditor({
     placeholder: computedPlaceholder,
     editable: !composerDisabled,
@@ -899,13 +906,13 @@ function MessageComposerImpl({
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                Upload failed: {media.uploadState.message}
+                {uiT("Upload failed: {0}", { p0: media.uploadState.message })}
                 <button
                   className="ml-2 underline"
                   onClick={() => media.setUploadState({ status: "idle" })}
                   type="button"
                 >
-                  Dismiss
+                  {uiT("Dismiss")}
                 </button>
               </div>
             ) : null}

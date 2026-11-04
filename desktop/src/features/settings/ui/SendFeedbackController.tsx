@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useSendFeedback } from "@/features/settings/hooks/useSendFeedback";
 import { SendFeedbackDialog } from "@/features/settings/ui/SendFeedbackDialog";
 
@@ -8,6 +10,8 @@ export function SendFeedbackController({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  useUiLanguage();
+
   const sendFeedback = useSendFeedback();
   return (
     <SendFeedbackDialog

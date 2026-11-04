@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertCircle, Brain, Download, FileType2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -33,9 +35,24 @@ const MEMORY_LEVELS: {
   value: SnapshotMemoryLevel;
   label: string;
 }[] = [
-  { value: "none", label: "Team only" },
-  { value: "core", label: "Team + core memory" },
-  { value: "everything", label: "Team + all memories" },
+  {
+    value: "none",
+    get label() {
+      return uiT("Team only");
+    },
+  },
+  {
+    value: "core",
+    get label() {
+      return uiT("Team + core memory");
+    },
+  },
+  {
+    value: "everything",
+    get label() {
+      return uiT("Team + all memories");
+    },
+  },
 ];
 
 const FORMAT_OPTIONS: { value: SnapshotFormat; label: string }[] = [
@@ -55,6 +72,8 @@ export function TeamSnapshotExportDialog({
   onSaveFile,
   onOpenChange,
 }: TeamSnapshotExportDialogProps) {
+  useUiLanguage();
+
   const [memoryLevel, setMemoryLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const [format, setFormat] = React.useState<SnapshotFormat>("png");
@@ -80,7 +99,9 @@ export function TeamSnapshotExportDialog({
         showCloseButton={false}
       >
         <DialogHeader className="space-y-0">
-          <DialogTitle className="truncate">Export {team.name}</DialogTitle>
+          <DialogTitle className="truncate">
+            {uiT("Export {0}", { p0: team.name })}
+          </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
@@ -88,10 +109,10 @@ export function TeamSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <Brain className="h-4 w-4 shrink-0 text-muted-foreground" />
-                Memories
+                {uiT("Memories")}
               </span>
               <SnapshotOptionMenu
-                ariaLabel="Memories"
+                ariaLabel={uiT("Memories")}
                 className="font-medium text-foreground"
                 disabled={isSavePending}
                 onValueChange={(value) =>
@@ -106,10 +127,10 @@ export function TeamSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <FileType2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                File format
+                {uiT("File format")}
               </span>
               <SnapshotOptionMenu
-                ariaLabel="File format"
+                ariaLabel={uiT("File format")}
                 className="font-medium text-foreground"
                 disabled={isSavePending}
                 onValueChange={(value) => setFormat(value as SnapshotFormat)}
@@ -137,8 +158,11 @@ export function TeamSnapshotExportDialog({
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <p>
-                    Memory is stored as <strong>plaintext</strong> in the
-                    snapshot. Only share it with people you trust.
+                    {uiT("Memory is stored as ")}
+                    <strong>{uiT("plaintext")}</strong>{" "}
+                    {uiT(
+                      " in the snapshot. Only share it with people you trust.",
+                    )}
                   </p>
                 </div>
               </motion.div>
@@ -156,7 +180,7 @@ export function TeamSnapshotExportDialog({
                 type="button"
                 variant="ghost"
               >
-                Cancel
+                {uiT("Cancel")}
               </Button>
             </DialogClose>
             <Button
@@ -167,7 +191,7 @@ export function TeamSnapshotExportDialog({
               type="button"
             >
               <Download className="h-4 w-4" />
-              Export
+              {uiT("Export")}
             </Button>
           </div>
         </div>

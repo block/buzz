@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
@@ -42,7 +44,7 @@ export function PullRequestsPanelSurface({
     selectedPullRequest,
   });
   if (kind === "loading") {
-    return <BuzzLoadingState label="Loading reviews" />;
+    return <BuzzLoadingState label={uiT("Loading reviews")} />;
   }
   if (kind === "detail") {
     return detail;
@@ -52,12 +54,12 @@ export function PullRequestsPanelSurface({
       <ProjectPanelState
         description={
           error
-            ? "Refresh the repository and try again."
-            : "Reviews opened for this repository will appear here."
+            ? uiT("Refresh the repository and try again.")
+            : uiT("Reviews opened for this repository will appear here.")
         }
         error={Boolean(error)}
         testId="project-pull-requests-empty"
-        title={error ? "Could not load reviews" : "No reviews yet"}
+        title={error ? uiT("Could not load reviews") : uiT("No reviews yet")}
       />
     );
   }

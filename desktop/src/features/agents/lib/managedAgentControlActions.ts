@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
@@ -35,14 +37,14 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+    return isManagedAgentActive(agent) ? uiT("Shutdown") : uiT("Deploy");
   }
 
   if (isManagedAgentActive(agent)) {
-    return "Stop";
+    return uiT("Stop");
   }
 
-  return "Start agent";
+  return uiT("Start agent");
 }
 
 export function resolveManagedAgentChannelId(
@@ -139,8 +141,11 @@ export async function stopManagedAgentWithRules({
       agent.pubkey,
     ]);
     return {
-      noticeMessage:
-        "Shutdown requested. This does not confirm the agent has stopped.",
+      get noticeMessage() {
+        return uiT(
+          "Shutdown requested. This does not confirm the agent has stopped.",
+        );
+      },
     };
   }
 

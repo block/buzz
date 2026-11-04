@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 import * as React from "react";
 
@@ -32,6 +34,8 @@ export function ProjectInboxDetailPane({
   profiles,
   workItem,
 }: ProjectInboxDetailPaneProps) {
+  useUiLanguage();
+
   const { activeCommunity } = useCommunities();
   const [detailContentRef, detailContentWidth] =
     useElementWidth<HTMLDivElement>();
@@ -45,13 +49,14 @@ export function ProjectInboxDetailPane({
     profiles?.[normalizePubkey(authorPubkey)]?.avatarUrl ?? null;
   const authorIsAgent =
     profiles?.[normalizePubkey(authorPubkey)]?.isAgent === true;
-  const inboxTitle = `${authorLabel} sent you ${
-    workItem.type === "pull-request" ? "a review" : "a task"
-  }`;
+  const inboxTitle = uiT("{0} sent you {1}", {
+    p0: authorLabel,
+    p1: workItem.type === "pull-request" ? "a review" : "a task",
+  });
   // The action deep-links to this specific work item in the project view,
   // so the label names the entity, not the project.
   const openLabel =
-    workItem.type === "pull-request" ? "Open review" : "Open task";
+    workItem.type === "pull-request" ? uiT("Open review") : uiT("Open task");
   const handleOpenMergeRecoveryTerminal = React.useCallback(
     async (input: {
       expectedCommit: string;
@@ -87,7 +92,7 @@ export function ProjectInboxDetailPane({
             <div className="flex min-w-0 items-center gap-1">
               {isSinglePanelView && onBack ? (
                 <Button
-                  aria-label="Back to Inbox"
+                  aria-label={uiT("Back to Inbox")}
                   onClick={onBack}
                   size="icon"
                   type="button"

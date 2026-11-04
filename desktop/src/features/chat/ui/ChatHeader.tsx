@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   Activity,
   Bot,
@@ -109,9 +111,9 @@ export function ChatHeader({
 
     try {
       await writeTextToClipboard(value);
-      toast.success("Channel name copied");
+      toast.success(uiT("Channel name copied"));
     } catch {
-      toast.error("Failed to copy channel name");
+      toast.error(uiT("Failed to copy channel name"));
     }
   }
 
@@ -148,11 +150,11 @@ export function ChatHeader({
             </h1>
             {titleAdornment}
             <Button
-              aria-label={`Copy channel name: ${title}`}
+              aria-label={uiT("Copy channel name: {0}", { p0: title })}
               className="h-6 w-6 shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
               onClick={() => void handleCopyTitle()}
               size="icon-xs"
-              title="Copy channel name"
+              title={uiT("Copy channel name")}
               type="button"
               variant="ghost"
             >

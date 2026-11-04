@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -43,6 +45,8 @@ export function IdentityRecoveryPairing({
   onRecovered: () => Promise<void>;
   onStepChange?: (step: Step) => void;
 }) {
+  useUiLanguage();
+
   const [step, setStep] = React.useState<Step>("loading");
   const [qrUri, setQrUri] = React.useState<string | null>(null);
   const [sas, setSas] = React.useState<string | null>(null);
@@ -67,7 +71,9 @@ export function IdentityRecoveryPairing({
       setStep("qr");
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Could not start recovery.",
+        cause instanceof Error
+          ? cause.message
+          : uiT("Could not start recovery."),
       );
       setStep("error");
     }
@@ -100,7 +106,7 @@ export function IdentityRecoveryPairing({
     listen<{ reason: string }>("pairing-aborted", ({ payload }) => {
       if (!disposed && active.current) {
         active.current = false;
-        setError(`Recovery stopped: ${payload.reason}`);
+        setError(uiT("Recovery stopped: {0}", { p0: payload.reason }));
         setStep("error");
       }
     }).then((unlisten) => (disposed ? unlisten() : unlisteners.push(unlisten)));
@@ -127,14 +133,14 @@ export function IdentityRecoveryPairing({
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
       copyTimer.current = window.setTimeout(() => setCopied(false), 2_000);
     } catch {
-      setError("Could not copy the pairing code. Try again.");
+      setError(uiT("Could not copy the pairing code. Try again."));
     }
   }
 
   async function deny() {
     active.current = false;
     await cancelPairing().catch(() => {});
-    setError("The codes didn't match. Pairing was canceled.");
+    setError(uiT("The codes didn't match. Pairing was canceled."));
     setStep("error");
   }
 
@@ -170,14 +176,14 @@ export function IdentityRecoveryPairing({
             centerImageSrc="/app-icon@2x.png"
             data-testid="identity-recovery-qr"
             size={240}
-            title="Desktop identity recovery QR code"
+            title={uiT("Desktop identity recovery QR code")}
             value={qrUri}
           />
         ) : step === "sas" && sas ? (
           <div className="flex max-w-60 flex-col items-center gap-3 py-2 text-center text-foreground">
             <ShieldCheck className="h-10 w-10 text-primary" />
             <p className="text-sm font-medium">
-              Does this code match your phone?
+              {uiT("Does this code match your phone?")}
             </p>
             <div className="rounded-xl border-2 border-primary/30 bg-primary/5 px-5 py-3">
               <p
@@ -188,8 +194,9 @@ export function IdentityRecoveryPairing({
               </p>
             </div>
             <p className="text-xs text-muted-foreground">
-              This gives this desktop permanent access to your Buzz identity.
-              Only continue if you trust it.
+              {uiT(
+                "This gives this desktop permanent access to your Buzz identity. Only continue if you trust it.",
+              )}
             </p>
             <div className="flex w-full flex-col gap-2">
               <Button
@@ -198,7 +205,7 @@ export function IdentityRecoveryPairing({
                 onClick={() => void confirm()}
               >
                 <Check className="mr-1.5 h-4 w-4" />
-                Codes match
+                {uiT("Codes match")}
               </Button>
               <Button
                 className="flex-1"
@@ -207,7 +214,7 @@ export function IdentityRecoveryPairing({
                 variant="outline"
               >
                 <X className="mr-1.5 h-4 w-4" />
-                Cancel
+                {uiT("Cancel")}
               </Button>
             </div>
           </div>
@@ -216,7 +223,9 @@ export function IdentityRecoveryPairing({
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30">
               <Check className="h-6 w-6 text-green-600 dark:text-green-400" />
             </div>
-            <p className="text-sm font-medium">Identity received securely</p>
+            <p className="text-sm font-medium">
+              {uiT("Identity received securely")}
+            </p>
           </div>
         ) : step === "error" ? (
           <div className="flex max-w-52 flex-col items-center gap-3 text-center text-foreground">
@@ -224,7 +233,7 @@ export function IdentityRecoveryPairing({
             <p className="text-sm text-destructive">{error}</p>
             <Button onClick={() => void start()} size="sm" variant="outline">
               <RefreshCw className="mr-1.5 h-4 w-4" />
-              Try again
+              {uiT("Try again")}
             </Button>
           </div>
         ) : (
@@ -232,8 +241,8 @@ export function IdentityRecoveryPairing({
             <LoaderCircle className="h-6 w-6 animate-spin text-muted-foreground" />
             <p className="text-sm text-muted-foreground">
               {step === "receiving"
-                ? "Receiving identity from mobile device..."
-                : "Starting pairing..."}
+                ? uiT("Receiving identity from mobile device...")
+                : uiT("Starting pairing...")}
             </p>
           </div>
         )}
@@ -256,10 +265,10 @@ export function IdentityRecoveryPairing({
             <Copy className="mr-1.5 h-4 w-4" />
           )}
           {step === "loading"
-            ? "Generating pairing code..."
+            ? uiT("Generating pairing code...")
             : copied
-              ? "Copied"
-              : "Copy pairing code"}
+              ? uiT("Copied")
+              : uiT("Copy pairing code")}
         </Button>
       ) : null}
       {step === "qr" && error ? (

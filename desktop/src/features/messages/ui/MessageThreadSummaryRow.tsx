@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type {
@@ -118,10 +120,17 @@ export function MessageThreadSummaryRow({
   const surfaceInsetStart = `calc(${contentPaddingStart} - ${threadReplyLength(
     THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
   )})`;
-  const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
+  const replyLabel = summary.replyCount === 1 ? uiT("reply") : uiT("replies");
   const summaryAriaLabel = summary.lastReplyAt
-    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
-    : `View thread with ${summary.replyCount} ${replyLabel}`;
+    ? uiT("View thread with {0} {1}, last reply {2}", {
+        p0: summary.replyCount,
+        p1: replyLabel,
+        p2: formatThreadSummaryLastReplyTime(summary.lastReplyAt),
+      })
+    : uiT("View thread with {0} {1}", {
+        p0: summary.replyCount,
+        p1: replyLabel,
+      });
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
     : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
@@ -274,7 +283,7 @@ export function MessageThreadSummaryRow({
             </span>
             {unreadCount != null && unreadCount > 0 ? (
               <span className="ml-1" data-testid="thread-unread-badge">
-                ({unreadCount} new)
+                {uiT("({0} new)", { p0: unreadCount })}
               </span>
             ) : null}
             {summary.lastReplyAt ? (
@@ -287,14 +296,15 @@ export function MessageThreadSummaryRow({
                     className="col-start-1 row-start-1 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
                     data-testid="message-thread-summary-last-reply"
                   >
-                    last reply{" "}
-                    {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
+                    {uiT("last reply {0}", {
+                      p0: formatThreadSummaryLastReplyTime(summary.lastReplyAt),
+                    })}
                   </span>
                   <span
                     className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
                     data-testid="message-thread-summary-hover-action"
                   >
-                    View thread
+                    {uiT("View thread")}
                   </span>
                 </span>
               </>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -80,7 +82,7 @@ export function useHiddenDmInboxNavigation({
           if (generationRef.current === generation) {
             errorChannelIdsRef.current.add(channelId);
           }
-          toast.error("Could not reopen conversation. Try again.");
+          toast.error(uiT("Could not reopen conversation. Try again."));
         },
         onPendingChange: () => setPendingVersion((version) => version + 1),
       });

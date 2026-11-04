@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { encodeVoiceNoteWav } from "./voiceNoteWav";
@@ -69,7 +71,7 @@ export function useVoiceNoteRecorder() {
     if (status !== "idle" || sessionRef.current) return;
     setError(null);
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      setError("Voice recording is not available in this environment.");
+      setError(uiT("Voice recording is not available in this environment."));
       return;
     }
 
@@ -156,7 +158,9 @@ export function useVoiceNoteRecorder() {
                 mountedRef.current &&
                 sessionRef.current === session
               ) {
-                setError("Buzz could not prepare this voice note for upload.");
+                setError(
+                  uiT("Buzz could not prepare this voice note for upload."),
+                );
               }
             }
           }
@@ -174,7 +178,7 @@ export function useVoiceNoteRecorder() {
       });
       recorder.addEventListener("error", () => {
         if (mountedRef.current && sessionRef.current === session) {
-          setError("The voice recording was interrupted.");
+          setError(uiT("The voice recording was interrupted."));
         }
       });
       recorder.start(250);
@@ -218,8 +222,8 @@ export function useVoiceNoteRecorder() {
         (cause.name === "NotAllowedError" || cause.name === "SecurityError");
       setError(
         denied
-          ? "Allow Buzz to access your microphone to record a voice note."
-          : "Buzz could not start the voice recorder.",
+          ? uiT("Allow Buzz to access your microphone to record a voice note.")
+          : uiT("Buzz could not start the voice recorder."),
       );
     }
   }, [status]);

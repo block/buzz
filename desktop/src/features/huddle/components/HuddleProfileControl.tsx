@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Headphones } from "lucide-react";
@@ -36,6 +38,8 @@ export function HuddleProfileControl({
   onHuddleEnded?: (ephemeralChannelId: string | null) => void;
   visible: boolean;
 }) {
+  useUiLanguage();
+
   const {
     audioDevices,
     isMuted,
@@ -123,7 +127,7 @@ export function HuddleProfileControl({
       data-testid="profile-huddle-control"
     >
       <Button
-        aria-label="Open huddle window"
+        aria-label={uiT("Open huddle window")}
         className="h-auto min-w-0 flex-1 justify-start gap-2 px-0 py-0 text-left hover:bg-transparent"
         onClick={() => void handleOpenHuddleWindow()}
         type="button"
@@ -135,10 +139,10 @@ export function HuddleProfileControl({
         />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium leading-tight">
-            In a huddle
+            {uiT("In a huddle")}
           </span>
           <span className="block truncate text-xs text-sidebar-foreground/65">
-            {channelName ? `#${channelName}` : "Huddle"}
+            {channelName ? `#${channelName}` : uiT("Huddle")}
           </span>
         </span>
       </Button>
@@ -159,14 +163,14 @@ export function HuddleProfileControl({
         />
         <Button
           aria-busy={isLeaving}
-          aria-label="Leave huddle"
+          aria-label={uiT("Leave huddle")}
           className="h-8 px-2 text-sm text-sidebar-foreground/70 hover:bg-destructive/15 hover:text-destructive"
           disabled={isLeaving}
           onClick={(event) => void handleLeave(event)}
           type="button"
           variant="ghost"
         >
-          Leave
+          {uiT("Leave")}
         </Button>
       </div>
     </div>

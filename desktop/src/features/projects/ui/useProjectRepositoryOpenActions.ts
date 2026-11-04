@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -40,8 +42,10 @@ export function useProjectRepositoryOpenActions({
   const handleOpenLocalRepository = React.useCallback(async () => {
     const cloneUrl = repository?.cloneUrls[0];
     if (!localRepositoryPath || !repository || !cloneUrl) {
-      toast.error("Couldn’t open repository folder", {
-        description: "Buzz could not find this repository’s local checkout.",
+      toast.error(uiT("Couldn’t open repository folder"), {
+        get description() {
+          return uiT("Buzz could not find this repository’s local checkout.");
+        },
       });
       return;
     }
@@ -52,8 +56,10 @@ export function useProjectRepositoryOpenActions({
         reposDir,
       });
     } catch {
-      toast.error("Couldn’t open repository folder", {
-        description: "Buzz could not open this checkout in your file browser.",
+      toast.error(uiT("Couldn’t open repository folder"), {
+        get description() {
+          return uiT("Buzz could not open this checkout in your file browser.");
+        },
       });
     }
   }, [localRepositoryPath, repository, reposDir]);

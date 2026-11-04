@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
@@ -13,6 +15,8 @@ export function CommunityApplyErrorScreen({
   onChangeCommunity,
   onRetry,
 }: CommunityApplyErrorScreenProps) {
+  useUiLanguage();
+
   const systemColorScheme = useSystemColorScheme();
 
   return (
@@ -24,7 +28,7 @@ export function CommunityApplyErrorScreen({
       <StartupWindowDragRegion />
       <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
         <h1 className="text-3xl font-semibold tracking-tight">
-          Community connection failed
+          {uiT("Community connection failed")}
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">{error}</p>
         <div className="mt-8 flex w-full max-w-[300px] flex-col gap-3">
@@ -34,7 +38,7 @@ export function CommunityApplyErrorScreen({
             onClick={onRetry}
             type="button"
           >
-            Retry
+            {uiT("Retry")}
           </Button>
           <Button
             className="h-10 w-full"
@@ -42,7 +46,7 @@ export function CommunityApplyErrorScreen({
             type="button"
             variant="secondary"
           >
-            Change community
+            {uiT("Change community")}
           </Button>
         </div>
       </div>

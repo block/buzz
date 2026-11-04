@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /** Clustered overview selection that drives the context pod. */
 
 export type ProjectSelectionKind =
@@ -217,26 +219,30 @@ export function projectSelectionPresentation(
   const actions: ProjectSelectionAction[] = [
     {
       id: "chat-agent",
-      label: "Chat with an agent",
+      get label() {
+        return uiT("Chat with an agent");
+      },
       testId: "projects-selection-chat-agent",
     },
   ];
   actions.push({
     id: "discuss",
-    label: "Discuss in a channel",
+    get label() {
+      return uiT("Discuss in a channel");
+    },
     testId: "projects-selection-discuss",
   });
   if (kind === "commit") {
     actions.push({
       id: "create-review",
-      label: items.length === 1 ? "Create review" : "Create reviews",
+      label: items.length === 1 ? uiT("Create review") : uiT("Create reviews"),
       testId: "projects-selection-create-review",
     });
   }
   if (projectSelectionShareLinks(items).length > 0) {
     actions.push({
       id: "copy",
-      label: items.length === 1 ? "Copy link" : "Copy links",
+      label: items.length === 1 ? uiT("Copy link") : uiT("Copy links"),
       testId: "projects-selection-copy",
     });
   }

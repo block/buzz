@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type {
   ActionType,
   StepFormState,
@@ -19,22 +21,30 @@ export type ActiveTemplateToken = {
 const COMMON_EVENT_VARIABLES: WorkflowTemplateVariable[] = [
   {
     value: "trigger.author",
-    description: "Author pubkey",
+    get description() {
+      return uiT("Author pubkey");
+    },
     group: "Trigger",
   },
   {
     value: "trigger.channel_id",
-    description: "Channel UUID",
+    get description() {
+      return uiT("Channel UUID");
+    },
     group: "Trigger",
   },
   {
     value: "trigger.timestamp",
-    description: "Unix timestamp",
+    get description() {
+      return uiT("Unix timestamp");
+    },
     group: "Trigger",
   },
   {
     value: "trigger.message_id",
-    description: "Message event ID",
+    get description() {
+      return uiT("Message event ID");
+    },
     group: "Trigger",
   },
 ];
@@ -59,21 +69,31 @@ function triggerVariables(
       return [
         {
           value: "trigger.text",
-          description: "Message text",
+          get description() {
+            return uiT("Message text");
+          },
           group: "Trigger",
         },
         ...COMMON_EVENT_VARIABLES,
       ];
     case "diff_posted":
       return [
-        { value: "trigger.text", description: "Diff text", group: "Trigger" },
+        {
+          value: "trigger.text",
+          get description() {
+            return uiT("Diff text");
+          },
+          group: "Trigger",
+        },
         ...COMMON_EVENT_VARIABLES,
       ];
     case "reaction_added":
       return [
         {
           value: "trigger.emoji",
-          description: "Reaction emoji",
+          get description() {
+            return uiT("Reaction emoji");
+          },
           group: "Trigger",
         },
         ...COMMON_EVENT_VARIABLES,
@@ -87,7 +107,9 @@ function triggerVariables(
       return [
         {
           value: "trigger.channel_id",
-          description: "Workflow channel UUID",
+          get description() {
+            return uiT("Workflow channel UUID");
+          },
           group: "Trigger",
         },
       ];

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ReactNode } from "react";
 
 import type { PersonaDropdownOption } from "./agentConfigOptions";
@@ -27,7 +29,7 @@ export function AgentHarnessField({
         className="text-sm font-medium text-foreground"
         htmlFor="persona-runtime"
       >
-        Agent harness
+        {uiT("Agent harness")}
       </label>
       <PersonaDropdownField
         disabled={disabled}

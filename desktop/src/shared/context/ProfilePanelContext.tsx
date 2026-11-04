@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { AgentPersona } from "@/shared/api/types";
@@ -30,6 +32,8 @@ export function ProfilePanelProvider({
   ) => void;
   onOpenPersonaProfilePanel?: (persona: AgentPersona) => void;
 }) {
+  useUiLanguage();
+
   const value = React.useMemo(
     () => ({
       openProfilePanel: onOpenProfilePanel,

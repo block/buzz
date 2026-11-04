@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -25,20 +27,25 @@ export function DeleteConfirmDialog({
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete {label}?</AlertDialogTitle>
+          <AlertDialogTitle>
+            {uiT("Delete {0}?", { p0: label })}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            This will permanently delete this {label} and cannot be undone.
+            {uiT(
+              "This will permanently delete this {0} and cannot be undone.",
+              { p0: label },
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
             <Button onClick={onConfirm} type="button" variant="destructive">
-              Delete {label}
+              {uiT("Delete {0}", { p0: label })}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

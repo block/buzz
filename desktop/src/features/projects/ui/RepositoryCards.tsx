@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { FolderGit2, Globe, SquareTerminal } from "lucide-react";
@@ -64,13 +66,15 @@ function RepositoryHostIcon({
   compact?: boolean;
   repository: Repository;
 }) {
+  useUiLanguage();
+
   const host = projectRepoHostForRepository(repository, useRelayOrigin());
   const label =
     host.kind === "buzz"
-      ? "Buzz-hosted repository"
+      ? uiT("Buzz-hosted repository")
       : host.kind === "external"
-        ? `Git data hosted on ${host.host}`
-        : "Repository host";
+        ? uiT("Git data hosted on {0}", { p0: host.host })
+        : uiT("Repository host");
   const mark =
     host.kind === "buzz" ? (
       <BuzzMark className={compact ? "h-3.5 w-4" : "h-4.5 w-5"} />
@@ -114,7 +118,9 @@ function RepositoryOpenButton({
       onClick={() => onOpen(project, repository)}
       type="button"
     >
-      <span className="sr-only">View {repository.name}</span>
+      <span className="sr-only">
+        {uiT("View {0}", { p0: repository.name })}
+      </span>
     </button>
   );
 }
@@ -127,6 +133,8 @@ function RepositoryIdentity({
 }: Pick<RepositoryItemProps, "profiles" | "project" | "repository"> & {
   inlineBranch?: boolean;
 }) {
+  useUiLanguage();
+
   // Where the git data lives beats repeating the (often identical) project
   // name — "github.com/block/buzz" for external repos, "owner/repo" for
   // Buzz-hosted ones.
@@ -174,7 +182,9 @@ function RepositoryActionsMenu({
   repository,
 }: Pick<RepositoryItemProps, "hasLocal" | "onOpenTerminal" | "repository">) {
   return (
-    <ProjectListRowMenu label={`More options for ${repository.name}`}>
+    <ProjectListRowMenu
+      label={uiT("More options for {0}", { p0: repository.name })}
+    >
       <CopyShareLinkMenuItem
         link={repositoryShareLink(repository)}
         testId={`repository-copy-link-${repository.dtag}`}
@@ -198,6 +208,8 @@ function RepositoryActionsMenu({
 export const RepositoryGridCard = React.memo(function RepositoryGridCard(
   props: RepositoryItemProps,
 ) {
+  useUiLanguage();
+
   const {
     hasLocal,
     onOpen,
@@ -240,7 +252,7 @@ export const RepositoryGridCard = React.memo(function RepositoryGridCard(
           )}
           data-testid="projects-grid-card-body"
         >
-          {repository.description || "A repository in this project."}
+          {repository.description || uiT("A repository in this project.")}
         </p>
         <div className="pointer-events-auto mt-auto">
           <ProjectPeopleStack
@@ -263,6 +275,8 @@ export const RepositoryGridCard = React.memo(function RepositoryGridCard(
 export const RepositoryListRow = React.memo(function RepositoryListRow(
   props: RepositoryItemProps,
 ) {
+  useUiLanguage();
+
   const {
     hasLocal,
     onOpen,

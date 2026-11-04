@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
@@ -98,7 +100,9 @@ export function usePulseNoteActions({
 
         queryClient.setQueryData(reactionQueryKey, previousReactions);
         toast.error(
-          error instanceof Error ? error.message : "Failed to update reaction",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to update reaction"),
         );
       } finally {
         setPendingUpvoteNoteIds((current) =>
@@ -135,7 +139,7 @@ export function usePulseNoteActions({
         });
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to post reply",
+          error instanceof Error ? error.message : uiT("Failed to post reply"),
         );
         throw error;
       }
@@ -146,9 +150,9 @@ export function usePulseNoteActions({
   const share = React.useCallback(async (note: UserNote) => {
     try {
       await writeTextToClipboard(buildNoteShareUri(note));
-      toast.success("Copied note link");
+      toast.success(uiT("Copied note link"));
     } catch {
-      toast.error("Failed to copy note link");
+      toast.error(uiT("Failed to copy note link"));
     }
   }, []);
 
@@ -164,7 +168,7 @@ export function usePulseNoteActions({
         });
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to open DM",
+          error instanceof Error ? error.message : uiT("Failed to open DM"),
         );
       }
     },

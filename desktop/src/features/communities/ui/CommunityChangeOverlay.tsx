@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useCommunities } from "../useCommunities";
@@ -12,6 +14,8 @@ export function CommunityChangeOverlay({
   onClose,
   onUpdated,
 }: CommunityChangeOverlayProps) {
+  useUiLanguage();
+
   const { activeCommunity, updateCommunity } = useCommunities();
   const [error, setError] = React.useState<string | null>(null);
   const overlayRef = React.useRef<HTMLDivElement>(null);
@@ -51,10 +55,10 @@ export function CommunityChangeOverlay({
           // If requiresReinit, the tree remounts — overlay unmounts naturally.
           break;
         case "duplicate-relay":
-          setError("Another community already uses this relay URL.");
+          setError(uiT("Another community already uses this relay URL."));
           break;
         case "not-found":
-          setError("Community not found.");
+          setError(uiT("Community not found."));
           break;
       }
     },
@@ -76,10 +80,10 @@ export function CommunityChangeOverlay({
       <div aria-hidden="true" className="absolute inset-0" onClick={onClose} />
       <div className="relative z-10 w-full max-w-md rounded-2xl border border-border bg-background p-8 shadow-2xl">
         <h2 className="text-xl font-semibold tracking-tight">
-          Change community
+          {uiT("Change community")}
         </h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Update your community name or relay URL.
+          {uiT("Update your community name or relay URL.")}
         </p>
         <div className="mt-6">
           <CommunityEditForm
@@ -87,7 +91,7 @@ export function CommunityChangeOverlay({
             initialRelayUrl={activeCommunity.relayUrl}
             onCancel={onClose}
             onSubmit={handleSubmit}
-            submitLabel="Save changes"
+            submitLabel={uiT("Save changes")}
           />
         </div>
         {error ? (

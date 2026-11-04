@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -34,6 +36,8 @@ export function ProjectSelectionProvider({
   onSelect?: () => void;
   resetKey: string;
 }) {
+  useUiLanguage();
+
   const [state, setState] = React.useState<ProjectSelectionState>(
     EMPTY_PROJECT_SELECTION,
   );

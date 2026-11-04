@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Video } from "lucide-react";
 import { motion } from "motion/react";
 
@@ -60,7 +62,7 @@ export function AnimatedAvatarCameraControls({
           onClick={onRetry}
           type="button"
         >
-          Try camera again
+          {uiT("Try camera again")}
         </Button>
       ) : isLive ? (
         <Button
@@ -81,7 +83,7 @@ export function AnimatedAvatarCameraControls({
             transition={ENTRANCE_TRANSITION}
           >
             <Video aria-hidden="true" className="mr-2 h-4 w-4" />
-            Capture {RECORD_SECONDS} sec video
+            {uiT("Capture {0} sec video", { p0: RECORD_SECONDS })}
           </motion.button>
         </Button>
       ) : null}

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
@@ -35,6 +37,8 @@ export function PersonaDropdownField({
   placeholder: string;
   value: string;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const selectedOption = options.find((option) => option.value === value);
 

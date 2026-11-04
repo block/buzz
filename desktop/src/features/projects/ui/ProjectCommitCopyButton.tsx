@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
 
@@ -14,6 +16,8 @@ export function CopyTextButton({
   className?: string;
   text: string;
 }) {
+  useUiLanguage();
+
   const [copied, setCopied] = React.useState(false);
   const handleCopy = React.useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -56,7 +60,7 @@ export function CopyCommitHashButton({
 }) {
   return (
     <CopyTextButton
-      ariaLabel="Copy commit hash"
+      ariaLabel={uiT("Copy commit hash")}
       className={className}
       text={hash}
     />

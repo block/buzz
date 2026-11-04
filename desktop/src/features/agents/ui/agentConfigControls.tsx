@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Shared provider and model field components for agent dialogs.
  *
@@ -49,7 +51,9 @@ export function appendNoModelsSentinel(
   if (options.length === 0 && !loading) {
     options.push({
       disabled: true,
-      label: "No models found",
+      get label() {
+        return uiT("No models found");
+      },
       value: MODEL_NO_MODELS_VALUE,
     });
   }
@@ -113,11 +117,11 @@ export function AgentDropdownSelect({
   ariaRequired,
   className,
   disabled = false,
-  emptyOptionsLabel = "No options available",
+  emptyOptionsLabel = uiT("No options available"),
   id,
   onValueChange,
   options,
-  placeholder = "Select",
+  placeholder = uiT("Select"),
   placeholderClassName,
   placeholderValue,
   searchable = false,
@@ -142,6 +146,8 @@ export function AgentDropdownSelect({
   testId?: string;
   value: string;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const selectedOption = options.find((option) => option.value === value);
@@ -152,6 +158,7 @@ export function AgentDropdownSelect({
         selectedOption.value === placeholderValue));
 
   const showSearch = searchable && options.length > 1;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const filteredOptions = React.useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     if (!showSearch || trimmed === "") return options;
@@ -162,7 +169,7 @@ export function AgentDropdownSelect({
           option.label.toLowerCase().includes(trimmed)) ||
         option.value.toLowerCase().includes(trimmed),
     );
-  }, [options, query, showSearch]);
+  }, [options, query, showSearch, __buzzLanguage]);
 
   function handleOpenChange(next: boolean) {
     setOpen(next);
@@ -229,12 +236,12 @@ export function AgentDropdownSelect({
                 className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground/45"
               />
               <Input
-                aria-label="Search models"
+                aria-label={uiT("Search models")}
                 autoFocus
                 className="h-9 rounded-xl border-foreground/10 bg-white pl-9 text-sm"
                 data-testid={testId ? `${testId}-search` : undefined}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search models…"
+                placeholder={uiT("Search models…")}
                 value={query}
               />
             </div>
@@ -245,7 +252,7 @@ export function AgentDropdownSelect({
               data-testid={testId ? `${testId}-empty` : undefined}
             >
               {showSearch && query.trim().length > 0
-                ? "No matches"
+                ? uiT("No matches")
                 : emptyOptionsLabel}
             </p>
           ) : null}
@@ -349,7 +356,7 @@ export function AgentModelField({
   modelDiscoveryStatus,
   onIsCustomModelEditingChange,
   onModelChange,
-  placeholder = "Select model",
+  placeholder = uiT("Select model"),
   placeholderClassName,
   provider,
   fieldClassName,
@@ -498,14 +505,23 @@ export function AgentModelField({
       ? [
           {
             disabled: true,
-            label: "Loading models...",
+            get label() {
+              return uiT("Loading models...");
+            },
             value: MODEL_DISCOVERY_LOADING_VALUE,
           },
         ]
       : []),
     ...(!isSharedCompute &&
     (showCustomModelOption || modelSelectValue === CUSTOM_MODEL_DROPDOWN_VALUE)
-      ? [{ label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE }]
+      ? [
+          {
+            get label() {
+              return uiT("Custom model...");
+            },
+            value: CUSTOM_MODEL_DROPDOWN_VALUE,
+          },
+        ]
       : []),
   ];
   // An opened dropdown must never show a blank popover. When all the above
@@ -520,7 +536,7 @@ export function AgentModelField({
     discoveredModelOptions === null &&
     trimmedModel.length === 0 &&
     !isCustomModelEditing
-      ? "Loading models..."
+      ? uiT("Loading models...")
       : placeholder;
   const statusMessage = resolveModelFieldStatusMessage({
     discoveredModelOptions,
@@ -533,7 +549,7 @@ export function AgentModelField({
       ariaRequired={isRequired}
       className={selectClassName}
       disabled={selectDisabled}
-      emptyOptionsLabel="Couldn't load models"
+      emptyOptionsLabel={uiT("Couldn't load models")}
       id={id}
       onValueChange={handleModelSelectChange}
       options={modelOptions}
@@ -575,7 +591,7 @@ export function AgentModelField({
         htmlFor={id}
         isRequired={isRequired}
       >
-        Model
+        {uiT("Model")}
       </RequiredFieldLabel>
       {!useCustomSelect && useChevronIcon ? (
         <div className="relative">
@@ -590,11 +606,11 @@ export function AgentModelField({
       )}
       {showCustomModelInput ? (
         <AgentConfigTextInput
-          aria-label="Custom model ID"
+          aria-label={uiT("Custom model ID")}
           autoCorrect="off"
           disabled={disabled}
           onChange={(event) => onModelChange(event.target.value)}
-          placeholder="Custom model ID"
+          placeholder={uiT("Custom model ID")}
           usePersonaInputStyle={usePersonaInputStyle}
           value={model}
         />
@@ -636,7 +652,7 @@ export function AgentProviderField({
   return (
     <div className="space-y-1.5">
       <RequiredFieldLabel htmlFor="agent-provider" isRequired={isRequired}>
-        LLM provider
+        {uiT("LLM provider")}
       </RequiredFieldLabel>
       <select
         aria-required={isRequired}
@@ -655,21 +671,23 @@ export function AgentProviderField({
           </option>
         ))}
         <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
-          Custom provider...
+          {uiT("Custom provider...")}
         </option>
       </select>
       {isCustomProviderEditing ? (
         <Input
-          aria-label="Custom provider ID"
+          aria-label={uiT("Custom provider ID")}
           autoCorrect="off"
           disabled={disabled}
           onChange={(event) => onProviderChange(event.target.value)}
-          placeholder="Custom provider ID"
+          placeholder={uiT("Custom provider ID")}
           value={provider}
         />
       ) : null}
       <p className="text-xs text-muted-foreground">
-        Changing the provider updates the available model list immediately.
+        {uiT(
+          "Changing the provider updates the available model list immediately.",
+        )}
       </p>
     </div>
   );

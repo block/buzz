@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, Hash, MessageSquare, Search } from "lucide-react";
 import * as React from "react";
 
@@ -21,6 +23,8 @@ export function ProjectSelectionDiscussAction({
   onSelectChannel: (channelId: string) => void;
   testIdPrefix?: string;
 }) {
+  useUiLanguage();
+
   const [expanded, setExpanded] = React.useState(false);
   const [browserOpen, setBrowserOpen] = React.useState(false);
   const channels = useChannelsQuery().data ?? [];
@@ -41,7 +45,7 @@ export function ProjectSelectionDiscussAction({
         variant="ghost"
       >
         <MessageSquare className="h-3.5 w-3.5" />
-        Discuss in a channel
+        {uiT("Discuss in a channel")}
         <ChevronDown
           className={cn(
             "ml-auto h-3.5 w-3.5 transition-transform",
@@ -86,7 +90,7 @@ export function ProjectSelectionDiscussAction({
             variant="ghost"
           >
             <Search className="h-3.5 w-3.5 text-muted-foreground" />
-            Search channels…
+            {uiT("Search channels…")}
           </Button>
         </div>
       ) : null}

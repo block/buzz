@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createPortal } from "react-dom";
 import type { Editor } from "@tiptap/react";
@@ -114,6 +116,8 @@ export function SelectionFormattingTray({
   disabled = false,
   onLinkButton,
 }: SelectionFormattingTrayProps) {
+  useUiLanguage();
+
   const [position, setPosition] = React.useState<TrayPosition | null>(null);
   const rafRef = React.useRef<number | null>(null);
   const suppressRightClickUpdatesRef = React.useRef(false);
@@ -254,7 +258,7 @@ export function SelectionFormattingTray({
       data-testid="selection-formatting-tray"
       onMouseDown={(event) => event.preventDefault()}
       role="toolbar"
-      aria-label="Selection formatting"
+      aria-label={uiT("Selection formatting")}
       style={{ left: position.left, top: position.top }}
     >
       <div className="max-w-full overflow-x-auto">

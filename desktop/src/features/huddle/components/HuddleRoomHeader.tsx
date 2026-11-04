@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
@@ -32,6 +34,8 @@ function isVisible(state: HuddleRosterState | null) {
 
 /** Larger, persistent roster for the companion huddle room window. */
 export function HuddleRoomHeader() {
+  useUiLanguage();
+
   const { interruptAgentSpeech, isMuted, micConnected } = useHuddle();
   const { activeSpeakers, micLevel, speakerLevels } = useHuddleLevels();
   const identityQuery = useIdentityQuery();

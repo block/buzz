@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertCircle, Brain, Download, FileType2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -37,15 +39,21 @@ const MEMORY_LEVELS: {
 }[] = [
   {
     value: "none",
-    label: "Agent only",
+    get label() {
+      return uiT("Agent only");
+    },
   },
   {
     value: "core",
-    label: "Agent + core memory",
+    get label() {
+      return uiT("Agent + core memory");
+    },
   },
   {
     value: "everything",
-    label: "Agent + all memories",
+    get label() {
+      return uiT("Agent + all memories");
+    },
   },
 ];
 
@@ -67,6 +75,8 @@ export function AgentSnapshotExportDialog({
   onSaveFile,
   onOpenChange,
 }: AgentSnapshotExportDialogProps) {
+  useUiLanguage();
+
   const [memoryLevel, setMemoryLevel] =
     React.useState<SnapshotMemoryLevel>("none");
   const [format, setFormat] = React.useState<SnapshotFormat>("png");
@@ -97,7 +107,9 @@ export function AgentSnapshotExportDialog({
         showCloseButton={false}
       >
         <DialogHeader className="space-y-0">
-          <DialogTitle className="truncate">Export {agentName}</DialogTitle>
+          <DialogTitle className="truncate">
+            {uiT("Export {0}", { p0: agentName })}
+          </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 pt-2">
@@ -105,11 +117,11 @@ export function AgentSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <Brain className="h-4 w-4 shrink-0 text-muted-foreground" />
-                Memories
+                {uiT("Memories")}
               </span>
               {hasLinkedAgent ? (
                 <SnapshotOptionMenu
-                  ariaLabel="Memories"
+                  ariaLabel={uiT("Memories")}
                   className="font-medium text-foreground"
                   disabled={isPending}
                   onValueChange={(value) =>
@@ -124,7 +136,7 @@ export function AgentSnapshotExportDialog({
                   className="inline-flex h-8 w-auto items-center justify-end px-2 text-sm font-medium"
                   data-testid="agent-snapshot-memory-value"
                 >
-                  Agent only
+                  {uiT("Agent only")}
                 </span>
               )}
             </div>
@@ -132,10 +144,10 @@ export function AgentSnapshotExportDialog({
             <div className="flex min-h-8 items-center justify-between gap-4">
               <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                 <FileType2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                File format
+                {uiT("File format")}
               </span>
               <SnapshotOptionMenu
-                ariaLabel="File format"
+                ariaLabel={uiT("File format")}
                 className="font-medium text-foreground"
                 disabled={isPending}
                 onValueChange={(value) => setFormat(value as SnapshotFormat)}
@@ -163,8 +175,11 @@ export function AgentSnapshotExportDialog({
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <p>
-                    Memory is stored as <strong>plaintext</strong> in the
-                    snapshot. Only share it with people you trust.
+                    {uiT("Memory is stored as ")}
+                    <strong>{uiT("plaintext")}</strong>{" "}
+                    {uiT(
+                      " in the snapshot. Only share it with people you trust.",
+                    )}
                   </p>
                 </div>
               </motion.div>
@@ -182,7 +197,7 @@ export function AgentSnapshotExportDialog({
                 type="button"
                 variant="ghost"
               >
-                Cancel
+                {uiT("Cancel")}
               </Button>
             </DialogClose>
             <Button
@@ -193,7 +208,7 @@ export function AgentSnapshotExportDialog({
               type="button"
             >
               <Download className="h-4 w-4" />
-              Export
+              {uiT("Export")}
             </Button>
           </div>
         </div>

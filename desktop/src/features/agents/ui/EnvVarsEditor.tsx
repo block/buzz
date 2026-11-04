@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AlertCircle, Lock, Plus, X } from "lucide-react";
 import * as React from "react";
 
@@ -212,8 +214,8 @@ export function EnvVarsEditor({
   value,
   onChange,
   inheritedFrom,
-  inheritedLabel = "inherited",
-  label = "Environment variables",
+  inheritedLabel = uiT("inherited"),
+  label = uiT("Environment variables"),
   helperText,
   disabled = false,
   requiredKeys = [],
@@ -224,6 +226,8 @@ export function EnvVarsEditor({
   inheritedRowsLabel = "build",
   keyAnnotations,
 }: EnvVarsEditorProps) {
+  useUiLanguage();
+
   // Keys that render as their own special rows (required amber rows or
   // file-satisfied read-only rows). These must NEVER enter `rows` state —
   // they read/write `value` directly via `onChange`/`updateRequiredValue`.
@@ -373,7 +377,7 @@ export function EnvVarsEditor({
                   {isMissing ? (
                     <span className="ml-1 flex items-center gap-0.5 rounded-sm bg-amber-100 px-1 py-0.5 text-2xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
                       <AlertCircle className="h-2.5 w-2.5" aria-hidden />
-                      Required
+                      {uiT("Required")}
                     </span>
                   ) : null}
                 </div>
@@ -384,7 +388,7 @@ export function EnvVarsEditor({
                   )}
                 >
                   <Input
-                    aria-label={`Value for ${key}`}
+                    aria-label={uiT("Value for {0}", { p0: key })}
                     className={cn(
                       "h-8 px-0 py-0 font-mono leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
@@ -394,7 +398,7 @@ export function EnvVarsEditor({
                     onChange={(event) =>
                       updateRequiredValue(key, event.target.value)
                     }
-                    placeholder="value"
+                    placeholder={uiT("value")}
                     ref={(el) => {
                       if (el) {
                         requiredValueRefs.current.set(key, el);
@@ -419,7 +423,7 @@ export function EnvVarsEditor({
                 const verb = key in value ? "Overrides" : "Inherited from";
                 return (
                   <p className="ml-1 text-xs text-muted-foreground">
-                    {verb} {inheritedLabel} value{" "}
+                    {verb} {inheritedLabel} {uiT(" value")}{" "}
                     <span className="font-mono">
                       {maskInherited(inheritedValue)}
                     </span>
@@ -460,7 +464,7 @@ export function EnvVarsEditor({
                   {key}
                 </span>
                 <span className="ml-1 rounded-sm bg-muted px-1 py-0.5 text-2xs font-medium text-muted-foreground">
-                  Set in goose config
+                  {uiT("Set in goose config")}
                 </span>
               </div>
               {/* Spacer columns to align with required-key rows */}
@@ -505,7 +509,7 @@ export function EnvVarsEditor({
                     {irow.key}
                   </span>
                   <span className="ml-1 rounded-sm bg-muted px-1 py-0.5 text-2xs font-medium text-muted-foreground">
-                    Inherited from {inheritedRowsLabel}
+                    {uiT("Inherited from {0}", { p0: inheritedRowsLabel })}
                   </span>
                 </div>
                 <div
@@ -539,7 +543,7 @@ export function EnvVarsEditor({
         fileSatisfiedKeys.length === 0 &&
         inheritedRows.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">
-            No variables set.
+            {uiT("No variables set.")}
           </p>
         ) : null}
         {rows.map((row) => {
@@ -556,7 +560,7 @@ export function EnvVarsEditor({
                   )}
                 >
                   <Input
-                    aria-label="Variable name"
+                    aria-label={uiT("Variable name")}
                     className={cn(
                       "h-8 px-0 py-0 font-mono leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
@@ -577,7 +581,7 @@ export function EnvVarsEditor({
                   )}
                 >
                   <Input
-                    aria-label="Variable value"
+                    aria-label={uiT("Variable value")}
                     className={cn(
                       "h-8 px-0 py-0 font-mono leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
@@ -587,12 +591,12 @@ export function EnvVarsEditor({
                     onChange={(event) =>
                       updateRow(row.id, { value: event.target.value })
                     }
-                    placeholder="value"
+                    placeholder={uiT("value")}
                     value={row.value}
                   />
                 </div>
                 <Button
-                  aria-label="Remove variable"
+                  aria-label={uiT("Remove variable")}
                   data-testid="env-vars-remove"
                   disabled={disabled}
                   onClick={() => removeRow(row.id)}
@@ -605,7 +609,8 @@ export function EnvVarsEditor({
               </div>
               {showsInherited ? (
                 <p className="ml-1 text-xs text-muted-foreground">
-                  Overrides {inheritedLabel} value{" "}
+                  {uiT("Overrides ")}
+                  {inheritedLabel} {uiT(" value")}{" "}
                   <span className="font-mono">
                     {maskInherited(inheritedValue)}
                   </span>
@@ -619,7 +624,8 @@ export function EnvVarsEditor({
                 if (!override) return null;
                 return (
                   <p className="ml-1 text-xs text-muted-foreground">
-                    Overrides {inheritedRowsLabel} default{" "}
+                    {uiT("Overrides ")}
+                    {inheritedRowsLabel} {uiT(" default")}{" "}
                     <span className="font-mono">{override.value}</span>
                   </p>
                 );
@@ -644,7 +650,7 @@ export function EnvVarsEditor({
           variant="outline"
         >
           <Plus className="mr-1 h-4 w-4" />
-          Add variable
+          {uiT("Add variable")}
         </Button>
       </div>
     </div>

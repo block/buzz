@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 export { TerminalBootstrap } from "@/features/terminal/TerminalBootstrap";
 import * as React from "react";
 
@@ -57,6 +59,8 @@ export function AppShellOverlays({
   onSelectChannel,
   relayUrl,
 }: AppShellOverlaysProps) {
+  useUiLanguage();
+
   const [membersChannel, setMembersChannel] = React.useState<Channel | null>(
     null,
   );

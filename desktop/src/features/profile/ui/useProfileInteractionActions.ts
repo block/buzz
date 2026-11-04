@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { toast } from "sonner";
@@ -134,8 +136,8 @@ export function useProfileInteractionActions({
             error instanceof Error
               ? error.message
               : action === "wave"
-                ? "Couldn't send the wave."
-                : "Couldn't open the direct message.",
+                ? uiT("Couldn't send the wave.")
+                : uiT("Couldn't open the direct message."),
           );
         }
       } finally {

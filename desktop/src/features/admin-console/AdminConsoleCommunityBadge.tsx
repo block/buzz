@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Community identity shared across the console: the navigation context, the
  * community badge and the not-connected warning.
@@ -46,6 +48,8 @@ export function CommunityBadge({
   host: string | null;
   icon?: string | null;
 }) {
+  useUiLanguage();
+
   const { open } = useCommunityNav();
   const base =
     "inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/60 px-2 py-0.5 text-xs";
@@ -55,7 +59,7 @@ export function CommunityBadge({
         className={cn(base, "text-muted-foreground")}
         data-testid="community-badge-removed"
       >
-        community removed
+        {uiT("community removed")}
       </span>
     );
   }
@@ -81,7 +85,7 @@ export function CommunityBadge({
       className={cn(base, "hover:bg-muted/50")}
       data-testid={`community-badge-${host}`}
       onClick={() => open({ id, host, icon })}
-      title={`Open ${host}`}
+      title={uiT("Open {0}", { p0: host })}
       type="button"
     >
       {content}
@@ -91,6 +95,8 @@ export function CommunityBadge({
 
 /** "Not the community you're connected to", when that applies. */
 export function NotConnectedWarning({ host }: { host: string }) {
+  useUiLanguage();
+
   const { connectedHost } = useCommunityNav();
   if (connectedHost === null || connectedHost === host) return null;
   return (
@@ -98,7 +104,7 @@ export function NotConnectedWarning({ host }: { host: string }) {
       className="text-xs text-amber-600 dark:text-amber-400"
       data-testid="community-not-connected"
     >
-      Not the community you're connected to.
+      {uiT("Not the community you're connected to.")}
     </span>
   );
 }

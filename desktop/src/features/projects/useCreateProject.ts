@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -76,7 +78,9 @@ export function useCreateProjectMutation() {
           });
           if (!applied) {
             toast.warning(
-              "Project created, but its project-home canvas could not be added.",
+              uiT(
+                "Project created, but its project-home canvas could not be added.",
+              ),
             );
           }
         } else if (input.templateId) {

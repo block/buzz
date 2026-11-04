@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import emojiData from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
 import * as React from "react";
@@ -45,7 +47,7 @@ import {
   isAvatarFileDrag,
 } from "./AgentCreationPreview.utils";
 export function AgentCreationPreview({
-  assetLabel = "avatar",
+  assetLabel = uiT("avatar"),
   avatarUrl,
   disabled = false,
   hideEditControl = false,
@@ -76,6 +78,8 @@ export function AgentCreationPreview({
   testIdPrefix?: string;
   variant?: "compact" | "default";
 }) {
+  useUiLanguage();
+
   const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = React.useState(false);
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
@@ -117,7 +121,7 @@ export function AgentCreationPreview({
     uploadFile: uploadAvatarFile,
     handleFileChange: handleAvatarUploadFileChange,
   } = useAvatarUpload({
-    fallbackErrorMessage: `Could not use that ${assetLabel}.`,
+    fallbackErrorMessage: uiT("Could not use that {0}.", { p0: assetLabel }),
     onUploadSuccess: (url) => {
       onSelectAvatar(url);
       onCommitAvatar?.(url);
@@ -426,7 +430,7 @@ export function AgentCreationPreview({
     >
       {/* Single drop zone covering the entire popover */}
       <fieldset
-        aria-label={`${assetLabelTitle} picker`}
+        aria-label={uiT("{0} picker", { p0: assetLabelTitle })}
         className={cn(
           "relative m-0 rounded-lg border-2 border-transparent p-0 transition-[border-color,background-color] duration-150",
           isPopoverDragOver && "border-dashed border-primary bg-primary/5",
@@ -457,13 +461,13 @@ export function AgentCreationPreview({
               className="relative z-10 h-full rounded-md bg-transparent text-xs font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
               value="image"
             >
-              Image
+              {uiT("Image")}
             </TabsTrigger>
             <TabsTrigger
               className="relative z-10 h-full rounded-md bg-transparent text-xs font-medium shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
               value="emoji"
             >
-              Emoji
+              {uiT("Emoji")}
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -489,7 +493,7 @@ export function AgentCreationPreview({
                 <UploadCloud className="h-5 w-5 text-muted-foreground" />
               )}
               <span className="text-xs font-medium text-muted-foreground">
-                {isUploading ? "Uploading..." : "Drop or browse"}
+                {isUploading ? uiT("Uploading...") : uiT("Drop or browse")}
               </span>
             </button>
 
@@ -508,7 +512,7 @@ export function AgentCreationPreview({
                     applyAvatarUrl();
                   }
                 }}
-                placeholder="Paste a URL"
+                placeholder={uiT("Paste a URL")}
                 spellCheck={false}
                 type="url"
                 value={avatarUrlDraft}
@@ -530,7 +534,7 @@ export function AgentCreationPreview({
                       size="xs"
                       type="button"
                     >
-                      Apply
+                      {uiT("Apply")}
                     </Button>
                   </motion.div>
                 ) : null}
@@ -553,7 +557,7 @@ export function AgentCreationPreview({
                 }}
                 type="button"
               >
-                Remove {assetLabel}
+                {uiT("Remove {0}", { p0: assetLabel })}
               </button>
             ) : null}
           </div>
@@ -618,9 +622,9 @@ export function AgentCreationPreview({
                     aria-label={
                       isCustomSwatch
                         ? selectedEmoji
-                          ? "Choose custom color"
-                          : "Choose an emoji first"
-                        : `Use ${swatch} background`
+                          ? uiT("Choose custom color")
+                          : uiT("Choose an emoji first")
+                        : uiT("Use {0} background", { p0: swatch })
                     }
                     aria-pressed={isSelected}
                     className={cn(
@@ -682,7 +686,7 @@ export function AgentCreationPreview({
                 }}
                 type="button"
               >
-                Remove {assetLabel}
+                {uiT("Remove {0}", { p0: assetLabel })}
               </button>
             ) : null}
           </div>
@@ -767,7 +771,7 @@ export function AgentCreationPreview({
       )}
     >
       <fieldset
-        aria-label={`${assetLabelTitle} preview`}
+        aria-label={uiT("{0} preview", { p0: assetLabelTitle })}
         className={cn(
           "group/avatar-preview relative m-0 flex min-w-0 flex-col items-center justify-center rounded-xl border border-transparent p-0 transition-[background-color,border-color,box-shadow] duration-150",
           isCompact ? "min-h-0" : "min-h-[190px] gap-3",
@@ -798,18 +802,20 @@ export function AgentCreationPreview({
                   badge={
                     <PopoverTrigger asChild>
                       <button
-                        aria-label={`Edit ${assetLabel}`}
+                        aria-label={uiT("Edit {0}", { p0: assetLabel })}
                         className={cn(
                           "flex items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100",
                           isCompact ? "h-6 w-6" : "h-9 w-9",
                         )}
                         disabled={disabled || isUploading}
-                        title={`Edit ${assetLabel}`}
+                        title={uiT("Edit {0}", { p0: assetLabel })}
                         type="button"
                       >
                         {isUploading ? (
                           <Spinner
-                            aria-label={`Uploading ${assetLabel}`}
+                            aria-label={uiT("Uploading {0}", {
+                              p0: assetLabel,
+                            })}
                             className={cn(
                               "border-2",
                               isCompact ? "h-3 w-3" : "h-4 w-4",
@@ -887,18 +893,20 @@ export function AgentCreationPreview({
                   badge={
                     <PopoverTrigger asChild>
                       <button
-                        aria-label={`Edit ${assetLabel}`}
+                        aria-label={uiT("Edit {0}", { p0: assetLabel })}
                         className={cn(
                           "flex items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100",
                           isCompact ? "h-6 w-6" : "h-9 w-9",
                         )}
                         disabled={disabled || isUploading}
-                        title={`Edit ${assetLabel}`}
+                        title={uiT("Edit {0}", { p0: assetLabel })}
                         type="button"
                       >
                         {isUploading ? (
                           <Spinner
-                            aria-label={`Uploading ${assetLabel}`}
+                            aria-label={uiT("Uploading {0}", {
+                              p0: assetLabel,
+                            })}
                             className={cn(
                               "border-2",
                               isCompact ? "h-3 w-3" : "h-4 w-4",
@@ -972,7 +980,7 @@ export function AgentCreationPreview({
               ) : (
                 <PopoverTrigger asChild>
                   <button
-                    aria-label={`Add ${assetLabel}`}
+                    aria-label={uiT("Add {0}", { p0: assetLabel })}
                     className={cn(
                       "group/add-avatar relative flex items-center justify-center bg-transparent text-primary shadow-xs transition-[background-color,border-color,color,filter,scale] duration-150 ease-out hover:scale-[1.02] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-60 disabled:hover:scale-100",
                       isCompact ? "h-16 w-16" : "h-36 w-36",
@@ -989,7 +997,7 @@ export function AgentCreationPreview({
                           : "ring-2 ring-primary/30"),
                     )}
                     disabled={disabled || isUploading}
-                    title={`Add ${assetLabel}`}
+                    title={uiT("Add {0}", { p0: assetLabel })}
                     type="button"
                   >
                     {isRoundedSquare ? null : (
@@ -1012,7 +1020,7 @@ export function AgentCreationPreview({
                     )}
                     {isUploading ? (
                       <Spinner
-                        aria-label={`Uploading ${assetLabel}`}
+                        aria-label={uiT("Uploading {0}", { p0: assetLabel })}
                         className="relative z-10 h-4 w-4 border-2"
                       />
                     ) : (

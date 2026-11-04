@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Smartphone, Webcam } from "lucide-react";
 
 import type { CameraSource } from "@/features/profile/ui/AnimatedAvatarCapture.helpers";
@@ -33,13 +35,17 @@ export function AnimatedAvatarCameraPicker({
         {
           disabled: iphoneDisabled,
           icon: Smartphone,
-          label: "Use iPhone",
+          get label() {
+            return uiT("Use iPhone");
+          },
           source: "iphone" as const,
         },
         {
           disabled: computerDisabled,
           icon: Webcam,
-          label: "Use this computer",
+          get label() {
+            return uiT("Use this computer");
+          },
           source: "computer" as const,
         },
       ].map((option) => {

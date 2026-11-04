@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -85,6 +87,8 @@ import {
 } from "./projectDetailHelpers";
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
+  useUiLanguage();
+
   const {
     commitHash,
     entityNavigationId,
@@ -342,7 +346,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       });
       return;
     }
-    toast.success("Remote state refreshed.");
+    toast.success(uiT("Remote state refreshed."));
   }, [
     memberChannelIds,
     repoSnapshotQuery,
@@ -363,11 +367,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     onTagChange: handleTagChange,
     onCreateBranch: () => branchActions.setCreateOpen(true),
     createBranchDisabled: branchActions.createPending || !activeBranchCommit,
-    createBranchTitle: createBranchReason ?? "Create a remote branch",
+    createBranchTitle: createBranchReason ?? uiT("Create a remote branch"),
     onDeleteBranch: () => branchActions.setDeleteOpen(true),
     deleteBranchDisabled:
       branchActions.deletePending || Boolean(deleteBranchReason),
-    deleteBranchTitle: deleteBranchReason ?? "Delete this remote branch",
+    deleteBranchTitle: deleteBranchReason ?? uiT("Delete this remote branch"),
     source: selectedTag ? "remote" : repoSource,
     onSourceChange: setRepoSource,
     localDisabled:
@@ -376,10 +380,10 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         !localRepoSnapshotQuery.data &&
         !localRepoSnapshotQuery.isLoading),
     localLabel: localRepoSnapshotQuery.isLoading
-      ? "Local checking"
+      ? uiT("Local checking")
       : repoSyncStatusQuery.data?.localPath || localRepoSnapshotQuery.data
-        ? "Local"
-        : "Local missing",
+        ? uiT("Local")
+        : uiT("Local missing"),
     localPath:
       repoSyncStatusQuery.data?.localPath ?? localRepoSnapshotQuery.data?.path,
     ...repoRemote.controls,
@@ -432,7 +436,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       repoStateQuery.isFetching ||
       repoSyncStatusQuery.isFetching,
     fetchTitle:
-      repoSyncStatusQuery.data?.pullBlockReason ?? "Check for remote changes",
+      repoSyncStatusQuery.data?.pullBlockReason ??
+      uiT("Check for remote changes"),
   };
   const fileContentSource = useRepositoryFileContentSource({
     activeBranch,
@@ -522,7 +527,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ]);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to push repository",
+        error instanceof Error
+          ? error.message
+          : uiT("Failed to push repository"),
       );
     }
   }, [
@@ -586,7 +593,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const handleCreateIssue = React.useCallback(
     async (input: CreateIssueDialogInput) => {
       const issueId = await createIssueMutation.mutateAsync(input);
-      toast.success("Task created.");
+      toast.success(uiT("Task created."));
       await issuesQuery.refetch();
       setSelectedIssueId(issueId);
     },
@@ -600,11 +607,13 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         commit,
         mergeBase: repoSyncStatusQuery.data?.mergeBase ?? null,
       });
-      toast.success(updated ? "Review updated." : "Review is already current.");
+      toast.success(
+        updated ? uiT("Review updated.") : uiT("Review is already current."),
+      );
       await pullRequestsQuery.refetch();
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to update review",
+        error instanceof Error ? error.message : uiT("Failed to update review"),
       );
     }
   }, [
@@ -625,7 +634,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       ]);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to pull repository",
+        error instanceof Error
+          ? error.message
+          : uiT("Failed to pull repository"),
       );
     }
   }, [

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
@@ -194,7 +196,7 @@ export async function buildProjectsFromFetcher(
     (events) => ({ ok: true as const, events }),
     (error: unknown) => ({
       ok: false as const,
-      message: error instanceof Error ? error.message : "Unknown error",
+      message: error instanceof Error ? error.message : uiT("Unknown error"),
     }),
   );
 

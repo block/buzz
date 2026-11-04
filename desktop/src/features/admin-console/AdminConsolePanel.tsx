@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Main admin console panel — renders when probe state is `nip98Authorized` or
  * `disabled`.
@@ -64,10 +66,34 @@ function TabBar({
     label: string;
     Icon: React.ComponentType<{ className?: string }>;
   }> = [
-    { value: "reports", label: "Reports", Icon: ShieldAlert },
-    { value: "feedback", label: "Feedback", Icon: MessageSquare },
-    { value: "communities", label: "Communities", Icon: Building2 },
-    { value: "operators", label: "Operators", Icon: Users },
+    {
+      value: "reports",
+      get label() {
+        return uiT("Reports");
+      },
+      Icon: ShieldAlert,
+    },
+    {
+      value: "feedback",
+      get label() {
+        return uiT("Feedback");
+      },
+      Icon: MessageSquare,
+    },
+    {
+      value: "communities",
+      get label() {
+        return uiT("Communities");
+      },
+      Icon: Building2,
+    },
+    {
+      value: "operators",
+      get label() {
+        return uiT("Operators");
+      },
+      Icon: Users,
+    },
   ].filter((t) => visible.has(t.value as Tab)) as typeof allTabs;
   return (
     <div className="mb-4 flex gap-1 border-b border-border/60">
@@ -131,6 +157,8 @@ export function AdminConsolePanel({
   /** Test-only, like `initialTab`: land on this community's page. */
   initialCommunity?: CommunityRef;
 }) {
+  useUiLanguage();
+
   const isOperator = role === "operator";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? "reports");
   // Increment whenever the (pubkey, origin) context changes to invalidate all

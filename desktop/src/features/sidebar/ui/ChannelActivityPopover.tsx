@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Clock, Loader2, MailOpen } from "lucide-react";
 
@@ -96,7 +98,7 @@ function ThreadPreviewRow({
       data-testid={`channel-activity-item-${item.conversationId}`}
     >
       <button
-        aria-label={`Open thread from ${item.senderLabel}`}
+        aria-label={uiT("Open thread from {0}", { p0: item.senderLabel })}
         className="absolute inset-0 z-0 w-full text-left"
         onClick={onOpen}
         type="button"
@@ -119,11 +121,11 @@ function ThreadPreviewRow({
             </span>
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-xs leading-4 text-muted-foreground">
-            <span>Thread</span>
+            <span>{uiT("Thread")}</span>
             {item.unreadCount > 1 ? (
               <>
                 <span aria-hidden="true">·</span>
-                <span>{item.unreadCount} unread</span>
+                <span>{uiT("{0} unread", { p0: item.unreadCount })}</span>
               </>
             ) : null}
           </div>
@@ -136,10 +138,10 @@ function ThreadPreviewRow({
         </div>
       </div>
       <div className="pointer-events-none absolute right-2 top-2 z-20 flex items-center gap-0.5 rounded-full bg-muted/95 p-0.5 opacity-0 shadow-xs transition-opacity group-hover/activity-row:pointer-events-auto group-hover/activity-row:opacity-100 group-focus-within/activity-row:pointer-events-auto group-focus-within/activity-row:opacity-100">
-        <RowActionButton label="Mark as read" onClick={onMarkRead}>
+        <RowActionButton label={uiT("Mark as read")} onClick={onMarkRead}>
           <MailOpen />
         </RowActionButton>
-        <RowActionButton label="Remind me later" onClick={onRemindLater}>
+        <RowActionButton label={uiT("Remind me later")} onClick={onRemindLater}>
           <Clock />
         </RowActionButton>
       </div>
@@ -189,7 +191,7 @@ function WorkingAgentRow({
         </div>
         <span className="mt-0.5 flex items-center gap-1.5 text-xs leading-4 text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary/70" />
-          Working
+          {uiT("Working")}
         </span>
       </div>
     </button>
@@ -248,6 +250,8 @@ export function ChannelActivityPopover({
   channel: Channel;
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -411,14 +415,14 @@ export function ChannelActivityPopover({
         style={ACTIVITY_POPOVER_MOTION_STYLE}
       >
         <section
-          aria-label="Channel activity"
+          aria-label={uiT("Channel activity")}
           className="flex max-h-96 min-h-0 flex-col overflow-hidden"
         >
           <h3
             className="relative z-20 shrink-0 border-b border-border/70 bg-background/95 px-3 py-2 text-sm font-semibold text-foreground backdrop-blur-md supports-[backdrop-filter]:bg-background/90"
             data-testid="channel-activity-header"
           >
-            Channel activity
+            {uiT("Channel activity")}
           </h3>
           <div
             className="buzz-channel-activity-scrollbar min-h-0 overflow-y-auto overscroll-contain"

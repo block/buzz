@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
@@ -34,6 +36,8 @@ export function ExternalLinkAnchor({
   isLinearLink: boolean;
   label: string;
 }) {
+  useUiLanguage();
+
   const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissMediaContextMenu(Boolean(menu), closeMenu);
@@ -68,16 +72,20 @@ export function ExternalLinkAnchor({
           dataAttributes={["data-link-context-menu"]}
           items={[
             {
-              label: "Open link",
+              get label() {
+                return uiT("Open link");
+              },
               onSelect: () => {
                 closeMenu();
                 void openUrl(href).catch(() => {
-                  toast.error("Failed to open link");
+                  toast.error(uiT("Failed to open link"));
                 });
               },
             },
             {
-              label: "Copy link",
+              get label() {
+                return uiT("Copy link");
+              },
               onSelect: () => {
                 closeMenu();
                 copyTextToClipboard(href, "Link copied to clipboard");

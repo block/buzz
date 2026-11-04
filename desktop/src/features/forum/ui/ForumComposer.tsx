@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
@@ -67,6 +69,8 @@ function ForumComposerVisit({
   autocompleteBelow = false,
   profiles,
 }: ForumComposerProps) {
+  useUiLanguage();
+
   const drafts = useDrafts();
   const mountedRef = React.useRef(false);
   React.useLayoutEffect(() => {
@@ -710,7 +714,7 @@ function ForumComposerVisit({
                         type="button"
                         variant="ghost"
                       >
-                        Cancel
+                        {uiT("Cancel")}
                       </Button>
                     ) : null}
                     {onSecondarySubmit && secondarySubmitLabel ? (
@@ -730,7 +734,7 @@ function ForumComposerVisit({
                           >
                             {submitMode === "secondary"
                               ? secondarySubmitLabel
-                              : "Comment"}
+                              : uiT("Comment")}
                             <ChevronDown className="h-3.5 w-3.5" />
                           </Button>
                         </DropdownMenuTrigger>
@@ -742,7 +746,7 @@ function ForumComposerVisit({
                             value={submitMode}
                           >
                             <DropdownMenuRadioItem value="primary">
-                              Comment
+                              {uiT("Comment")}
                             </DropdownMenuRadioItem>
                             <DropdownMenuRadioItem value="secondary">
                               {secondarySubmitLabel}

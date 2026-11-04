@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   CircleAlert,
   CircleDot,
@@ -84,7 +86,7 @@ export function ProjectPeopleStack({
           >
             <UserProfilePopover pubkey={pubkey} triggerElement="span">
               <button
-                aria-label={`View ${label}'s profile`}
+                aria-label={uiT("View {0}'s profile", { p0: label })}
                 className={cn(
                   "inline-flex focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                   profile?.isAgent ? "rounded-[30%]" : "rounded-full",
@@ -255,34 +257,64 @@ function RepositoryUnavailableIndicator({
   if (!reason) return null;
   const status = {
     authentication: {
-      description: "Buzz could not authenticate with this repository.",
-      label: "Access failed",
+      get description() {
+        return uiT("Buzz could not authenticate with this repository.");
+      },
+      get label() {
+        return uiT("Access failed");
+      },
     },
     missing: {
-      description: "No git repository was found on the Buzz relay.",
-      label: "Uninitialized",
+      get description() {
+        return uiT("No git repository was found on the Buzz relay.");
+      },
+      get label() {
+        return uiT("Uninitialized");
+      },
     },
     access: {
-      description:
-        "You’re not a member of the channel that grants access to this repository.",
-      label: "No access",
+      get description() {
+        return uiT(
+          "You’re not a member of the channel that grants access to this repository.",
+        );
+      },
+      get label() {
+        return uiT("No access");
+      },
     },
     unbound: {
-      description:
-        "The repository has no access channel binding, so the relay cannot authorize reads.",
-      label: "No access channel",
+      get description() {
+        return uiT(
+          "The repository has no access channel binding, so the relay cannot authorize reads.",
+        );
+      },
+      get label() {
+        return uiT("No access channel");
+      },
     },
     network: {
-      description: "The Buzz git service could not be reached.",
-      label: "Unreachable",
+      get description() {
+        return uiT("The Buzz git service could not be reached.");
+      },
+      get label() {
+        return uiT("Unreachable");
+      },
     },
     ref: {
-      description: "The advertised branch is missing from the git remote.",
-      label: "Branch missing",
+      get description() {
+        return uiT("The advertised branch is missing from the git remote.");
+      },
+      get label() {
+        return uiT("Branch missing");
+      },
     },
     unknown: {
-      description: "Buzz could not load this repository.",
-      label: "Unavailable",
+      get description() {
+        return uiT("Buzz could not load this repository.");
+      },
+      get label() {
+        return uiT("Unavailable");
+      },
     },
   } satisfies Record<
     ProjectRepoUnavailableReason,
@@ -294,7 +326,7 @@ function RepositoryUnavailableIndicator({
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          aria-label={`Repository ${label.toLowerCase()}`}
+          aria-label={uiT("Repository {0}", { p0: label.toLowerCase() })}
           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-amber-600 hover:bg-amber-500/10 dark:text-amber-300"
           role="img"
         >
@@ -318,14 +350,16 @@ export function EmptyState({
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
       <Folders className="h-10 w-10 text-muted-foreground/40" />
       <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">No projects yet</p>
+        <p className="text-sm font-medium text-foreground">
+          {uiT("No projects yet")}
+        </p>
         <p className="text-sm text-muted-foreground">
-          Projects published to this relay will appear here.
+          {uiT("Projects published to this relay will appear here.")}
         </p>
       </div>
       <Button onClick={onCreateProject} size="sm" type="button">
         <Plus className="h-4 w-4" />
-        Create project
+        {uiT("Create project")}
       </Button>
     </div>
   );
@@ -337,10 +371,10 @@ export function EmptyFilteredState() {
       <Folders className="h-9 w-9 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
-          No matching projects
+          {uiT("No matching projects")}
         </p>
         <p className="text-sm text-muted-foreground">
-          Try another owner filter or sort mode.
+          {uiT("Try another owner filter or sort mode.")}
         </p>
       </div>
     </div>
@@ -360,7 +394,7 @@ function ProjectCardButton({
       onClick={() => onOpen(project)}
       type="button"
     >
-      <span className="sr-only">View {project.name}</span>
+      <span className="sr-only">{uiT("View {0}", { p0: project.name })}</span>
     </button>
   );
 }
@@ -380,11 +414,15 @@ function ProjectActionsMenu({
   onDelete: (project: Project) => Promise<void> | void;
   onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
+  useUiLanguage();
+
   const [confirmOpen, setConfirmOpen] = React.useState(false);
 
   return (
     <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
-      <ProjectListRowMenu label={`More options for ${project.name}`}>
+      <ProjectListRowMenu
+        label={uiT("More options for {0}", { p0: project.name })}
+      >
         <CopyShareLinkMenuItem
           link={projectShareLink(project)}
           testId={`project-copy-link-${project.dtag}`}
@@ -411,23 +449,25 @@ function ProjectActionsMenu({
           }}
         >
           <Trash2 className="h-4 w-4" />
-          Delete project
+          {uiT("Delete project")}
         </DropdownMenuItem>
       </ProjectListRowMenu>
       <AlertDialogContent
         data-testid={`project-delete-confirm-${project.dtag}`}
       >
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete project?</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Delete project?")}</AlertDialogTitle>
           <AlertDialogDescription>
-            Delete {project.name} from Projects for everyone. This can only be
-            done for projects you own and cannot be undone.
+            {uiT(
+              "Delete {0} from Projects for everyone. This can only be done for projects you own and cannot be undone.",
+              { p0: project.name },
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button disabled={disabled} type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
@@ -443,7 +483,7 @@ function ProjectActionsMenu({
               type="button"
               variant="destructive"
             >
-              {disabled ? "Deleting..." : "Delete project"}
+              {disabled ? uiT("Deleting...") : uiT("Delete project")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -482,6 +522,8 @@ export const ProjectGridCard = React.memo(function ProjectGridCard({
   onOpen,
   onOpenTerminal,
 }: ProjectItemProps) {
+  useUiLanguage();
+
   return (
     <Card
       className="group relative flex h-full min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
@@ -510,8 +552,8 @@ export const ProjectGridCard = React.memo(function ProjectGridCard({
                 <span>
                   {project.repositoryAddresses.length}{" "}
                   {project.repositoryAddresses.length === 1
-                    ? "repository"
-                    : "repositories"}
+                    ? uiT("repository")
+                    : uiT("repositories")}
                 </span>
                 <StatusPill status={project.status} />
                 <RepositoryUnavailableIndicator
@@ -539,7 +581,7 @@ export const ProjectGridCard = React.memo(function ProjectGridCard({
           )}
           data-testid="projects-grid-card-body"
         >
-          {project.description || "A shared space for internal git work."}
+          {project.description || uiT("A shared space for internal git work.")}
         </p>
 
         <div className="relative z-10 flex items-center px-4 pb-1">
@@ -572,6 +614,8 @@ export const ProjectListRow = React.memo(function ProjectListRow({
   onOpen,
   onOpenTerminal,
 }: ProjectItemProps) {
+  useUiLanguage();
+
   const repositoryCount = project.repositoryAddresses.length;
   const selectionItem = selectionItemFromProject({
     channelId: project.projectChannelId,

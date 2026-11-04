@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ArrowUp, AtSign, Square, X } from "lucide-react";
 import {
@@ -29,6 +31,8 @@ function AddressedAgentAvatar({
   pulseVersion,
   shakeVersion,
 }: AddressAnimationProps & { agent: ComposerAddressAgent }) {
+  useUiLanguage();
+
   const controls = useAnimationControls();
   const shouldReduceMotion = useReducedMotion();
   const previousPulseVersionRef = React.useRef(0);
@@ -81,7 +85,10 @@ function AddressedAgentAvatar({
 function RemainingAgentCount({ count }: { count: number }) {
   return count > 0 ? (
     <span
-      aria-label={`${count} more addressed ${count === 1 ? "agent" : "agents"}`}
+      aria-label={uiT("{0} more addressed {1}", {
+        p0: count,
+        p1: count === 1 ? "agent" : "agents",
+      })}
       className="flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-1 ring-border/70"
       role="img"
     >
@@ -150,6 +157,8 @@ export function ComposerMentionButton({
   onRemove: (pubkey: string) => void;
   showAgents: boolean;
 }) {
+  useUiLanguage();
+
   const visibleAgents = showAgents ? agents.slice(0, VISIBLE_AGENT_LIMIT) : [];
   const hiddenCount = showAgents ? agents.length - visibleAgents.length : 0;
   const hasAgents = visibleAgents.length > 0;
@@ -181,7 +190,9 @@ export function ComposerMentionButton({
           <Tooltip disableHoverableContent>
             <TooltipTrigger asChild>
               <button
-                aria-label={hasAgents ? "Manage mentions" : "Mention someone"}
+                aria-label={
+                  hasAgents ? uiT("Manage mentions") : uiT("Mention someone")
+                }
                 className={cn(
                   "flex h-8 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
                   showActiveChrome
@@ -202,7 +213,7 @@ export function ComposerMentionButton({
               </button>
             </TooltipTrigger>
             <TooltipContent>
-              {hasAgents ? "Manage mentions" : "Mention someone"}
+              {hasAgents ? uiT("Manage mentions") : uiT("Mention someone")}
             </TooltipContent>
           </Tooltip>
           <AnimatePresence
@@ -229,7 +240,10 @@ export function ComposerMentionButton({
                     <Tooltip disableHoverableContent key={agent.pubkey}>
                       <TooltipTrigger asChild>
                         <motion.button
-                          aria-label={`Don't automatically mention ${agent.displayName} in this thread`}
+                          aria-label={uiT(
+                            "Don't automatically mention {0} in this thread",
+                            { p0: agent.displayName },
+                          )}
                           animate={{ opacity: 1, scale: 1 }}
                           className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                           data-testid={`composer-address-lock-remove-${agent.pubkey}`}
@@ -270,8 +284,9 @@ export function ComposerMentionButton({
                         </motion.button>
                       </TooltipTrigger>
                       <TooltipContent>
-                        Don't automatically mention {agent.displayName} in this
-                        thread <AgentManagementMarker pubkey={agent.pubkey} />
+                        {uiT("Don't automatically mention ")}
+                        {agent.displayName} {uiT(" in this thread ")}
+                        <AgentManagementMarker pubkey={agent.pubkey} />
                       </TooltipContent>
                     </Tooltip>
                   ))}
@@ -304,7 +319,7 @@ export function ComposerMentionButton({
             onMouseDown={(event) => event.preventDefault()}
             type="button"
           >
-            Turn off
+            {uiT("Turn off")}
           </button>
         </PopoverContent>
       ) : null}
@@ -326,10 +341,10 @@ export function ComposerSendButton({
     <button
       aria-label={
         isFinishingVoiceNote
-          ? "Finish voice note"
+          ? uiT("Finish voice note")
           : isSending
-            ? "Sending"
-            : "Send message"
+            ? uiT("Sending")
+            : uiT("Send message")
       }
       className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
       data-testid={isFinishingVoiceNote ? "finish-voice-note" : "send-message"}

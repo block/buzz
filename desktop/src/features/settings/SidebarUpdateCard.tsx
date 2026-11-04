@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CircleArrowUp, ExternalLink } from "lucide-react";
@@ -21,6 +23,8 @@ export function SidebarUpdateCompactCard({
   onDismiss,
   testId = "sidebar-update-card-compact",
 }: SidebarUpdateCompactCardProps) {
+  useUiLanguage();
+
   const { installAndRelaunch, status } = useUpdaterContext();
   const [isUpdatePending, setIsUpdatePending] = React.useState(false);
   const updatePendingRef = React.useRef(false);
@@ -66,11 +70,11 @@ export function SidebarUpdateCompactCard({
 
   return (
     <SidebarCompactActionCard
-      actionAriaLabel="Update now"
+      actionAriaLabel={uiT("Update now")}
       actionDisabled={pending}
       actionTestId={actionTestId}
-      description={pending ? "Updating" : "Click to update"}
-      dismissLabel="Dismiss update notification"
+      description={pending ? uiT("Updating") : uiT("Click to update")}
+      dismissLabel={uiT("Dismiss update notification")}
       icon={
         pending ? (
           <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
@@ -82,12 +86,14 @@ export function SidebarUpdateCompactCard({
       onAction={handleUpdate}
       onDismiss={onDismiss}
       testId={testId}
-      title="Ready to update!"
+      title={uiT("Ready to update!")}
     />
   );
 }
 
 export function SidebarUpdateCard({ onDismiss }: SidebarUpdateCardProps) {
+  useUiLanguage();
+
   const { status } = useUpdaterContext();
 
   if (!shouldShowSidebarUpdateCard(status)) {
@@ -97,16 +103,19 @@ export function SidebarUpdateCard({ onDismiss }: SidebarUpdateCardProps) {
   if (status.state === "manual-required") {
     return (
       <SidebarCompactActionCard
-        actionAriaLabel="Download update from GitHub"
+        actionAriaLabel={uiT("Download update from GitHub")}
         actionTestId="sidebar-update-download-github"
-        description={`v${status.version} available — download from GitHub. Switch to AppImage for automatic updates.`}
-        dismissLabel="Dismiss update notification"
+        description={uiT(
+          "v{0} available — download from GitHub. Switch to AppImage for automatic updates.",
+          { p0: status.version },
+        )}
+        dismissLabel={uiT("Dismiss update notification")}
         icon={<ExternalLink aria-hidden="true" className="h-5 w-5" />}
         iconKey="manual"
         onAction={() => void openUrl(status.releaseUrl)}
         onDismiss={onDismiss}
         testId="sidebar-update-card-manual"
-        title="Update available"
+        title={uiT("Update available")}
       />
     );
   }

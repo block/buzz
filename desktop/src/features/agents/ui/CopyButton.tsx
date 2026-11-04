@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Copy } from "lucide-react";
 
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
@@ -18,7 +20,7 @@ export function CopyButton({
   value: string;
   variant?: ButtonProps["variant"];
 }) {
-  const resolvedLabel = label ?? "Copy";
+  const resolvedLabel = label ?? uiT("Copy");
 
   return (
     <Button

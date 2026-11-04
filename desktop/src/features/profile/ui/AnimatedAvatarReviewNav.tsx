@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   Camera,
   Circle,
@@ -21,21 +23,34 @@ const REVIEW_SECTIONS: {
     caption: "You",
     icon: UserRound,
     key: "person",
-    label: "Position yourself",
+    get label() {
+      return uiT("Position yourself");
+    },
   },
   {
     caption: "Circle",
     hidden: true,
     icon: Circle,
     key: "shape",
-    label: "Adjust the circle",
+    get label() {
+      return uiT("Adjust the circle");
+    },
   },
-  { caption: "Background", icon: Palette, key: "color", label: "Background" },
+  {
+    caption: "Background",
+    icon: Palette,
+    key: "color",
+    get label() {
+      return uiT("Background");
+    },
+  },
   {
     caption: "Frame",
     icon: GalleryThumbnails,
     key: "poster",
-    label: "Still frame",
+    get label() {
+      return uiT("Still frame");
+    },
   },
 ];
 
@@ -108,13 +123,13 @@ export function AnimatedAvatarReviewNav({
         className="h-12 w-px shrink-0 rounded-full bg-border/70"
       />
       <button
-        aria-label="Retake the recording"
+        aria-label={uiT("Retake the recording")}
         className="group flex flex-col items-center gap-1.5 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-testid={`${testIdPrefix}-animated-retake`}
         disabled={controlsDisabled}
         key="retake"
         onClick={onRetake}
-        title="Retake the recording"
+        title={uiT("Retake the recording")}
         type="button"
       >
         <span className="grid h-12 w-12 place-items-center rounded-full bg-muted text-muted-foreground/70 transition-[background-color,color,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none group-hover:bg-muted/80 group-hover:text-muted-foreground motion-safe:group-hover:scale-[1.04] motion-safe:group-active:scale-[0.98] group-disabled:bg-muted group-disabled:text-muted-foreground/70 group-disabled:scale-100">
@@ -123,7 +138,7 @@ export function AnimatedAvatarReviewNav({
             className="h-5 w-5 transition-transform duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none motion-safe:group-hover:rotate-[5deg] motion-safe:group-hover:scale-[1.12] motion-safe:group-active:scale-[0.98]"
           />
         </span>
-        <span className="text-sm text-muted-foreground">Retake</span>
+        <span className="text-sm text-muted-foreground">{uiT("Retake")}</span>
       </button>
     </div>
   );

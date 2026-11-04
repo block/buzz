@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -120,6 +122,8 @@ export function ChannelRouteScreen({
   targetReplyId,
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
+  useUiLanguage();
+
   const isHuddleTranscript = huddleWindowChannelId() !== null;
   const queryClient = useQueryClient();
   const { closeForumPost, goForumPost } = useAppNavigation();

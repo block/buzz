@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useEphemeralChannelDisplay } from "@/features/channels/useEphemeralChannelDisplay";
@@ -92,7 +94,7 @@ export function useActiveChannelHeader(
           currentPubkey,
           activeDmProfilesQuery.data?.profiles,
         )
-      : "Channels",
+      : uiT("Channels"),
     activeDmAvatarUrl,
     activeDmHeaderParticipants,
     activeDmPresenceStatus,

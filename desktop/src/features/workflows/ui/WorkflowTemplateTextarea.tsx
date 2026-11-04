@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -28,6 +30,8 @@ export function WorkflowTemplateTextarea({
   triggerType: TriggerType;
   value: string;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const generatedId = React.useId();
   const textareaId = props.id ?? `workflow-template-${generatedId}`;
@@ -38,6 +42,7 @@ export function WorkflowTemplateTextarea({
     () => workflowTemplateVariables(triggerType, previousSteps),
     [previousSteps, triggerType],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const suggestions = React.useMemo(() => {
     if (!token) return [];
     const query = token.query.toLowerCase();
@@ -46,7 +51,7 @@ export function WorkflowTemplateTextarea({
         variable.value.toLowerCase().includes(query) ||
         variable.description.toLowerCase().includes(query),
     );
-  }, [token, variables]);
+  }, [token, variables, __buzzLanguage]);
   const open = token !== null;
   const selectedOptionId = suggestions[selectedIndex]
     ? `${listboxId}-option-${selectedIndex}`
@@ -173,13 +178,14 @@ export function WorkflowTemplateTextarea({
             })
           ) : (
             <p className="px-2 py-2 text-xs text-muted-foreground">
-              No matching variables
+              {uiT("No matching variables")}
             </p>
           )}
         </div>
         {triggerType === "webhook" ? (
           <p className="border-t border-border/50 px-2 pb-1 pt-2 text-2xs text-muted-foreground">
-            JSON fields are available as {"{{trigger.field_name}}"}.
+            {uiT("JSON fields are available as ")}
+            {"{{trigger.field_name}}"}.
           </p>
         ) : null}
       </PopoverContent>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Check, FolderPlus, Link, Plus, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
@@ -42,6 +44,8 @@ export function ProjectRepositoryManagement({
   projects: Project[];
   repository?: Repository | null;
 }) {
+  useUiLanguage();
+
   const [uncontrolledCreateOpen, setUncontrolledCreateOpen] =
     React.useState(false);
   const createOpen = createOpenProp ?? uncontrolledCreateOpen;
@@ -120,7 +124,9 @@ export function ProjectRepositoryManagement({
             ownerControlAgentPubkey,
           });
           onChange(result.repository.id);
-          toast.success(`Repository "${result.repository.name}" created.`);
+          toast.success(
+            uiT('Repository "{0}" created.', { p0: result.repository.name }),
+          );
         }}
         onOpenChange={setCreateOpen}
         open={createOpen}
@@ -135,7 +141,9 @@ export function ProjectRepositoryManagement({
             repository: candidate,
           });
           onChange(result.repository.id);
-          toast.success(`Repository "${result.repository.name}" added.`);
+          toast.success(
+            uiT('Repository "{0}" added.', { p0: result.repository.name }),
+          );
         }}
         onOpenChange={setAttachOpen}
         open={attachOpen}
@@ -146,7 +154,7 @@ export function ProjectRepositoryManagement({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label="Add repository"
+              aria-label={uiT("Add repository")}
               className={
                 compact
                   ? "h-6 w-6 shrink-0 rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -157,14 +165,14 @@ export function ProjectRepositoryManagement({
               size={compact ? "icon" : "sm"}
               title={
                 canEdit
-                  ? "Add repository"
-                  : "Only the project owner can add repositories"
+                  ? uiT("Add repository")
+                  : uiT("Only the project owner can add repositories")
               }
               type="button"
               variant={compact ? "ghost" : "outline"}
             >
               <Plus className={compact ? "h-4 w-4" : "h-3.5 w-3.5"} />
-              {compact ? null : "Add"}
+              {compact ? null : uiT("Add")}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
@@ -173,14 +181,14 @@ export function ProjectRepositoryManagement({
               onSelect={() => setCreateOpen(true)}
             >
               <FolderPlus className="h-4 w-4" />
-              Create new repository
+              {uiT("Create new repository")}
             </DropdownMenuItem>
             <DropdownMenuItem
               data-testid="attach-project-repository"
               onSelect={() => setAttachOpen(true)}
             >
               <Link className="h-4 w-4" />
-              Select existing repository
+              {uiT("Select existing repository")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -189,7 +197,7 @@ export function ProjectRepositoryManagement({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label="Manage repository access"
+              aria-label={uiT("Manage repository access")}
               className={
                 compact
                   ? "h-6 w-6 shrink-0 rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -204,12 +212,14 @@ export function ProjectRepositoryManagement({
               {compact
                 ? null
                 : repairMutation.isPending
-                  ? "Updating…"
-                  : "Access"}
+                  ? uiT("Updating…")
+                  : uiT("Access")}
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-56">
-            <DropdownMenuLabel>Repository access channel</DropdownMenuLabel>
+            <DropdownMenuLabel>
+              {uiT("Repository access channel")}
+            </DropdownMenuLabel>
             {accessChannels.map((channel) => (
               <DropdownMenuItem
                 className="justify-between gap-4"
@@ -224,14 +234,16 @@ export function ProjectRepositoryManagement({
                     })
                     .then(() => {
                       toast.success(
-                        `Repository access set to #${channel.name}.`,
+                        uiT("Repository access set to #{0}.", {
+                          p0: channel.name,
+                        }),
                       );
                     })
                     .catch((error: unknown) => {
                       toast.error(
                         error instanceof Error
                           ? error.message
-                          : "Failed to update repository access.",
+                          : uiT("Failed to update repository access."),
                       );
                     });
                 }}

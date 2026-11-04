@@ -1,9 +1,13 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import React from "react";
 import { cn } from "@/shared/lib/cn";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
 /** Grid layout for messages that contain multiple standalone images. */
 export function ImageMosaic({ children }: { children: React.ReactNode[] }) {
+  useUiLanguage();
+
   const mosaicRef = React.useRef<HTMLDivElement | null>(null);
   const isTriptych = children.length === 3;
   const hasOddTail = children.length > 3 && children.length % 2 === 1;

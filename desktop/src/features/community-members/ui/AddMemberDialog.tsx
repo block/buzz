@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown, Search } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
@@ -40,11 +42,15 @@ const ROLE_OPTIONS: Array<{
 }> = [
   {
     value: "member",
-    label: "Member",
+    get label() {
+      return uiT("Member");
+    },
   },
   {
     value: "admin",
-    label: "Admin",
+    get label() {
+      return uiT("Admin");
+    },
   },
 ];
 
@@ -52,13 +58,15 @@ export function DirectAddMemberForm({
   isOwner,
   onAdded,
   showLabel = true,
-  submitLabel = "Add member",
+  submitLabel = uiT("Add member"),
 }: {
   isOwner: boolean;
   onAdded?: () => void;
   showLabel?: boolean;
   submitLabel?: string;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const addMutation = useAddRelayMemberMutation();
   const membersQuery = useRelayMembersQuery();
   const [query, setQuery] = React.useState("");
@@ -120,12 +128,13 @@ export function DirectAddMemberForm({
       isAgent: false,
     };
   }, [isAlreadyMember, parsedPubkey, searchResults, selectedPubkeys]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const roleOptions = React.useMemo(
     () => ROLE_OPTIONS.filter((option) => isOwner || option.value === "member"),
-    [isOwner],
+    [isOwner, __buzzLanguage],
   );
   const selectedRoleLabel =
-    roleOptions.find((option) => option.value === role)?.label ?? "Member";
+    roleOptions.find((option) => option.value === role)?.label ?? uiT("Member");
   const actionTransition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.18, ease: [0.23, 1, 0.32, 1] as const };
@@ -173,11 +182,11 @@ export function DirectAddMemberForm({
       toast.success(
         selectedUsers.length === 1
           ? role === "admin"
-            ? "Admin added"
-            : "Member added"
+            ? uiT("Admin added")
+            : uiT("Member added")
           : role === "admin"
-            ? "Admins added"
-            : "Members added",
+            ? uiT("Admins added")
+            : uiT("Members added"),
       );
       reset();
       onAdded?.();
@@ -198,7 +207,7 @@ export function DirectAddMemberForm({
       <div className="space-y-1.5">
         {showLabel ? (
           <label className="text-sm font-medium" htmlFor="member-search">
-            Person
+            {uiT("Person")}
           </label>
         ) : null}
         <div className="flex gap-2">
@@ -266,7 +275,7 @@ export function DirectAddMemberForm({
                       }}
                       placeholder={
                         selectedUsers.length === 0
-                          ? "Search people or paste an npub"
+                          ? uiT("Search people or paste an npub")
                           : ""
                       }
                       ref={searchInputRef}
@@ -287,7 +296,7 @@ export function DirectAddMemberForm({
                         <DropdownMenu modal={false}>
                           <DropdownMenuTrigger asChild>
                             <button
-                              aria-label="Choose member role"
+                              aria-label={uiT("Choose member role")}
                               className="inline-flex items-center gap-1.5 bg-transparent text-sm text-muted-foreground outline-hidden transition-colors hover:text-foreground focus-visible:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
                               data-testid="member-role"
                               disabled={addMutation.isPending}
@@ -342,7 +351,7 @@ export function DirectAddMemberForm({
               >
                 {userSearchQuery.isLoading ? (
                   <p className="px-3 py-3 text-sm text-muted-foreground">
-                    Searching…
+                    {uiT("Searching…")}
                   </p>
                 ) : searchResults.length > 0 || directResult ? (
                   <>
@@ -364,8 +373,9 @@ export function DirectAddMemberForm({
                   </>
                 ) : (
                   <p className="px-3 py-3 text-sm text-muted-foreground">
-                    No people found. Paste a full npub or hex public key to add
-                    someone directly.
+                    {uiT(
+                      "No people found. Paste a full npub or hex public key to add someone directly.",
+                    )}
                   </p>
                 )}
               </div>
@@ -387,7 +397,7 @@ export function DirectAddMemberForm({
                   size="sm"
                   type="submit"
                 >
-                  {addMutation.isPending ? "Inviting…" : submitLabel}
+                  {addMutation.isPending ? uiT("Inviting…") : submitLabel}
                 </Button>
               </motion.div>
             ) : null}
@@ -395,7 +405,7 @@ export function DirectAddMemberForm({
         </div>
         {isAlreadyMember ? (
           <p className="text-xs text-destructive">
-            This person is already a community member.
+            {uiT("This person is already a community member.")}
           </p>
         ) : null}
         {userSearchQuery.error instanceof Error ? (
@@ -431,9 +441,9 @@ export function AddMemberDialog({
       >
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-            <DialogTitle>Add member</DialogTitle>
+            <DialogTitle>{uiT("Add member")}</DialogTitle>
             <DialogDescription>
-              Add a person to this community by their public key.
+              {uiT("Add a person to this community by their public key.")}
             </DialogDescription>
           </DialogHeader>
           <div className="px-6 py-4">

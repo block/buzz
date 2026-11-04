@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   AlertCircle,
   Bell,
@@ -101,7 +103,7 @@ function InboxLabel({
       )}
       data-inbox-type-label=""
     >
-      <span className="shrink-0">{label.text}</span>
+      <span className="shrink-0">{uiT(label.text)}</span>
       {label.channelLabel ? (
         <span
           className={cn(
@@ -190,7 +192,7 @@ function PersonalItemRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-semibold text-foreground">
-          Reminder
+          {uiT("Reminder")}
         </span>
         {location ? (
           <InboxLabel
@@ -269,6 +271,8 @@ export function InboxListPane({
   selectedReminderId,
   unreadOnly,
 }: InboxListPaneProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
   const isMixedInboxView = filter === "all";
@@ -285,12 +289,13 @@ export function InboxListPane({
       }),
     [items, reminders, unreadOnly],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const visibleInboxRows = React.useMemo(
     () =>
       isMixedInboxView
         ? inboxRows
         : inboxRows.filter((row) => row.kind === "inbox"),
-    [inboxRows, isMixedInboxView],
+    [inboxRows, isMixedInboxView, __buzzLanguage],
   );
   const reminderSources = useReminderSources(reminders);
   const unreadVisibleItemCount = React.useMemo(
@@ -319,10 +324,10 @@ export function InboxListPane({
     const hasReopenError = isReopenErrored?.(item.item.channelId) ?? false;
     const canOpen = hasChannelTarget && !isReopening;
     const openLabel = !hasChannelTarget
-      ? "No channel link"
+      ? uiT("No channel link")
       : isReopening
-        ? "Reopening…"
-        : "Open in channel";
+        ? uiT("Reopening…")
+        : uiT("Open in channel");
     const typeLabel = getInboxTypeLabel(item);
     const videoReviewCommentRootId = getInboxVideoReviewCommentRootId(item);
     const isSenderAgent =
@@ -353,7 +358,7 @@ export function InboxListPane({
         }
       >
         <button
-          aria-label={`Open inbox item from ${item.senderLabel}`}
+          aria-label={uiT("Open inbox item from {0}", { p0: item.senderLabel })}
           className="absolute inset-0 z-0 block w-full border-l border-l-transparent text-left"
           onClick={() => onSelect(item.id)}
           type="button"
@@ -433,7 +438,7 @@ export function InboxListPane({
                   ) : null}
                   {item.unreadCount > 1 ? (
                     <span data-testid="home-inbox-unread-count">
-                      {item.unreadCount} unread
+                      {uiT("{0} unread", { p0: item.unreadCount })}
                     </span>
                   ) : null}
                   {item.timestampLabel}
@@ -450,7 +455,7 @@ export function InboxListPane({
                   data-testid="home-inbox-reminder-due"
                 >
                   <Bell className="h-3 w-3" />
-                  Reminder due
+                  {uiT("Reminder due")}
                 </div>
               ) : null}
 
@@ -469,12 +474,12 @@ export function InboxListPane({
                   {isReopening ? (
                     <>
                       <LoaderCircle className="h-3 w-3 shrink-0 animate-spin" />
-                      Reopening…
+                      {uiT("Reopening…")}
                     </>
                   ) : (
                     <>
                       <AlertCircle className="h-3 w-3 shrink-0" />
-                      Couldn’t reopen
+                      {uiT("Couldn’t reopen")}
                       {canOpen ? (
                         <button
                           className="ml-0.5 rounded font-semibold underline underline-offset-2 hover:no-underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
@@ -487,7 +492,7 @@ export function InboxListPane({
                           }}
                           type="button"
                         >
-                          Retry
+                          {uiT("Retry")}
                         </button>
                       ) : null}
                     </>
@@ -518,14 +523,14 @@ export function InboxListPane({
         <div className="pointer-events-none absolute right-3 top-2 z-10 flex items-center gap-0.5 rounded-full bg-[var(--inbox-row-highlight-bg)] p-1 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
           {isDone ? (
             <InboxRowActionButton
-              label="Mark unread"
+              label={uiT("Mark unread")}
               onClick={() => onMarkUnread(item.id)}
             >
               <MailOpen className="!h-4 !w-4" />
             </InboxRowActionButton>
           ) : (
             <InboxRowActionButton
-              label="Mark as read"
+              label={uiT("Mark as read")}
               onClick={() => onMarkRead(item.id)}
             >
               <MailOpen className="!h-4 !w-4" />
@@ -544,9 +549,9 @@ export function InboxListPane({
             label={
               hasChannelTarget
                 ? hasActiveReminder
-                  ? "Reminder set"
-                  : "Remind me later"
-                : "Cannot remind without a channel"
+                  ? uiT("Reminder set")
+                  : uiT("Remind me later")
+                : uiT("Cannot remind without a channel")
             }
             onClick={() => onRemindLater(item)}
           >
@@ -563,12 +568,12 @@ export function InboxListPane({
           {isDone ? (
             <ContextMenuItem onClick={() => onMarkUnread(item.id)}>
               <MailOpen className="h-4 w-4" />
-              Mark unread
+              {uiT("Mark unread")}
             </ContextMenuItem>
           ) : (
             <ContextMenuItem onClick={() => onMarkRead(item.id)}>
               <MailOpen className="h-4 w-4" />
-              Mark as read
+              {uiT("Mark as read")}
             </ContextMenuItem>
           )}
           <ContextMenuSeparator />
@@ -592,7 +597,7 @@ export function InboxListPane({
             }}
           >
             <Clock className="h-4 w-4" />
-            {hasActiveReminder ? "Reminder set" : "Remind me later"}
+            {hasActiveReminder ? uiT("Reminder set") : uiT("Remind me later")}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
@@ -613,7 +618,7 @@ export function InboxListPane({
               <Popover>
                 <PopoverTrigger asChild>
                   <button
-                    aria-label="Inbox options"
+                    aria-label={uiT("Inbox options")}
                     className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "-mr-4")}
                     data-testid="inbox-options-trigger"
                     type="button"
@@ -632,7 +637,7 @@ export function InboxListPane({
                       className="text-sm font-medium text-foreground"
                       htmlFor="inbox-unread-only-switch"
                     >
-                      Show unread only
+                      {uiT("Show unread only")}
                     </label>
                     <Switch
                       checked={unreadOnly}
@@ -650,7 +655,7 @@ export function InboxListPane({
                     onClick={handleMarkAllRead}
                     type="button"
                   >
-                    <span>Mark all as read</span>
+                    <span>{uiT("Mark all as read")}</span>
                     {unreadVisibleItemCount > 0 ? (
                       <span className="ml-auto text-xs text-muted-foreground">
                         {unreadVisibleItemCount}
@@ -748,16 +753,18 @@ export function InboxListPane({
             <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
               <div>
                 <p className="text-sm font-medium text-foreground">
-                  {unreadOnly
-                    ? INBOX_UNREAD_EMPTY_STATE_TITLES[filter]
-                    : INBOX_EMPTY_STATE_TITLES[filter]}
+                  {uiT(
+                    unreadOnly
+                      ? INBOX_UNREAD_EMPTY_STATE_TITLES[filter]
+                      : INBOX_EMPTY_STATE_TITLES[filter],
+                  )}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {unreadOnly
-                    ? "Turn off Show unread only to see read activity."
+                    ? uiT("Turn off Show unread only to see read activity.")
                     : filter === "all"
-                      ? "New activity will appear here."
-                      : "Switch back to All to see other activity."}
+                      ? uiT("New activity will appear here.")
+                      : uiT("Switch back to All to see other activity.")}
                 </p>
               </div>
             </div>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { toast } from "sonner";
 
 import { truncateNpub } from "@/shared/lib/pubkey";
@@ -24,6 +26,8 @@ export function ConfirmRemoveDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  useUiLanguage();
+
   const removeMutation = useRemoveRelayMemberMutation();
   const label = displayName || (member ? truncateNpub(member.pubkey) : "");
 
@@ -41,9 +45,9 @@ export function ConfirmRemoveDialog({
         data-testid="confirm-remove-member-dialog"
       >
         <DialogHeader>
-          <DialogTitle>Remove {label}?</DialogTitle>
+          <DialogTitle>{uiT("Remove {0}?", { p0: label })}</DialogTitle>
           <DialogDescription>
-            This will immediately revoke their access to the relay.
+            {uiT("This will immediately revoke their access to the relay.")}
           </DialogDescription>
           {member ? (
             <PubKey
@@ -59,7 +63,7 @@ export function ConfirmRemoveDialog({
             size="sm"
             variant="outline"
           >
-            Cancel
+            {uiT("Cancel")}
           </Button>
           <Button
             data-testid="confirm-remove-member"
@@ -68,14 +72,14 @@ export function ConfirmRemoveDialog({
               if (!member) return;
               removeMutation.mutate(member.pubkey, {
                 onSuccess: () => {
-                  toast.success("Member removed");
+                  toast.success(uiT("Member removed"));
                   handleOpenChange(false);
                 },
                 onError: (error) => {
                   toast.error(
                     error instanceof Error
                       ? error.message
-                      : "Failed to remove member",
+                      : uiT("Failed to remove member"),
                   );
                 },
               });
@@ -83,7 +87,7 @@ export function ConfirmRemoveDialog({
             size="sm"
             variant="destructive"
           >
-            {removeMutation.isPending ? "Removing..." : "Remove"}
+            {removeMutation.isPending ? uiT("Removing...") : uiT("Remove")}
           </Button>
         </div>
       </DialogContent>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Clock } from "lucide-react";
 
 import {
@@ -20,7 +22,7 @@ import {
  * timeout resolution can share it and stay on one preset list.
  */
 export function TimeoutDurationSubmenu({
-  label = "Time out",
+  label = uiT("Time out"),
   disabled = false,
   testIdPrefix,
   onSelect,

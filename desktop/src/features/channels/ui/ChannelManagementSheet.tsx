@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Archive,
   ArchiveRestore,
@@ -107,6 +109,8 @@ export function ChannelManagementSheet({
   open,
   transparentChrome = false,
 }: ChannelManagementSheetProps) {
+  useUiLanguage();
+
   const { isDark } = useTheme();
   const { goNewWorkflowForChannel, goWorkflow } = useAppNavigation();
   const {
@@ -490,8 +494,9 @@ export function ChannelManagementSheet({
             <div className="flex max-h-[85vh] flex-col">
               <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
                 <DialogTitle>
-                  Edit {nextVisibility === "private" ? "private" : "public"}{" "}
-                  channel
+                  {uiT("Edit {0} channel", {
+                    p0: nextVisibility === "private" ? "private" : "public",
+                  })}
                 </DialogTitle>
               </DialogHeader>
 
@@ -502,7 +507,7 @@ export function ChannelManagementSheet({
                       className="text-sm font-medium text-foreground"
                       htmlFor="channel-name"
                     >
-                      Name
+                      {uiT("Name")}
                     </label>
                     <div
                       className={cn(
@@ -531,7 +536,7 @@ export function ChannelManagementSheet({
                       className="text-sm font-medium text-foreground"
                       htmlFor="channel-description"
                     >
-                      Description
+                      {uiT("Description")}
                     </label>
                     <div className={CHANNEL_FORM_FIELD_SHELL_CLASS}>
                       <Textarea
@@ -599,7 +604,7 @@ export function ChannelManagementSheet({
                   type="button"
                   variant="outline"
                 >
-                  Cancel
+                  {uiT("Cancel")}
                 </Button>
                 <Button
                   data-testid="channel-management-save-changes"
@@ -608,7 +613,9 @@ export function ChannelManagementSheet({
                   size="sm"
                   type="button"
                 >
-                  {isSavingChannelEdits ? "Saving..." : "Save changes"}
+                  {isSavingChannelEdits
+                    ? uiT("Saving...")
+                    : uiT("Save changes")}
                 </Button>
               </div>
             </div>
@@ -707,6 +714,8 @@ function ChannelManagementPanelContent({
   setActiveView,
   unarchiveChannelMutation,
 }: ChannelManagementPanelContentProps) {
+  useUiLanguage();
+
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useScrollBoundaryLock(scrollRef);
 
@@ -731,7 +740,7 @@ function ChannelManagementPanelContent({
         transparent={transparentChrome}
       >
         <AuxiliaryPanelHeaderGroup
-          backButtonAriaLabel="Back to channel"
+          backButtonAriaLabel={uiT("Back to channel")}
           backButtonTestId="channel-management-back"
           mode={mode}
           onBack={
@@ -743,15 +752,15 @@ function ChannelManagementPanelContent({
           <DialogPrimitive.Title asChild>
             <AuxiliaryPanelTitle>
               {activeView === "canvas"
-                ? "Canvas"
+                ? uiT("Canvas")
                 : activeView === "workflows"
-                  ? "Workflows"
-                  : "Channel Settings"}
+                  ? uiT("Workflows")
+                  : uiT("Channel Settings")}
             </AuxiliaryPanelTitle>
           </DialogPrimitive.Title>
         </AuxiliaryPanelHeaderGroup>
         <DialogPrimitive.Description className="sr-only">
-          Channel settings
+          {uiT("Channel settings")}
         </DialogPrimitive.Description>
       </AuxiliaryPanelHeader>
 
@@ -780,7 +789,10 @@ function ChannelManagementPanelContent({
               </p>
             ) : null}
 
-            <FieldGroup testId="channel-management-details" title="Details">
+            <FieldGroup
+              testId="channel-management-details"
+              title={uiT("Details")}
+            >
               {resolvedChannel.channelType !== "dm" ? (
                 <>
                   <ChannelTypeDetailRow
@@ -790,7 +802,7 @@ function ChannelManagementPanelContent({
                   />
                   <EditableInfoFieldRow
                     editTestId="channel-management-edit-visibility"
-                    label="Visibility"
+                    label={uiT("Visibility")}
                     onEdit={canEditChannel ? onOpenEdit : undefined}
                     testId="channel-management-visibility"
                     value={
@@ -802,7 +814,7 @@ function ChannelManagementPanelContent({
                 </>
               ) : null}
               <InfoFieldRow
-                label="Members"
+                label={uiT("Members")}
                 onClick={onOpenMembers}
                 testId="channel-management-member-count"
                 trailing={
@@ -814,7 +826,7 @@ function ChannelManagementPanelContent({
                 value={`${memberCount} member${memberCount === 1 ? "" : "s"}`}
               />
               <CopyFieldRow
-                label="Channel ID"
+                label={uiT("Channel ID")}
                 testId="channel-management-channel-id"
                 value={resolvedChannel.id}
               />
@@ -824,9 +836,11 @@ function ChannelManagementPanelContent({
               <div className="space-y-3">
                 <IngressRow
                   description={canvasPreview}
-                  helpText="Use the canvas as a shared space for notes, plans, and other channel information."
+                  helpText={uiT(
+                    "Use the canvas as a shared space for notes, plans, and other channel information.",
+                  )}
                   icon={BookOpenText}
-                  label="Canvas"
+                  label={uiT("Canvas")}
                   onClick={() => setActiveView("canvas")}
                   testId="channel-canvas-ingress"
                   trailing={canvasQuery.isLoading ? "Loading..." : undefined}
@@ -836,10 +850,13 @@ function ChannelManagementPanelContent({
                     description={
                       workflowsQuery.isLoading
                         ? undefined
-                        : `${workflowsQuery.data?.length ?? 0} workflow${workflowsQuery.data?.length === 1 ? "" : "s"}`
+                        : uiT("{0} workflow{1}", {
+                            p0: workflowsQuery.data?.length ?? 0,
+                            p1: workflowsQuery.data?.length === 1 ? "" : "s",
+                          })
                     }
                     icon={WorkflowIcon}
-                    label="Workflows"
+                    label={uiT("Workflows")}
                     onClick={() => setActiveView("workflows")}
                     testId="channel-workflows-ingress"
                     trailing={
@@ -853,10 +870,13 @@ function ChannelManagementPanelContent({
                 description={
                   workflowsQuery.isLoading
                     ? undefined
-                    : `${workflowsQuery.data?.length ?? 0} workflow${workflowsQuery.data?.length === 1 ? "" : "s"}`
+                    : uiT("{0} workflow{1}", {
+                        p0: workflowsQuery.data?.length ?? 0,
+                        p1: workflowsQuery.data?.length === 1 ? "" : "s",
+                      })
                 }
                 icon={WorkflowIcon}
-                label="Workflows"
+                label={uiT("Workflows")}
                 onClick={() => setActiveView("workflows")}
                 testId="channel-workflows-ingress"
                 trailing={workflowsQuery.isLoading ? "Loading..." : undefined}
@@ -867,13 +887,13 @@ function ChannelManagementPanelContent({
               <FieldGroup testId="channel-management-actions">
                 {canJoin ? (
                   <ActionFieldRow
-                    description="Add this channel to your sidebar"
+                    description={uiT("Add this channel to your sidebar")}
                     disabled={joinChannelMutation.isPending}
                     icon={DoorOpen}
                     label={
                       joinChannelMutation.isPending
-                        ? "Joining channel..."
-                        : "Join channel"
+                        ? uiT("Joining channel...")
+                        : uiT("Join channel")
                     }
                     onClick={() => {
                       void joinChannelMutation.mutateAsync();
@@ -887,8 +907,8 @@ function ChannelManagementPanelContent({
                     icon={DoorClosed}
                     label={
                       leaveChannelMutation.isPending
-                        ? "Leaving channel..."
-                        : "Leave channel"
+                        ? uiT("Leaving channel...")
+                        : uiT("Leave channel")
                     }
                     onClick={() => {
                       void leaveChannelMutation.mutateAsync().then(() => {
@@ -905,8 +925,8 @@ function ChannelManagementPanelContent({
                       icon={ArchiveRestore}
                       label={
                         unarchiveChannelMutation.isPending
-                          ? "Restoring channel..."
-                          : "Unarchive channel"
+                          ? uiT("Restoring channel...")
+                          : uiT("Unarchive channel")
                       }
                       onClick={() => {
                         void unarchiveChannelMutation.mutateAsync();
@@ -919,8 +939,8 @@ function ChannelManagementPanelContent({
                       icon={Archive}
                       label={
                         archiveChannelMutation.isPending
-                          ? "Archiving channel..."
-                          : "Archive channel"
+                          ? uiT("Archiving channel...")
+                          : uiT("Archive channel")
                       }
                       onClick={() => {
                         void archiveChannelMutation.mutateAsync();
@@ -944,7 +964,7 @@ function ChannelManagementPanelContent({
                         destructive
                         disabled={deleteChannelMutation.isPending}
                         icon={Trash2}
-                        label="Delete channel"
+                        label={uiT("Delete channel")}
                         testId="channel-management-delete"
                       />
                     }

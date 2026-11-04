@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import {
@@ -52,7 +54,7 @@ export function IdleAuxiliaryPanel({
       onClose={onClose}
       onResetWidth={onResetWidth}
       onResizeStart={onResizeStart}
-      resizeHandleAriaLabel="Resize panel"
+      resizeHandleAriaLabel={uiT("Resize panel")}
       resizeHandleTestId="idle-auxiliary-resize-handle"
       testId="idle-auxiliary-panel"
       transparentChrome={split}

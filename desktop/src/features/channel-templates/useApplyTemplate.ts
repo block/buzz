@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -137,7 +139,7 @@ export function useApplyTemplate() {
         const { toast } = await import("sonner");
         toast.warning(
           result.failures.length === 1
-            ? "1 agent from the template could not be created"
+            ? uiT("1 agent from the template could not be created")
             : `${result.failures.length} agents from the template could not be created`,
         );
       }

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type {
@@ -110,8 +112,8 @@ export function UserProfilePersonaDialogs({
         }}
         onSubmit={onSubmit}
         open={personaDialogState !== null}
-        submitLabel={personaDialogState?.submitLabel ?? "Save"}
-        title={personaDialogState?.title ?? "Agent"}
+        submitLabel={personaDialogState?.submitLabel ?? uiT("Save")}
+        title={personaDialogState?.title ?? uiT("Agent")}
       />
       <PersonaDeleteDialog
         instanceCount={instanceCount}

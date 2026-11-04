@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { MessageCircle } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
@@ -20,13 +22,13 @@ export function ProjectsOverviewChromeActions({
   return (
     <>
       <Button
-        aria-label={`Chat with an agent about ${sectionTitle}`}
+        aria-label={uiT("Chat with an agent about {0}", { p0: sectionTitle })}
         aria-pressed={chatOpen}
         className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
         data-testid="projects-overview-chat-toggle"
         onClick={onToggleChat}
         size="icon"
-        title={`Chat with an agent about ${sectionTitle}`}
+        title={uiT("Chat with an agent about {0}", { p0: sectionTitle })}
         type="button"
         variant="ghost"
       >
@@ -39,14 +41,20 @@ export function ProjectsOverviewChromeActions({
       </Button>
       <Button
         aria-label={
-          contextOpen ? "Hide project context" : "Show project context"
+          contextOpen
+            ? uiT("Hide project context")
+            : uiT("Show project context")
         }
         aria-pressed={contextOpen}
         className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
         data-testid="projects-overview-context-toggle"
         onClick={onToggleContext}
         size="icon"
-        title={contextOpen ? "Hide project context" : "Show project context"}
+        title={
+          contextOpen
+            ? uiT("Hide project context")
+            : uiT("Show project context")
+        }
         type="button"
         variant="ghost"
       >

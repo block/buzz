@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { Bot } from "lucide-react";
 import type { UserSearchResult } from "@/shared/api/types";
@@ -37,7 +39,7 @@ export function AddMemberSearchResultRow({
       data-testid={`channel-user-search-result-${user.pubkey}`}
     >
       <button
-        aria-label={`Select ${formatAddCandidateName(user)}`}
+        aria-label={uiT("Select {0}", { p0: formatAddCandidateName(user) })}
         className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
         disabled={disabled}
         onClick={() => onSelect(user)}
@@ -59,7 +61,7 @@ export function AddMemberSearchResultRow({
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
                 <Bot aria-hidden="true" className="h-4 w-4" />
-                agent
+                {uiT("agent")}
               </span>
               <AgentManagementMarker
                 pubkey={user.pubkey}
@@ -71,7 +73,7 @@ export function AddMemberSearchResultRow({
             </span>
             {ownerLabel ? (
               <span className="block truncate text-xs text-muted-foreground">
-                managed by {ownerLabel}
+                {uiT("managed by {0}", { p0: ownerLabel })}
               </span>
             ) : null}
           </div>
@@ -91,7 +93,7 @@ export function AddMemberSearchResultRow({
         size="sm"
         type="button"
       >
-        Add
+        {uiT("Add")}
       </Button>
     </div>
   );

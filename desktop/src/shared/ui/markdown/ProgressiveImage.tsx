@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -50,6 +52,8 @@ export function ProgressiveImage({
   thumbSrc,
   width,
 }: ProgressiveImageProps) {
+  useUiLanguage();
+
   const thumbnailSrc = isSameImageSource(thumbSrc, resolvedSrc)
     ? undefined
     : thumbSrc;

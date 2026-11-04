@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 export type BackgroundMediaUploadPhase =
   | "preparing"
   | "processing-video"
@@ -45,16 +47,16 @@ export function backgroundMediaUploadPhaseLabel(
 ): string {
   switch (phase) {
     case "processing-video":
-      return "Processing";
+      return uiT("Processing");
     case "converting-image":
-      return "Converting";
+      return uiT("Converting");
     case "processing-files":
-      return "Processing";
+      return uiT("Processing");
     case "uploading":
-      return "Uploading";
+      return uiT("Uploading");
     case "finishing":
-      return "Finishing";
+      return uiT("Finishing");
     default:
-      return "Preparing";
+      return uiT("Preparing");
   }
 }

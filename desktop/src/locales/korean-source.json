@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/Gwani-28/buzz",
+  "ref": "0a1e20470327270e572b2495eddb55bd726951f6",
+  "path": "team-patches/40-korean.patch",
+  "upstreamLicense": "Apache-2.0",
+  "patchSha256": "f0f48c354ca48909e229dde1e66cab9d29996a82bae4dce4877f0428e5494936",
+  "snapshotSha256": "6b5bb5edfabf67c93f7a2b1917fa10e5d1c968ed61bb3b586ab7b76603e52f63",
+  "exact": 2446,
+  "patterns": 321,
+  "method": "Literal catalogue only; DOM observer code is not imported."
+}

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ProjectPullRequest, Repository } from "@/features/projects/hooks";
 import { AlertTriangle } from "lucide-react";
 import {
@@ -50,7 +52,7 @@ export function ProjectHomeCommitsPanel({
       )
     : null;
   if (results.some((result) => result.isLoading) && loaded.length === 0) {
-    return <BuzzLoadingState label="Loading commits" />;
+    return <BuzzLoadingState label={uiT("Loading commits")} />;
   }
   if (loaded.length === 0) {
     return (
@@ -62,10 +64,12 @@ export function ProjectHomeCommitsPanel({
                   ? ` ${failed.length - 1} other repositories also failed.`
                   : ""
               }`
-            : "Commits pushed to this project's repositories will appear here."
+            : uiT(
+                "Commits pushed to this project's repositories will appear here.",
+              )
         }
         error={failed.length > 0}
-        title={failure?.title ?? "No commits yet"}
+        title={failure?.title ?? uiT("No commits yet")}
       />
     );
   }
@@ -82,10 +86,18 @@ export function ProjectHomeCommitsPanel({
         >
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
           <p>
-            Showing commits from {loaded.length} of {results.length}{" "}
-            repositories. {failed.length}{" "}
-            {failed.length === 1 ? "repository could" : "repositories could"}{" "}
-            not be loaded.
+            {uiT(
+              "Showing commits from {0} of {1} repositories. {2} {3} not be loaded.",
+              {
+                p0: loaded.length,
+                p1: results.length,
+                p2: failed.length,
+                p3:
+                  failed.length === 1
+                    ? "repository could"
+                    : "repositories could",
+              },
+            )}
           </p>
         </div>
       ) : null}

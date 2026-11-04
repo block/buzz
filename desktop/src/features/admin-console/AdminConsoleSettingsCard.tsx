@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Settings card for the desktop admin console.
  *
@@ -50,6 +52,8 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 // ── DeniedBadge — copy-icon button for the pubkey ─────────────────────────
 
 function DeniedBadge({ pubkeyHex }: { pubkeyHex: string }) {
+  useUiLanguage();
+
   const [copied, setCopied] = useState(false);
   const resetTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(resetTimer.current), []);
@@ -58,11 +62,12 @@ function DeniedBadge({ pubkeyHex }: { pubkeyHex: string }) {
     <span className="flex flex-col gap-1 text-xs text-destructive">
       <span className="flex items-center gap-1.5">
         <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-        Access denied
+        {uiT("Access denied")}
       </span>
       <span className="text-muted-foreground">
-        Your pubkey is not authorized as an operator on this relay. Ask a relay
-        operator to add:
+        {uiT(
+          "Your pubkey is not authorized as an operator on this relay. Ask a relay operator to add:",
+        )}
       </span>
       <span className="flex min-w-0 items-center gap-1.5 rounded bg-muted px-1.5 py-0.5">
         <code
@@ -72,7 +77,7 @@ function DeniedBadge({ pubkeyHex }: { pubkeyHex: string }) {
           {pubkeyHex}
         </code>
         <Button
-          aria-label="Copy pubkey"
+          aria-label={uiT("Copy pubkey")}
           data-testid="admin-denied-pubkey-copy"
           onClick={() => {
             copyTextToClipboard(pubkeyHex, "Pubkey copied");
@@ -95,7 +100,9 @@ function DeniedBadge({ pubkeyHex }: { pubkeyHex: string }) {
         </Button>
       </span>
       <span className="text-muted-foreground">
-        Other possible causes: clock skew &gt; 60 s or a relay config mismatch.
+        {uiT(
+          "Other possible causes: clock skew > 60 s or a relay config mismatch.",
+        )}
       </span>
     </span>
   );
@@ -122,16 +129,17 @@ function ProbeStatusBadge({ uiState }: { uiState: ProbeUiState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-        Probing…
+        {uiT("Probing…")}
       </span>
     );
   }
   if (uiState.kind === "authorized") {
-    const roleLabel = uiState.role ?? "operator";
+    const roleLabel = uiState.role ?? uiT("operator");
     return (
       <span className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
         <CheckCircle2 className="h-3.5 w-3.5" />
-        Connected as {roleLabel}
+        {uiT("Connected as ")}
+        {roleLabel}
       </span>
     );
   }
@@ -142,8 +150,9 @@ function ProbeStatusBadge({ uiState }: { uiState: ProbeUiState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
         <Info className="h-3.5 w-3.5" />
-        Auth is disabled on this relay. The admin console is read-only; taking
-        action requires BUZZ_ADMIN_AUTH=nip98.
+        {uiT(
+          "Auth is disabled on this relay. The admin console is read-only; taking action requires BUZZ_ADMIN_AUTH=nip98.",
+        )}
       </span>
     );
   }
@@ -151,7 +160,7 @@ function ProbeStatusBadge({ uiState }: { uiState: ProbeUiState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <AlertCircle className="h-3.5 w-3.5" />
-        No admin API found at this origin. Check the URL matches{" "}
+        {uiT("No admin API found at this origin. Check the URL matches")}{" "}
         <code className="font-mono">BUZZ_ADMIN_HOST</code>.
       </span>
     );
@@ -160,8 +169,9 @@ function ProbeStatusBadge({ uiState }: { uiState: ProbeUiState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-destructive">
         <AlertCircle className="h-3.5 w-3.5" />
-        Could not reach the relay. Check: network, TLS certificate, DNS, or
-        whether a VPN/SSO layer (e.g. Cloudflare Access) intercepts this host.
+        {uiT(
+          "Could not reach the relay. Check: network, TLS certificate, DNS, or whether a VPN/SSO layer (e.g. Cloudflare Access) intercepts this host.",
+        )}
       </span>
     );
   }
@@ -205,6 +215,8 @@ function probeStateToUiState(
 // ── Main card ─────────────────────────────────────────────────────────────
 
 export function AdminConsoleSettingsCard() {
+  useUiLanguage();
+
   const { data: identity } = useIdentityQuery();
   const pubkeyHex = identity?.pubkey ?? "";
 
@@ -214,8 +226,10 @@ export function AdminConsoleSettingsCard() {
       data-testid="settings-admin-console"
     >
       <SettingsSectionHeader
-        title="Admin"
-        description="Manage your relay's platform layer: triage cross-community reports, review product feedback, and configure the relay operator roster."
+        title={uiT("Admin")}
+        description={uiT(
+          "Manage your relay's platform layer: triage cross-community reports, review product feedback, and configure the relay operator roster.",
+        )}
       />
       {pubkeyHex ? (
         <AdminConsoleSettingsSession key={pubkeyHex} pubkeyHex={pubkeyHex} />
@@ -237,6 +251,8 @@ export function AdminConsoleSettingsCard() {
 // B's pubkey and A's stale origin/authorized state for one render cycle.
 
 function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
+  useUiLanguage();
+
   const [originInput, setOriginInput] = useState("");
   const [savedOrigin, setSavedOrigin] = useState<string | null>(null);
   const [probeUiState, setProbeUiState] = useState<ProbeUiState>({
@@ -504,7 +520,7 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
         >
           <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
             <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open/advanced:rotate-90" />
-            Advanced: admin origin
+            {uiT("Advanced: admin origin")}
           </summary>
           <div className="space-y-3 px-3 pb-3">
             <div className="flex gap-2">
@@ -539,7 +555,7 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
                 {isSaving ? (
                   <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  "Save"
+                  uiT("Save")
                 )}
               </Button>
               {savedOrigin && (
@@ -555,19 +571,20 @@ function AdminConsoleSettingsSession({ pubkeyHex }: { pubkeyHex: string }) {
                   type="button"
                   variant="ghost"
                 >
-                  Re-probe
+                  {uiT("Re-probe")}
                 </Button>
               )}
             </div>
             {probeUiState.kind === "authorized" && probeUiState.source && (
               <p className="text-xs text-muted-foreground">
-                Origin resolved from{" "}
-                {probeUiState.source === "config"
-                  ? "relay config"
-                  : probeUiState.source === "owner_fallback"
-                    ? "relay config (owner fallback)"
-                    : "database"}
-                .
+                {uiT("Origin resolved from {0} .", {
+                  p0:
+                    probeUiState.source === "config"
+                      ? "relay config"
+                      : probeUiState.source === "owner_fallback"
+                        ? "relay config (owner fallback)"
+                        : "database",
+                })}
               </p>
             )}
           </div>

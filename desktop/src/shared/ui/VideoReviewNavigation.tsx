@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 type OpenVideoReview = (seconds: number) => void;
@@ -19,6 +21,8 @@ export function VideoReviewNavigationProvider({
 }: {
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   // Review comments are scoped to their message, not an individual attachment.
   // Keep attachment registration order so a multi-video message always opens
   // its first video instead of whichever player happened to update last.

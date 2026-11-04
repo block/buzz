@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { setAgentManagedProfiles } from "@/shared/api/tauriWorkspace";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
@@ -6,6 +8,8 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 function FeatureRow({ feature }: { feature: FeatureDefinition }) {
+  useUiLanguage();
+
   const [enabled, toggle] = useFeatureToggle(feature.id);
   const switchId = `feature-toggle-${feature.id}`;
 
@@ -13,10 +17,10 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
     <SettingsOptionRow>
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium" id={`${switchId}-label`}>
-          {feature.name}
+          {uiT(feature.name)}
         </p>
         <p className="text-xs text-muted-foreground/70" data-settings-subcopy>
-          {feature.description}
+          {uiT(feature.description)}
         </p>
       </div>
       <Switch
@@ -47,16 +51,17 @@ export function ExperimentalFeaturesCard() {
   return (
     <section className="min-w-0" data-testid="settings-experimental">
       <SettingsSectionHeader
-        title="Experiments"
+        title={uiT("Experiments")}
         description={
           <>
-            These features are functional but still being refined. Enable them
-            to try new capabilities early.
+            {uiT(
+              "These features are functional but still being refined. Enable them to try new capabilities early.",
+            )}
           </>
         }
       />
 
-      <SettingsOptionGroup title="Features">
+      <SettingsOptionGroup title={uiT("Features")}>
         {previewFeatures.map((f) => (
           <FeatureRow feature={f} key={f.id} />
         ))}

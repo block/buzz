@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
@@ -32,6 +34,8 @@ export function ProjectSelectableGroup({
   labelTestId?: string;
   testId: string;
 }) {
+  useUiLanguage();
+
   const [expanded, setExpanded] = React.useState(true);
   const selection = useProjectSelection();
   const selectedCount =
@@ -81,7 +85,10 @@ export function ProjectSelectableGroup({
               <ProjectEntitySelectControl
                 checked={allSelected}
                 indeterminate={partiallySelected}
-                label={`${allSelected ? "Clear" : "Select"} all ${label}`}
+                label={uiT("{0} all {1}", {
+                  p0: allSelected ? "Clear" : "Select",
+                  p1: label,
+                })}
                 onToggle={() => selection.toggleGroup(items)}
                 testId="projects-group-select"
               />

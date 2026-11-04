@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
@@ -69,6 +71,8 @@ export function InboxMessageRow({
   videoReviewCommentRootId,
   videoReviewContext,
 }: InboxMessageRowProps) {
+  useUiLanguage();
+
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
     [message],

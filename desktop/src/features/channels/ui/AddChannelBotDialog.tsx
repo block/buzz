@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
@@ -62,6 +64,8 @@ export function AddChannelBotDialog({
   onCreateAgent,
   onOpenChange,
 }: AddChannelBotDialogProps) {
+  useUiLanguage();
+
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const inChannelPersonaIds = useInChannelPersonaIds(
@@ -196,18 +200,18 @@ export function AddChannelBotDialog({
     !createBotsMutation.isPending;
   const addButtonLabel = createBotsMutation.isPending
     ? selectedPersonas.length > 1
-      ? `Adding ${selectedPersonas.length}…`
-      : "Adding…"
+      ? uiT("Adding {0}…", { p0: selectedPersonas.length })
+      : uiT("Adding…")
     : selectedPersonas.length > 1
-      ? `Add ${selectedPersonas.length} agents`
-      : "Add agent";
+      ? uiT("Add {0} agents", { p0: selectedPersonas.length })
+      : uiT("Add agent");
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
       <ChooserDialogContent
         className="max-w-xl"
         data-testid="add-channel-bot-dialog"
-        description="Choose from your agents, or create a new one."
+        description={uiT("Choose from your agents, or create a new one.")}
         footer={
           <>
             <Button
@@ -216,7 +220,7 @@ export function AddChannelBotDialog({
               type="button"
               variant="outline"
             >
-              Cancel
+              {uiT("Cancel")}
             </Button>
             <Button
               disabled={!canSubmit}
@@ -233,7 +237,7 @@ export function AddChannelBotDialog({
         headerTestId="add-channel-bot-dialog-header"
         scrollAreaClassName="space-y-5"
         scrollAreaTestId="add-channel-bot-dialog-scroll-area"
-        title="Add agents"
+        title={uiT("Add agents")}
       >
         <AddChannelBotPersonasSection
           canToggleSelections={!createBotsMutation.isPending}
@@ -265,7 +269,9 @@ export function AddChannelBotDialog({
           <div className="flex gap-3 rounded-lg border border-warning/30 bg-warning-bg px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <p className="text-sm text-warning">
-              Install an agent runtime before adding an agent to this channel.
+              {uiT(
+                "Install an agent runtime before adding an agent to this channel.",
+              )}
             </p>
           </div>
         ) : null}

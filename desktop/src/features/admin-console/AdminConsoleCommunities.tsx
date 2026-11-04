@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 /**
  * Communities tab and the per-community page.
  *
@@ -41,6 +43,8 @@ export function CommunitiesTab({
   origin: string;
   generation: number;
 }) {
+  useUiLanguage();
+
   const { open, connectedHost } = useCommunityNav();
   const [query, setQuery] = useState("");
   const q = useDeferredValue(query.trim().toLowerCase());
@@ -146,7 +150,9 @@ export function CommunitiesTab({
       >
         <span className="flex-1 truncate">{c.host}</span>
         {connected && (
-          <span className="text-xs text-muted-foreground">Connected</span>
+          <span className="text-xs text-muted-foreground">
+            {uiT("Connected")}
+          </span>
         )}
       </button>
     </li>
@@ -158,7 +164,7 @@ export function CommunitiesTab({
         className="w-full rounded-md border border-border/60 bg-background px-2 py-1 text-xs"
         data-testid="communities-search-input"
         onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search by host (e.g. team.example.com)"
+        placeholder={uiT("Search by host (e.g. team.example.com)")}
         value={query}
       />
       {pinnedRow && (
@@ -169,13 +175,15 @@ export function CommunitiesTab({
           className="text-xs text-destructive"
           data-testid="communities-search-secret"
         >
-          That's a secret key. Never paste it here.
+          {uiT("That's a secret key. Never paste it here.")}
         </p>
       )}
       {first.status === "loading" && <LoadingSpinner />}
       {first.status === "error" && <ErrorMessage message={first.message} />}
       {first.status === "ok" && items.length === 0 && !pinnedRow && !secret && (
-        <p className="text-sm text-muted-foreground">No communities found.</p>
+        <p className="text-sm text-muted-foreground">
+          {uiT("No communities found.")}
+        </p>
       )}
       <ul className="space-y-1">{items.map((c) => row(c, false))}</ul>
       {moreStatus?.error && <ErrorMessage message={moreStatus.error} />}
@@ -191,7 +199,7 @@ export function CommunitiesTab({
           {moreStatus?.busy ? (
             <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            "Load more"
+            uiT("Load more")
           )}
         </Button>
       )}
@@ -219,6 +227,8 @@ export function CommunityPage({
   generation: number;
   onBack: () => void;
 }) {
+  useUiLanguage();
+
   const [section, setSection] = useState<Section>("reports");
   return (
     <div className="space-y-3" data-testid="community-page">

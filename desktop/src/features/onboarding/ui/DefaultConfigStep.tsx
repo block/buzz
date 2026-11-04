@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -66,6 +68,8 @@ function AgentDefaultsSection({
   onUseDifferentHarness?: () => void;
   readyRuntimeIds: readonly string[];
 }) {
+  useUiLanguage();
+
   const cardLayout = useOnboardingCardLayout();
   const runtimesQuery = useAcpRuntimesQuery();
   const initialDraftRef = React.useRef(draft);
@@ -236,11 +240,11 @@ function AgentDefaultsSection({
       {configSurfaceLoading ? (
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
-          Loading…
+          {uiT("Loading…")}
         </div>
       ) : configSurfaceError ? (
         <p className="py-4 text-center text-sm text-destructive">
-          Couldn't load harness settings. Go back and try again.
+          {uiT("Couldn't load harness settings. Go back and try again.")}
         </p>
       ) : (
         <div className="space-y-7">
@@ -251,7 +255,7 @@ function AgentDefaultsSection({
                   className="text-sm font-medium"
                   htmlFor="global-agent-default-harness"
                 >
-                  Default harness
+                  {uiT("Default harness")}
                 </label>
               </div>
               <AgentDropdownSelect
@@ -263,7 +267,7 @@ function AgentDefaultsSection({
                 id="global-agent-default-harness"
                 onValueChange={handleHarnessChange}
                 options={harnessOptions}
-                placeholder="Select a harness"
+                placeholder={uiT("Select a harness")}
                 placeholderClassName="text-foreground/70"
                 testId="global-agent-default-harness"
                 value={selectedRuntimeId}
@@ -315,7 +319,7 @@ function AgentDefaultsSection({
 
           {onUseDifferentHarness ? (
             <div className="flex items-baseline gap-1.5 text-sm text-foreground/70">
-              <span>or</span>
+              <span>{uiT("or")}</span>
               <Button
                 className="h-auto p-0 text-sm text-foreground"
                 data-testid="onboarding-use-different-harness"
@@ -324,7 +328,7 @@ function AgentDefaultsSection({
                 type="button"
                 variant="link"
               >
-                Use a different harness
+                {uiT("Use a different harness")}
               </Button>
             </div>
           ) : null}
@@ -346,6 +350,8 @@ export function DefaultConfigStep({
   onSavingChange,
   readyRuntimeIds,
 }: DefaultConfigStepProps) {
+  useUiLanguage();
+
   const cardLayout = useOnboardingCardLayout();
   const [persistenceState, setPersistenceState] = React.useState<{
     canComplete: boolean;
@@ -371,7 +377,7 @@ export function DefaultConfigStep({
       setSaveError(
         cause instanceof Error
           ? cause.message
-          : "Couldn’t save model settings.",
+          : uiT("Couldn’t save model settings."),
       );
     } finally {
       setIsSaving(false);
@@ -395,15 +401,19 @@ export function DefaultConfigStep({
       >
         <h1 className="text-title font-normal text-foreground">
           {actions.useDifferentHarness
-            ? "Connect with an API key"
-            : "Choose your model settings"}
+            ? uiT("Connect with an API key")
+            : uiT("Choose your model settings")}
         </h1>
         <p
           className={`w-full text-foreground/80 ${cardLayout ? "mt-2 text-base leading-6" : "mx-auto mt-3 max-w-[440px] text-sm leading-5"}`}
         >
           {actions.useDifferentHarness
-            ? "Choose your provider and enter an API key to connect to the Buzz harness."
-            : "Select the model and effort level your agents will use by default."}
+            ? uiT(
+                "Choose your provider and enter an API key to connect to the Buzz harness.",
+              )
+            : uiT(
+                "Select the model and effort level your agents will use by default.",
+              )}
         </p>
       </div>
 
@@ -431,7 +441,7 @@ export function DefaultConfigStep({
           type="button"
           variant="ghost"
         >
-          Skip for now
+          {uiT("Skip for now")}
         </Button>
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
@@ -440,7 +450,7 @@ export function DefaultConfigStep({
           onClick={() => void handleComplete()}
           type="button"
         >
-          {isSaving ? "Saving…" : "Next"}
+          {isSaving ? uiT("Saving…") : uiT("Next")}
         </Button>
 
         {saveError ? (
@@ -449,7 +459,9 @@ export function DefaultConfigStep({
             data-testid="onboarding-config-save-error"
             role="alert"
           >
-            Couldn’t save model settings. {saveError} Try again.
+            {uiT("Couldn’t save model settings. {0} Try again.", {
+              p0: saveError,
+            })}
           </p>
         ) : null}
       </OnboardingFooter>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useAgentAccessOwnerOnlyQuery } from "../useAgentAccessOwnerOnly";
 import { Input } from "@/shared/ui/input";
@@ -13,8 +15,7 @@ import {
   BUZZ_AGENT_THINKING_EFFORT,
 } from "./buzzAgentConfig";
 import {
-  AGENT_PARALLELISM_HELP,
-  AGENT_PARALLELISM_PLACEHOLDER,
+  DEFAULT_AGENT_PARALLELISM,
   parallelismCapHint,
 } from "../lib/agentParallelism";
 import {
@@ -94,6 +95,8 @@ export function PersonaAdvancedFields({
    */
   selectedRuntime?: AcpRuntimeCatalogEntry;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const { data: agentAccessOwnerOnly = false } = useAgentAccessOwnerOnlyQuery();
   const respondToMode = agentAccessOwnerOnly
     ? "owner-only"
@@ -123,6 +126,7 @@ export function PersonaAdvancedFields({
   // Persona hint: definitions keep a portable requested value across harnesses.
   // When the selected harness has a cap and the draft's parallelism exceeds it,
   // explain that the agent will run at the cap — without clamping the stored value.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const personaParallelismHint = React.useMemo(() => {
     if (
       selectedRuntime?.maxParallelism === undefined ||
@@ -137,7 +141,7 @@ export function PersonaAdvancedFields({
       selectedRuntime.maxParallelism,
       requested,
     );
-  }, [selectedRuntime, behaviorDraft.parallelism]);
+  }, [selectedRuntime, behaviorDraft.parallelism, __buzzLanguage]);
 
   return (
     <div className="space-y-5 pt-2">
@@ -168,7 +172,7 @@ export function PersonaAdvancedFields({
             className="text-sm font-medium text-foreground"
             htmlFor="persona-session-policy"
           >
-            Conversation context
+            {uiT("Conversation context")}
           </label>
           <PersonaDropdownField
             ariaDescribedBy="persona-session-policy-description"
@@ -181,10 +185,20 @@ export function PersonaAdvancedFields({
               })
             }
             options={[
-              { label: "Entire channel", value: "channel" },
-              { label: "Each thread", value: "thread" },
+              {
+                get label() {
+                  return uiT("Entire channel");
+                },
+                value: "channel",
+              },
+              {
+                get label() {
+                  return uiT("Each thread");
+                },
+                value: "thread",
+              },
             ]}
-            placeholder="Entire channel"
+            placeholder={uiT("Entire channel")}
             value={behaviorDraft.sessionPolicy}
           />
           <p
@@ -192,8 +206,12 @@ export function PersonaAdvancedFields({
             id="persona-session-policy-description"
           >
             {behaviorDraft.sessionPolicy === "thread"
-              ? "Keeps a separate conversation for each channel thread. Direct messages remain shared."
-              : "Shares one conversation across every thread in a channel."}
+              ? uiT(
+                  "Keeps a separate conversation for each channel thread. Direct messages remain shared.",
+                )
+              : uiT(
+                  "Shares one conversation across every thread in a channel.",
+                )}
           </p>
         </div>
 
@@ -202,8 +220,10 @@ export function PersonaAdvancedFields({
             className="text-sm font-medium text-foreground"
             htmlFor="persona-parallelism"
           >
-            Parallelism
-            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+            {uiT("Parallelism")}
+            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+              {uiT("Optional")}
+            </span>
           </label>
           <div
             className={cn(
@@ -227,13 +247,18 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder={AGENT_PARALLELISM_PLACEHOLDER}
+              placeholder={uiT("App default ({0})", {
+                p0: DEFAULT_AGENT_PARALLELISM,
+              })}
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            {AGENT_PARALLELISM_HELP}
+            {uiT(
+              "Leave blank to use the app default (currently {0}). Custom values may be 1–32.",
+              { p0: DEFAULT_AGENT_PARALLELISM },
+            )}
           </p>
           {personaParallelismHint !== null ? (
             <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -248,8 +273,10 @@ export function PersonaAdvancedFields({
           className="text-sm font-medium text-foreground"
           htmlFor="persona-name-pool"
         >
-          Instance name pool
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+          {uiT("Instance name pool")}
+          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+            {uiT("Optional")}
+          </span>
         </label>
         <div
           className={cn(

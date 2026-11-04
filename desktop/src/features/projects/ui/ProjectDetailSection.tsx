@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
@@ -34,6 +36,8 @@ export function ProjectDetailSection({
   testId?: string;
   title: string;
 }) {
+  useUiLanguage();
+
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
   const isControlled = openProp !== undefined;
   const open = isControlled ? openProp : uncontrolledOpen;

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { UnreadPill } from "@/shared/ui/UnreadPill";
@@ -35,7 +37,7 @@ export function unreadDmAccessibleLabel({
   targetChannelId?: string;
 }) {
   const direction = position === "top" ? "above" : "below";
-  const resolvedLabel = label ?? `${count} unread`;
+  const resolvedLabel = label ?? uiT("{0} unread", { p0: count });
   const targetPreview = dmPreviews.find(
     ({ channelId }) => channelId === targetChannelId,
   );
@@ -78,7 +80,7 @@ export function MoreUnreadButton({
   const positionClassName =
     position === "top" ? topChromeInset.top : bottomClassName;
   const visibleDmPreviews = visibleUnreadDmPreviews(dmPreviews);
-  const resolvedLabel = label ?? `${count} unread`;
+  const resolvedLabel = label ?? uiT("{0} unread", { p0: count });
   const accessibleLabel = unreadDmAccessibleLabel({
     count,
     dmPreviews,

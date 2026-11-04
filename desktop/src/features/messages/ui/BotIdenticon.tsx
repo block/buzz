@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toSvg } from "jdenticon";
 
@@ -20,6 +22,8 @@ export const BotIdenticon = React.memo(function BotIdenticon({
   className,
   "data-testid": dataTestid,
 }: BotIdenticonProps) {
+  useUiLanguage();
+
   const svgHtml = React.useMemo(() => toSvg(value, size), [value, size]);
 
   return (

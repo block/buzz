@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
@@ -52,6 +54,8 @@ export function ManagedAgentRow({
   onOpenProfile: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
 }) {
+  useUiLanguage();
+
   const isLocal = agent.backend.type === "local";
   const runtimeSource =
     agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
@@ -171,7 +175,7 @@ export function ManagedAgentRow({
             type="button"
             variant="outline"
           >
-            Manage
+            {uiT("Manage")}
           </Button>
         </div>
       </div>
@@ -190,7 +194,7 @@ export function ManagedAgentRow({
           />
           <div className="mt-4 border-t border-border/50 pt-3">
             <p className="mb-2 text-xs font-medium text-muted-foreground">
-              Configuration
+              {uiT("Configuration")}
             </p>
             <AgentConfigPanel pubkey={agent.pubkey} />
           </div>
@@ -217,6 +221,8 @@ function AgentSummary({
   personaLabel: string | null;
   presenceStatus: PresenceStatus | undefined;
 }) {
+  useUiLanguage();
+
   const { goChannel } = useAppNavigation();
   const { openAgentActivity } = useOpenAgentActivity();
 
@@ -247,13 +253,13 @@ function AgentSummary({
             {agent.personaOrphaned ? (
               <Badge className="gap-1" variant="warning">
                 <AlertTriangle className="h-3 w-3" />
-                Configuration missing
+                {uiT("Configuration missing")}
               </Badge>
             ) : null}
             {agent.personaOutOfDate ? (
               <Badge className="gap-1" variant="warning">
                 <AlertTriangle className="h-3 w-3" />
-                Out of date
+                {uiT("Out of date")}
               </Badge>
             ) : null}
           </div>
@@ -261,27 +267,32 @@ function AgentSummary({
             <PubKey pubkey={agent.pubkey} />
             {agent.backend.type === "local" ? (
               <span>
-                {agent.startOnAppLaunch ? "Auto-start" : "Manual start"}
+                {agent.startOnAppLaunch
+                  ? uiT("Auto-start")
+                  : uiT("Manual start")}
               </span>
             ) : (
-              <span>Remote deployment</span>
+              <span>{uiT("Remote deployment")}</span>
             )}
           </div>
           {agent.personaOrphaned ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-              This agent's configuration is missing — it may still be syncing or
-              was deleted on another device.
+              {uiT(
+                "This agent's configuration is missing — it may still be syncing or was deleted on another device.",
+              )}
             </p>
           ) : agent.needsRestart ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-              Configuration changed since this agent started. Restart to apply
-              it.
+              {uiT(
+                "Configuration changed since this agent started. Restart to apply it.",
+              )}
             </p>
           ) : null}
           {agent.personaOutOfDate ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-              Template updated since this agent was created. Respawn to apply
-              the new configuration.
+              {uiT(
+                "Template updated since this agent was created. Respawn to apply the new configuration.",
+              )}
             </p>
           ) : null}
           {channelNames.length > 0 ? (
@@ -335,6 +346,8 @@ function WorkingBadge({
   anchorAt: number;
   onNavigate: (channelId: string) => void;
 }) {
+  useUiLanguage();
+
   // The 1s tick lives here, at the leaf, so only visible working badges
   // re-render each second — idle rows never mount this hook.
   const now = useNow(1000);
@@ -348,7 +361,10 @@ function WorkingBadge({
         onNavigate(channelId);
       }}
     >
-      Working in #{name} · {formatElapsed(now - anchorAt)}
+      {uiT("Working in #{0} · {1}", {
+        p0: name,
+        p1: formatElapsed(now - anchorAt),
+      })}
     </Badge>
   );
 }
@@ -370,7 +386,7 @@ function StatusBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <SubsectionLabel className="lg:hidden">Status</SubsectionLabel>
+      <SubsectionLabel className="lg:hidden">{uiT("Status")}</SubsectionLabel>
       <AgentStatusBadge
         isWorking={isWorking}
         presenceLoaded={presenceLoaded}
@@ -404,7 +420,7 @@ function RuntimeBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <SubsectionLabel className="lg:hidden">Runtime</SubsectionLabel>
+      <SubsectionLabel className="lg:hidden">{uiT("Runtime")}</SubsectionLabel>
       <p className="truncate font-mono text-xs text-foreground">
         {agent.agentCommand}
       </p>
@@ -423,7 +439,7 @@ function RuntimeBlock({
 function AgentOriginBadge({ agent }: { agent: ManagedAgent }) {
   return (
     <Badge variant="outline">
-      {agent.backend.type === "local" ? "Local" : "Remote"}
+      {agent.backend.type === "local" ? uiT("Local") : uiT("Remote")}
     </Badge>
   );
 }

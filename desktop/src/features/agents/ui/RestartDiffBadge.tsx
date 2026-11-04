@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { RefreshCw } from "lucide-react";
 
 import { Badge } from "@/shared/ui/badge";
@@ -58,9 +60,7 @@ function ChangeDescription({ change }: { change: RestartChange }) {
       const before = change.before_chars ?? 0;
       const after = change.after_chars ?? 0;
       return (
-        <span>
-          {before} chars → {after} chars
-        </span>
+        <span>{uiT("{0} chars → {1} chars", { p0: before, p1: after })}</span>
       );
     }
     case "masked":
@@ -74,9 +74,9 @@ function ChangeDescription({ change }: { change: RestartChange }) {
         </span>
       );
     case "added":
-      return <span>added</span>;
+      return <span>{uiT("added")}</span>;
     case "removed":
-      return <span>removed</span>;
+      return <span>{uiT("removed")}</span>;
     default:
       // Unknown kind — render nothing, remain type-safe at runtime
       return null;
@@ -126,7 +126,9 @@ function DiffList({
         </li>
       ))}
       {overflow > 0 ? (
-        <li className={overflowClass}>and {overflow} more</li>
+        <li className={overflowClass}>
+          {uiT("and {0} more", { p0: overflow })}
+        </li>
       ) : null}
     </ul>
   );
@@ -153,7 +155,7 @@ export function RestartDiffBadge({
   const badge = (
     <Badge className={cn("cursor-default gap-1", className)} variant="warning">
       <RefreshCw className="h-3 w-3" />
-      Restart required
+      {uiT("Restart required")}
     </Badge>
   );
 
@@ -174,11 +176,13 @@ export function RestartDiffBadge({
           data-testid="restart-diff-badge"
         >
           <RefreshCw className="h-3 w-3" />
-          Restart required
+          {uiT("Restart required")}
         </Badge>
       </TooltipTrigger>
       <TooltipContent className="max-w-72 text-xs" side="bottom">
-        <p className="mb-1.5 font-semibold">Config changed since last start:</p>
+        <p className="mb-1.5 font-semibold">
+          {uiT("Config changed since last start:")}
+        </p>
         <DiffList cap={TOOLTIP_CAP} entries={restartDiff} />
         <p className="mt-1.5 text-secondary-foreground/70">
           {autoRestartEnabled ? AUTO_RESTART_ON_BLURB : AUTO_RESTART_OFF_BLURB}

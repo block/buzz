@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { hasBlockMedia } from "../markdownUtils";
@@ -20,6 +22,8 @@ export function SpoilerInline({
   children?: React.ReactNode;
   interactive?: boolean;
 }) {
+  useUiLanguage();
+
   const [revealed, setRevealed] = React.useState(false);
   const contentRef = React.useRef<HTMLElement | null>(null);
   const isBlock = block || hasBlockMedia(React.Children.toArray(children));

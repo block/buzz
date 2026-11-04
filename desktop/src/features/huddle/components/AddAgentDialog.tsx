@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { invoke } from "@tauri-apps/api/core";
 import { LoaderCircle } from "lucide-react";
 import * as React from "react";
@@ -34,6 +36,8 @@ export function AddAgentDialog({
   onAdd,
   currentAgentPubkeys,
 }: AddAgentDialogProps) {
+  useUiLanguage();
+
   const [agents, setAgents] = React.useState<ManagedAgentSummary[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [adding, setAdding] = React.useState<string | null>(null);
@@ -56,7 +60,7 @@ export function AddAgentDialog({
       .catch((e: unknown) => {
         if (cancelled) return;
         console.error("Failed to load agents:", e);
-        setError("Could not load agents.");
+        setError(uiT("Could not load agents."));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -124,7 +128,7 @@ export function AddAgentDialog({
         }
       }
       const msg = e instanceof Error ? e.message : String(e);
-      setError(`Failed to add agent: ${msg}`);
+      setError(uiT("Failed to add agent: {0}", { p0: msg }));
       console.error("Failed to add agent to huddle:", e);
     } finally {
       setAdding(null);
@@ -141,9 +145,9 @@ export function AddAgentDialog({
       <ChooserDialogContent
         className="max-w-xl"
         data-testid="add-huddle-agent-dialog"
-        headerSubtitle="Choose an agent to join this huddle."
+        headerSubtitle={uiT("Choose an agent to join this huddle.")}
         scrollAreaClassName="space-y-5"
-        title="Add agents"
+        title={uiT("Add agents")}
       >
         {error ? (
           <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -159,11 +163,11 @@ export function AddAgentDialog({
 
         {loading ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            Loading agents…
+            {uiT("Loading agents…")}
           </p>
         ) : availableAgents.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
-            All available agents are already in this huddle.
+            {uiT("All available agents are already in this huddle.")}
           </p>
         ) : (
           <ul className="flex flex-col gap-1">
@@ -188,7 +192,7 @@ export function AddAgentDialog({
                     </span>
                     {isAdding ? (
                       <LoaderCircle
-                        aria-label={`Adding ${agent.name}`}
+                        aria-label={uiT("Adding {0}", { p0: agent.name })}
                         className="h-4 w-4 shrink-0 animate-spin text-muted-foreground"
                       />
                     ) : null}

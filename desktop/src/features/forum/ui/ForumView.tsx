@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { MessageSquareText } from "lucide-react";
 import * as React from "react";
 
@@ -53,6 +55,8 @@ export function ForumView({
   targetSearchMessageId,
   targetSearchQuery,
 }: ForumViewProps) {
+  useUiLanguage();
+
   const [isComposerOpen, setIsComposerOpen] = React.useState(false);
   const postsScrollRef = React.useRef<HTMLDivElement>(null);
 
@@ -189,7 +193,7 @@ export function ForumView({
               });
               setIsComposerOpen(false);
             }}
-            placeholder="Write your post..."
+            placeholder={uiT("Write your post...")}
             profiles={profiles}
           />
         ) : (
@@ -200,10 +204,10 @@ export function ForumView({
             type="button"
           >
             {channel.archivedAt
-              ? "This forum is archived."
+              ? uiT("This forum is archived.")
               : !channel.isMember
-                ? "Join this forum to create posts."
-                : "Start a new post..."}
+                ? uiT("Join this forum to create posts.")
+                : uiT("Start a new post...")}
           </button>
         )}
       </div>
@@ -225,10 +229,10 @@ export function ForumView({
             <MessageSquareText className="h-10 w-10 text-muted-foreground/40" />
             <div>
               <p className="text-sm font-medium text-foreground/70">
-                No posts yet
+                {uiT("No posts yet")}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
-                Start a discussion by creating the first post.
+                {uiT("Start a discussion by creating the first post.")}
               </p>
             </div>
           </div>

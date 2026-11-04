@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -27,7 +29,9 @@ export function DirectMessageIntroAvatarStack({
         <UserProfilePopover
           key={participant.pubkey}
           pubkey={participant.pubkey}
-          triggerAriaLabel={`Open profile for ${participant.displayName}`}
+          triggerAriaLabel={uiT("Open profile for {0}", {
+            p0: participant.displayName,
+          })}
           triggerElement="span"
           role={participant.isAgent ? "bot" : undefined}
         >

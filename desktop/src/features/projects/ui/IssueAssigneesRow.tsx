@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, Search, UserPlus, Users, X } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -73,7 +75,7 @@ export function IssueAssigneeFacepile({
               profile?.isAgent ? "rounded-squircle" : "rounded-full",
             )}
             key={pubkey}
-            title={`Assigned to ${label}`}
+            title={uiT("Assigned to {0}", { p0: label })}
           >
             <UserAvatar
               accent={profile?.isAgent === true}
@@ -119,6 +121,8 @@ export function IssueAssigneesRow({
   testIdPrefix?: string;
   viewerPubkey: string | null;
 }) {
+  useUiLanguage();
+
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [assigneeQuery, setAssigneeQuery] = React.useState("");
   const assignmentOperationInFlightRef = React.useRef(false);
@@ -167,10 +171,12 @@ export function IssueAssigneesRow({
         });
         setPickerOpen(false);
         setAssigneeQuery("");
-        toast.success("Task assigned.");
+        toast.success(uiT("Task assigned."));
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to assign task.",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to assign task."),
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
@@ -192,10 +198,12 @@ export function IssueAssigneesRow({
           signerPubkey: operationSigner,
           signAsManagedOwner,
         });
-        toast.success("Task unassigned.");
+        toast.success(uiT("Task unassigned."));
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to unassign task.",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to unassign task."),
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
@@ -245,7 +253,7 @@ export function IssueAssigneesRow({
             <TooltipTrigger asChild>
               {canUnassign ? (
                 <button
-                  aria-label={`Unassign ${label}`}
+                  aria-label={uiT("Unassign {0}", { p0: label })}
                   className={cn(
                     "group relative inline-flex rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                   )}
@@ -271,7 +279,9 @@ export function IssueAssigneesRow({
               )}
             </TooltipTrigger>
             <TooltipContent>
-              {canUnassign ? `Unassign ${label}` : `${label} — assigned`}
+              {canUnassign
+                ? uiT("Unassign {0}", { p0: label })
+                : uiT("{0} — assigned", { p0: label })}
             </TooltipContent>
           </Tooltip>
         );
@@ -293,8 +303,9 @@ export function IssueAssigneesRow({
           type="button"
           variant="ghost"
         >
-          {contextActions ? <UserPlus /> : null}
-          Assign to me
+          {uiMessage("{0} Assign to me", {
+            p0: contextActions ? <UserPlus /> : null,
+          })}
         </Button>
       ) : null}
       {showSelfAssignmentState && isSelfAssigned ? (
@@ -309,7 +320,7 @@ export function IssueAssigneesRow({
           variant="ghost"
         >
           <Check className="h-3 w-3" />
-          Assigned to me
+          {uiT("Assigned to me")}
         </Button>
       ) : null}
       {canAssignOthers ? (
@@ -326,15 +337,16 @@ export function IssueAssigneesRow({
               type="button"
               variant="ghost"
             >
-              {contextActions ? <Users /> : null}
-              Assign
+              {uiMessage("{0} Assign", {
+                p0: contextActions ? <Users /> : null,
+              })}
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-md gap-0 overflow-hidden p-0">
             <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-              <DialogTitle>Assign task</DialogTitle>
+              <DialogTitle>{uiT("Assign task")}</DialogTitle>
               <DialogDescription>
-                Choose a person or agent to work on this task.
+                {uiT("Choose a person or agent to work on this task.")}
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2 border-b border-border/60 px-6 py-3">
@@ -344,14 +356,14 @@ export function IssueAssigneesRow({
                 className="h-8 border-0 px-0 text-sm shadow-none focus-visible:ring-0"
                 data-testid="project-assignee-search"
                 onChange={(event) => setAssigneeQuery(event.target.value)}
-                placeholder="Search people and agents"
+                placeholder={uiT("Search people and agents")}
                 value={assigneeQuery}
               />
             </div>
             <div className="max-h-72 min-h-28 overflow-y-auto p-2">
               {userSearchQuery.isLoading ? (
                 <p className="px-3 py-4 text-sm text-muted-foreground">
-                  Searching…
+                  {uiT("Searching…")}
                 </p>
               ) : candidates.length > 0 ? (
                 candidates.map((candidate) => {
@@ -381,7 +393,7 @@ export function IssueAssigneesRow({
                           {label}
                         </span>
                         <span className="block truncate text-xs text-muted-foreground">
-                          {candidate.isAgent ? "Agent · " : ""}
+                          {candidate.isAgent ? uiT("Agent ·") : ""}
                           {truncateNpub(candidate.pubkey)}
                         </span>
                       </span>
@@ -390,7 +402,7 @@ export function IssueAssigneesRow({
                 })
               ) : (
                 <p className="px-3 py-4 text-sm text-muted-foreground">
-                  No matching people or agents.
+                  {uiT("No matching people or agents.")}
                 </p>
               )}
             </div>

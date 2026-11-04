@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Check,
   History,
@@ -58,7 +60,7 @@ function reviewerSearchLabel(user: UserSearchResult) {
 
 /** Reviewer status avatars and the reviewer request picker for a pull request. */
 export function PullRequestReviewersRow({
-  actionLabel = "Add Reviewer",
+  actionLabel = uiT("Add Reviewer"),
   canRequest,
   contextActions = false,
   profiles,
@@ -80,6 +82,8 @@ export function PullRequestReviewersRow({
   showSummary?: boolean;
   summaryTestId?: string;
 }) {
+  useUiLanguage();
+
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [reviewerQuery, setReviewerQuery] = React.useState("");
   const requestInFlightRef = React.useRef(false);
@@ -187,10 +191,12 @@ export function PullRequestReviewersRow({
         });
         setPickerOpen(false);
         setReviewerQuery("");
-        toast.success("Review requested.");
+        toast.success(uiT("Review requested."));
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to request review.",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to request review."),
         );
       } finally {
         requestInFlightRef.current = false;
@@ -222,9 +228,9 @@ export function PullRequestReviewersRow({
       </DialogTrigger>
       <DialogContent className="max-w-md gap-0 overflow-hidden p-0">
         <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-          <DialogTitle>Add reviewer</DialogTitle>
+          <DialogTitle>{uiT("Add reviewer")}</DialogTitle>
           <DialogDescription>
-            Choose a person or agent to review these changes.
+            {uiT("Choose a person or agent to review these changes.")}
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center gap-2 border-b border-border/60 px-6 py-3">
@@ -234,14 +240,14 @@ export function PullRequestReviewersRow({
             className="h-8 border-0 px-0 text-sm shadow-none focus-visible:ring-0"
             data-testid="project-reviewer-search"
             onChange={(event) => setReviewerQuery(event.target.value)}
-            placeholder="Search people and agents"
+            placeholder={uiT("Search people and agents")}
             value={reviewerQuery}
           />
         </div>
         <div className="max-h-72 min-h-28 overflow-y-auto p-2">
           {userSearchQuery.isLoading ? (
             <p className="px-3 py-4 text-sm text-muted-foreground">
-              Searching…
+              {uiT("Searching…")}
             </p>
           ) : candidates.length > 0 ? (
             candidates.map((candidate) => {
@@ -269,7 +275,7 @@ export function PullRequestReviewersRow({
                       {label}
                     </span>
                     <span className="block truncate text-xs text-muted-foreground">
-                      {candidate.isAgent ? "Agent · " : ""}
+                      {candidate.isAgent ? uiT("Agent ·") : ""}
                       {truncateNpub(candidate.pubkey)}
                     </span>
                   </span>
@@ -278,7 +284,7 @@ export function PullRequestReviewersRow({
             })
           ) : (
             <p className="px-3 py-4 text-sm text-muted-foreground">
-              No matching people or agents.
+              {uiT("No matching people or agents.")}
             </p>
           )}
         </div>
@@ -289,7 +295,7 @@ export function PullRequestReviewersRow({
   if (contextActions) return requestAction;
 
   return (
-    <ProjectDetailMetaRow icon={Users} label="Reviewers">
+    <ProjectDetailMetaRow icon={Users} label={uiT("Reviewers")}>
       <div
         className="flex min-w-0 items-center gap-2"
         data-testid="project-reviewers-content"
@@ -313,12 +319,12 @@ export function PullRequestReviewersRow({
                   ? History
                   : null;
             const decisionLabel = hasApproved
-              ? `Approved by ${label}`
+              ? uiT("Approved by {0}", { p0: label })
               : hasRequestedChanges
-                ? `Changes requested by ${label}`
+                ? uiT("Changes requested by {0}", { p0: label })
                 : needsRereview
-                  ? `Re-review needed from ${label}`
-                  : `Awaiting review from ${label}`;
+                  ? uiT("Re-review needed from {0}", { p0: label })
+                  : uiT("Awaiting review from {0}", { p0: label });
             return (
               <React.Fragment key={pubkey}>
                 {index > 0 ? (
@@ -362,7 +368,7 @@ export function PullRequestReviewersRow({
           {hasHistoricalDecision ? (
             <span className="flex min-w-0 items-center gap-1 truncate text-xs text-amber-600 dark:text-amber-400">
               <History className="h-3.5 w-3.5 shrink-0" />
-              Earlier decision applies to another commit
+              {uiT("Earlier decision applies to another commit")}
             </span>
           ) : null}
         </div>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -26,6 +28,8 @@ export function AuxiliaryPanelBody({
   panelPadding = false,
   ...props
 }: AuxiliaryPanelBodyProps) {
+  useUiLanguage();
+
   const context = React.useContext(AuxiliaryPanelContext);
   const mode = resolveAuxiliaryPanelBodyMode({
     context,

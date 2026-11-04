@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Copy for channel system events (the "joined", "added by", "changed the
  * topic" captions in the message timeline).
@@ -20,7 +22,7 @@ export type ChannelTextField = "topic" | "purpose";
  * rather than the ungrammatical "You added by".
  */
 export function addedByActionPrefix(isCurrentUser: boolean): string {
-  return isCurrentUser ? "were added by" : "added by";
+  return isCurrentUser ? uiT("were added by") : uiT("added by");
 }
 
 /**
@@ -28,7 +30,7 @@ export function addedByActionPrefix(isCurrentUser: boolean): string {
  * without attributing the action to a single actor.
  */
 export function addedActionPrefix(isCurrentUser: boolean): string {
-  return isCurrentUser ? "were added" : "was added";
+  return isCurrentUser ? uiT("were added") : uiT("was added");
 }
 
 /**
@@ -51,9 +53,14 @@ export function describeChannelTextFieldChange(
 ): string {
   const trimmed = value?.trim();
   if (!trimmed) {
-    return `cleared the ${field}`;
+    return uiT("cleared the {0}", { p0: field });
   }
-  return `changed the ${field} to ${OPEN_QUOTE}${trimmed}${CLOSE_QUOTE}`;
+  return uiT("changed the {0} to {1}{2}{3}", {
+    p0: field,
+    p1: OPEN_QUOTE,
+    p2: trimmed,
+    p3: CLOSE_QUOTE,
+  });
 }
 
 /**
@@ -72,5 +79,5 @@ export function describeChannelTextFieldChange(
  * untouched.
  */
 export function toInlineName(label: string, isSelf: boolean): string {
-  return isSelf ? "you" : label;
+  return isSelf ? uiT("you") : label;
 }

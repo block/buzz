@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import useEmblaCarousel, {
   type UseEmblaCarouselType,
@@ -56,6 +58,8 @@ const Carousel = React.forwardRef<
     },
     ref,
   ) => {
+    useUiLanguage();
+
     const [carouselRef, api] = useEmblaCarousel(
       {
         ...opts,
@@ -154,6 +158,8 @@ const CarouselContent = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => {
+  useUiLanguage();
+
   const { carouselRef, orientation } = useCarousel();
 
   return (
@@ -176,6 +182,8 @@ const CarouselItem = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
 >(({ className, children, ...props }, ref) => {
+  useUiLanguage();
+
   const { orientation } = useCarousel();
 
   return (
@@ -201,6 +209,8 @@ const CarouselPrevious = React.forwardRef<
   HTMLButtonElement,
   React.ComponentProps<typeof Button>
 >(({ className, variant = "outline", size = "icon", ...props }, ref) => {
+  useUiLanguage();
+
   const { canScrollPrev, orientation, scrollPrev } = useCarousel();
 
   return (
@@ -220,7 +230,7 @@ const CarouselPrevious = React.forwardRef<
       {...props}
     >
       <ArrowLeft className="h-4 w-4" />
-      <span className="sr-only">Previous slide</span>
+      <span className="sr-only">{uiT("Previous slide")}</span>
     </Button>
   );
 });
@@ -230,6 +240,8 @@ const CarouselNext = React.forwardRef<
   HTMLButtonElement,
   React.ComponentProps<typeof Button>
 >(({ className, variant = "outline", size = "icon", ...props }, ref) => {
+  useUiLanguage();
+
   const { canScrollNext, orientation, scrollNext } = useCarousel();
 
   return (
@@ -249,7 +261,7 @@ const CarouselNext = React.forwardRef<
       {...props}
     >
       <ArrowRight className="h-4 w-4" />
-      <span className="sr-only">Next slide</span>
+      <span className="sr-only">{uiT("Next slide")}</span>
     </Button>
   );
 });

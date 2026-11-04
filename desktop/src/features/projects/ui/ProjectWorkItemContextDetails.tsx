@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   CheckCircle2,
   CircleDot,
@@ -49,17 +51,17 @@ export function ProjectWorkItemContextDetails({
       <>
         <ContextDetailRow
           icon={CircleDot}
-          label="Status"
+          label={uiT("Status")}
           value={issue.status}
         />
         <ContextDetailRow
           icon={Users}
-          label="Assignees"
+          label={uiT("Assignees")}
           value={issue.assignees.length}
         />
         <ContextDetailRow
           icon={MessageCircle}
-          label="Comments"
+          label={uiT("Comments")}
           value={issue.comments.length}
         />
       </>
@@ -75,7 +77,7 @@ export function ProjectWorkItemContextDetails({
       <>
         <ContextDetailRow
           icon={GitBranch}
-          label="Branch"
+          label={uiT("Branch")}
           value={
             <span
               className="block max-w-40 truncate"
@@ -88,17 +90,17 @@ export function ProjectWorkItemContextDetails({
         />
         <ContextDetailRow
           icon={GitPullRequest}
-          label="Status"
+          label={uiT("Status")}
           value={pullRequest.status}
         />
         <ContextDetailRow
           icon={Users}
-          label="Reviewers"
+          label={uiT("Reviewers")}
           value={pullRequest.reviewers.length}
         />
         <ContextDetailRow
           icon={CheckCircle2}
-          label="Approvals"
+          label={uiT("Approvals")}
           value={pullRequest.approvals.length}
         />
       </>

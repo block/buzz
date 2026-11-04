@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type { ComponentProps } from "react";
 
 import { CardMintComposerChip } from "@/features/agents/ui/CardMintComposerChip";
@@ -33,6 +35,8 @@ export function ChannelComposerActivityAccessory({
   visible,
   workingBotPubkeys,
 }: ChannelComposerActivityAccessoryProps) {
+  useUiLanguage();
+
   const cardMintJobs = useCardMintJobs();
   return (
     <ComposerActivityAccessory

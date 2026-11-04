@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { EllipsisVertical, Settings2, Users } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -53,6 +55,8 @@ export function ChannelMembersBar({
   onToggleMembers,
   variant = "inline",
 }: ChannelMembersBarProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const [uncontrolledAddBotOpen, setUncontrolledAddBotOpen] =
     React.useState(false);
   const isAddBotOpen = isAddBotOpenProp ?? uncontrolledAddBotOpen;
@@ -115,6 +119,7 @@ export function ChannelMembersBar({
       dmProfilesQuery.isPending ||
       dmProfilesQuery.isPlaceholderData);
   const memberCount = membersQuery.data?.length ?? channel.memberCount;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const providers = React.useMemo(
     () =>
       [...(providersQuery.data ?? [])].sort((left, right) => {
@@ -126,7 +131,7 @@ export function ChannelMembersBar({
 
         return left.label.localeCompare(right.label);
       }),
-    [providersQuery.data],
+    [providersQuery.data, __buzzLanguage],
   );
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
@@ -195,7 +200,7 @@ export function ChannelMembersBar({
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
-              aria-label="Channel actions"
+              aria-label={uiT("Channel actions")}
               data-testid="channel-actions-menu-trigger"
               size="icon"
               type="button"
@@ -210,7 +215,7 @@ export function ChannelMembersBar({
               onSelect={onToggleMembers}
             >
               <Users />
-              <span>Members</span>
+              <span>{uiT("Members")}</span>
               <span className="ml-auto text-xs text-muted-foreground">
                 {memberCount}
               </span>
@@ -221,7 +226,7 @@ export function ChannelMembersBar({
               onSelect={onManageChannel}
             >
               <Settings2 />
-              <span>Manage channel</span>
+              <span>{uiT("Manage channel")}</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -232,7 +237,9 @@ export function ChannelMembersBar({
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <Button
-              aria-label={`View channel members (${memberCount})`}
+              aria-label={uiT("View channel members ({0})", {
+                p0: memberCount,
+              })}
               className="h-8 px-2.5"
               data-testid="channel-members-trigger"
               onClick={onToggleMembers}
@@ -245,7 +252,7 @@ export function ChannelMembersBar({
               </span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Channel members</TooltipContent>
+          <TooltipContent>{uiT("Channel members")}</TooltipContent>
         </Tooltip>
 
         {huddleIndicator}
@@ -253,7 +260,7 @@ export function ChannelMembersBar({
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <Button
-              aria-label="Manage channel"
+              aria-label={uiT("Manage channel")}
               data-testid="channel-management-trigger"
               onClick={onManageChannel}
               size="icon"
@@ -263,7 +270,7 @@ export function ChannelMembersBar({
               <EllipsisVertical />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Channel settings</TooltipContent>
+          <TooltipContent>{uiT("Channel settings")}</TooltipContent>
         </Tooltip>
 
         {endActions}

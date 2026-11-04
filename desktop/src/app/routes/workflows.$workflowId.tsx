@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createFileRoute, useLocation } from "@tanstack/react-router";
 
@@ -21,6 +23,8 @@ export const Route = createFileRoute("/workflows/$workflowId")({
 });
 
 function WorkflowRouteComponent() {
+  useUiLanguage();
+
   usePreviewFeatureWarning("workflows");
   const navigate = Route.useNavigate();
   const location = useLocation();

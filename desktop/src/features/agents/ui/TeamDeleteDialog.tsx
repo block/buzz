@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { AgentTeam } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -28,17 +30,20 @@ export function TeamDeleteDialog({
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete team?</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Delete team?")}</AlertDialogTitle>
           <AlertDialogDescription>
             {team
-              ? `Delete "${team.name}". Already-deployed agents are not affected, but this team template will no longer be available.`
-              : "Delete this team."}
+              ? uiT(
+                  'Delete "{0}". Already-deployed agents are not affected, but this team template will no longer be available.',
+                  { p0: team.name },
+                )
+              : uiT("Delete this team.")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
@@ -51,7 +56,7 @@ export function TeamDeleteDialog({
               type="button"
               variant="destructive"
             >
-              Delete
+              {uiT("Delete")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

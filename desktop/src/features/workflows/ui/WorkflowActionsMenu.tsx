@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   Copy,
   MoreHorizontal,
@@ -43,7 +45,7 @@ export function WorkflowActionsMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          aria-label="Workflow actions"
+          aria-label={uiT("Workflow actions")}
           className="h-8 w-8 text-muted-foreground hover:bg-background/80 hover:text-foreground data-[state=open]:bg-background/80 data-[state=open]:text-foreground"
           size="icon"
           type="button"
@@ -55,15 +57,15 @@ export function WorkflowActionsMenu({
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={onTrigger}>
           <Play className="mr-2 h-4 w-4" />
-          Trigger
+          {uiT("Trigger")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onEdit}>
           <Pencil className="mr-2 h-4 w-4" />
-          Edit
+          {uiT("Edit")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={onDuplicate}>
           <Copy className="mr-2 h-4 w-4" />
-          Duplicate
+          {uiT("Duplicate")}
         </DropdownMenuItem>
         {showEnabledToggle ? (
           <DropdownMenuCheckboxItem
@@ -80,7 +82,7 @@ export function WorkflowActionsMenu({
             ) : (
               <PowerOff className="mr-2 h-4 w-4 shrink-0" />
             )}
-            <span>Enable</span>
+            <span>{uiT("Enable")}</span>
             <span
               aria-hidden="true"
               className={
@@ -101,7 +103,7 @@ export function WorkflowActionsMenu({
         <DropdownMenuSeparator />
         <DropdownMenuItem className="text-destructive" onClick={onDelete}>
           <Trash2 className="mr-2 h-4 w-4" />
-          Delete
+          {uiT("Delete")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -1,3 +1,6 @@
+import { EditAgentNameField } from "./EditAgentNameField";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -116,6 +119,8 @@ export function AgentInstanceEditDialog({
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
+  const __buzzLanguage = useUiLanguage();
+
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
   const queryClient = useQueryClient();
@@ -252,13 +257,19 @@ export function AgentInstanceEditDialog({
 
   const runtimeDropdownValue = selectedRuntimeId || NO_RUNTIME_DROPDOWN_VALUE;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const runtimeDropdownOptions: PersonaDropdownOption[] = React.useMemo(() => {
     const options: PersonaDropdownOption[] = [
       ...sortedRuntimes.map((candidate) => ({
         label: formatRuntimeOptionLabel(candidate),
         value: candidate.id,
       })),
-      { label: "Custom command", value: "custom" },
+      {
+        get label() {
+          return uiT("Custom command");
+        },
+        value: "custom",
+      },
     ];
     if (
       selectedRuntimeId &&
@@ -266,13 +277,13 @@ export function AgentInstanceEditDialog({
       !options.some((o) => o.value === selectedRuntimeId)
     ) {
       options.push({
-        label: `${selectedRuntimeId} (current)`,
+        label: uiT("{0} (current)", { p0: selectedRuntimeId }),
         value: selectedRuntimeId,
       });
     }
     options.push(ADD_CUSTOM_HARNESS_OPTION);
     return options;
-  }, [sortedRuntimes, selectedRuntimeId]);
+  }, [sortedRuntimes, selectedRuntimeId, __buzzLanguage]);
 
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
@@ -794,16 +805,22 @@ export function AgentInstanceEditDialog({
       // explicitly instead of relying on the user to know the policy.
       if (!isManagedAgentActive(result.agent)) {
         const startedName = result.agent.name;
-        toast(`${startedName} saved while stopped.`, {
+        toast(uiT("{0} saved while stopped.", { p0: startedName }), {
           action: {
-            label: "Start now",
+            get label() {
+              return uiT("Start now");
+            },
             onClick: () => {
               startMutation.mutate(result.agent.pubkey, {
-                onSuccess: () => toast.success(`${startedName} started.`),
+                onSuccess: () =>
+                  toast.success(uiT("{0} started.", { p0: startedName })),
                 onError: (error) =>
                   isRelayRemovedError(error) ||
                   toast.error(
-                    `${startedName} failed to start${error instanceof Error ? `: ${error.message}` : "."}`,
+                    uiT("{0} failed to start{1}", {
+                      p0: startedName,
+                      p1: error instanceof Error ? `: ${error.message}` : ".",
+                    }),
                   ),
               });
             },
@@ -902,10 +919,15 @@ export function AgentInstanceEditDialog({
           : option.label,
       value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
     })),
-    { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
+    {
+      get label() {
+        return uiT("Custom provider...");
+      },
+      value: CUSTOM_PROVIDER_DROPDOWN_VALUE,
+    },
   ];
 
-  const previewLabel = name.trim() || "Agent name";
+  const previewLabel = name.trim() || uiT("Agent name");
   const previewAvatarUrl = avatarUrl.trim() || null;
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
@@ -924,7 +946,7 @@ export function AgentInstanceEditDialog({
         data-testid="edit-agent-dialog"
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        title={`Edit ${agent.name}`}
+        title={uiT("Edit {0}", { p0: agent.name })}
         footer={
           <div className="flex w-full items-center justify-end gap-2">
             <Button
@@ -933,7 +955,7 @@ export function AgentInstanceEditDialog({
               type="button"
               variant="outline"
             >
-              Cancel
+              {uiT("Cancel")}
             </Button>
             <Button
               data-testid="edit-agent-dialog-submit"
@@ -941,7 +963,7 @@ export function AgentInstanceEditDialog({
               onClick={() => void handleSubmit()}
               type="button"
             >
-              {isSaving ? "Saving..." : "Save changes"}
+              {isSaving ? uiT("Saving...") : uiT("Save changes")}
             </Button>
           </div>
         }
@@ -970,42 +992,20 @@ export function AgentInstanceEditDialog({
                 type="button"
                 variant="outline"
               >
-                Edit avatar
+                {uiT("Edit avatar")}
               </Button>
             ) : (
               <p className="text-center text-xs text-muted-foreground">
-                Avatar is shared identity
+                {uiT("Avatar is shared identity")}
               </p>
             )}
           </div>
           <div className="space-y-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-name"
-              >
-                Agent name
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isSaving}
-                  id="edit-agent-name"
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Agent name"
-                  value={name}
-                />
-              </div>
-            </div>
+            <EditAgentNameField
+              name={name}
+              onChange={setName}
+              disabled={isSaving}
+            />
             <OwnerOnlyAccessField
               accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}
@@ -1022,19 +1022,19 @@ export function AgentInstanceEditDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="edit-agent-runtime"
               >
-                Provider
+                {uiT("Provider")}
               </label>
               <PersonaDropdownField
                 disabled={isSaving}
                 id="edit-agent-runtime"
                 onValueChange={handleRuntimeDropdownChange}
                 options={runtimeDropdownOptions}
-                placeholder="Choose a provider"
+                placeholder={uiT("Choose a provider")}
                 value={runtimeDropdownValue}
               />
               {selectedRuntime ? (
                 <p className="text-xs text-muted-foreground">
-                  Detected at{" "}
+                  {uiT("Detected at")}{" "}
                   <span className="font-medium">
                     {selectedRuntime.binaryPath ??
                       selectedRuntime.command ??
@@ -1054,7 +1054,7 @@ export function AgentInstanceEditDialog({
                   className="text-sm font-medium text-foreground"
                   htmlFor="edit-agent-command"
                 >
-                  Agent command
+                  {uiT("Agent command")}
                 </label>
                 <div
                   className={cn(
@@ -1071,7 +1071,7 @@ export function AgentInstanceEditDialog({
                     disabled={isSaving}
                     id="edit-agent-command"
                     onChange={(event) => setAgentCommand(event.target.value)}
-                    placeholder="Full path or shell command"
+                    placeholder={uiT("Full path or shell command")}
                     value={agentCommand}
                   />
                 </div>
@@ -1147,7 +1147,7 @@ export function AgentInstanceEditDialog({
                 onClick={() => setShowAdvancedFields((current) => !current)}
                 type="button"
               >
-                <span>Advanced</span>
+                <span>{uiT("Advanced")}</span>
                 <AdvancedRequiredBadge
                   envVars={inheritedSubmission.envVars}
                   requiredEnvKeys={advancedRequiredEnvKeys}

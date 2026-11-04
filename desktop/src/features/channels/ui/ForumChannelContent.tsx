@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -81,7 +83,7 @@ export function ForumChannelContent({
       {header}
       <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
         <section
-          aria-label="Forum posts"
+          aria-label={uiT("Forum posts")}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
           <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>

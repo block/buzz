@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/AuxiliaryPanel";
@@ -50,15 +52,15 @@ export function RightAuxiliaryPane({
       }}
     >
       <button
-        aria-label="Resize panel"
+        aria-label={uiT("Resize panel")}
         className="peer/right-pane-resize group/right-pane-resize absolute inset-y-0 left-0 z-50 w-3 -translate-x-1/2 cursor-col-resize"
         data-testid="right-auxiliary-pane-resize-handle"
         onDoubleClick={canResetWidth ? onResetWidth : undefined}
         onPointerDown={onResizeStart}
         title={
           canResetWidth
-            ? "Drag to resize. Double-click to reset width."
-            : "Drag to resize."
+            ? uiT("Drag to resize. Double-click to reset width.")
+            : uiT("Drag to resize.")
         }
         type="button"
       >

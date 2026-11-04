@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Cloud } from "lucide-react";
 
 import { useIsOtherSetupAgent } from "../useKnownAgentPubkeys";
@@ -38,6 +40,8 @@ export function AgentManagementMarker({
   className?: string;
   testId?: string;
 }) {
+  useUiLanguage();
+
   const show = useIsOtherSetupAgent(pubkey, ownerPubkey);
   return show ? (
     <OtherSetupAgentMarker className={className} testId={testId} />

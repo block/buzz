@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -175,10 +177,10 @@ function NormalizedRow({
   if (isEditable) {
     return (
       <button
-        aria-label={`Edit ${label}`}
+        aria-label={uiT("Edit {0}", { p0: label })}
         className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={onEdit}
-        title={`Edit ${label}`}
+        title={uiT("Edit {0}", { p0: label })}
         type="button"
       >
         {content}
@@ -207,6 +209,8 @@ function AdvancedRow({
   field: ConfigField;
   variant?: RowVariant;
 }) {
+  useUiLanguage();
+
   const { copied, copy } = useCopyFeedback({
     label: field.label,
     value: field.value ?? "",
@@ -255,10 +259,10 @@ function AdvancedRow({
   if (isCopyable && field.value) {
     return (
       <button
-        aria-label={`Copy ${field.label}`}
+        aria-label={uiT("Copy {0}", { p0: field.label })}
         className="group flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={() => void copy()}
-        title={`Copy ${field.label}`}
+        title={uiT("Copy {0}", { p0: field.label })}
         type="button"
       >
         {content}
@@ -300,14 +304,15 @@ function ClaudeConfigDirNotice() {
   return (
     <div className="mt-3 border-t border-border/50 px-4 pt-2">
       <p className="text-xs text-muted-foreground/80">
-        ⚠ Custom <code className="font-mono text-xs">CLAUDE_CONFIG_DIR</code>{" "}
-        active — config is read from that directory. Claude Code keys its login
-        to the config-dir path, so a custom dir creates a new Keychain
-        namespace. The agent will need to re-authenticate unless you also set{" "}
+        {uiT("⚠ Custom ")}
+        <code className="font-mono text-xs">CLAUDE_CONFIG_DIR</code>{" "}
+        {uiT(
+          "active — config is read from that directory. Claude Code keys its login to the config-dir path, so a custom dir creates a new Keychain namespace. The agent will need to re-authenticate unless you also set",
+        )}{" "}
         <code className="font-mono text-xs">
           CLAUDE_SECURESTORAGE_CONFIG_DIR
         </code>{" "}
-        to match your default login.
+        {uiT("to match your default login.")}
       </p>
     </div>
   );
@@ -319,18 +324,20 @@ export function AgentConfigPanel({
   pubkey,
   sections = ALL_AGENT_CONFIG_SECTIONS,
 }: Props) {
+  useUiLanguage();
+
   const { data, isLoading, error } = useAgentConfigSurface(pubkey);
   const flatStateTitle = sections.includes("model")
-    ? "Model settings"
+    ? uiT("Model settings")
     : sections.includes("mcp")
-      ? "MCP servers"
-      : "Advanced";
+      ? uiT("MCP servers")
+      : uiT("Advanced");
 
   if (isLoading) {
     const loading = (
       <div className="flex items-center gap-2 px-4 py-4 text-sm text-muted-foreground">
         <Spinner className="h-3.5 w-3.5" />
-        Loading configuration…
+        {uiT("Loading configuration…")}
       </div>
     );
     if (advancedMode === "flat") {
@@ -348,7 +355,7 @@ export function AgentConfigPanel({
       <p className="px-4 py-3 text-sm text-destructive">
         {error instanceof Error
           ? error.message
-          : "Couldn't load agent configuration."}
+          : uiT("Couldn't load agent configuration.")}
       </p>
     );
     if (advancedMode === "flat") {
@@ -377,6 +384,8 @@ export function AgentConfigSurfaceRows({
   onEdit,
   sections = ALL_AGENT_CONFIG_SECTIONS,
 }: AgentConfigSurfaceRowsProps) {
+  useUiLanguage();
+
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
 
   const { normalized, advanced, extensions, runtimeId, sources } = data;
@@ -416,7 +425,7 @@ export function AgentConfigSurfaceRows({
         {showModelSection && normalizedEntries.length > 0 ? (
           <ProfileConfigSection
             testId="user-profile-model-settings-section"
-            title="Model settings"
+            title={uiT("Model settings")}
           >
             <div className="divide-y divide-border/55">
               {normalizedEntries.map(([key, field]) => (
@@ -424,7 +433,7 @@ export function AgentConfigSurfaceRows({
                   field={field}
                   fieldKey={key}
                   key={key}
-                  label={NORMALIZED_LABELS[key]}
+                  label={uiT(NORMALIZED_LABELS[key])}
                   onEdit={onEdit}
                   variant="profile"
                 />
@@ -436,7 +445,7 @@ export function AgentConfigSurfaceRows({
         {showMcpSection && showMcpServers ? (
           <ProfileConfigSection
             testId="user-profile-mcp-servers-section"
-            title="MCP servers"
+            title={uiT("MCP servers")}
           >
             <McpServersSection
               extensions={extensions}
@@ -450,7 +459,7 @@ export function AgentConfigSurfaceRows({
         {showAdvancedSection && advanced.length > 0 ? (
           <ProfileConfigSection
             testId="user-profile-advanced-section"
-            title="Advanced"
+            title={uiT("Advanced")}
           >
             {advanced.map((field) => (
               <AdvancedRow field={field} key={field.key} variant="profile" />
@@ -469,13 +478,13 @@ export function AgentConfigSurfaceRows({
       <div className="divide-y divide-border/50">
         {normalizedEntries.length === 0 ? (
           <p className="py-2 text-xs text-muted-foreground">
-            No config fields available.
+            {uiT("No config fields available.")}
           </p>
         ) : (
           normalizedEntries.map(([key, field]) => (
             <NormalizedRow
               fieldKey={key}
-              label={NORMALIZED_LABELS[key]}
+              label={uiT(NORMALIZED_LABELS[key])}
               field={field}
               key={key}
               variant="compact"
@@ -498,12 +507,14 @@ export function AgentConfigSurfaceRows({
             onClick={() => setAdvancedOpen((v) => !v)}
             type="button"
           >
-            {advancedOpen ? (
-              <ChevronDown className="h-3 w-3" />
-            ) : (
-              <ChevronRight className="h-3 w-3" />
-            )}
-            Advanced ({advanced.length})
+            {uiMessage("{0} Advanced ({1})", {
+              p0: advancedOpen ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              ),
+              p1: advanced.length,
+            })}
           </button>
 
           {advancedOpen ? (

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Activity, Headphones, MessageSquare } from "lucide-react";
 
@@ -145,6 +147,8 @@ export function UserProfilePopover({
   role,
   botIdenticonValue,
 }: UserProfilePopoverProps) {
+  useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -275,6 +279,8 @@ function UserProfilePopoverBody({
   role?: string;
   setOpen: (open: boolean) => void;
 }) {
+  useUiLanguage();
+
   const profileQuery = useUserProfileQuery(pubkey);
   const usersBatchQuery = useUsersBatchQuery([pubkey]);
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -427,7 +433,7 @@ function UserProfilePopoverBody({
             className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
             data-testid={`user-profile-popover-owner-${pubkey}`}
           >
-            managed by {ownerLabel}
+            {uiT("managed by {0}", { p0: ownerLabel })}
           </p>
         ) : null}
         {profileSubheader ? (
@@ -517,7 +523,7 @@ function UserProfilePopoverBody({
             type="button"
           >
             <Activity className="h-4 w-4 text-muted-foreground" />
-            View activity log
+            {uiT("View activity log")}
           </button>
         ) : null}
 
@@ -544,7 +550,7 @@ function UserProfilePopoverBody({
               <div className="flex gap-2">
                 {showHumanProfileActions ? (
                   <Button
-                    aria-label="Wave"
+                    aria-label={uiT("Wave")}
                     className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
                     data-testid={`user-profile-popover-wave-${pubkey}`}
                     disabled={pendingAction !== null || isOpeningDm}
@@ -582,15 +588,17 @@ function UserProfilePopoverBody({
                     type="button"
                     variant="outline"
                   >
-                    {pendingAction === "message" ? (
-                      <Spinner
-                        aria-hidden="true"
-                        className="h-3.5 w-3.5 border-2"
-                      />
-                    ) : (
-                      <MessageSquare />
-                    )}
-                    Message
+                    {uiMessage("{0} Message", {
+                      p0:
+                        pendingAction === "message" ? (
+                          <Spinner
+                            aria-hidden="true"
+                            className="h-3.5 w-3.5 border-2"
+                          />
+                        ) : (
+                          <MessageSquare />
+                        ),
+                    })}
                   </Button>
                 ) : null}
                 {showHuddleAction ? (
@@ -607,15 +615,17 @@ function UserProfilePopoverBody({
                     type="button"
                     variant="outline"
                   >
-                    {pendingAction === "huddle" ? (
-                      <Spinner
-                        aria-hidden="true"
-                        className="h-3.5 w-3.5 border-2"
-                      />
-                    ) : (
-                      <Headphones />
-                    )}
-                    Huddle
+                    {uiMessage("{0} Huddle", {
+                      p0:
+                        pendingAction === "huddle" ? (
+                          <Spinner
+                            aria-hidden="true"
+                            className="h-3.5 w-3.5 border-2"
+                          />
+                        ) : (
+                          <Headphones />
+                        ),
+                    })}
                   </Button>
                 ) : null}
               </div>
@@ -634,11 +644,16 @@ function PopoverWorkingBadge({
   name: string;
   anchorAt: number;
 }) {
+  useUiLanguage();
+
   const now = useNow(1000);
 
   return (
     <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary motion-safe:animate-pulse">
-      Working in #{name} · {formatElapsed(now - anchorAt)}
+      {uiT("Working in #{0} · {1}", {
+        p0: name,
+        p1: formatElapsed(now - anchorAt),
+      })}
     </span>
   );
 }

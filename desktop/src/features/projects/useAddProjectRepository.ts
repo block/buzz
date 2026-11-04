@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -283,8 +285,8 @@ export async function addProjectRepository(
         // error with the event id so the user (or a future repair pass) can
         // query the relay directly and re-submit the signed event if needed.
         const eventLabel = repositoryEvent
-          ? `event ${repositoryEvent.id.slice(0, 8)}…`
-          : "an event that could not be signed";
+          ? uiT("event {0}…", { p0: repositoryEvent.id.slice(0, 8) })
+          : uiT("an event that could not be signed");
         throw new Error(
           `The project was updated but the repository could not be created (${eventLabel}): ${message} ` +
             `The add-repository operation is idempotent — re-run Add repository with the same name to resume: the recovery query will find the stored event or retry the publish.`,

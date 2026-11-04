@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ComponentType } from "react";
 import { ExternalLink, RefreshCcw, RotateCw } from "lucide-react";
@@ -28,30 +30,41 @@ const variants: Record<
 > = {
   available: {
     Icon: RefreshCcw,
-    label: "Update available",
+    get label() {
+      return uiT("Update available");
+    },
     badgeColor: "bg-primary",
   },
   downloading: {
     Icon: Spinner,
     iconClassName: "h-4 w-4 border-2",
-    label: "Downloading update\u2026",
+    get label() {
+      return uiT("Downloading update…");
+    },
     badgeColor: "bg-primary",
   },
   installing: {
     Icon: Spinner,
     iconClassName: "h-4 w-4 border-2",
-    label: "Installing update\u2026",
+    get label() {
+      return uiT("Installing update…");
+    },
     badgeColor: "bg-primary",
   },
   "manual-required": {
     Icon: ExternalLink,
-    label:
-      "Update available — download from GitHub (use AppImage for auto-updates)",
+    get label() {
+      return uiT(
+        "Update available — download from GitHub (use AppImage for auto-updates)",
+      );
+    },
     badgeColor: "bg-primary",
   },
   ready: {
     Icon: RotateCw,
-    label: "Update now",
+    get label() {
+      return uiT("Update now");
+    },
     badgeColor: "bg-emerald-500",
   },
 };
@@ -70,6 +83,8 @@ function getVariant(state: UpdateStatus["state"]) {
 }
 
 export function UpdateIndicator({ className }: { className?: string }) {
+  useUiLanguage();
+
   const { status, installAndRelaunch } = useUpdaterContext();
   const variant = getVariant(status.state);
 

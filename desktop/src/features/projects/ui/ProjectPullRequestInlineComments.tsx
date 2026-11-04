@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { FileCode2, MessageSquareText } from "lucide-react";
 
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
@@ -104,9 +106,9 @@ export function ProjectPullRequestInlineCommentThread({
               : undefined
           }
           onSubmit={onSubmit}
-          placeholder="Leave a comment on this line…"
+          placeholder={uiT("Leave a comment on this line…")}
           profiles={profiles}
-          secondarySubmitLabel="Request changes"
+          secondarySubmitLabel={uiT("Request changes")}
         />
       ) : null}
     </div>

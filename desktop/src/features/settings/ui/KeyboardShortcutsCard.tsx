@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   getShortcutsByCategory,
   getPlatformKeys,
@@ -38,8 +40,10 @@ export function KeyboardShortcutsCard() {
   return (
     <section className="min-w-0" data-testid="settings-shortcuts">
       <SettingsSectionHeader
-        title="Keyboard shortcuts"
-        description="All available keyboard shortcuts. Shortcuts are read-only."
+        title={uiT("Keyboard shortcuts")}
+        description={uiT(
+          "All available keyboard shortcuts. Shortcuts are read-only.",
+        )}
       />
 
       <SettingsOptionGroupList>

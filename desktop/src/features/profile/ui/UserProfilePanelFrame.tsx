@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import {
@@ -59,7 +61,7 @@ export function UserProfilePanelFrame({
       onClose={onClose}
       onResetWidth={onResetWidth}
       onResizeStart={onResizeStart}
-      resizeHandleAriaLabel="Resize profile panel"
+      resizeHandleAriaLabel={uiT("Resize profile panel")}
       resizeHandleTestId="user-profile-resize-handle"
       siblings={
         <>

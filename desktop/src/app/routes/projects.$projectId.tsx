@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createFileRoute, useLocation } from "@tanstack/react-router";
 
@@ -16,6 +18,8 @@ export const Route = createFileRoute("/projects/$projectId")({
 });
 
 function ProjectDetailRouteComponent() {
+  useUiLanguage();
+
   usePreviewFeatureWarning("projects");
   const { projectId } = Route.useParams();
   const { commitHash, filePath, pullRequestId, issueId, repositoryId, tab } =

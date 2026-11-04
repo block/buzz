@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   commitAuthorPubkeysFromPullRequests,
   contributorKey,
@@ -81,7 +83,7 @@ export function ContributorsPanel({
     const matchedProfile = signedProfile ?? heuristicProfile?.profile;
     const label = matchedProfile
       ? resolveUserLabel({ pubkey: matchedPubkey ?? "", profiles })
-      : contributor.name || contributor.email || "Unknown contributor";
+      : contributor.name || contributor.email || uiT("Unknown contributor");
     const signedCounts = matchedPubkey
       ? activityCounts[matchedPubkey]
       : undefined;
@@ -152,8 +154,10 @@ export function ContributorsPanel({
   if (rows.length === 0) {
     return (
       <ProjectPanelState
-        description="Contributors appear after signed project or repository activity."
-        title="No contributors yet"
+        description={uiT(
+          "Contributors appear after signed project or repository activity.",
+        )}
+        title={uiT("No contributors yet")}
       />
     );
   }
@@ -198,7 +202,7 @@ export function ContributorsPanel({
             data-testid="project-contributor-commit-count"
             title={
               row.commitCount === null
-                ? "No git commits"
+                ? uiT("No git commits")
                 : pluralize(row.commitCount, "commit")
             }
           >
@@ -210,7 +214,7 @@ export function ContributorsPanel({
             data-testid="project-contributor-review-count"
             title={
               row.reviewCount === null
-                ? "No linked reviews"
+                ? uiT("No linked reviews")
                 : pluralize(row.reviewCount, "review")
             }
           >
@@ -222,7 +226,7 @@ export function ContributorsPanel({
             data-testid="project-contributor-task-count"
             title={
               row.taskCount === null
-                ? "No linked tasks"
+                ? uiT("No linked tasks")
                 : pluralize(row.taskCount, "task")
             }
           >
@@ -301,7 +305,7 @@ export function ActivityPanel({
   });
 
   if (isLoading) {
-    return <BuzzLoadingState label="Loading activity" />;
+    return <BuzzLoadingState label={uiT("Loading activity")} />;
   }
 
   if (items.length === 0) {
@@ -309,13 +313,15 @@ export function ActivityPanel({
       <ProjectPanelState
         description={
           error
-            ? "Refresh the repository and try again."
+            ? uiT("Refresh the repository and try again.")
             : commitItems
-              ? "Commits pushed to this project's repositories will appear here."
-              : "Commits pushed to this repository will appear here."
+              ? uiT(
+                  "Commits pushed to this project's repositories will appear here.",
+                )
+              : uiT("Commits pushed to this repository will appear here.")
         }
         error={Boolean(error)}
-        title={error ? "Could not load commits" : "No commits yet"}
+        title={error ? uiT("Could not load commits") : uiT("No commits yet")}
       />
     );
   }
@@ -340,7 +346,7 @@ export function ActivityPanel({
               })
             : item.commit.authorName ||
               item.commit.authorEmail ||
-              "Unknown author";
+              uiT("Unknown author");
           const matchingContributor = (item.repoContributors ?? []).find(
             (contributor) =>
               contributor.name.trim().toLowerCase() ===
@@ -354,7 +360,9 @@ export function ActivityPanel({
               eventId={item.commit.hash}
               identifier={item.commit.shortHash}
               identifierClassName="font-mono"
-              identifierTitle={`View commit ${item.commit.shortHash}`}
+              identifierTitle={uiT("View commit {0}", {
+                p0: item.commit.shortHash,
+              })}
               key={`${item.project.repoAddress}:${item.commit.hash}`}
               metadata={
                 showRepositoryName || item.branch ? (
@@ -397,14 +405,15 @@ export function ActivityPanel({
                   <span
                     className="flex h-5 w-5 shrink-0 items-center justify-center"
                     data-testid="project-commit-author"
-                    title={`Committed by ${authorLabel}${
-                      matchingContributor?.commitCount
+                    title={uiT("Committed by {0}{1}", {
+                      p0: authorLabel,
+                      p1: matchingContributor?.commitCount
                         ? ` · ${pluralize(
                             matchingContributor.commitCount,
                             "commit",
                           )}`
-                        : ""
-                    }`}
+                        : "",
+                    })}
                   >
                     <ProfileIdentityButton
                       avatarClassName="shrink-0"

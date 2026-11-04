@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -32,6 +34,8 @@ export function AgentDefaultsDialog({
   onOpenChange: (open: boolean) => void;
   returnFocusRef: React.RefObject<HTMLButtonElement | null>;
 }) {
+  useUiLanguage();
+
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [confirmDiscard, setConfirmDiscard] = React.useState(false);
@@ -86,11 +90,11 @@ export function AgentDefaultsDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Agent defaults</DialogTitle>
+            <DialogTitle>{uiT("Agent defaults")}</DialogTitle>
             <DialogDescription>
-              These settings apply to all agents unless you override them.
-              Agent-specific settings always take priority. Changes may restart
-              running agents.
+              {uiT(
+                "These settings apply to all agents unless you override them. Agent-specific settings always take priority. Changes may restart running agents.",
+              )}
             </DialogDescription>
           </DialogHeader>
           <AgentDefaultsEditor
@@ -109,7 +113,7 @@ export function AgentDefaultsDialog({
                 type="button"
                 variant="outline"
               >
-                {restartFailures > 0 ? "Done" : "Cancel"}
+                {restartFailures > 0 ? uiT("Done") : uiT("Cancel")}
               </Button>
             }
           />
@@ -128,10 +132,10 @@ export function AgentDefaultsDialog({
         >
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Discard changes to agent defaults?
+              {uiT("Discard changes to agent defaults?")}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Unsaved changes made to agent defaults will be lost.
+              {uiT("Unsaved changes made to agent defaults will be lost.")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -140,7 +144,7 @@ export function AgentDefaultsDialog({
                 restoreDefaultsFocusRef.current = true;
               }}
             >
-              Keep editing
+              {uiT("Keep editing")}
             </AlertDialogCancel>
             <AlertDialogAction asChild>
               <Button
@@ -150,7 +154,7 @@ export function AgentDefaultsDialog({
                 }}
                 variant="destructive"
               >
-                Discard changes
+                {uiT("Discard changes")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { createFileRoute, useLocation } from "@tanstack/react-router";
 
@@ -59,6 +61,8 @@ const ChannelRouteScreen = React.lazy(async () => {
 });
 
 function ChannelRouteComponent() {
+  useUiLanguage();
+
   const { channelId } = Route.useParams();
   const search = Route.useSearch();
   const searchHighlight = useLocation({

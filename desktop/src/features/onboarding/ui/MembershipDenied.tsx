@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Check, Copy, KeyRound, ShieldX, Ticket } from "lucide-react";
 
@@ -30,6 +32,8 @@ export function MembershipDenied({
   onRetry,
   pubkey,
 }: MembershipDeniedProps) {
+  useUiLanguage();
+
   // Full canonical npub; an unencodable identity renders the neutral label
   // (never raw hex) and is never copyable.
   const identityNpub = React.useMemo(
@@ -64,7 +68,7 @@ export function MembershipDenied({
   const handleImportKey = React.useCallback(async () => {
     if (!previewNpub) {
       setImportError(
-        "That doesn't look like a valid nsec. Paste an nsec1 key.",
+        uiT("That doesn't look like a valid nsec. Paste an nsec1 key."),
       );
       return;
     }
@@ -76,7 +80,7 @@ export function MembershipDenied({
       await onImportKey(trimmedNsec);
     } catch (error) {
       setImportError(
-        error instanceof Error ? error.message : "Failed to import key.",
+        error instanceof Error ? error.message : uiT("Failed to import key."),
       );
     } finally {
       setIsImportingKey(false);
@@ -103,25 +107,26 @@ export function MembershipDenied({
       <StartupWindowDragRegion />
       <div className="w-full max-w-md rounded-[28px] border border-border/70 bg-background/92 p-8 shadow-2xl backdrop-blur-sm">
         <div className="space-y-3">
-          <Badge variant="warning">Membership required</Badge>
+          <Badge variant="warning">{uiT("Membership required")}</Badge>
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-destructive/10">
               <ShieldX className="h-4 w-4 text-destructive" />
             </div>
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-              Not a member yet
+              {uiT("Not a member yet")}
             </h1>
           </div>
           <p className="text-sm leading-6 text-muted-foreground">
-            This relay requires an invitation. Ask a relay admin to add you as a
-            member, then come back and try again.
+            {uiT(
+              "This relay requires an invitation. Ask a relay admin to add you as a member, then come back and try again.",
+            )}
           </p>
         </div>
 
         <div className="mt-6 space-y-3">
           <div className="space-y-1.5">
             <p className="text-xs font-medium text-muted-foreground">
-              Your public key (npub)
+              {uiT("Your public key (npub)")}
             </p>
             <div className="flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5 font-mono text-xs text-foreground">
@@ -134,7 +139,7 @@ export function MembershipDenied({
                   void handleCopy();
                 }}
                 size="icon"
-                title="Copy npub"
+                title={uiT("Copy npub")}
                 type="button"
                 variant="outline"
               >
@@ -147,8 +152,9 @@ export function MembershipDenied({
             </div>
           </div>
           <p className="text-xs leading-5 text-muted-foreground">
-            This is your public identity — it&apos;s safe to share. Send it to
-            the relay admin so they can invite you.
+            {uiT(
+              "This is your public identity — it's safe to share. Send it to the relay admin so they can invite you.",
+            )}
           </p>
         </div>
 
@@ -174,7 +180,7 @@ export function MembershipDenied({
                   className="text-sm font-medium text-foreground"
                   htmlFor="membership-denied-nsec"
                 >
-                  Private key
+                  {uiT("Private key")}
                 </label>
                 <Input
                   autoComplete="off"
@@ -201,7 +207,7 @@ export function MembershipDenied({
                   <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                   <div className="min-w-0 space-y-0.5">
                     <p className="font-medium text-foreground">
-                      This will use this Nostr identity:
+                      {uiT("This will use this Nostr identity:")}
                     </p>
                     <p className="break-all font-mono text-2xs text-muted-foreground">
                       {previewNpub}
@@ -224,11 +230,11 @@ export function MembershipDenied({
               >
                 {isImportingKey ? (
                   <Spinner
-                    aria-label="Importing key"
+                    aria-label={uiT("Importing key")}
                     className="h-4 w-4 border-2"
                   />
                 ) : (
-                  "Import key"
+                  uiT("Import key")
                 )}
               </Button>
               <Button
@@ -242,13 +248,13 @@ export function MembershipDenied({
                 type="button"
                 variant="ghost"
               >
-                Back
+                {uiT("Back")}
               </Button>
             </form>
           ) : (
             <>
               <Button className="w-full" onClick={onRetry} type="button">
-                Try again
+                {uiT("Try again")}
               </Button>
               <div className="flex gap-2">
                 <Button
@@ -257,7 +263,7 @@ export function MembershipDenied({
                   type="button"
                   variant="ghost"
                 >
-                  Back
+                  {uiT("Back")}
                 </Button>
                 <Button
                   className="flex-1 text-muted-foreground hover:text-accent-foreground"
@@ -265,7 +271,7 @@ export function MembershipDenied({
                   type="button"
                   variant="ghost"
                 >
-                  Change community
+                  {uiT("Change community")}
                 </Button>
               </div>
               <button
@@ -275,7 +281,7 @@ export function MembershipDenied({
                 type="button"
               >
                 <Ticket className="h-4 w-4" />
-                Have an invite?
+                {uiT("Have an invite?")}
               </button>
               <button
                 className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
@@ -287,7 +293,7 @@ export function MembershipDenied({
                 type="button"
               >
                 <KeyRound className="h-4 w-4" />
-                Use a different key
+                {uiT("Use a different key")}
               </button>
             </>
           )}

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Download, FileText } from "lucide-react";
 import { toast } from "sonner";
@@ -38,6 +40,8 @@ export function FileCard({
   filename: string;
   size?: number;
 }) {
+  useUiLanguage();
+
   const cardRef = React.useRef<HTMLButtonElement | null>(null);
   const sizeLabel = size != null ? formatFileSize(size) : "";
   useSmoothCorners(cardRef);

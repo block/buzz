@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -148,12 +150,16 @@ async function verifyPresentation(
     state: "failed",
   };
   emitChange();
-  toast.error("Avatar couldn’t finish uploading", {
+  toast.error(uiT("Avatar couldn’t finish uploading"), {
     action: {
-      label: "Retry",
+      get label() {
+        return uiT("Retry");
+      },
       onClick: () => retryAvatarPresentation(entry.remoteUrl),
     },
-    description: "Your default avatar is showing instead.",
+    get description() {
+      return uiT("Your default avatar is showing instead.");
+    },
     id: toastId(entry.remoteUrl),
   });
 }

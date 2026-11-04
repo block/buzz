@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -8,6 +10,8 @@ import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 
 export function KeyringLockedScreen() {
+  useUiLanguage();
+
   const queryClient = useQueryClient();
   const systemColorScheme = useSystemColorScheme();
   const [showImport, setShowImport] = React.useState(false);
@@ -41,17 +45,17 @@ export function KeyringLockedScreen() {
       <StartupWindowDragRegion />
       <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
         <h1 className="text-3xl font-semibold tracking-tight">
-          Unlock your system keyring
+          {uiT("Unlock your system keyring")}
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Your identity is safe in the OS keyring, but it's unreachable this
-          session. Unlock your keyring or sign into your desktop session, then
-          relaunch Buzz.
+          {uiT(
+            "Your identity is safe in the OS keyring, but it's unreachable this session. Unlock your keyring or sign into your desktop session, then relaunch Buzz.",
+          )}
         </p>
 
         {showImport ? (
           <NostrKeyImportForm
-            backLabel="Cancel"
+            backLabel={uiT("Cancel")}
             onBack={() => setShowImport(false)}
             onImport={handleImport}
           />
@@ -65,7 +69,7 @@ export function KeyringLockedScreen() {
               }}
               type="button"
             >
-              Relaunch Buzz
+              {uiT("Relaunch Buzz")}
             </Button>
             <Button
               className="h-10 w-full"
@@ -73,7 +77,7 @@ export function KeyringLockedScreen() {
               type="button"
               variant="secondary"
             >
-              Re-import your key instead
+              {uiT("Re-import your key instead")}
             </Button>
           </div>
         )}

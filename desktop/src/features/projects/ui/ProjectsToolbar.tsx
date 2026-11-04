@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { LayoutGrid, List } from "lucide-react";
 import { motion } from "motion/react";
 import * as React from "react";
@@ -39,9 +41,9 @@ export function ProjectsViewModeToggle({
 }) {
   return (
     <fieldset className="flex items-center rounded-lg bg-muted/30 p-0.5">
-      <legend className="sr-only">Project layout</legend>
+      <legend className="sr-only">{uiT("Project layout")}</legend>
       <Button
-        aria-label="Grid layout"
+        aria-label={uiT("Grid layout")}
         aria-pressed={viewMode === "grid"}
         className="h-7 w-7 px-0"
         onClick={() => onViewModeChange("grid")}
@@ -52,7 +54,7 @@ export function ProjectsViewModeToggle({
         <LayoutGrid className="h-3.5 w-3.5" />
       </Button>
       <Button
-        aria-label="List layout"
+        aria-label={uiT("List layout")}
         aria-pressed={viewMode === "list"}
         className="h-7 w-7 px-0"
         onClick={() => onViewModeChange("list")}
@@ -108,6 +110,8 @@ export function ProjectsToolbar({
   onFilterChange,
   reduceMotion = false,
 }: ProjectsToolbarProps) {
+  useUiLanguage();
+
   const scrollRef = React.useRef<HTMLFieldSetElement>(null);
   const overflow = useHorizontalOverflow(scrollRef);
 
@@ -123,12 +127,42 @@ export function ProjectsToolbar({
     label: string;
     value: ProjectsFilter;
   }> = [
-    { label: "Activity", value: "all" },
-    { label: "Projects", value: "projects" },
-    { label: "Repositories", value: "repositories" },
-    { label: "Tasks", value: "issues" },
-    { label: "Reviews", value: "prs" },
-    { label: "Channels", value: "channels" },
+    {
+      get label() {
+        return uiT("Activity");
+      },
+      value: "all",
+    },
+    {
+      get label() {
+        return uiT("Projects");
+      },
+      value: "projects",
+    },
+    {
+      get label() {
+        return uiT("Repositories");
+      },
+      value: "repositories",
+    },
+    {
+      get label() {
+        return uiT("Tasks");
+      },
+      value: "issues",
+    },
+    {
+      get label() {
+        return uiT("Reviews");
+      },
+      value: "prs",
+    },
+    {
+      get label() {
+        return uiT("Channels");
+      },
+      value: "channels",
+    },
   ];
 
   return (
@@ -150,7 +184,7 @@ export function ProjectsToolbar({
           )}
           ref={scrollRef}
         >
-          <legend className="sr-only">Project owner filter</legend>
+          <legend className="sr-only">{uiT("Project owner filter")}</legend>
           {filterOptions.map((option) => (
             <motion.span
               className="shrink-0"

@@ -1,5 +1,9 @@
 import type { CSSProperties } from "react";
 
+export type WebKitGestureLikeEvent = Event & {
+  scale?: number;
+};
+
 import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
 import {

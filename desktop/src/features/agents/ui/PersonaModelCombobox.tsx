@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 
@@ -27,12 +29,15 @@ export function PersonaModelCombobox({
   placeholder,
   value,
 }: PersonaModelComboboxProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
 
   const selectedOption = options.find((option) => option.value === value);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const filteredOptions = React.useMemo(() => {
     if (query.trim() === "") return options;
     const lower = query.toLowerCase();
@@ -42,7 +47,7 @@ export function PersonaModelCombobox({
         option.label.toLowerCase().includes(lower) ||
         option.value.toLowerCase().includes(lower),
     );
-  }, [options, query]);
+  }, [options, query, __buzzLanguage]);
 
   function handleOpenChange(next: boolean) {
     setOpen(next);
@@ -157,14 +162,14 @@ export function PersonaModelCombobox({
           <div className="group/search flex cursor-text items-center gap-2 border-b border-border/50 px-3 py-2">
             <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-focus-within/search:text-foreground" />
             <input
-              aria-label="Search models"
+              aria-label={uiT("Search models")}
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect="off"
               className="block min-w-0 flex-1 border-0 bg-transparent p-0 text-sm leading-5 text-muted-foreground/55 shadow-none outline-none placeholder:text-muted-foreground/55 focus:text-foreground focus:placeholder:text-muted-foreground"
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Search models…"
+              placeholder={uiT("Search models…")}
               // Popover supports onOpenAutoFocus; we preventDefault above so
               // Radix doesn't move focus to the first focusable. But we still
               // want the input focused immediately, so use the callback ref.
@@ -213,7 +218,7 @@ export function PersonaModelCombobox({
               ))
             ) : (
               <p className="px-3 py-6 text-center text-sm text-muted-foreground/55">
-                No models match
+                {uiT("No models match")}
               </p>
             )}
           </div>

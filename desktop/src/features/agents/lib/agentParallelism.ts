@@ -1,3 +1,4 @@
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Desktop-managed agents materialize this value when neither the create input
  * nor the linked definition sets parallelism. Keep in sync with
@@ -35,5 +36,8 @@ export function parallelismCapHint(
   requested: number,
 ): string | null {
   if (requested <= cap) return null;
-  return `${harnessLabel} runs at most ${cap} parallel conversation${cap === 1 ? "" : "s"} — this agent will run ${cap}.`;
+  return uiT(
+    "{0} runs at most {1} parallel conversation{2} — this agent will run {3}.",
+    { p0: harnessLabel, p1: cap, p2: cap === 1 ? "" : "s", p3: cap },
+  );
 }

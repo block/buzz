@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel";
 
 export function AdvancedRequiredBadge({
@@ -20,7 +22,7 @@ export function AdvancedRequiredBadge({
       className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive"
       data-testid={testId}
     >
-      Required
+      {uiT("Required")}
     </span>
   );
 }

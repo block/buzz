@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   ArrowDown,
   CalendarClock,
@@ -104,7 +106,7 @@ function TriggerConfigFields({
     case "webhook":
       return (
         <p className="text-xs text-muted-foreground">
-          A unique URL is generated after creation.
+          {uiT("A unique URL is generated after creation.")}
         </p>
       );
     case "schedule":
@@ -239,6 +241,8 @@ function WorkflowNode({
   terminal: boolean;
   title: string;
 }) {
+  useUiLanguage();
+
   const isNumbered = number !== undefined;
   const [addMenuOpen, setAddMenuOpen] = React.useState(false);
 
@@ -291,7 +295,7 @@ function WorkflowNode({
 
         {onRemove ? (
           <Button
-            aria-label={`Remove ${title}`}
+            aria-label={uiT("Remove {0}", { p0: title })}
             className="pointer-events-none absolute -right-8 top-1/2 z-10 h-8 w-8 -translate-y-1/2 rounded-full bg-transparent opacity-0 transition-all duration-200 group-focus-within:pointer-events-auto group-focus-within:translate-x-3 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-x-3 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive"
             disabled={disabled}
             onClick={onRemove}
@@ -320,7 +324,9 @@ function WorkflowNode({
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={
-                title === "Trigger" ? "Add step" : `Add after ${title}`
+                title === "Trigger"
+                  ? uiT("Add step")
+                  : uiT("Add after {0}", { p0: title })
               }
               className={cn(
                 "relative z-10 h-7 w-7 rounded-full bg-background shadow-sm",
@@ -371,6 +377,8 @@ export const WorkflowFormBuilder = React.forwardRef<
   },
   ref,
 ) {
+  useUiLanguage();
+
   // Parse once on mount instead of calling yamlToFormState three times
   const initialParseRef = React.useRef(yaml ? yamlToFormState(yaml) : null);
   const [formState, setFormState] = React.useState<WorkflowFormState>(
@@ -657,7 +665,7 @@ export const WorkflowFormBuilder = React.forwardRef<
             className="mx-6 mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
             role="alert"
           >
-            Cannot switch to form view: {parseError}
+            {uiT("Cannot switch to form view: {0}", { p0: parseError })}
           </p>
         ) : null}
 
@@ -666,7 +674,7 @@ export const WorkflowFormBuilder = React.forwardRef<
             <div className="max-w-md flex-shrink-0">{scopeField}</div>
             <div className="flex min-h-0 flex-1 flex-col gap-1.5">
               <Textarea
-                aria-label="Workflow YAML"
+                aria-label={uiT("Workflow YAML")}
                 autoCapitalize="off"
                 className="min-h-0 flex-1 resize-none font-mono text-xs"
                 disabled={disabled}
@@ -674,7 +682,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                 value={yaml}
               />
               <p className="flex-shrink-0 text-xs text-muted-foreground">
-                Edit the raw YAML definition directly.
+                {uiT("Edit the raw YAML definition directly.")}
               </p>
             </div>
           </div>
@@ -684,7 +692,7 @@ export const WorkflowFormBuilder = React.forwardRef<
               <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-5">
                 <div className="mx-auto w-full max-w-sm">
                   {scopeField ? <div className="mb-3">{scopeField}</div> : null}
-                  <ol aria-label="Workflow sequence">
+                  <ol aria-label={uiT("Workflow sequence")}>
                     <WorkflowNode
                       description={visibleTriggerDescription}
                       disabled={disabled}
@@ -698,12 +706,12 @@ export const WorkflowFormBuilder = React.forwardRef<
                           <TriggerIcon className="h-4 w-4" />
                         )
                       }
-                      label={`Trigger: ${triggerDescription}`}
+                      label={uiT("Trigger: {0}", { p0: triggerDescription })}
                       onAddAfter={(action) => insertStep(0, action)}
                       onClick={() => selectNode({ type: "trigger" })}
                       selected={selectedNode?.type === "trigger"}
                       terminal={formState.steps.length === 0}
-                      title="Trigger"
+                      title={uiT("Trigger")}
                     />
 
                     {formState.steps.map((step, index) => {
@@ -738,7 +746,10 @@ export const WorkflowFormBuilder = React.forwardRef<
                             ) : undefined
                           }
                           key={step.id}
-                          label={`Step ${index + 1}: ${nodeDescription}`}
+                          label={uiT("Step {0}: {1}", {
+                            p0: index + 1,
+                            p1: nodeDescription,
+                          })}
                           number={stepEmoji ? undefined : index + 1}
                           onAddAfter={(action) => insertStep(index + 1, action)}
                           onClick={() =>
@@ -754,7 +765,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                             showActionSubtitle ? actionLabel : undefined
                           }
                           terminal={index === formState.steps.length - 1}
-                          title={`Step ${index + 1}`}
+                          title={uiT("Step {0}", { p0: index + 1 })}
                         />
                       );
                     })}
@@ -766,7 +777,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                 {selectedNode ? (
                   <motion.button
                     animate={{ opacity: 1 }}
-                    aria-label="Close inspector overlay"
+                    aria-label={uiT("Close inspector overlay")}
                     className="absolute inset-0 z-20 hidden bg-background/15 backdrop-blur-sm [@container(max-width:58rem)]:block"
                     data-testid="workflow-node-inspector-backdrop"
                     exit={{ opacity: 0 }}
@@ -790,7 +801,9 @@ export const WorkflowFormBuilder = React.forwardRef<
                     <motion.aside
                       animate={{ opacity: 1, width: "26rem", x: 0 }}
                       aria-label={
-                        narrowInspector ? "Workflow node inspector" : undefined
+                        narrowInspector
+                          ? uiT("Workflow node inspector")
+                          : undefined
                       }
                       aria-modal={narrowInspector || undefined}
                       className="flex flex-shrink-0 p-4 [@container(max-width:58rem)]:absolute [@container(max-width:58rem)]:inset-y-0 [@container(max-width:58rem)]:right-0 [@container(max-width:58rem)]:z-30 [@container(max-width:58rem)]:max-w-full"
@@ -820,12 +833,14 @@ export const WorkflowFormBuilder = React.forwardRef<
                           <div className="min-w-0">
                             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                               {selectedNode.type === "trigger"
-                                ? "Trigger"
-                                : `Step ${selectedStepIndex + 1}`}
+                                ? uiT("Trigger")
+                                : uiT("Step {0}", {
+                                    p0: selectedStepIndex + 1,
+                                  })}
                             </p>
                             {selectedNode.type === "trigger" ? (
                               <InspectorTypeMenu
-                                ariaLabel="Trigger event"
+                                ariaLabel={uiT("Trigger event")}
                                 disabled={disabled}
                                 labels={TRIGGER_LABELS}
                                 onChange={(triggerType) => {
@@ -855,7 +870,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                               />
                             ) : selectedStep ? (
                               <InspectorTypeMenu
-                                ariaLabel="Action"
+                                ariaLabel={uiT("Action")}
                                 disabled={disabled}
                                 labels={ACTION_LABELS}
                                 onChange={(action) => {
@@ -876,7 +891,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                           <div className="flex items-center gap-1">
                             {selectedNode.type === "step" && selectedStep ? (
                               <Button
-                                aria-label="Remove step"
+                                aria-label={uiT("Remove step")}
                                 className="h-8 w-8"
                                 disabled={disabled}
                                 onClick={() => removeStep(selectedStepIndex)}
@@ -888,7 +903,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                               </Button>
                             ) : null}
                             <Button
-                              aria-label="Close inspector"
+                              aria-label={uiT("Close inspector")}
                               className="h-8 w-8"
                               onClick={() => onSelectedNodeChange(null)}
                               size="icon"
@@ -973,7 +988,7 @@ export const WorkflowFormBuilder = React.forwardRef<
       {mode === "form" && nameLeadingContainer
         ? createPortal(
             <Switch
-              aria-label="Enable workflow"
+              aria-label={uiT("Enable workflow")}
               checked={formState.enabled}
               disabled={disabled}
               id="wf-enabled"

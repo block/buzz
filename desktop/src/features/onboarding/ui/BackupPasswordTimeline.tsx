@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { FileKey2, LockKeyhole, LockOpen } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 
@@ -47,6 +49,8 @@ const TIMELINE_BOTTOM_DOT_TRANSITIONS = TIMELINE_CONNECTOR_DOTS.map(
 );
 
 export function BackupFileUnlockPreview() {
+  useUiLanguage();
+
   const reduceMotion = useReducedMotion() ?? false;
 
   return (
@@ -118,6 +122,8 @@ export function BackupPasswordTimeline({
   className?: string;
   mode?: "backup" | "restore";
 }) {
+  useUiLanguage();
+
   const reduceMotion = useReducedMotion() ?? false;
 
   return (

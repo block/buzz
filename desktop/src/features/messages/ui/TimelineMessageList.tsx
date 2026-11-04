@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { VList } from "virtua";
 import type { VListHandle } from "virtua";
@@ -171,6 +173,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onVirtualizerRangeChanged,
   onVirtualizerScrollerChange,
 }: TimelineMessageListProps) {
+  useUiLanguage();
+
   const entries = React.useMemo(
     () =>
       mainEntries ??
@@ -414,6 +418,8 @@ function VirtualizedTimelineItemShell({
   ref,
   style,
 }: VirtualizedTimelineItemShellProps) {
+  useUiLanguage();
+
   const preserveVisibility = React.useContext(
     PreserveVirtualizedItemVisibilityContext,
   );
@@ -439,6 +445,8 @@ function VirtualizedTimelineRows({
   onVirtualizerScrollerChange,
   renderItem,
 }: VirtualizedTimelineRowsProps) {
+  useUiLanguage();
+
   const listRef = React.useRef<VListHandle>(null);
   const hostRef = React.useRef<HTMLDivElement>(null);
   const itemsLengthRef = React.useRef(0);

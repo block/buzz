@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
@@ -62,6 +64,8 @@ function SidebarActionDescriptionText({
   shouldReduceMotion: boolean;
   value: string;
 }) {
+  useUiLanguage();
+
   const [transition, setTransition] =
     React.useState<SidebarActionDescriptionTransition>(() => ({
       current: value,
@@ -139,6 +143,8 @@ function SidebarActionDismissButton({
   onDismissStart,
   testId,
 }: SidebarActionDismissButtonProps) {
+  useUiLanguage();
+
   const dismissTimeoutRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
@@ -192,7 +198,7 @@ export function SidebarCompactActionCard({
   className,
   description,
   dismissClassName,
-  dismissLabel = "Dismiss notification",
+  dismissLabel = uiT("Dismiss notification"),
   icon,
   iconKey,
   onAction,
@@ -203,6 +209,8 @@ export function SidebarCompactActionCard({
   title,
   tone = "neutral",
 }: SidebarCompactActionCardProps) {
+  useUiLanguage();
+
   const shouldReduceMotion = useReducedMotion();
   const isSuccess = tone === "success";
   const [isDismissing, setIsDismissing] = React.useState(false);

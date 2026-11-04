@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Quota-aware localStorage writes with pure-cache eviction recovery.
  *
@@ -131,9 +133,12 @@ function notifyStorageFull(): void {
   // Dynamic import keeps this module usable from node unit tests.
   import("sonner")
     .then(({ toast }) => {
-      toast.error("Local storage is full", {
-        description:
-          "Buzz could not save some local data — read positions may not persist across restarts.",
+      toast.error(uiT("Local storage is full"), {
+        get description() {
+          return uiT(
+            "Buzz could not save some local data — read positions may not persist across restarts.",
+          );
+        },
       });
     })
     .catch(() => {});

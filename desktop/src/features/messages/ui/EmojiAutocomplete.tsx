@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
@@ -31,6 +33,8 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
   onSelect,
   position = "above",
 }: EmojiAutocompleteProps) {
+  useUiLanguage();
+
   const listVirtualizerRef = React.useRef<ListVirtualizer | null>(null);
 
   React.useEffect(() => {

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
 import {
@@ -162,6 +164,8 @@ export const MessageRow = React.memo(
     videoReviewCommentRootId?: string;
     videoReviewContext?: VideoReviewContext;
   }) {
+    useUiLanguage();
+
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
     const isDisplayedAsContinuation = isContinuation && !message.pending;
@@ -186,7 +190,9 @@ export const MessageRow = React.memo(
               );
             } catch (error) {
               toast.error(
-                `Failed to remove previews: ${error instanceof Error ? error.message : String(error)}`,
+                uiT("Failed to remove previews: {0}", {
+                  p0: error instanceof Error ? error.message : String(error),
+                }),
               );
               throw error;
             }
@@ -388,7 +394,7 @@ export const MessageRow = React.memo(
             <React.Suspense
               fallback={
                 <div className="p-3 text-sm text-muted-foreground">
-                  Loading diff…
+                  {uiT("Loading diff…")}
                 </div>
               }
             >
@@ -494,13 +500,13 @@ export const MessageRow = React.memo(
             role="img"
             aria-label={
               message.respondTo === "anyone"
-                ? "Anyone can send instructions to this agent"
-                : "Selected people can send instructions to this agent"
+                ? uiT("Anyone can send instructions to this agent")
+                : uiT("Selected people can send instructions to this agent")
             }
             title={
               message.respondTo === "anyone"
-                ? "Anyone can send instructions to this agent"
-                : "Selected people can send instructions to this agent"
+                ? uiT("Anyone can send instructions to this agent")
+                : uiT("Selected people can send instructions to this agent")
             }
           >
             {message.respondTo === "anyone" ? (
@@ -617,15 +623,17 @@ export const MessageRow = React.memo(
               className="font-normal text-muted-foreground/70"
               data-testid="message-send-status"
             >
-              Sending…
+              {uiT("Sending…")}
             </p>
           ) : null}
           {message.edited ? (
             <Tooltip>
               <TooltipTrigger asChild>
-                <p className="text-muted-foreground/70">(edited)</p>
+                <p className="text-muted-foreground/70">{uiT("(edited)")}</p>
               </TooltipTrigger>
-              <TooltipContent>This message has been edited</TooltipContent>
+              <TooltipContent>
+                {uiT("This message has been edited")}
+              </TooltipContent>
             </Tooltip>
           ) : null}
         </>
@@ -712,7 +720,7 @@ export const MessageRow = React.memo(
           <React.Suspense
             fallback={
               <div className="p-3 text-sm text-muted-foreground">
-                Loading diff viewer…
+                {uiT("Loading diff viewer…")}
               </div>
             }
           >
@@ -850,7 +858,8 @@ export const MessageRow = React.memo(
             {onCollapseDescendants ? (
               <button
                 aria-label={
-                  collapseDescendantsLabel ?? "Collapse replies to this message"
+                  collapseDescendantsLabel ??
+                  uiT("Collapse replies to this message")
                 }
                 className="absolute bottom-0 z-20 w-5 -translate-x-1/2 cursor-pointer rounded-full p-0 focus-visible:outline-hidden"
                 data-thread-head-id={message.id}

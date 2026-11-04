@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { UserRound } from "lucide-react";
 
@@ -67,6 +69,8 @@ export function ProfileAvatar({
   testId,
   untrusted = false,
 }: ProfileAvatarProps) {
+  useUiLanguage();
+
   const initials = getInitials(initialsLabel ?? label);
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
@@ -122,7 +126,7 @@ export function ProfileAvatar({
     >
       {src !== undefined ? (
         <AvatarImage
-          alt={`${label} avatar`}
+          alt={uiT("{0} avatar", { p0: label })}
           className={cn(
             "object-cover",
             presentation?.state === "pending" && "brightness-75",
@@ -157,7 +161,7 @@ export function ProfileAvatar({
       ) : null}
       {presentation?.state === "pending" ? (
         <span
-          aria-label="Avatar upload pending"
+          aria-label={uiT("Avatar upload pending")}
           className="pointer-events-none absolute inset-0 flex items-center justify-center text-white drop-shadow-sm"
           data-testid={testId ? `${testId}-upload-pending` : undefined}
           role="status"

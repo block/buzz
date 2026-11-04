@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
@@ -20,6 +22,8 @@ export function ComposerActivityAccessory({
   testId,
   visible,
 }: ComposerActivityAccessoryProps) {
+  useUiLanguage();
+
   const prefersReducedMotion = useReducedMotion();
 
   return (

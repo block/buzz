@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useState } from "react";
 
 import { useLinkPreviewStyle } from "@/shared/lib/linkPreviewStylePreference";
@@ -28,6 +30,8 @@ export function LinkPreviewList({
   onRemoveForEveryone?: () => Promise<void>;
   previews: ResolvedLinkPreview[];
 }) {
+  useUiLanguage();
+
   const [dialogOpen, setDialogOpen] = useState(false);
   const [removed, setRemoved] = useState(false);
   const style = useLinkPreviewStyle();
@@ -64,17 +68,19 @@ export function LinkPreviewList({
         <AlertDialog onOpenChange={setDialogOpen} open={dialogOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Remove {previewNoun}?</AlertDialogTitle>
+              <AlertDialogTitle>
+                {uiT("Remove {0}?", { p0: previewNoun })}
+              </AlertDialogTitle>
               <AlertDialogDescription>
-                This removes{" "}
-                {previews.length === 1 ? "the preview" : "the previews"} for
-                everyone.
+                {uiT("This removes {0} for everyone.", {
+                  p0: previews.length === 1 ? "the preview" : "the previews",
+                })}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel asChild>
                 <Button type="button" variant="outline">
-                  Cancel
+                  {uiT("Cancel")}
                 </Button>
               </AlertDialogCancel>
               <AlertDialogAction asChild>
@@ -86,7 +92,7 @@ export function LinkPreviewList({
                   type="button"
                   variant="destructive"
                 >
-                  Remove {previewNoun}
+                  {uiT("Remove {0}", { p0: previewNoun })}
                 </Button>
               </AlertDialogAction>
             </AlertDialogFooter>

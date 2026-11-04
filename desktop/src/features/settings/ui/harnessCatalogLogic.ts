@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Pure logic for the consolidated Harnesses settings surface and the
  * Add-runtimes catalog dialog.
@@ -137,17 +139,19 @@ export function stableRowOrder(
 
 /** Human status label for a catalog entry; null when nothing needs saying. */
 export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
-  if (entry.authStatus.status === "config_invalid") return "Config error";
+  if (entry.authStatus.status === "config_invalid") return uiT("Config error");
   switch (entry.availability) {
     case "adapter_missing":
-      return "Adapter needed";
+      return uiT("Adapter needed");
     case "adapter_outdated":
-      return "Update needed";
+      return uiT("Update needed");
     case "cli_missing":
     case "not_installed":
-      return "CLI needed";
+      return uiT("CLI needed");
     case "available":
-      return entry.authStatus.status === "logged_out" ? "Sign-in needed" : null;
+      return entry.authStatus.status === "logged_out"
+        ? uiT("Sign-in needed")
+        : null;
     default:
       return null;
   }
@@ -197,8 +201,8 @@ export function isDownloadPageUrl(url: string): boolean {
 /** Label for a link that opens `installInstructionsUrl`. */
 export function installLinkLabel(entry: AcpRuntimeCatalogEntry): string {
   return isDownloadPageUrl(entry.installInstructionsUrl)
-    ? "Download page"
-    : "Setup guide";
+    ? uiT("Download page")
+    : uiT("Setup guide");
 }
 
 /**
@@ -216,7 +220,10 @@ export function catalogPrimaryAction(
   if (entry.canAutoInstall && !entry.nodeRequired) {
     return {
       kind: "install",
-      label: entry.availability === "adapter_outdated" ? "Update" : "Install",
+      label:
+        entry.availability === "adapter_outdated"
+          ? uiT("Update")
+          : uiT("Install"),
     };
   }
   if (entry.installInstructionsUrl.trim().length > 0) {

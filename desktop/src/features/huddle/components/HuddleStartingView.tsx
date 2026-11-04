@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 
@@ -5,13 +7,13 @@ import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 export function HuddleStartingView() {
   return (
     <div
-      aria-label="Starting huddle"
+      aria-label={uiT("Starting huddle")}
       className="buzz-setup-loading-shell flex min-h-0 flex-1 items-center justify-center overflow-hidden px-6 text-foreground"
       data-testid="huddle-starting-view"
       role="status"
     >
       <ThemeGrainientBackground />
-      <span className="sr-only">Starting huddle</span>
+      <span className="sr-only">{uiT("Starting huddle")}</span>
       <FlappingBee className="relative z-10 h-auto w-28" />
     </div>
   );

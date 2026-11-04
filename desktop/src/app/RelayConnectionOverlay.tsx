@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { AnimatePresence, motion } from "motion/react";
 import { AlertCircle } from "lucide-react";
 
@@ -31,6 +33,8 @@ export function RelayConnectionOverlay({
   hasCommunityRail,
   isHuddleDrawerOpen,
 }: RelayConnectionOverlayProps) {
+  useUiLanguage();
+
   const { open: sidebarOpen, openMobile } = useSidebar();
   const isMobile = useIsMobile();
   const connectionState = useRelayConnection();

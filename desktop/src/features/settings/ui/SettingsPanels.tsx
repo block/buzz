@@ -1,3 +1,6 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+import { LanguageSetting } from "./LanguageSetting";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -153,85 +156,117 @@ export type SettingsPanelProps = {
 export const settingsSections: SettingsSectionDescriptor[] = [
   {
     value: "appearance",
-    label: "Appearance",
+    get label() {
+      return uiT("Appearance");
+    },
     icon: MonitorCog,
   },
   {
     value: "profile",
-    label: "Profile",
+    get label() {
+      return uiT("Profile");
+    },
     icon: UserRound,
   },
   {
     value: "notifications",
-    label: "Notifications",
+    get label() {
+      return uiT("Notifications");
+    },
     icon: BellRing,
   },
   {
     value: "voice",
-    label: "Voice",
+    get label() {
+      return uiT("Voice");
+    },
     icon: Volume2,
   },
   {
     value: "experimental",
-    label: "Experiments",
+    get label() {
+      return uiT("Experiments");
+    },
     icon: FlaskConical,
   },
   {
     value: "agents",
-    label: "Agents",
+    get label() {
+      return uiT("Agents");
+    },
     icon: Bot,
     featureGate: "managed-agents",
   },
   {
     value: "channel-templates",
-    label: "Channel templates",
+    get label() {
+      return uiT("Channel templates");
+    },
     icon: LayoutTemplate,
     featureGate: "channel-templates",
   },
   {
     value: "compute",
-    label: "Compute",
+    get label() {
+      return uiT("Compute");
+    },
     icon: Cpu,
   },
   {
     value: "shortcuts",
-    label: "Shortcuts",
+    get label() {
+      return uiT("Shortcuts");
+    },
     icon: Keyboard,
   },
   {
     value: "hosted-communities",
-    label: "Hosted communities",
+    get label() {
+      return uiT("Hosted communities");
+    },
     icon: MessagesSquare,
   },
   {
     value: "community-members",
-    label: "Invites",
+    get label() {
+      return uiT("Invites");
+    },
     icon: Ticket,
   },
   {
     value: "relay-admin",
-    label: "Admin",
+    get label() {
+      return uiT("Admin");
+    },
     icon: ServerCog,
   },
   {
     value: "custom-emoji",
-    label: "Custom emoji",
+    get label() {
+      return uiT("Custom emoji");
+    },
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
-    label: "Local archive",
+    get label() {
+      return uiT("Local archive");
+    },
     icon: Archive,
   },
   {
     value: "mobile",
-    label: "Mobile",
+    get label() {
+      return uiT("Mobile");
+    },
     icon: Smartphone,
   },
   {
     value: "updates",
-    label: "Updates",
+    get label() {
+      return uiT("Updates");
+    },
     icon: Download,
   },
 ];
@@ -401,9 +436,27 @@ function SingleThemeTile({
 type AppearanceMode = "system" | "light" | "dark";
 
 const APPEARANCE_MODE_OPTIONS = [
-  { mode: "system" as const, label: "System", Icon: SunMoon },
-  { mode: "light" as const, label: "Light", Icon: Sun },
-  { mode: "dark" as const, label: "Dark", Icon: Moon },
+  {
+    mode: "system" as const,
+    get label() {
+      return uiT("System");
+    },
+    Icon: SunMoon,
+  },
+  {
+    mode: "light" as const,
+    get label() {
+      return uiT("Light");
+    },
+    Icon: Sun,
+  },
+  {
+    mode: "dark" as const,
+    get label() {
+      return uiT("Dark");
+    },
+    Icon: Moon,
+  },
 ] as const;
 
 // Reveal/hide motion for the accent picker: a small translate + opacity fade.
@@ -419,6 +472,8 @@ const ACCENT_PICKER_TRANSITION = {
 };
 
 function ThemeSettingsCard() {
+  useUiLanguage();
+
   const {
     setTheme,
     selectedThemeName,
@@ -637,8 +692,8 @@ function ThemeSettingsCard() {
       data-testid="settings-theme"
     >
       <SettingsSectionHeader
-        title="Appearance"
-        description="Choose how Buzz looks and feels."
+        title={uiT("Appearance")}
+        description={uiT("Choose how Buzz looks and feels.")}
       />
 
       <SettingsOptionGroupList>
@@ -657,10 +712,10 @@ function ThemeSettingsCard() {
           }
           title={
             <>
-              Theme
+              {uiT("Theme")}
               {showCommunityScope ? (
                 <span className="ml-1 font-normal text-muted-foreground">
-                  (per community)
+                  {uiT("(per community)")}
                 </span>
               ) : null}
             </>
@@ -668,17 +723,19 @@ function ThemeSettingsCard() {
         >
           <SettingsOptionRow data-testid="appearance-color-mode-row">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Color mode</p>
+              <p className="text-sm font-medium">{uiT("Color mode")}</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Follow your system or choose a light or dark appearance.
+                {uiT(
+                  "Follow your system or choose a light or dark appearance.",
+                )}
               </p>
             </div>
             <SegmentedControl
               indicatorTestId="appearance-color-mode-indicator"
-              legend="Color mode"
+              legend={uiT("Color mode")}
               onValueChange={handleModeSelect}
               optionTestIdPrefix="appearance-mode"
               options={APPEARANCE_MODE_OPTIONS.map(({ mode, label, Icon }) => ({
@@ -693,16 +750,16 @@ function ThemeSettingsCard() {
 
           <SettingsOptionRow data-testid="theme-style-row">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Theme style</p>
+              <p className="text-sm font-medium">{uiT("Theme style")}</p>
               <p
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Choose the colors used throughout Buzz.
+                {uiT("Choose the colors used throughout Buzz.")}
               </p>
             </div>
             <button
-              aria-label={`Theme style, ${selectedThemeLabel}`}
+              aria-label={uiT("Theme style, {0}", { p0: selectedThemeLabel })}
               aria-controls="theme-style-options"
               aria-expanded={themeStyleExpanded}
               className="flex h-auto min-w-0 items-center gap-2 rounded-md bg-transparent p-0 text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
@@ -782,13 +839,14 @@ function ThemeSettingsCard() {
             </AnimatePresence>
           )}
 
+          <LanguageSetting />
           <GlassBackgroundSetting />
           {buzzThemeSelected ? <ProminentActiveTabSetting /> : null}
         </SettingsOptionGroup>
 
         <SettingsOptionGroup
           data-testid="appearance-preferences-card"
-          title="Preferences"
+          title={uiT("Preferences")}
         >
           <ConversationDisplaySettings />
           <LinkPreviewStyleSetting />

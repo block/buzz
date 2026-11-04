@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { ObserverEvent, PromptSection } from "./agentSessionTypes";
 import {
   findBuzzToolName,
@@ -44,7 +46,15 @@ export function parsePromptBlocks(
   const parsed = parsePromptText(remainingBlocks.join("\n"));
   return {
     ...parsed,
-    sections: [{ title: "Prompt", body: firstBlock }, ...parsed.sections],
+    sections: [
+      {
+        get title() {
+          return uiT("Prompt");
+        },
+        body: firstBlock,
+      },
+      ...parsed.sections,
+    ],
   };
 }
 
@@ -66,7 +76,9 @@ export function parsePromptText(text: string): {
     return {
       sections: [],
       userText: text.trim(),
-      userTitle: "Prompt",
+      get userTitle() {
+        return uiT("Prompt");
+      },
       userPubkey: null,
       userEventId: null,
     };
@@ -88,7 +100,7 @@ export function parsePromptText(text: string): {
   return {
     sections,
     userText: eventContent,
-    userTitle: eventKind ? titleCase(eventKind) : "Buzz event",
+    userTitle: eventKind ? titleCase(eventKind) : uiT("Buzz event"),
     userPubkey: eventAuthorPubkey,
     userEventId: eventId,
   };
@@ -224,8 +236,18 @@ export function parseSystemPromptSections(
   }
 
   const instructionFrames = [
-    { header: "[Agent Instructions]", title: "Agent Instructions" },
-    { header: "[System]", title: "System" },
+    {
+      header: "[Agent Instructions]",
+      get title() {
+        return uiT("Agent Instructions");
+      },
+    },
+    {
+      header: "[System]",
+      get title() {
+        return uiT("System");
+      },
+    },
   ] as const;
 
   function appendBaseAndWorkspace(raw: string): void {
@@ -244,9 +266,20 @@ export function parseSystemPromptSections(
         const workspaceBody = raw
           .slice(workspaceAt + workspaceMarker.length)
           .trim();
-        if (baseBody) sections.push({ title: "Base", body: baseBody });
+        if (baseBody)
+          sections.push({
+            get title() {
+              return uiT("Base");
+            },
+            body: baseBody,
+          });
         if (workspaceBody)
-          sections.push({ title: "Workspace", body: workspaceBody });
+          sections.push({
+            get title() {
+              return uiT("Workspace");
+            },
+            body: workspaceBody,
+          });
         return;
       }
     }
@@ -261,14 +294,31 @@ export function parseSystemPromptSections(
           .trim();
         const baseBody = raw.slice(baseAt + baseMarker.length).trim();
         if (workspaceBody)
-          sections.push({ title: "Workspace", body: workspaceBody });
-        if (baseBody) sections.push({ title: "Base", body: baseBody });
+          sections.push({
+            get title() {
+              return uiT("Workspace");
+            },
+            body: workspaceBody,
+          });
+        if (baseBody)
+          sections.push({
+            get title() {
+              return uiT("Base");
+            },
+            body: baseBody,
+          });
         return;
       }
     }
 
     const baseBody = raw.replace(/^\[Base]\n/, "").trim();
-    if (baseBody) sections.push({ title: "Base", body: baseBody });
+    if (baseBody)
+      sections.push({
+        get title() {
+          return uiT("Base");
+        },
+        body: baseBody,
+      });
   }
 
   const baseAndInstructions = remainder;
@@ -282,7 +332,12 @@ export function parseSystemPromptSections(
       if (instructionsBody)
         sections.push({ title: leadingFrame.title, body: instructionsBody });
       if (teamBody)
-        sections.push({ title: "Team Instructions", body: teamBody });
+        sections.push({
+          get title() {
+            return uiT("Team Instructions");
+          },
+          body: teamBody,
+        });
     } else {
       const boundary = instructionFrames
         .map((frame) => ({
@@ -305,16 +360,38 @@ export function parseSystemPromptSections(
         if (instructionsBody)
           sections.push({ title: boundary.title, body: instructionsBody });
         if (teamBody)
-          sections.push({ title: "Team Instructions", body: teamBody });
+          sections.push({
+            get title() {
+              return uiT("Team Instructions");
+            },
+            body: teamBody,
+          });
       }
     }
   }
 
   // ── 5. Append team (modern), core, and canvas sections in producer order ──
   if (modernTeamBody)
-    sections.push({ title: "Team Instructions", body: modernTeamBody });
-  if (coreBody) sections.push({ title: "Core Memory", body: coreBody });
-  if (canvasBody) sections.push({ title: "Channel Canvas", body: canvasBody });
+    sections.push({
+      get title() {
+        return uiT("Team Instructions");
+      },
+      body: modernTeamBody,
+    });
+  if (coreBody)
+    sections.push({
+      get title() {
+        return uiT("Core Memory");
+      },
+      body: coreBody,
+    });
+  if (canvasBody)
+    sections.push({
+      get title() {
+        return uiT("Channel Canvas");
+      },
+      body: canvasBody,
+    });
 
   return sections;
 }
@@ -349,7 +426,14 @@ function parseSemanticStandingSections(
     return parsed.sections;
   }
 
-  return [{ title: "Prompt", body: systemPrompt }];
+  return [
+    {
+      get title() {
+        return uiT("Prompt");
+      },
+      body: systemPrompt,
+    },
+  ];
 }
 
 function splitSemanticStandingPrefix(text: string): {
@@ -469,7 +553,9 @@ function semanticTurnTitle(
     case "thread-context":
     case "conversation-context": {
       const label =
-        tag === "thread-context" ? "Thread Context" : "Conversation Context";
+        tag === "thread-context"
+          ? uiT("Thread Context")
+          : uiT("Conversation Context");
       const truncated = attributes.truncated === "true" ? ", truncated" : "";
       return `${label} (${attributes.included} of ${attributes.total} messages${truncated})`;
     }
@@ -515,7 +601,12 @@ function parsePromptSections(text: string): PromptSection[] {
           body: current.body.trim(),
         });
       } else if (preamble.join("\n").trim()) {
-        sections.push({ title: "Prompt", body: preamble.join("\n").trim() });
+        sections.push({
+          get title() {
+            return uiT("Prompt");
+          },
+          body: preamble.join("\n").trim(),
+        });
       }
       current = { title: header[1], body: "" };
       continue;
@@ -531,7 +622,12 @@ function parsePromptSections(text: string): PromptSection[] {
   if (current) {
     sections.push({ title: current.title, body: current.body.trim() });
   } else if (preamble.join("\n").trim()) {
-    sections.push({ title: "Prompt", body: preamble.join("\n").trim() });
+    sections.push({
+      get title() {
+        return uiT("Prompt");
+      },
+      body: preamble.join("\n").trim(),
+    });
   }
 
   return sections;
@@ -672,7 +768,7 @@ export function extractToolIdentity(update: Record<string, unknown>): {
     (candidate) => !isGenericToolTitle(candidate),
   );
   const title =
-    asString(update.title) ?? knownName ?? firstSpecific ?? "Tool call";
+    asString(update.title) ?? knownName ?? firstSpecific ?? uiT("Tool call");
   return {
     title,
     toolName: knownName ?? normalizeToolName(firstSpecific ?? title),

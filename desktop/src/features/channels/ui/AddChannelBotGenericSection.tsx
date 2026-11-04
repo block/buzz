@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 
@@ -19,15 +21,15 @@ export function AddChannelBotGenericSection({
   return (
     <div className="space-y-5 rounded-2xl border border-border/70 bg-card/70 p-4">
       <div>
-        <div className="text-sm font-medium">Generic agent</div>
+        <div className="text-sm font-medium">{uiT("Generic agent")}</div>
         <p className="text-xs text-muted-foreground">
-          Add one custom agent alongside any selected agents.
+          {uiT("Add one custom agent alongside any selected agents.")}
         </p>
       </div>
 
       <div className="space-y-1.5">
         <label className="text-sm font-medium" htmlFor="channel-generic-name">
-          Name
+          {uiT("Name")}
         </label>
         <Input
           autoCapitalize="none"
@@ -39,24 +41,24 @@ export function AddChannelBotGenericSection({
           value={name}
         />
         <p className="text-xs text-muted-foreground">
-          Defaults to the selected runtime name.
+          {uiT("Defaults to the selected runtime name.")}
         </p>
       </div>
 
       <div className="space-y-1.5">
         <label className="text-sm font-medium" htmlFor="channel-generic-prompt">
-          Prompt
+          {uiT("Prompt")}
         </label>
         <Textarea
           className="min-h-24"
           disabled={disabled}
           id="channel-generic-prompt"
           onChange={(event) => onPromptChange(event.target.value)}
-          placeholder="What should this agent help with in the channel?"
+          placeholder={uiT("What should this agent help with in the channel?")}
           value={prompt}
         />
         <p className="text-xs text-muted-foreground">
-          Saved as the generic agent&apos;s system prompt override.
+          {uiT("Saved as the generic agent's system prompt override.")}
         </p>
       </div>
     </div>

@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import {
   cancelBackgroundMediaUploads,
   useBackgroundMediaUpload,
@@ -9,6 +11,8 @@ import {
 import { ComposerUploadProgressPill } from "@/features/messages/ui/ComposerUploadProgressPill";
 
 export function ComposerUploadProgressOverlay() {
+  useUiLanguage();
+
   const backgroundUpload = useBackgroundMediaUpload();
   const linkPreviews = useBackgroundLinkPreviewPreparation();
 
@@ -16,12 +20,12 @@ export function ComposerUploadProgressOverlay() {
     <div className="pointer-events-auto">
       {linkPreviews.isPreparing ? (
         <ComposerUploadProgressPill
-          actionLabel="Skip"
+          actionLabel={uiT("Skip")}
           canCancel={linkPreviews.canSkip}
           isUploading
           onCancel={skipBackgroundLinkPreviews}
           phase="preparing"
-          phaseLabel="Preparing link preview"
+          phaseLabel={uiT("Preparing link preview")}
           percentage={0}
         />
       ) : (

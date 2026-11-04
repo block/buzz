@@ -44,6 +44,7 @@ pub fn install<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 /// both silently -- no error, just a Window menu AppKit no longer manages.
 #[cfg(target_os = "macos")]
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    use crate::app_language::{predefined, text};
     let pkg_info = app.package_info();
     let config = app.config();
     let about_metadata = AboutMetadata {
@@ -62,50 +63,53 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 pkg_info.name.clone(),
                 true,
                 &[
-                    &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::about(app, predefined("Buzz 정보"), Some(about_metadata))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::services(app, predefined("서비스"))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::hide(app, None)?,
-                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::hide(app, predefined("Buzz 가리기"))?,
+                    &PredefinedMenuItem::hide_others(app, predefined("기타 가리기"))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &PredefinedMenuItem::quit(app, predefined("Buzz 종료"))?,
                 ],
             )?,
             // `Menu::default()`'s File submenu holds exactly one item on macOS
             // -- close_window -- so dropping that item drops the submenu too.
             &Submenu::with_items(
                 app,
-                "Edit",
+                text("Edit", "편집"),
                 true,
                 &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::undo(app, predefined("실행 취소"))?,
+                    &PredefinedMenuItem::redo(app, predefined("다시 실행"))?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, None)?,
-                    &PredefinedMenuItem::copy(app, None)?,
-                    &PredefinedMenuItem::paste(app, None)?,
-                    &PredefinedMenuItem::select_all(app, None)?,
+                    &PredefinedMenuItem::cut(app, predefined("오려두기"))?,
+                    &PredefinedMenuItem::copy(app, predefined("복사하기"))?,
+                    &PredefinedMenuItem::paste(app, predefined("붙여넣기"))?,
+                    &PredefinedMenuItem::select_all(app, predefined("모두 선택"))?,
                 ],
             )?,
             &Submenu::with_items(
                 app,
-                "View",
+                text("View", "보기"),
                 true,
-                &[&PredefinedMenuItem::fullscreen(app, None)?],
+                &[&PredefinedMenuItem::fullscreen(
+                    app,
+                    predefined("전체 화면 시작"),
+                )?],
             )?,
             &Submenu::with_id_and_items(
                 app,
                 WINDOW_SUBMENU_ID,
-                "Window",
+                text("Window", "윈도우"),
                 true,
                 &[
-                    &PredefinedMenuItem::minimize(app, None)?,
-                    &PredefinedMenuItem::maximize(app, None)?,
+                    &PredefinedMenuItem::minimize(app, predefined("최소화"))?,
+                    &PredefinedMenuItem::maximize(app, predefined("확대/축소"))?,
                 ],
             )?,
             // Empty upstream too on macOS: About lives in the app submenu.
-            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, text("Help", "도움말"), true, &[])?,
         ],
     )
 }

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * First-join alert bookkeeping for community owners/admins.
  *
@@ -223,5 +225,5 @@ export function joinAlertBody(displayName: string) {
 export const JOIN_ALERT_MAX_INDIVIDUAL = 3;
 
 export function joinAlertSummaryBody(count: number) {
-  return `${count} new members joined`;
+  return uiT("{0} new members joined", { p0: count });
 }

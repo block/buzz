@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -97,6 +99,8 @@ function AnimatedCountSlot({
 }
 
 export function AnimatedCount({ className, value }: AnimatedCountProps) {
+  useUiLanguage();
+
   const normalizedValue = normalizeAnimatedCount(value);
   const formattedValue = formatAnimatedCount(normalizedValue);
   const previousValueRef = React.useRef(normalizedValue);

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -46,6 +48,8 @@ import { SegmentedControl } from "@/shared/ui/segmented-control";
 
 /** Buzz navigation can use either its production tint or a stronger tab. */
 export function ProminentActiveTabSetting() {
+  useUiLanguage();
+
   const { prominentActiveTab, setProminentActiveTab } = useTheme();
 
   return (
@@ -55,13 +59,15 @@ export function ProminentActiveTabSetting() {
           className="text-sm font-medium"
           htmlFor="prominent-active-tab-switch"
         >
-          Prominent active tab
+          {uiT("Prominent active tab")}
         </label>
         <p
           className="text-sm font-normal text-muted-foreground/70"
           data-settings-subcopy
         >
-          Give the selected navigation item a higher-contrast background.
+          {uiT(
+            "Give the selected navigation item a higher-contrast background.",
+          )}
         </p>
       </div>
       <Switch
@@ -81,13 +87,21 @@ const LINK_PREVIEW_STYLE_OPTIONS: {
 }[] = [
   {
     value: "compact",
-    label: "Compact",
-    description: "Small cards with a thumbnail",
+    get label() {
+      return uiT("Compact");
+    },
+    get description() {
+      return uiT("Small cards with a thumbnail");
+    },
   },
   {
     value: "rich",
-    label: "Rich",
-    description: "Large previews with images and descriptions",
+    get label() {
+      return uiT("Rich");
+    },
+    get description() {
+      return uiT("Large previews with images and descriptions");
+    },
   },
 ];
 
@@ -97,15 +111,21 @@ const CONVERSATION_DENSITY_OPTIONS: readonly {
 }[] = [
   {
     value: "compact",
-    label: "Compact",
+    get label() {
+      return uiT("Compact");
+    },
   },
   {
     value: "comfortable",
-    label: "Comfy",
+    get label() {
+      return uiT("Comfy");
+    },
   },
   {
     value: "spacious",
-    label: "Spacious",
+    get label() {
+      return uiT("Spacious");
+    },
   },
 ];
 
@@ -115,15 +135,21 @@ const FONT_SIZE_OPTIONS: readonly {
 }[] = [
   {
     value: "smaller",
-    label: "Smaller",
+    get label() {
+      return uiT("Smaller");
+    },
   },
   {
     value: "default",
-    label: "Default",
+    get label() {
+      return uiT("Default");
+    },
   },
   {
     value: "larger",
-    label: "Larger",
+    get label() {
+      return uiT("Larger");
+    },
   },
 ];
 
@@ -170,7 +196,7 @@ function ConversationPreview() {
       >
         <span className="absolute right-3.5 top-3 inline-flex items-center gap-1 text-2xs font-medium text-muted-foreground/55">
           <Eye aria-hidden="true" className="size-3" />
-          Preview
+          {uiT("Preview")}
         </span>
         <div className="p-4" data-testid="conversation-preview-content">
           <ConversationDensityPreviewMessage
@@ -178,7 +204,7 @@ function ConversationPreview() {
             author="Maya"
             timestamp="9:41"
           >
-            The revised conversation layout is ready to review.
+            {uiT("The revised conversation layout is ready to review.")}
           </ConversationDensityPreviewMessage>
           <ConversationDensityPreviewMessage
             avatar="T"
@@ -186,11 +212,14 @@ function ConversationPreview() {
             timestamp="9:43"
           >
             <p>
-              I added a longer message so you can compare line height and text
-              spacing.
+              {uiT(
+                "I added a longer message so you can compare line height and text spacing.",
+              )}
             </p>
             <p className="mt-conversation-paragraph">
-              The same rhythm carries through channels, threads, DMs, and Inbox.
+              {uiT(
+                "The same rhythm carries through channels, threads, DMs, and Inbox.",
+              )}
             </p>
           </ConversationDensityPreviewMessage>
         </div>
@@ -201,6 +230,8 @@ function ConversationPreview() {
 
 /** App-wide type sizing and conversation-specific spacing controls. */
 export function ConversationDisplaySettings() {
+  useUiLanguage();
+
   const density = useConversationDensity();
   const fontSize = useFontSize();
 
@@ -208,17 +239,17 @@ export function ConversationDisplaySettings() {
     <div data-testid="conversation-display-group">
       <SettingsOptionRow data-testid="font-size-row">
         <div className="min-w-0">
-          <p className="text-sm font-medium">Font size</p>
+          <p className="text-sm font-medium">{uiT("Font size")}</p>
           <p
             className="text-sm font-normal text-muted-foreground/70"
             data-settings-subcopy
           >
-            Applies across conversations and interface text
+            {uiT("Applies across conversations and interface text")}
           </p>
         </div>
         <SegmentedControl
           size="wide"
-          legend="Font size"
+          legend={uiT("Font size")}
           onPreviewChange={previewFontSize}
           onValueChange={setFontSize}
           optionTestIdPrefix="font-size"
@@ -229,17 +260,17 @@ export function ConversationDisplaySettings() {
       </SettingsOptionRow>
       <SettingsOptionRow data-testid="conversation-density-row">
         <div className="min-w-0">
-          <p className="text-sm font-medium">Conversation density</p>
+          <p className="text-sm font-medium">{uiT("Conversation density")}</p>
           <p
             className="text-sm font-normal text-muted-foreground/70"
             data-settings-subcopy
           >
-            Spacing in conversations and Markdown content across Buzz
+            {uiT("Spacing in conversations and Markdown content across Buzz")}
           </p>
         </div>
         <SegmentedControl
           size="wide"
-          legend="Conversation density"
+          legend={uiT("Conversation density")}
           onPreviewChange={previewConversationDensity}
           onValueChange={setConversationDensity}
           optionTestIdPrefix="conversation-density"
@@ -261,10 +292,15 @@ const LINK_PREVIEW_SAMPLE_BASE: Omit<ResolvedLinkPreview, "imageDataUrl"> = {
   kind: "generic-link",
   href: "https://example.com/product-updates",
   provider: "example.com",
-  title: "Product updates — a fresh look at conversations",
+  get title() {
+    return uiT("Product updates — a fresh look at conversations");
+  },
   typeLabel: "link",
-  description:
-    "Highlights from this release: refreshed conversation layout, quicker link handling, and readability improvements.",
+  get description() {
+    return uiT(
+      "Highlights from this release: refreshed conversation layout, quicker link handling, and readability improvements.",
+    );
+  },
   imageState: "image",
   imageDomain: "example.com",
 };
@@ -304,13 +340,16 @@ function SampleImageLightbox({
 }
 
 function LinkPreviewSample({ style }: { style: LinkPreviewStyle }) {
+  const __buzzLanguage = useUiLanguage();
+
   const { isDark } = useTheme();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const preview = React.useMemo<ResolvedLinkPreview>(
     () => ({
       ...LINK_PREVIEW_SAMPLE_BASE,
       imageDataUrl: buzzGradientSampleImage(isDark),
     }),
-    [isDark],
+    [isDark, __buzzLanguage],
   );
   return (
     <div className="px-4 py-3" data-testid="link-preview-sample">
@@ -322,7 +361,7 @@ function LinkPreviewSample({ style }: { style: LinkPreviewStyle }) {
       >
         <span className="absolute right-3.5 top-3 inline-flex items-center gap-1 text-2xs font-medium text-muted-foreground/55">
           <Eye aria-hidden="true" className="size-3" />
-          Preview
+          {uiT("Preview")}
         </span>
         <div className="p-4 pr-24">
           <LinkPreviewAttachmentPresentation
@@ -338,6 +377,8 @@ function LinkPreviewSample({ style }: { style: LinkPreviewStyle }) {
 }
 
 export function LinkPreviewStyleSetting() {
+  useUiLanguage();
+
   const style = useLinkPreviewStyle();
   const [previewStyle, setPreviewStyle] =
     React.useState<LinkPreviewStyle | null>(null);
@@ -351,7 +392,7 @@ export function LinkPreviewStyleSetting() {
     <div data-testid="link-preview-style-group">
       <SettingsOptionRow>
         <div className="min-w-0">
-          <p className="text-sm font-medium">Link previews</p>
+          <p className="text-sm font-medium">{uiT("Link previews")}</p>
           <p
             className="text-sm font-normal text-muted-foreground/70"
             data-settings-subcopy
@@ -361,7 +402,7 @@ export function LinkPreviewStyleSetting() {
         </div>
         <SegmentedControl
           size="compact"
-          legend="Link previews"
+          legend={uiT("Link previews")}
           onPreviewChange={setPreviewStyle}
           onValueChange={setLinkPreviewStyle}
           optionTestIdPrefix="link-preview-style"
@@ -382,18 +423,28 @@ const THREAD_VIEW_MODE_OPTIONS: {
 }[] = [
   {
     value: "focus",
-    label: "Focus",
-    description: "Threads open over the channel",
+    get label() {
+      return uiT("Focus");
+    },
+    get description() {
+      return uiT("Threads open over the channel");
+    },
   },
   {
     value: "split",
-    label: "Split",
-    description: "Threads open in a side panel next to the channel",
+    get label() {
+      return uiT("Split");
+    },
+    get description() {
+      return uiT("Threads open in a side panel next to the channel");
+    },
   },
 ];
 
 /** Native window glass rows sit below theme and accent choices. */
 export function GlassBackgroundSetting() {
+  useUiLanguage();
+
   const {
     glassBackground,
     glassBackgroundSupported,
@@ -409,19 +460,19 @@ export function GlassBackgroundSetting() {
   const opacityRow = (
     <SettingsOptionRow data-testid="glass-opacity-row">
       <div className="min-w-0">
-        <p className="text-sm font-medium">Glass opacity</p>
+        <p className="text-sm font-medium">{uiT("Glass opacity")}</p>
         <p
           className="text-sm font-normal text-muted-foreground/70"
           data-settings-subcopy
           id="glass-opacity-description"
         >
-          Lower values reveal more of the desktop blur.
+          {uiT("Lower values reveal more of the desktop blur.")}
         </p>
       </div>
       <div className="flex w-64 shrink-0 items-center">
         <AvatarFramingSlider
           ariaDescribedBy="glass-opacity-description"
-          ariaLabel="Glass opacity"
+          ariaLabel={uiT("Glass opacity")}
           ariaValueText={`${glassOpacity}% opacity`}
           compact
           handleAlwaysVisible
@@ -429,7 +480,7 @@ export function GlassBackgroundSetting() {
           min={GLASS_OPACITY_MIN}
           onChange={setGlassOpacity}
           onReset={() => setGlassOpacity(DEFAULT_GLASS_OPACITY)}
-          resetLabel="Reset glass opacity"
+          resetLabel={uiT("Reset glass opacity")}
           resetTestId="glass-opacity-reset"
           resetValue={DEFAULT_GLASS_OPACITY}
           testId="glass-opacity-slider"
@@ -447,15 +498,17 @@ export function GlassBackgroundSetting() {
             className="text-sm font-medium"
             htmlFor="glass-background-switch"
           >
-            Glass background
+            {uiT("Glass background")}
           </label>
           <p
             className="text-sm font-normal text-muted-foreground/70"
             data-settings-subcopy
           >
             {glassBackgroundSupported
-              ? "Blur the desktop behind navigation while keeping content solid."
-              : "Available in the macOS desktop app."}
+              ? uiT(
+                  "Blur the desktop behind navigation while keeping content solid.",
+                )
+              : uiT("Available in the macOS desktop app.")}
           </p>
         </div>
         <Switch
@@ -502,6 +555,8 @@ export function GlassBackgroundSetting() {
  * changes automatically. Only the panel proportions change between modes.
  */
 function ThreadLayoutDiagram({ mode }: { mode: ThreadViewMode }) {
+  useUiLanguage();
+
   const { isDark } = useTheme();
   const gradientId = React.useId();
   // Inline SVG resolves CSS variables, so the frame gradient references the
@@ -592,7 +647,7 @@ function ThreadLayoutPreview({ mode }: { mode: ThreadViewMode }) {
       >
         <span className="absolute right-3.5 top-3 inline-flex items-center gap-1 text-2xs font-medium text-muted-foreground/55">
           <Eye aria-hidden="true" className="size-3" />
-          Preview
+          {uiT("Preview")}
         </span>
         <div className="p-4 pr-24">
           <ThreadLayoutDiagram mode={mode} />
@@ -603,6 +658,8 @@ function ThreadLayoutPreview({ mode }: { mode: ThreadViewMode }) {
 }
 
 export function ThreadLayoutSetting() {
+  useUiLanguage();
+
   const threadViewMode = useThreadViewMode();
   const [previewMode, setPreviewMode] = React.useState<ThreadViewMode | null>(
     null,
@@ -619,13 +676,14 @@ export function ThreadLayoutSetting() {
       <SettingsOptionRow>
         <div className="min-w-0">
           <p className="text-sm font-medium">
-            Thread layout
-            {showCommunityScope ? (
-              <span className="font-normal text-muted-foreground">
-                {" "}
-                (all communities)
-              </span>
-            ) : null}
+            {uiMessage("Thread layout {0}", {
+              p0: showCommunityScope ? (
+                <span className="font-normal text-muted-foreground">
+                  {" "}
+                  {uiT("(all communities)")}
+                </span>
+              ) : null,
+            })}
           </p>
           <p
             className="text-sm font-normal text-muted-foreground/70"
@@ -636,7 +694,7 @@ export function ThreadLayoutSetting() {
         </div>
         <SegmentedControl
           size="compact"
-          legend="Thread layout"
+          legend={uiT("Thread layout")}
           onPreviewChange={setPreviewMode}
           onValueChange={setThreadViewMode}
           optionTestIdPrefix="thread-layout"
@@ -663,12 +721,12 @@ export function AccentPickerContent({
   return (
     <SettingsOptionRow className="items-start">
       <div className="min-w-0">
-        <p className="text-sm font-medium">Accent color</p>
+        <p className="text-sm font-medium">{uiT("Accent color")}</p>
         <p
           className="text-sm font-normal text-muted-foreground/70"
           data-settings-subcopy
         >
-          Choose the highlight color used throughout Buzz.
+          {uiT("Choose the highlight color used throughout Buzz.")}
         </p>
       </div>
       <div
@@ -690,7 +748,7 @@ export function AccentPickerContent({
 
             return (
               <button
-                aria-label={`Use ${color.name} accent`}
+                aria-label={uiT("Use {0} accent", { p0: color.name })}
                 aria-pressed={isSelected}
                 className="relative h-9 w-9 shrink-0 rounded-full border border-border transition-transform duration-200 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transform-none motion-reduce:transition-none"
                 data-testid={`accent-color-${color.name.toLowerCase()}`}

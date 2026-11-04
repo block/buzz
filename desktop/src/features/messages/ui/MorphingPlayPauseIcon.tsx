@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { motion, useReducedMotion } from "motion/react";
 
 const PLAY_PATHS = [
@@ -14,6 +16,8 @@ const MORPH_TRANSITION = {
 } as const;
 
 export function MorphingPlayPauseIcon({ isPlaying }: { isPlaying: boolean }) {
+  useUiLanguage();
+
   const shouldReduceMotion = useReducedMotion();
   const paths = isPlaying ? PAUSE_PATHS : PLAY_PATHS;
   const transition = shouldReduceMotion ? { duration: 0 } : MORPH_TRANSITION;

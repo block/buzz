@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { MessageCircle } from "lucide-react";
 
 /** Orientation content shown at the top of the companion huddle transcript. */
@@ -11,10 +13,13 @@ export function HuddleTranscriptIntro() {
         <MessageCircle aria-hidden className="h-4 w-4" />
       </span>
       <div className="min-w-0">
-        <p className="text-base font-semibold text-foreground">Huddle chat</p>
+        <p className="text-base font-semibold text-foreground">
+          {uiT("Huddle chat")}
+        </p>
         <p className="mt-0.5 max-w-xl text-sm leading-5 text-muted-foreground">
-          Chat with huddle participants and agents. The transcript appears here
-          too.
+          {uiT(
+            "Chat with huddle participants and agents. The transcript appears here too.",
+          )}
         </p>
       </div>
     </div>

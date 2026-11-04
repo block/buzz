@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -12,7 +14,7 @@ export function Spinner({
   className,
   size,
   role = "status",
-  "aria-label": ariaLabel = "Loading",
+  "aria-label": ariaLabel = uiT("Loading"),
   "aria-hidden": ariaHidden,
   style,
   ...rest

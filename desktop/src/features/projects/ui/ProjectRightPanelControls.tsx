@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { MessageCircle } from "lucide-react";
 
 import {
@@ -27,7 +29,9 @@ export function ProjectChatPanelControl({
   const chatOpen = !collapsed && mode === "chat";
   return (
     <Button
-      aria-label={chatOpen ? "Hide project chat" : "Show project chat"}
+      aria-label={
+        chatOpen ? uiT("Hide project chat") : uiT("Show project chat")
+      }
       aria-pressed={chatOpen}
       className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
       data-testid="project-right-panel-chat-tab"
@@ -40,7 +44,7 @@ export function ProjectChatPanelControl({
         onExpand();
       }}
       size="icon"
-      title="Project chat"
+      title={uiT("Project chat")}
       type="button"
       variant="ghost"
     >
@@ -69,6 +73,8 @@ export function ProjectRightPanelControls({
   onModeChange: (mode: ProjectRightPanelMode) => void;
   terminalAvailable: boolean;
 }) {
+  useUiLanguage();
+
   const terminalPanel = useTerminalPanel();
   const terminalOpen = terminalPanel.mode !== "closed";
   const repositoryOpen = !collapsed && mode === "repository";
@@ -76,7 +82,9 @@ export function ProjectRightPanelControls({
   return (
     <div className="flex items-center gap-0.5">
       <Button
-        aria-label={terminalOpen ? "Hide Buzz Term" : "Open Buzz Term"}
+        aria-label={
+          terminalOpen ? uiT("Hide Buzz Term") : uiT("Open Buzz Term")
+        }
         aria-pressed={terminalOpen}
         className={cn(
           "h-7 w-7 text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -86,7 +94,7 @@ export function ProjectRightPanelControls({
         disabled={!terminalAvailable}
         onClick={toggleTerminalPanel}
         size="icon"
-        title="Buzz Term (⌘J)"
+        title={uiT("Buzz Term (⌘J)")}
         type="button"
         variant="ghost"
       >
@@ -105,7 +113,9 @@ export function ProjectRightPanelControls({
       />
       <Button
         aria-label={
-          repositoryOpen ? "Hide project context" : "Show project context"
+          repositoryOpen
+            ? uiT("Hide project context")
+            : uiT("Show project context")
         }
         aria-pressed={repositoryOpen}
         className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
@@ -119,7 +129,7 @@ export function ProjectRightPanelControls({
           onExpand();
         }}
         size="icon"
-        title="Project context"
+        title={uiT("Project context")}
         type="button"
         variant="ghost"
       >

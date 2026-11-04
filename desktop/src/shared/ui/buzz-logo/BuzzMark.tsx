@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useId } from "react";
 
 /**
@@ -7,6 +9,8 @@ import { useId } from "react";
  * paints complete on the very first frame regardless of animation support.
  */
 export function BuzzMark({ className }: { className?: string }) {
+  useUiLanguage();
+
   const maskId = `buzz-mark-cutouts-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
   return (

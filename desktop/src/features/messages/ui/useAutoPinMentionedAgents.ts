@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -167,10 +169,12 @@ export function useAutoPinMentionedAgents({
           ? getDisplayName(promotedPubkeys[0])?.trim()
           : null;
       const title = displayName
-        ? `${displayName} will be mentioned automatically`
+        ? uiT("{0} will be mentioned automatically", { p0: displayName })
         : promotedPubkeys.length === 1
-          ? "Agent will be mentioned automatically"
-          : `${promotedPubkeys.length} agents will be mentioned automatically`;
+          ? uiT("Agent will be mentioned automatically")
+          : uiT("{0} agents will be mentioned automatically", {
+              p0: promotedPubkeys.length,
+            });
       setConfirmationHovered(false);
       setConfirmation({
         expectedRevision: revision,

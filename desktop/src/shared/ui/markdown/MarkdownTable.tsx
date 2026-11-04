@@ -1,8 +1,12 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
 export function MarkdownTable({ children }: { children?: React.ReactNode }) {
+  useUiLanguage();
+
   const tableBlockRef = React.useRef<HTMLDivElement | null>(null);
   useSmoothCorners(tableBlockRef);
 

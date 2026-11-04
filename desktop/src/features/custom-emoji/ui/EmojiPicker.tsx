@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import Picker from "@emoji-mart/react";
 import * as React from "react";
 
@@ -91,6 +93,8 @@ export const EmojiPicker = React.memo(function EmojiPicker({
   onSelect,
   perLine = 8,
 }: EmojiPickerProps) {
+  useUiLanguage();
+
   const customEmoji = useCustomEmoji();
   const custom = React.useMemo(
     () => buildCustomEmojiCategory(customEmoji),

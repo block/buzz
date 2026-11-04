@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Bot } from "lucide-react";
 
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -15,7 +17,7 @@ export function MessageAgentOwner({
       data-testid="message-agent-owner"
     >
       <span className="sr-only">
-        {ownerLabel ? "Agent managed by" : "Agent; owner unavailable"}
+        {ownerLabel ? uiT("Agent managed by") : uiT("Agent; owner unavailable")}
       </span>
       {/*
        * Icon and label sit directly in this baseline row rather than in a nested
@@ -38,7 +40,7 @@ export function MessageAgentOwner({
       {ownerPubkey && ownerLabel ? (
         <>
           <span aria-hidden="true" className="shrink-0">
-            managed by
+            {uiT("managed by")}
           </span>
           <UserProfilePopover
             pubkey={ownerPubkey}
@@ -52,7 +54,7 @@ export function MessageAgentOwner({
         </>
       ) : (
         <span aria-hidden="true" className="min-w-0 truncate">
-          owner unavailable
+          {uiT("owner unavailable")}
         </span>
       )}
     </span>

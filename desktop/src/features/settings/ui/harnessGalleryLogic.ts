@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Pure logic helpers for custom-harness deletion (blast-radius confirmation).
  *
@@ -88,13 +90,18 @@ export function deleteConfirmState(
   if (agents.isPending || personas.isPending) {
     return {
       canConfirm: false,
-      message: "Checking which agents use this harness…",
+      get message() {
+        return uiT("Checking which agents use this harness…");
+      },
     };
   }
   if (agents.isError || personas.isError) {
     return {
       canConfirm: true,
-      message: `Couldn't check which agents use this harness — some agents may stop launching. Delete ${label}?`,
+      message: uiT(
+        "Couldn't check which agents use this harness — some agents may stop launching. Delete {0}?",
+        { p0: label },
+      ),
     };
   }
   const count = countAgentsReferencingHarness(

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import {
@@ -54,6 +56,8 @@ export function KnownAgentPubkeysProvider({
 }: {
   children: React.ReactNode;
 }) {
+  useUiLanguage();
+
   const managedQuery = useManagedAgentsQuery();
   const relayQuery = useRelayAgentsQuery();
   const currentPubkey = useIdentityQuery().data?.pubkey;

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 
@@ -35,11 +37,12 @@ export function SimpleImageLightbox({
             {alt}
           </DialogPrimitive.Title>
           <DialogPrimitive.Description className="sr-only">
-            Full-size image preview. Press Escape or click outside the image to
-            close.
+            {uiT(
+              "Full-size image preview. Press Escape or click outside the image to close.",
+            )}
           </DialogPrimitive.Description>
           <DialogPrimitive.Close
-            aria-label="Close lightbox"
+            aria-label={uiT("Close lightbox")}
             className="absolute inset-0 cursor-default"
           />
           {children ?? (

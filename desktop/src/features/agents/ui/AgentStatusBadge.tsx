@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import { Badge } from "@/shared/ui/badge";
@@ -22,6 +24,8 @@ export function AgentStatusBadge({
   sentenceCase?: boolean;
   status: ManagedAgent["status"];
 }) {
+  useUiLanguage();
+
   const [inGracePeriod, setInGracePeriod] = React.useState(true);
 
   React.useEffect(() => {
@@ -45,9 +49,9 @@ export function AgentStatusBadge({
         : "secondary";
 
   const rawLabel = isWorking
-    ? "Working"
+    ? uiT("Working")
     : isStarting
-      ? "Starting\u2026"
+      ? uiT("Starting…")
       : status.replace(/_/g, " ");
   const label = sentenceCase
     ? `${rawLabel.charAt(0).toUpperCase()}${rawLabel.slice(1)}`

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useIsAuxiliaryPanelOverlay } from "@/shared/hooks/use-mobile";
@@ -62,7 +64,7 @@ export function AuxiliaryPanel({
   onClose,
   onResetWidth,
   onResizeStart,
-  resizeHandleAriaLabel = "Resize panel",
+  resizeHandleAriaLabel = uiT("Resize panel"),
   resizeHandleTestId,
   siblings,
   splitPaneClamp = true,
@@ -70,6 +72,8 @@ export function AuxiliaryPanel({
   transparentChrome = false,
   widthPx,
 }: AuxiliaryPanelProps) {
+  useUiLanguage();
+
   const isOverlay = useIsAuxiliaryPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
@@ -119,8 +123,8 @@ export function AuxiliaryPanel({
         onPointerDown={onResizeStart}
         title={
           canResetWidth
-            ? "Drag to resize. Double-click to reset width."
-            : "Drag to resize."
+            ? uiT("Drag to resize. Double-click to reset width.")
+            : uiT("Drag to resize.")
         }
         type="button"
       >

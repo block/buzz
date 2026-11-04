@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { MessageCircle, SlidersHorizontal } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
@@ -32,9 +34,9 @@ export function WelcomeAgentCreateDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Create an agent</DialogTitle>
+          <DialogTitle>{uiT("Create an agent")}</DialogTitle>
           <DialogDescription>
-            Start with a conversation, or set everything up yourself.
+            {uiT("Start with a conversation, or set everything up yourself.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -51,11 +53,13 @@ export function WelcomeAgentCreateDialog({
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">
-                Create with {guideName}
+                {uiT("Create with {0}", { p0: guideName })}
               </span>
               <span className="mt-0.5 block text-sm text-muted-foreground">
-                Talk through what you need. {guideName} will prepare a draft you
-                can review and edit.
+                {uiT(
+                  "Talk through what you need. {0} will prepare a draft you can review and edit.",
+                  { p0: guideName },
+                )}
               </span>
             </span>
           </button>
@@ -71,10 +75,12 @@ export function WelcomeAgentCreateDialog({
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">
-                Create manually
+                {uiT("Create manually")}
               </span>
               <span className="mt-0.5 block text-sm text-muted-foreground">
-                Fill in the agent’s name, instructions, and settings yourself.
+                {uiT(
+                  "Fill in the agent’s name, instructions, and settings yourself.",
+                )}
               </span>
             </span>
           </button>
@@ -93,7 +99,7 @@ export function WelcomeAgentCreateDialog({
             type="button"
             variant="ghost"
           >
-            Cancel
+            {uiT("Cancel")}
           </Button>
         </div>
       </DialogContent>

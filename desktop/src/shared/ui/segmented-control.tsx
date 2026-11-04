@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -42,6 +44,8 @@ export function SegmentedControl<Value extends string>({
   testId: string;
   value: Value;
 }) {
+  useUiLanguage();
+
   const [previewValue, setPreviewValue] = React.useState<Value | null>(null);
   const controlRef = React.useRef<HTMLFieldSetElement | null>(null);
   const activePointerIdRef = React.useRef<number | null>(null);

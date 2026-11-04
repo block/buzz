@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import {
   CalendarClock,
@@ -192,6 +194,8 @@ export function SetStatusDialog({
   onClear,
   hasExistingStatus,
 }: SetStatusDialogProps) {
+  useUiLanguage();
+
   const [text, setText] = React.useState(initialText);
   const [emoji, setEmoji] = React.useState(initialEmoji);
   const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -319,7 +323,7 @@ export function SetStatusDialog({
       expiresAt !== undefined &&
       expiresAt <= Math.floor(Date.now() / 1_000)
     ) {
-      setSaveError("Choose a duration in the future.");
+      setSaveError(uiT("Choose a duration in the future."));
       return;
     }
     onSave({
@@ -358,33 +362,33 @@ export function SetStatusDialog({
                 type="button"
                 variant="ghost"
               >
-                Clear status
+                {uiT("Clear status")}
               </Button>
             ) : (
               <span />
             )}
             <Button
-              aria-label="Save status"
+              aria-label={uiT("Save status")}
               data-testid="set-status-save"
               disabled={!canSave}
               onClick={handleSave}
               type="button"
             >
-              Save status
+              {uiT("Save status")}
             </Button>
           </div>
         }
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
-        headerSubtitle="Let others know what you're up to."
-        title="Set a status"
+        headerSubtitle={uiT("Let others know what you're up to.")}
+        title={uiT("Set a status")}
       >
         <div className="flex min-h-12 items-stretch rounded-xl border border-input focus-within:ring-1 focus-within:ring-ring">
           <Popover onOpenChange={setPickerOpen} open={pickerOpen}>
             <div className="shrink-0">
               <PopoverTrigger asChild>
                 <button
-                  aria-label="Choose a status emoji"
+                  aria-label={uiT("Choose a status emoji")}
                   className="flex h-12 w-12 items-center justify-center rounded-xl transition-colors hover:bg-accent"
                   type="button"
                 >
@@ -409,12 +413,12 @@ export function SetStatusDialog({
             data-testid="set-status-input"
             onChange={(event) => setText(event.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="What’s your status?"
+            placeholder={uiT("What’s your status?")}
             value={text}
           />
         </div>
 
-        <StatusSection label="Duration">
+        <StatusSection label={uiT("Duration")}>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -423,7 +427,7 @@ export function SetStatusDialog({
                 type="button"
               >
                 <Clock3 className="h-5 w-5 text-muted-foreground" />
-                <span className="flex-1">Duration</span>
+                <span className="flex-1">{uiT("Duration")}</span>
                 <span className="text-muted-foreground">{duration}</span>
                 <ChevronDown className="h-4 w-4 text-muted-foreground" />
               </button>
@@ -448,11 +452,11 @@ export function SetStatusDialog({
           {duration === "Custom" ? (
             <div className={ROW_CLASS}>
               <CalendarClock className="h-5 w-5 text-muted-foreground" />
-              <span>Until</span>
+              <span>{uiT("Until")}</span>
               <Popover onOpenChange={setCalendarOpen} open={calendarOpen}>
                 <PopoverTrigger asChild>
                   <button
-                    aria-label="Status expiration date"
+                    aria-label={uiT("Status expiration date")}
                     className="flex h-9 min-w-0 flex-1 items-center rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-1 focus:ring-ring"
                     type="button"
                   >
@@ -482,7 +486,7 @@ export function SetStatusDialog({
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
-                    aria-label="Status expiration time"
+                    aria-label={uiT("Status expiration time")}
                     className="flex h-9 w-28 shrink-0 items-center rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-1 focus:ring-ring"
                     type="button"
                   >
@@ -526,13 +530,13 @@ export function SetStatusDialog({
           ) : null}
           {saveError || (!expirationIsFuture && isDirty) ? (
             <p className="px-3 py-2 text-xs text-destructive" role="alert">
-              {saveError || "Choose a duration in the future."}
+              {saveError || uiT("Choose a duration in the future.")}
             </p>
           ) : null}
         </StatusSection>
 
         {!baseline.hasExistingStatus ? (
-          <StatusSection label="Quick statuses">
+          <StatusSection label={uiT("Quick statuses")}>
             {PRESETS.map((preset) => (
               <button
                 className={ROW_CLASS}

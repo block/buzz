@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useNow } from "@/shared/lib/useNow";
@@ -315,9 +317,27 @@ function groupActivityItems(items: ProjectActivityItem[], nowMs: number) {
   const thisWeek = startOfWeek(Math.floor(nowMs / 1_000));
   const lastWeek = thisWeek - WEEK_SECONDS;
   const groups: ProjectActivityGroup[] = [
-    { key: "this-week", label: "This week", items: [] },
-    { key: "last-week", label: "Last week", items: [] },
-    { key: "earlier", label: "Earlier", items: [] },
+    {
+      key: "this-week",
+      get label() {
+        return uiT("This week");
+      },
+      items: [],
+    },
+    {
+      key: "last-week",
+      get label() {
+        return uiT("Last week");
+      },
+      items: [],
+    },
+    {
+      key: "earlier",
+      get label() {
+        return uiT("Earlier");
+      },
+      items: [],
+    },
   ];
 
   for (const item of items) {
@@ -357,7 +377,7 @@ function ActivityCard({
     : undefined;
   const actorLabel = item.actorPubkey
     ? resolveUserLabel({ profiles, pubkey: item.actorPubkey })
-    : item.actorName || "Someone";
+    : item.actorName || uiT("Someone");
   return (
     <div
       className={cn(
@@ -367,7 +387,10 @@ function ActivityCard({
       data-testid="projects-activity-card"
     >
       <button
-        aria-label={`Open ${item.title} in ${item.target.project.name}`}
+        aria-label={uiT("Open {0} in {1}", {
+          p0: item.title,
+          p1: item.target.project.name,
+        })}
         className="absolute inset-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={onOpen}
         type="button"
@@ -404,7 +427,7 @@ function ActivityCard({
           {item.actorPubkey ? (
             <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
               <button
-                aria-label={`View ${actorLabel}'s profile`}
+                aria-label={uiT("View {0}'s profile", { p0: actorLabel })}
                 className={cn(
                   "pointer-events-auto relative z-10 shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                   profile?.isAgent ? "rounded-[30%]" : "rounded-full",
@@ -522,6 +545,8 @@ function ActivityCard({
 
 /** Mixed GitHub-style workspace activity shown beneath the overview callouts. */
 export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
+  const __buzzLanguage = useUiLanguage();
+
   const { issues, projects, pullRequests, snapshots } = props;
   // Memoized: this feed re-renders with every parent state change (profiles
   // landing, selection, hover), and an unmemoized rebuild re-flattened and
@@ -530,6 +555,7 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
     () => buildActivityItems({ issues, projects, pullRequests, snapshots }),
     [issues, projects, pullRequests, snapshots],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: UI label getters depend on the active language.
   const items = React.useMemo(
     () =>
       allItems.filter((item) => {
@@ -546,18 +572,19 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
           repository,
         ]);
       }),
-    [allItems, props.searchQuery],
+    [allItems, props.searchQuery, __buzzLanguage],
   );
   // Week buckets are clock-derived; ticked so the memo cannot freeze "This
   // week" across a week boundary. Coarse cadence — the boundary moves weekly.
   const now = useNow(600_000);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: This UI projection reads locale-dependent labels.
   const groups = React.useMemo(
     () => groupActivityItems(items, now),
-    [items, now],
+    [items, now, __buzzLanguage],
   );
 
   if (props.isLoading && items.length === 0) {
-    return <BuzzLoadingState label="Loading project activity" />;
+    return <BuzzLoadingState label={uiT("Loading project activity")} />;
   }
 
   if (items.length === 0) {
@@ -565,12 +592,16 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
     return (
       <div className="rounded-xl border border-dashed border-border/60 px-4 py-12 text-center">
         <p className="text-sm font-medium text-foreground">
-          {searching ? "No matching activity" : "No project activity yet"}
+          {searching
+            ? uiT("No matching activity")
+            : uiT("No project activity yet")}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           {searching
-            ? "Try a different search."
-            : "Commits, reviews, review decisions, and tasks will appear here."}
+            ? uiT("Try a different search.")
+            : uiT(
+                "Commits, reviews, review decisions, and tasks will appear here.",
+              )}
         </p>
       </div>
     );

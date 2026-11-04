@@ -1,0 +1,188 @@
+{
+  "settings": {
+    "nav": {
+      "backToApp": "앱으로 돌아가기",
+      "groups": {
+        "personal": "개인",
+        "communities": "커뮤니티",
+        "app": "앱"
+      },
+      "sectionsLabel": "{{group}} 설정 항목",
+      "sections": {
+        "appearance": "모양",
+        "profile": "프로필",
+        "notifications": "알림",
+        "voice": "음성",
+        "experimental": "실험 기능",
+        "agents": "에이전트",
+        "channelTemplates": "채널 템플릿",
+        "compute": "컴퓨트",
+        "shortcuts": "단축키",
+        "hostedCommunities": "호스팅 커뮤니티",
+        "communityMembers": "초대",
+        "moderation": "관리",
+        "customEmoji": "사용자 지정 이모지",
+        "localArchive": "이 기기에 보관",
+        "mobile": "모바일",
+        "updates": "업데이트"
+      }
+    },
+    "access": {
+      "checking": "초대 권한 확인 중…",
+      "error": "초대 설정을 확인하지 못했습니다.",
+      "retry": "다시 시도",
+      "unavailable": "초대 설정을 불러올 수 없습니다. 릴레이를 복구하는 중일 수 있습니다."
+    },
+    "appearance": {
+      "title": "모양",
+      "description": "Buzz 테마를 선택합니다.",
+      "system": "시스템 설정 따름",
+      "light": "라이트",
+      "dark": "다크",
+      "accentColor": "강조 색",
+      "threadLayout": "스레드 배치",
+      "threadFocus": "집중 보기",
+      "threadFocusDescription": "채널 위에 스레드를 전체 너비로 엽니다",
+      "threadSplit": "나란히",
+      "threadSplitDescription": "스레드가 채널 옆 패널에 열립니다"
+    },
+    "language": {
+      "label": "언어",
+      "description": "Buzz에서 사용할 언어를 선택합니다.",
+      "system": "시스템 설정 따름",
+      "english": "English",
+      "traditionalChinese": "繁體中文",
+      "simplifiedChinese": "简体中文",
+      "unsaved": "현재 실행 중에는 적용되지만 언어 설정을 저장하지 못했습니다.",
+      "error": "언어를 변경하지 못했습니다. 다시 시도하세요.",
+      "nativeError": "앱 언어는 변경됐지만 macOS 메뉴를 갱신하지 못했습니다. 언어를 다시 선택해 재시도하세요.",
+      "retry": "다시 시도"
+    }
+  },
+  "sidebar": {
+    "primary": {
+      "inbox": "받은 편지함",
+      "pulse": "Pulse",
+      "projects": "프로젝트",
+      "agents": "에이전트",
+      "workflows": "워크플로"
+    },
+    "community": {
+      "notConnected": "연결 안 됨",
+      "connecting": "연결 중…",
+      "connected": "연결됨",
+      "reconnecting": "릴레이에 다시 연결 중…",
+      "stalled": "연결이 끊겼습니다 — 릴레이가 응답하지 않습니다",
+      "disconnected": "릴레이 연결이 끊어졌습니다",
+      "noCommunity": "커뮤니티 없음",
+      "community": "커뮤니티",
+      "actions": "커뮤니티 작업",
+      "copyUrl": "커뮤니티 URL 복사",
+      "invite": "커뮤니티에 초대",
+      "settings": "커뮤니티 설정",
+      "add": "커뮤니티 추가",
+      "switch": "커뮤니티 전환",
+      "edit": "{{name}} 수정"
+    },
+    "channel": {
+      "closeDirectMessage": "다이렉트 메시지 닫기",
+      "newComments_one": "새 댓글",
+      "newComments_other": "새 댓글",
+      "unread": "읽지 않음",
+      "copy": "복사",
+      "copyName": "채널 이름 복사",
+      "copyId": "채널 ID 복사",
+      "nameCopied": "채널 이름을 클립보드에 복사했습니다",
+      "idCopied": "채널 ID를 클립보드에 복사했습니다",
+      "markAsRead": "읽음으로 표시",
+      "markUnread": "읽지 않음으로 표시",
+      "mute": "채널 음소거",
+      "unmute": "채널 음소거 해제",
+      "star": "채널 즐겨찾기",
+      "unstar": "채널 즐겨찾기 해제",
+      "leave": "채널 나가기",
+      "archive": "채널 보관",
+      "delete": "채널 삭제"
+    }
+  },
+  "composer": {
+    "toolbar": {
+      "formatting": "서식",
+      "toggleFormatting": "서식 도구 전환",
+      "closeFormatting": "서식 닫기",
+      "mention": "멘션하기",
+      "attachFile": "파일 첨부",
+      "sending": "보내는 중",
+      "sendMessage": "메시지 보내기"
+    },
+    "format": {
+      "bold": "굵게",
+      "italic": "기울임꼴",
+      "strikethrough": "취소선",
+      "code": "코드",
+      "codeBlock": "코드 블록",
+      "link": "링크",
+      "bulletList": "글머리 기호 목록",
+      "orderedList": "번호 목록",
+      "quote": "인용",
+      "spoiler": "스포일러",
+      "enterUrl": "URL 입력:",
+      "linkText": "링크 텍스트:"
+    },
+    "banner": {
+      "editing": "메시지 편집 중",
+      "cancelEdit": "수정 취소",
+      "replying": "{{author}}에게 답글 작성 중",
+      "cancelReply": "답글 취소"
+    },
+    "actions": {
+      "more": "더 보기",
+      "edit": "메시지 편집",
+      "markRead": "읽음으로 표시",
+      "markUnread": "읽지 않음으로 표시",
+      "followThread": "스레드 팔로우",
+      "unfollowThread": "스레드 팔로우 해제",
+      "copyMessage": "메시지 복사",
+      "messageCopied": "메시지를 클립보드에 복사했습니다",
+      "remindLater": "나중에 알림",
+      "copyLink": "링크 복사",
+      "linkCopied": "링크를 클립보드에 복사했습니다",
+      "report": "메시지 신고",
+      "delete": "메시지 삭제",
+      "openReactions": "반응 열기",
+      "react": "반응 추가",
+      "reply": "답글"
+    },
+    "delete": {
+      "title": "메시지를 삭제할까요?",
+      "description": "이 메시지를 영구 삭제하며 되돌릴 수 없습니다.",
+      "cancel": "취소",
+      "confirm": "삭제"
+    },
+    "mention": {
+      "agent": "에이전트",
+      "teamAgents_one": "팀 · 에이전트 {{count}}개",
+      "teamAgents_other": "팀 · 에이전트 {{count}}개",
+      "managedBy": "관리자: {{owner}}",
+      "notInChannel": "채널에 참여하지 않음",
+      "managedByNotInChannel": "관리자: {{owner}} · 채널에 참여하지 않음"
+    }
+  },
+  "agents": {
+    "title": "에이전트",
+    "description": "에이전트를 설정하고 관리합니다.",
+    "defaults": "에이전트 기본값",
+    "setDefaults": "에이전트 기본값 설정",
+    "stopRunning": "실행 중인 에이전트 중지",
+    "actions": "에이전트 작업",
+    "dropToImport": "가져오려면 .agent.json 또는 .agent.png 파일을 여기에 놓으세요",
+    "unknown": "알 수 없는 에이전트",
+    "custom": "직접 만든 에이전트",
+    "configurationMissing": "설정 없음",
+    "newAgent": "새 에이전트",
+    "createAgent": "에이전트 만들기",
+    "discoverAgents": "에이전트 찾기",
+    "import": "가져오기",
+    "profile": "{{name}} 에이전트 프로필"
+  }
+}

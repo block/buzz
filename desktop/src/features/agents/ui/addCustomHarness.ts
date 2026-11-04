@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Shared pieces of the inline "Add custom harness…" entry the agent dialogs
  * append to their harness dropdown.
@@ -24,7 +26,9 @@ import {
 export const ADD_CUSTOM_HARNESS_VALUE = "\u0000add-custom-harness";
 
 export const ADD_CUSTOM_HARNESS_OPTION: PersonaDropdownOption = {
-  label: "Add custom harness…",
+  get label() {
+    return uiT("Add custom harness…");
+  },
   value: ADD_CUSTOM_HARNESS_VALUE,
 };
 

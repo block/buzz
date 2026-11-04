@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { Markdown } from "@/shared/ui/markdown";
@@ -21,6 +23,8 @@ export function VideoReviewCommentMarkdown({
   videoReviewCommentRootId,
   ...markdownProps
 }: VideoReviewCommentMarkdownProps) {
+  useUiLanguage();
+
   const openVideoReviewAt = useOpenVideoReviewAt();
   const reviewTimecode = React.useMemo(
     () => (videoReviewCommentRootId ? parseVideoReviewTimecode(content) : null),

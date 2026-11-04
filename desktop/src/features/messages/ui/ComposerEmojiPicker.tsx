@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useQuery } from "@tanstack/react-query";
 import { Images, Smile, SmilePlus } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
@@ -42,6 +44,8 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   onTriggerMouseDown,
   open,
 }: ComposerEmojiPickerProps) {
+  useUiLanguage();
+
   const [pickerTab, setPickerTab] = React.useState<ComposerPickerTab>("emoji");
   const shouldReduceMotion = useReducedMotion();
   const { activeCommunity } = useCommunities();
@@ -90,7 +94,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
           <PopoverTrigger asChild>
             <Button
               aria-label={
-                gifsAvailable ? "Insert emoji or GIF" : "Insert emoji"
+                gifsAvailable ? uiT("Insert emoji or GIF") : uiT("Insert emoji")
               }
               data-testid="composer-emoji-button"
               disabled={disabled}
@@ -104,7 +108,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
           </PopoverTrigger>
         </TooltipTrigger>
         <TooltipContent>
-          {gifsAvailable ? "Emoji and GIFs" : "Emoji"}
+          {gifsAvailable ? uiT("Emoji and GIFs") : uiT("Emoji")}
         </TooltipContent>
       </Tooltip>
       <PopoverContent
@@ -165,7 +169,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
                 value="emoji"
               >
                 <Smile aria-hidden className="h-4 w-4" />
-                Emoji
+                {uiT("Emoji")}
               </TabsTrigger>
               <TabsTrigger
                 className="relative z-10 h-8 gap-1.5 bg-transparent shadow-none transition-colors data-[state=active]:bg-transparent data-[state=active]:shadow-none"
@@ -173,7 +177,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
                 value="gifs"
               >
                 <Images aria-hidden className="h-4 w-4" />
-                GIFs
+                {uiT("GIFs")}
               </TabsTrigger>
             </TabsList>
             <TabsContent className="m-0" value="emoji">

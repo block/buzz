@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type { AgentPersona } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -55,7 +57,7 @@ export function PersonaDeleteDialog({
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete agent?</AlertDialogTitle>
+          <AlertDialogTitle>{uiT("Delete agent?")}</AlertDialogTitle>
           <AlertDialogDescription>
             {personaDeleteDescription(persona, instanceCount)}
           </AlertDialogDescription>
@@ -63,7 +65,7 @@ export function PersonaDeleteDialog({
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
@@ -76,7 +78,7 @@ export function PersonaDeleteDialog({
               type="button"
               variant="destructive"
             >
-              Delete
+              {uiT("Delete")}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>

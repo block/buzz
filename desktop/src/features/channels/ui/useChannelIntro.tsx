@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { Bot, FolderPlus, Plus, Sparkles, UserPlus } from "lucide-react";
 
@@ -57,7 +59,9 @@ export function useChannelIntro({
       if (onBrowseChannels) {
         actions.push({
           icon: <HashSearch aria-hidden className="h-6 w-6" />,
-          label: "Browse channels",
+          get label() {
+            return uiT("Browse channels");
+          },
           onClick: onBrowseChannels,
           testId: "welcome-intro-action-browse-channels",
         });
@@ -66,7 +70,9 @@ export function useChannelIntro({
       if (onCreateChannel) {
         actions.push({
           icon: <Plus aria-hidden className="h-6 w-6" />,
-          label: "Create a channel",
+          get label() {
+            return uiT("Create a channel");
+          },
           onClick: onCreateChannel,
           testId: "welcome-intro-action-create-channel",
         });
@@ -75,7 +81,9 @@ export function useChannelIntro({
       if (onWelcomeAddAgent) {
         actions.push({
           icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create an agent",
+          get label() {
+            return uiT("Create an agent");
+          },
           onClick: onWelcomeAddAgent,
           testId: "welcome-intro-action-create-agent",
         });
@@ -84,8 +92,8 @@ export function useChannelIntro({
       return {
         actions,
         channelKindLabel: isWelcomeChannel(activeChannel)
-          ? "private welcome channel"
-          : getChannelIntroKind(activeChannel, projectHome),
+          ? uiT("private welcome channel")
+          : uiT(getChannelIntroKind(activeChannel, projectHome)),
         channelName: activeChannel.name,
         description: isWelcomeChannel(activeChannel)
           ? null
@@ -97,9 +105,13 @@ export function useChannelIntro({
     if (!activeChannel.archivedAt && activeChannel.isMember) {
       if (onAddFiles) {
         actions.push({
-          description: "Add a repo.",
+          get description() {
+            return uiT("Add a repo.");
+          },
           icon: <FolderPlus aria-hidden className="h-5 w-5" />,
-          label: "Add files",
+          get label() {
+            return uiT("Add files");
+          },
           onClick: onAddFiles,
           testId: "channel-intro-action-add-files",
         });
@@ -107,9 +119,13 @@ export function useChannelIntro({
 
       if (onAddAgent) {
         actions.push({
-          description: "Add an agent here.",
+          get description() {
+            return uiT("Add an agent here.");
+          },
           icon: <Bot aria-hidden className="h-5 w-5" />,
-          label: "Add agent",
+          get label() {
+            return uiT("Add agent");
+          },
           onClick: onAddAgent,
           testId: "channel-intro-action-create-agent",
         });
@@ -117,9 +133,13 @@ export function useChannelIntro({
 
       if (onOpenMembers) {
         actions.push({
-          description: "Invite members.",
+          get description() {
+            return uiT("Invite members.");
+          },
           icon: <UserPlus aria-hidden className="h-5 w-5" />,
-          label: "Add people",
+          get label() {
+            return uiT("Add people");
+          },
           onClick: onOpenMembers,
           testId: "channel-intro-action-add-people",
         });
@@ -128,7 +148,7 @@ export function useChannelIntro({
 
     return {
       actions,
-      channelKindLabel: getChannelIntroKind(activeChannel, projectHome),
+      channelKindLabel: uiT(getChannelIntroKind(activeChannel, projectHome)),
       channelName: activeChannel.name,
       description: getChannelIntroDescription(activeChannel),
       hideBeginning: projectHome,

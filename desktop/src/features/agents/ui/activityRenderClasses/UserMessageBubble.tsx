@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import * as React from "react";
 
 import {
@@ -29,6 +31,8 @@ export function UserMessageBubble({
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
+  useUiLanguage();
+
   const variant = useAgentSessionTranscriptVariant();
   const { goChannel } = useAppNavigation();
   const { openProfilePanel } = useProfilePanel();
@@ -50,7 +54,7 @@ export function UserMessageBubble({
         fallbackName: item.title,
         profiles,
       })
-    : item.title || "User";
+    : item.title || uiT("User");
   const handleBubbleClick = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!messageLink || isNestedInteractiveTarget(event)) return;
@@ -100,7 +104,7 @@ export function UserMessageBubble({
     >
       {isCompactPreview ? null : item.authorPubkey && openProfilePanel ? (
         <button
-          aria-label={`Open ${authorLabel} profile`}
+          aria-label={uiT("Open {0} profile", { p0: authorLabel })}
           className={cn(
             "pointer-events-auto order-last ml-2 mt-1 size-7 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             authorProfile?.isAgent ? "rounded-[30%]" : "rounded-full",

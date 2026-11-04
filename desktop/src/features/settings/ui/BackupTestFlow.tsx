@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, Eye, EyeOff, FileKey2, FileUp } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
@@ -58,6 +60,8 @@ type BurstParticle = {
  * skipped entirely under reduced motion.
  */
 function SuccessBurst() {
+  useUiLanguage();
+
   const particles = React.useMemo<BurstParticle[]>(
     () =>
       Array.from({ length: BURST_PARTICLE_COUNT }, (_, i) => {
@@ -117,6 +121,8 @@ export function BackupTestFlow({
   progress,
   onProgressChange,
 }: BackupTestFlowProps) {
+  useUiLanguage();
+
   const reduceMotion = useReducedMotion() ?? false;
   const { stage, fileName, ncryptsec, result } = progress;
   // True while a file drag is anywhere over the window — the drop overlay
@@ -184,12 +190,12 @@ export function BackupTestFlow({
       try {
         text = (await file.text()).trim();
       } catch {
-        if (mountedRef.current) setError("Could not read that file.");
+        if (mountedRef.current) setError(uiT("Could not read that file."));
         return;
       }
       if (!mountedRef.current) return;
       if (!text.toLowerCase().startsWith("ncryptsec1")) {
-        setError("That doesn't look like a key backup file.");
+        setError(uiT("That doesn't look like a key backup file."));
         return;
       }
       setError(null);
@@ -225,7 +231,9 @@ export function BackupTestFlow({
     } catch (err) {
       if (mountedRef.current && requestId === requestRef.current)
         setError(
-          err instanceof Error ? err.message : "Could not verify this backup.",
+          err instanceof Error
+            ? err.message
+            : uiT("Could not verify this backup."),
         );
     } finally {
       if (mountedRef.current && requestId === requestRef.current)
@@ -260,12 +268,14 @@ export function BackupTestFlow({
           }
         >
           <p className="text-lg font-medium text-foreground">
-            This backup works
+            {uiT("This backup works")}
           </p>
           <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
             {result.matchesCurrentIdentity
-              ? "It restores your current Buzz identity."
-              : "It restores a different identity than the one signed in here."}
+              ? uiT("It restores your current Buzz identity.")
+              : uiT(
+                  "It restores a different identity than the one signed in here.",
+                )}
           </p>
           <div className="mt-3 flex justify-center">
             <PubKey
@@ -285,7 +295,7 @@ export function BackupTestFlow({
           type="button"
           variant="ghost"
         >
-          Test another backup
+          {uiT("Test another backup")}
         </Button>
       </div>
     );
@@ -318,7 +328,9 @@ export function BackupTestFlow({
             onClick={() => fileInputRef.current?.click()}
             type="button"
           >
-            <span className="text-sm font-medium">Select your backup file</span>
+            <span className="text-sm font-medium">
+              {uiT("Select your backup file")}
+            </span>
           </button>
           {isWindowDragging ? (
             /*
@@ -340,7 +352,7 @@ export function BackupTestFlow({
             >
               <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15">
                 <FileUp aria-hidden="true" className="size-4" />
-                <span>Drop your backup file here</span>
+                <span>{uiT("Drop your backup file here")}</span>
               </span>
             </div>
           ) : null}
@@ -370,11 +382,13 @@ export function BackupTestFlow({
             <Check aria-hidden="true" className="h-4 w-4 text-primary" />
           </div>
           <p className="text-center text-sm leading-6 text-muted-foreground">
-            That's the one. Now enter your password to prove you can unlock it.
+            {uiT(
+              "That's the one. Now enter your password to prove you can unlock it.",
+            )}
           </p>
           <div className="relative">
             <Input
-              aria-label="Backup password"
+              aria-label={uiT("Backup password")}
               autoComplete="off"
               className="h-10 bg-background pr-10 font-mono"
               data-testid="backup-test-password"
@@ -386,13 +400,15 @@ export function BackupTestFlow({
                   void handleVerify();
                 }
               }}
-              placeholder="Your backup password"
+              placeholder={uiT("Your backup password")}
               ref={passwordInputRef}
               type={isRevealed ? "text" : "password"}
               value={attempt}
             />
             <Button
-              aria-label={isRevealed ? "Hide password" : "Reveal password"}
+              aria-label={
+                isRevealed ? uiT("Hide password") : uiT("Reveal password")
+              }
               className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               data-testid="backup-test-password-reveal-toggle"
               disabled={isVerifying}
@@ -428,10 +444,10 @@ export function BackupTestFlow({
               {isVerifying ? (
                 <>
                   <Spinner className="h-4 w-4 border-2" />
-                  Checking…
+                  {uiT("Checking…")}
                 </>
               ) : (
-                "Verify backup"
+                uiT("Verify backup")
               )}
             </Button>
             <Button
@@ -449,7 +465,7 @@ export function BackupTestFlow({
               type="button"
               variant="ghost"
             >
-              Use a different file
+              {uiT("Use a different file")}
             </Button>
           </div>
         </>

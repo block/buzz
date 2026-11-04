@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Button } from "@/shared/ui/button";
 
 /** Retryable terminal failure for a channel history load with no cached rows. */
@@ -13,11 +15,12 @@ export function MessageTimelineErrorCard({
       role="alert"
     >
       <p className="text-base font-semibold tracking-tight">
-        Couldn&apos;t load messages
+        {uiT("Couldn't load messages")}
       </p>
       <p className="mt-2 text-sm text-muted-foreground">
-        The channel history didn&apos;t load. Check your connection and try
-        again.
+        {uiT(
+          "The channel history didn't load. Check your connection and try again.",
+        )}
       </p>
       {onRetry ? (
         <Button
@@ -28,7 +31,7 @@ export function MessageTimelineErrorCard({
           type="button"
           variant="outline"
         >
-          Retry
+          {uiT("Retry")}
         </Button>
       ) : null}
     </div>

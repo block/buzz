@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -109,9 +111,11 @@ export async function runCardMintJob(
       input.memoryLevel,
     );
     updateJob(jobId, { phase: "done", card });
-    toast.success(`${input.agentName}'s card is ready`, {
+    toast.success(uiT("{0}'s card is ready", { p0: input.agentName }), {
       action: {
-        label: "View card",
+        get label() {
+          return uiT("View card");
+        },
         onClick: () => viewMintedCardJob(jobId),
       },
       duration: 10_000,
@@ -134,7 +138,7 @@ export async function runCardMintJob(
         'The OpenAI API key is invalid or expired. Open the mint dialog and use "Update API key" to replace it.';
     }
     updateJob(jobId, { phase: "error", error: message });
-    toast.error(`Minting ${input.agentName}'s card failed`, {
+    toast.error(uiT("Minting {0}'s card failed", { p0: input.agentName }), {
       description: message,
     });
   }

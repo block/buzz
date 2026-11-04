@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 export type ProjectRepoUnavailableReason =
   | "missing"
   | "access"
@@ -18,39 +20,74 @@ const PROJECT_REPO_UNAVAILABLE_PRESENTATIONS: Record<
   ProjectRepoUnavailablePresentation
 > = {
   authentication: {
-    description:
-      "Buzz could not authenticate with this repository. Check your access and try again.",
-    title: "Repository access failed",
+    get description() {
+      return uiT(
+        "Buzz could not authenticate with this repository. Check your access and try again.",
+      );
+    },
+    get title() {
+      return uiT("Repository access failed");
+    },
   },
   missing: {
-    description:
-      "The project announcement exists, but its git repository was not found on the Buzz relay.",
-    title: "Repository not initialized",
+    get description() {
+      return uiT(
+        "The project announcement exists, but its git repository was not found on the Buzz relay.",
+      );
+    },
+    get title() {
+      return uiT("Repository not initialized");
+    },
   },
   access: {
-    description:
-      "Repository access is granted through its channel, and you’re not a member. Ask the repository owner for an invite.",
-    title: "Repository access restricted",
+    get description() {
+      return uiT(
+        "Repository access is granted through its channel, and you’re not a member. Ask the repository owner for an invite.",
+      );
+    },
+    get title() {
+      return uiT("Repository access restricted");
+    },
   },
   unbound: {
-    description:
-      "This repository has no access channel binding, so the relay cannot authorize anyone to read it. The repository owner can bind a channel from the Access menu.",
-    title: "No access channel bound",
+    get description() {
+      return uiT(
+        "This repository has no access channel binding, so the relay cannot authorize anyone to read it. The repository owner can bind a channel from the Access menu.",
+      );
+    },
+    get title() {
+      return uiT("No access channel bound");
+    },
   },
   network: {
-    description:
-      "The Buzz git service could not be reached. Check your connection and try again.",
-    title: "Couldn’t reach repository",
+    get description() {
+      return uiT(
+        "The Buzz git service could not be reached. Check your connection and try again.",
+      );
+    },
+    get title() {
+      return uiT("Couldn’t reach repository");
+    },
   },
   ref: {
-    description:
-      "The selected branch is advertised by the project but is missing from its git remote.",
-    title: "Branch unavailable",
+    get description() {
+      return uiT(
+        "The selected branch is advertised by the project but is missing from its git remote.",
+      );
+    },
+    get title() {
+      return uiT("Branch unavailable");
+    },
   },
   unknown: {
-    description:
-      "Buzz could not load this repository. Try again or contact the project owner.",
-    title: "Repository unavailable",
+    get description() {
+      return uiT(
+        "Buzz could not load this repository. Try again or contact the project owner.",
+      );
+    },
+    get title() {
+      return uiT("Repository unavailable");
+    },
   },
 };
 

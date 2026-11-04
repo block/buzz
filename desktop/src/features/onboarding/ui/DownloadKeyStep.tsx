@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
@@ -36,6 +38,8 @@ export function DownloadKeyStep({
   session,
   onBack,
 }: DownloadKeyStepProps) {
+  useUiLanguage();
+
   const reduceMotion = useReducedMotion() ?? false;
   const cardLayout = useOnboardingCardLayout();
   // Once the encrypted payload is saved, the creator advances to its guided
@@ -86,12 +90,12 @@ export function DownloadKeyStep({
             text-title size token as conflicting with text-foreground. */}
         <h1 className="text-title font-normal text-foreground">
           {hasVerifiedBackup
-            ? "Your backup is verified"
+            ? uiT("Your backup is verified")
             : hasSelectedBackup
-              ? "Verify your backup"
+              ? uiT("Verify your backup")
               : hasCreated
-                ? "Your backup is ready"
-                : "Create a secure backup file"}
+                ? uiT("Your backup is ready")
+                : uiT("Create a secure backup file")}
         </h1>
         <p
           className={cn(
@@ -100,12 +104,18 @@ export function DownloadKeyStep({
           )}
         >
           {hasVerifiedBackup
-            ? "Your file and password can restore your identity."
+            ? uiT("Your file and password can restore your identity.")
             : hasSelectedBackup
-              ? "Enter your password to make sure you can unlock this file."
+              ? uiT(
+                  "Enter your password to make sure you can unlock this file.",
+                )
               : hasCreated
-                ? "Test your backup to make sure it works, or continue without testing."
-                : "This creates a password-protected file with your private key. Remember, Buzz can’t recover your key if you lose it."}
+                ? uiT(
+                    "Test your backup to make sure it works, or continue without testing.",
+                  )
+                : uiT(
+                    "This creates a password-protected file with your private key. Remember, Buzz can’t recover your key if you lose it.",
+                  )}
         </p>
       </motion.div>
 
@@ -175,7 +185,7 @@ export function DownloadKeyStep({
             type="button"
             variant="ghost"
           >
-            {hasVerifiedBackup ? "Continue" : "Skip for now"}
+            {hasVerifiedBackup ? uiT("Continue") : uiT("Skip for now")}
           </Button>
         ) : null}
       </OnboardingFooter>

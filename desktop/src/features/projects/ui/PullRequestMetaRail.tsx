@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { GitBranch, GitMerge, GitPullRequest, Tag } from "lucide-react";
 import * as React from "react";
 
@@ -36,6 +38,8 @@ export function PullRequestMetaHeader({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  useUiLanguage();
+
   const identityQuery = useIdentityQuery();
   const targetBranch =
     pullRequest.targetBranch || project.defaultBranch || "default branch";
@@ -71,7 +75,7 @@ export function PullRequestMetaHeader({
 
   return (
     <ProjectDetailMetaList>
-      <ProjectDetailMetaRow icon={GitBranch} label="Branch">
+      <ProjectDetailMetaRow icon={GitBranch} label={uiT("Branch")}>
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <p className="flex min-w-0 items-center gap-1.5 overflow-hidden">
             <span className="truncate text-foreground">{sourceBranch}</span>
@@ -121,13 +125,13 @@ export function PullRequestMetaHeader({
         pullRequest={pullRequest}
         signAsManagedOwner={isManagedAgentOwner && !isOwner}
       />
-      <ProjectDetailMetaRow icon={StatusIcon} label="Status">
+      <ProjectDetailMetaRow icon={StatusIcon} label={uiT("Status")}>
         <span className={`font-medium ${statusClassName(pullRequest.status)}`}>
           {pullRequest.status}
         </span>
       </ProjectDetailMetaRow>
       {labels.length > 0 ? (
-        <ProjectDetailMetaRow icon={Tag} label="Labels">
+        <ProjectDetailMetaRow icon={Tag} label={uiT("Labels")}>
           <ProjectDetailMetaPills labels={labels} />
         </ProjectDetailMetaRow>
       ) : null}

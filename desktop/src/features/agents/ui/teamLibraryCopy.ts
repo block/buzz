@@ -1,15 +1,38 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 export const teamCatalogCopy = {
-  chooseFromCatalog: "Choose from catalog",
-  dialogTitle: "Team Catalog",
-  dialogDescription: "Browse teams shared to this relay.",
-  emptyCatalogTitle: "No teams are being shared",
-  emptyCatalogDescription: "Shared teams will appear here.",
-  addAction: "Add team",
-  addedAction: "Added to my teams",
-  addingAction: "Adding…",
-  shareTitle: "Share to catalog",
-  shareDescription:
-    "Anyone in this community can find and add a copy of this team. Both the team instructions and every member’s instructions are shared as plaintext. Memories and secrets aren’t included.",
+  get chooseFromCatalog() {
+    return uiT("Choose from catalog");
+  },
+  get dialogTitle() {
+    return uiT("Team Catalog");
+  },
+  get dialogDescription() {
+    return uiT("Browse teams shared to this relay.");
+  },
+  get emptyCatalogTitle() {
+    return uiT("No teams are being shared");
+  },
+  get emptyCatalogDescription() {
+    return uiT("Shared teams will appear here.");
+  },
+  get addAction() {
+    return uiT("Add team");
+  },
+  get addedAction() {
+    return uiT("Added to my teams");
+  },
+  get addingAction() {
+    return uiT("Adding…");
+  },
+  get shareTitle() {
+    return uiT("Share to catalog");
+  },
+  get shareDescription() {
+    return uiT(
+      "Anyone in this community can find and add a copy of this team. Both the team instructions and every member’s instructions are shared as plaintext. Memories and secrets aren’t included.",
+    );
+  },
 } as const;
 
 /**
@@ -25,7 +48,10 @@ export function teamAutoRetractedNotice(
   teamName: string,
   reason: string,
 ): string {
-  return `"${teamName}" has been queued for removal from the community catalog because it can no longer be projected: ${reason}`;
+  return uiT(
+    '"{0}" has been queued for removal from the community catalog because it can no longer be projected: {1}',
+    { p0: teamName, p1: reason },
+  );
 }
 
 /**
@@ -42,10 +68,18 @@ export function teamShareNotice(
 ): string {
   if (publicationStatus === "queued") {
     return shared
-      ? `Sharing ${teamName} is queued. It will appear after the relay accepts the update.`
-      : `Removing ${teamName} is queued. It may remain discoverable until the relay accepts the update.`;
+      ? uiT(
+          "Sharing {0} is queued. It will appear after the relay accepts the update.",
+          { p0: teamName },
+        )
+      : uiT(
+          "Removing {0} is queued. It may remain discoverable until the relay accepts the update.",
+          { p0: teamName },
+        );
   }
   return shared
-    ? `Published ${teamName} to the community catalog.`
-    : `${teamName} is no longer discoverable in the community catalog.`;
+    ? uiT("Published {0} to the community catalog.", { p0: teamName })
+    : uiT("{0} is no longer discoverable in the community catalog.", {
+        p0: teamName,
+      });
 }

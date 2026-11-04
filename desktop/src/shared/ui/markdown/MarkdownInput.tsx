@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -17,7 +19,7 @@ export function MarkdownInput({
   if (type === "checkbox") {
     return (
       <Checkbox
-        aria-label={checked ? "Completed task" : "Incomplete task"}
+        aria-label={checked ? uiT("Completed task") : uiT("Incomplete task")}
         checked={Boolean(checked)}
         className={cn(
           "pointer-events-none mr-1.5 inline-flex align-[-0.125rem] disabled:opacity-45",

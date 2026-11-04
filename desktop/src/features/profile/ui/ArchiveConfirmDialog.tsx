@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,7 +32,9 @@ export function ArchiveConfirmDialog({
   isBot: boolean;
   isPending: boolean;
 }) {
-  const title = isBot ? "Archive this agent?" : "Archive this identity?";
+  const title = isBot
+    ? uiT("Archive this agent?")
+    : uiT("Archive this identity?");
   const subject = isBot ? "this agent" : "this person";
 
   return (
@@ -39,7 +43,7 @@ export function ArchiveConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
-            Archiving hides {subject} from the space.
+            {uiT("Archiving hides {0} from the space.", { p0: subject })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The list + closing paragraph sit outside AlertDialogDescription on
@@ -47,25 +51,30 @@ export function ArchiveConfirmDialog({
             a <ul> or another block <p>. */}
         <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
           <li>
-            They won't appear in search, autocomplete, or when adding members
+            {uiT(
+              "They won't appear in search, autocomplete, or when adding members",
+            )}
           </li>
           <li>
-            This only affects{" "}
-            <span className="font-medium text-foreground">this space</span> —
-            not their account anywhere else
+            {uiT("This only affects")}{" "}
+            <span className="font-medium text-foreground">
+              {uiT("this space")}
+            </span>{" "}
+            {uiT(" — not their account anywhere else")}
           </li>
-          <li>You can unarchive them at any time to restore them</li>
+          <li>{uiT("You can unarchive them at any time to restore them")}</li>
         </ul>
         {isBot ? (
           <p className="text-sm text-muted-foreground">
-            You can also delete this agent from the profile settings menu if you
-            want to remove the agent instead of hiding it.
+            {uiT(
+              "You can also delete this agent from the profile settings menu if you want to remove the agent instead of hiding it.",
+            )}
           </p>
         ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">
-              Cancel
+              {uiT("Cancel")}
             </Button>
           </AlertDialogCancel>
           <AlertDialogAction
@@ -74,7 +83,7 @@ export function ArchiveConfirmDialog({
             disabled={isPending}
             onClick={onConfirm}
           >
-            {isPending ? "Archiving…" : "Archive"}
+            {isPending ? uiT("Archiving…") : uiT("Archive")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

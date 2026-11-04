@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { cn } from "@/shared/lib/cn";
 import BuzzLogoAnimation from "@/shared/ui/buzz-logo/BuzzLogoAnimation";
 
@@ -5,7 +7,7 @@ import BuzzLogoAnimation from "@/shared/ui/buzz-logo/BuzzLogoAnimation";
 export function BuzzLoadingState({
   className,
   fill = false,
-  label = "Loading",
+  label = uiT("Loading"),
 }: {
   className?: string;
   fill?: boolean;

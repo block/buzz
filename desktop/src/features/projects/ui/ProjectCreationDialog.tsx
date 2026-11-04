@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -12,6 +14,8 @@ export function ProjectCreationDialog({
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
+  useUiLanguage();
+
   const { goProject } = useAppNavigation();
   const createProjectMutation = useCreateProjectMutation();
 
@@ -21,11 +25,13 @@ export function ProjectCreationDialog({
       onCreate={async (input) => {
         const result = await createProjectMutation.mutateAsync(input);
         if (result.compatibilityWarning) {
-          toast.warning("Created as a standalone project", {
+          toast.warning(uiT("Created as a standalone project"), {
             description: result.compatibilityWarning,
           });
         } else {
-          toast.success(`Project "${result.project.name}" created.`);
+          toast.success(
+            uiT('Project "{0}" created.', { p0: result.project.name }),
+          );
         }
         await goProject(result.project.id);
       }}

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { diffLines } from "diff";
 import { RotateCcw } from "lucide-react";
 import * as React from "react";
@@ -54,6 +56,8 @@ export function CanvasHistoryPanel({
   currentRevision,
   canRestore,
 }: CanvasHistoryPanelProps) {
+  useUiLanguage();
+
   const historyQuery = useCanvasHistoryQuery(channelId, true);
   const restoreMutation = useSetCanvasMutation(channelId);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
@@ -137,7 +141,7 @@ export function CanvasHistoryPanel({
   if (historyQuery.isLoading) {
     return (
       <p className="text-sm text-muted-foreground" role="status">
-        Loading history...
+        {uiT("Loading history...")}
       </p>
     );
   }
@@ -162,7 +166,7 @@ export function CanvasHistoryPanel({
   if (revisions.length === 0) {
     return (
       <p className="text-sm text-muted-foreground" role="status">
-        No revisions yet.
+        {uiT("No revisions yet.")}
       </p>
     );
   }
@@ -178,7 +182,7 @@ export function CanvasHistoryPanel({
         >
           {isRelayUnreachableError(historyQuery.error)
             ? RELAY_UNREACHABLE_SHORT
-            : "Couldn't refresh history — showing last known revisions."}
+            : uiT("Couldn't refresh history — showing last known revisions.")}
         </p>
       ) : null}
       {unverifiedRestoreNotice ? (
@@ -190,8 +194,9 @@ export function CanvasHistoryPanel({
           role="status"
           tabIndex={-1}
         >
-          Restored. We couldn't verify against the latest revision just now —
-          check the canvas if a concurrent edit appears.
+          {uiT(
+            "Restored. We couldn't verify against the latest revision just now — check the canvas if a concurrent edit appears.",
+          )}
         </p>
       ) : null}
       <ul className="space-y-2">
@@ -223,7 +228,7 @@ export function CanvasHistoryPanel({
                   {authorLabel(revision.author)}
                   {isCurrent ? (
                     <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      Current
+                      {uiT("Current")}
                     </span>
                   ) : null}
                 </span>
@@ -253,8 +258,8 @@ export function CanvasHistoryPanel({
                     >
                       <RotateCcw className="h-4 w-4" />
                       {restoreMutation.isPending
-                        ? "Restoring..."
-                        : "Restore this revision"}
+                        ? uiT("Restoring...")
+                        : uiT("Restore this revision")}
                     </Button>
                   ) : null}
                   {restoreMutation.error instanceof Error ? (
@@ -278,7 +283,9 @@ export function CanvasHistoryPanel({
           type="button"
           variant="ghost"
         >
-          {historyQuery.isFetchingNextPage ? "Loading..." : "Load older"}
+          {historyQuery.isFetchingNextPage
+            ? uiT("Loading...")
+            : uiT("Load older")}
         </Button>
       ) : null}
       <AlertDialog
@@ -289,20 +296,22 @@ export function CanvasHistoryPanel({
       >
         <AlertDialogContent data-testid="channel-canvas-restore-confirm">
           <AlertDialogHeader>
-            <AlertDialogTitle>Restore this revision?</AlertDialogTitle>
+            <AlertDialogTitle>{uiT("Restore this revision?")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This publishes{" "}
-              {confirmRevision
-                ? `${authorLabel(confirmRevision.revision.author)}'s revision from ${formatItemTimestamp(confirmRevision.revision.createdAt, { withTime: true })}`
-                : "the selected revision"}{" "}
-              as the current canvas for everyone in this channel. History is
-              preserved.
+              {uiT(
+                "This publishes {0} as the current canvas for everyone in this channel. History is preserved.",
+                {
+                  p0: confirmRevision
+                    ? `${authorLabel(confirmRevision.revision.author)}'s revision from ${formatItemTimestamp(confirmRevision.revision.createdAt, { withTime: true })}`
+                    : "the selected revision",
+                },
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel asChild>
               <Button type="button" variant="outline">
-                Cancel
+                {uiT("Cancel")}
               </Button>
             </AlertDialogCancel>
             <AlertDialogAction asChild>
@@ -322,7 +331,7 @@ export function CanvasHistoryPanel({
                 }}
                 type="button"
               >
-                Restore
+                {uiT("Restore")}
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -344,6 +353,8 @@ function CanvasRevisionDiff({
   current: string;
   revision: string;
 }) {
+  useUiLanguage();
+
   const parts = React.useMemo(
     () => diffLines(current, revision),
     [current, revision],
@@ -351,7 +362,7 @@ function CanvasRevisionDiff({
   if (parts.length === 1 && !parts[0].added && !parts[0].removed) {
     return (
       <p className="text-xs text-muted-foreground">
-        Identical to the current canvas.
+        {uiT("Identical to the current canvas.")}
       </p>
     );
   }

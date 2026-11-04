@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import {
   Check,
   GitPullRequest,
@@ -53,6 +55,8 @@ export function PullRequestReviewCard({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  useUiLanguage();
+
   const identityQuery = useIdentityQuery();
   const { isPending: isUpdatingStatus, mutateAsync: updatePullRequestStatus } =
     useUpdateProjectPullRequestStatusMutation(project);
@@ -93,16 +97,18 @@ export function PullRequestReviewCard({
         });
         toast.success(
           status === "draft"
-            ? "Converted to draft."
+            ? uiT("Converted to draft.")
             : status === "closed"
-              ? "Review closed."
+              ? uiT("Review closed.")
               : pullRequest.status === "Closed"
-                ? "Review reopened."
-                : "Marked as ready for review.",
+                ? uiT("Review reopened.")
+                : uiT("Marked as ready for review."),
         );
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to update status.",
+          error instanceof Error
+            ? error.message
+            : uiT("Failed to update status."),
         );
       }
     },
@@ -200,7 +206,7 @@ export function PullRequestReviewCard({
               type="button"
             >
               <Check className="h-3.5 w-3.5" />
-              Approve
+              {uiT("Approve")}
             </Button>
           ) : null}
           {canMerge ? (
@@ -222,7 +228,7 @@ export function PullRequestReviewCard({
               variant="secondary"
             >
               <GitPullRequest className="h-3.5 w-3.5" />
-              Ready for review
+              {uiT("Ready for review")}
             </Button>
           ) : null}
           {canReopen ? (
@@ -237,14 +243,14 @@ export function PullRequestReviewCard({
               variant="secondary"
             >
               <RotateCcw className="h-3.5 w-3.5" />
-              Reopen review
+              {uiT("Reopen review")}
             </Button>
           ) : null}
           {hasOverflowAction ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
-                  aria-label="More review actions"
+                  aria-label={uiT("More review actions")}
                   className="ml-auto h-8 w-8"
                   disabled={isUpdatingStatus}
                   size="icon-xs"
@@ -262,7 +268,7 @@ export function PullRequestReviewCard({
                     }}
                   >
                     <GitPullRequestDraft className="h-4 w-4" />
-                    Convert to draft
+                    {uiT("Convert to draft")}
                   </DropdownMenuItem>
                 ) : null}
                 {canClose ? (
@@ -273,7 +279,7 @@ export function PullRequestReviewCard({
                     }}
                   >
                     <X className="h-4 w-4" />
-                    Close review
+                    {uiT("Close review")}
                   </DropdownMenuItem>
                 ) : null}
               </DropdownMenuContent>
@@ -291,16 +297,18 @@ export function PullRequestReviewCard({
       >
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Approve review</DialogTitle>
+            <DialogTitle>{uiT("Approve review")}</DialogTitle>
             <DialogDescription>
-              Add an optional summary for the author and other reviewers.
+              {uiT(
+                "Add an optional summary for the author and other reviewers.",
+              )}
             </DialogDescription>
           </DialogHeader>
           <Textarea
-            aria-label="Approval summary"
+            aria-label={uiT("Approval summary")}
             disabled={isApproving}
             onChange={(event) => setApprovalSummary(event.target.value)}
-            placeholder="What looks good?"
+            placeholder={uiT("What looks good?")}
             value={approvalSummary}
           />
           <DialogFooter>
@@ -310,7 +318,7 @@ export function PullRequestReviewCard({
               type="button"
               variant="ghost"
             >
-              Cancel
+              {uiT("Cancel")}
             </Button>
             <Button
               className="bg-green-600 text-white hover:bg-green-700"
@@ -321,7 +329,7 @@ export function PullRequestReviewCard({
               type="button"
             >
               <Check className="h-4 w-4" />
-              Approve
+              {uiT("Approve")}
             </Button>
           </DialogFooter>
         </DialogContent>

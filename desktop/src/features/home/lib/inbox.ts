@@ -1,3 +1,6 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiDateFormatter } from "@/shared/i18n/format";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -108,7 +111,7 @@ export type InboxGroup = {
 
 type InboxChannel = Pick<Channel, "channelType" | "id" | "name">;
 
-const fullTimeFormatter = new Intl.DateTimeFormat("en-US", {
+const fullTimeFormatter = uiDateFormatter({
   month: "short",
   day: "numeric",
   year: "numeric",
@@ -129,9 +132,9 @@ function projectRootItem(item: FeedItem, groupItems: readonly FeedItem[]) {
 }
 
 function projectTypeLabel(item: FeedItem) {
-  if (item.kind === 1618) return "Review";
-  if (item.kind === 1621) return "Task";
-  return "Project update";
+  if (item.kind === 1618) return uiT("Review");
+  if (item.kind === 1621) return uiT("Task");
+  return uiT("Project update");
 }
 
 function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
@@ -196,12 +199,12 @@ function feedPreview(item: FeedItem) {
 
 function categoryLabelFor(category: FeedItemCategory) {
   return category === "needs_action"
-    ? "Needs Action"
+    ? uiT("Needs Action")
     : category === "mention"
-      ? "Mention"
+      ? uiT("Mention")
       : category === "agent_activity"
-        ? "Agent update"
-        : "Activity";
+        ? uiT("Agent update")
+        : uiT("Activity");
 }
 
 export function isThreadActivityItem(item: FeedItem) {

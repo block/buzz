@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { ArrowLeft } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -32,7 +34,7 @@ function ProjectInboxStatus({
       {onBack ? (
         <div className="flex min-h-13 items-center px-5 py-2">
           <Button
-            aria-label="Back to Inbox"
+            aria-label={uiT("Back to Inbox")}
             onClick={onBack}
             size="icon"
             type="button"
@@ -46,7 +48,7 @@ function ProjectInboxStatus({
         <p className="text-sm text-muted-foreground">{message}</p>
         {onRetry ? (
           <Button onClick={onRetry} size="sm" type="button" variant="outline">
-            Retry
+            {uiT("Retry")}
           </Button>
         ) : null}
       </div>
@@ -61,6 +63,8 @@ export function ProjectInboxDetail({
   onBack,
   profiles,
 }: ProjectInboxDetailProps) {
+  useUiLanguage();
+
   const { goProject } = useAppNavigation();
   const projectsQuery = useProjectsQuery();
   const projectsWorkItemsQuery = useProjectsWorkItemsQuery(
@@ -79,10 +83,10 @@ export function ProjectInboxDetail({
       <ProjectInboxStatus
         message={
           error
-            ? "Could not load this project item."
+            ? uiT("Could not load this project item.")
             : isLoading
-              ? "Loading project item…"
-              : "This project item could not be found."
+              ? uiT("Loading project item…")
+              : uiT("This project item could not be found.")
         }
         onBack={onBack}
         onRetry={
@@ -104,7 +108,9 @@ export function ProjectInboxDetail({
   if (failedSections && failedSections.length > 0) {
     return (
       <ProjectInboxStatus
-        message="Some project activity could not be loaded. Actions are unavailable until the item is current."
+        message={uiT(
+          "Some project activity could not be loaded. Actions are unavailable until the item is current.",
+        )}
         onBack={onBack}
         onRetry={() => void projectsWorkItemsQuery.refetch()}
       />

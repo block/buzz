@@ -1,3 +1,5 @@
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
 import type * as React from "react";
 
 import {
@@ -58,6 +60,8 @@ function ChannelMetadataTooltip({
   channel: Channel | undefined;
   children: React.ReactElement;
 }) {
+  useUiLanguage();
+
   const { contentRef, onPointerMove } = useInlineTooltipPosition();
   const description = channel?.description?.trim();
   if (!channel) return children;
@@ -126,7 +130,11 @@ function ChannelPermalinkChipContents({
         href={href}
         icon="channel"
         title={href}
-        aria-label={openable ? `Open channel ${label}` : `Channel ${label}`}
+        aria-label={
+          openable
+            ? uiT("Open channel {0}", { p0: label })
+            : uiT("Channel {0}", { p0: label })
+        }
         interactive={openable && interactive}
         onOpenLink={() => {
           if (openable) onOpenChannel(channelId);
@@ -140,6 +148,8 @@ function ChannelPermalinkChipContents({
 }
 
 function ResolvedChannelPermalinkChip(props: ChannelPermalinkChipProps) {
+  useUiLanguage();
+
   const channel = useChannelReference(props.channelId);
   const openable = isChannelReferenceOpenable(channel);
   const label = openable ? channel.name : props.channelId.slice(0, 8);
@@ -174,6 +184,8 @@ function ResolvedAuthoredDeepLink({
   onOpenChannel,
   onOpenMessageLink,
 }: AuthoredDeepLinkProps) {
+  useUiLanguage();
+
   const channel = useChannelReference(channelId);
   const openable = isChannelReferenceOpenable(channel);
   const label = getReactNodeText(children);
@@ -220,6 +232,8 @@ export function AuthoredDeepLinkAnchor({
   interactive: boolean;
   messageLink: AuthoredMessageLink | null;
 }) {
+  useUiLanguage();
+
   const {
     channels,
     onOpenChannel,
@@ -290,6 +304,8 @@ export function ChannelDeepLinkAnchor({
   href,
   interactive,
 }: React.ComponentPropsWithoutRef<"a"> & { interactive: boolean }) {
+  useUiLanguage();
+
   const {
     channels,
     onOpenChannel,
@@ -351,6 +367,8 @@ export function MarkdownChannelDeepLink({
   children?: React.ReactNode;
   interactive: boolean;
 }) {
+  useUiLanguage();
+
   const {
     channels,
     onOpenChannel,
@@ -415,7 +433,9 @@ function ChannelReferenceChip({
         href={channel ? buildChannelLink(channel.id) : undefined}
         icon="channel"
         aria-label={
-          channel ? `Open channel ${channelName}` : `Channel ${channelName}`
+          channel
+            ? uiT("Open channel {0}", { p0: channelName })
+            : uiT("Channel {0}", { p0: channelName })
         }
         interactive={Boolean(channel) && interactive}
         onOpenLink={() => {
@@ -434,6 +454,8 @@ function ResolvedChannelReferenceChip({
   interactive,
   onOpenChannel,
 }: Omit<ChannelReferenceChipProps, "channel">) {
+  useUiLanguage();
+
   const { channels } = useResolvedChannelDirectory();
   const channel = channels.find(
     (candidate) =>
@@ -458,6 +480,8 @@ export function MarkdownChannelReference({
   children?: React.ReactNode;
   interactive: boolean;
 }) {
+  useUiLanguage();
+
   const { channels, onOpenChannel, resolveChannelReferences } =
     useMarkdownRuntime();
   const text = String(children ?? "");

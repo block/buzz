@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -44,7 +46,7 @@ export function VideoReviewTimecodeButton({
 }) {
   return (
     <button
-      aria-label={`Jump to ${timecode}`}
+      aria-label={uiT("Jump to {0}", { p0: timecode })}
       className={timecodeClasses({ className, interactive: true, surface })}
       data-testid="video-review-comment-timecode"
       type="button"

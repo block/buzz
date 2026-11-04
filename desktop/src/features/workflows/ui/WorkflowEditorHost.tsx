@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { useWorkflowQuery } from "@/features/workflows/hooks";
 import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
 import { WorkflowUnavailableDialog } from "@/features/workflows/ui/WorkflowUnavailableDialog";
@@ -59,6 +61,8 @@ export function WorkflowEditorHost({
   onTriggerWorkflow,
   workflowHint,
 }: WorkflowEditorHostProps) {
+  useUiLanguage();
+
   const editorWorkflowId =
     editor && editor.mode !== "create" ? editor.workflowId : null;
   const editorWorkflowQuery = useWorkflowQuery(editorWorkflowId);

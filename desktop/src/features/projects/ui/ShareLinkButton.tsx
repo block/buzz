@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Check, Link2 } from "lucide-react";
 import * as React from "react";
 
@@ -12,7 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
  */
 export function ShareLinkButton({
   className,
-  label = "Copy link",
+  label = uiT("Copy link"),
   link,
   testId,
 }: {
@@ -21,6 +23,8 @@ export function ShareLinkButton({
   link: string | null;
   testId?: string;
 }) {
+  useUiLanguage();
+
   const [copied, setCopied] = React.useState(false);
   const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -62,7 +66,7 @@ export function ShareLinkButton({
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent>{copied ? "Link copied" : label}</TooltipContent>
+      <TooltipContent>{copied ? uiT("Link copied") : label}</TooltipContent>
     </Tooltip>
   );
 }

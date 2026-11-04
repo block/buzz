@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -69,6 +71,8 @@ export function ProjectHomeWorkspaceSheet({
   repository: Project["repositories"][number];
   tab: ProjectHomeWorkspaceSheetTab;
 }) {
+  useUiLanguage();
+
   const { goProject } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
@@ -215,7 +219,9 @@ export function ProjectHomeWorkspaceSheet({
   const detail = React.useMemo<ProjectHomeWorkspaceDetail | null>(() => {
     if (tab === "issues" && selectedIssueId) {
       return {
-        backLabel: "Back to Tasks",
+        get backLabel() {
+          return uiT("Back to Tasks");
+        },
         navigation: {
           issueId: selectedIssueId,
           repositoryId: selectedIssueItem?.project.id,
@@ -225,14 +231,18 @@ export function ProjectHomeWorkspaceSheet({
     }
     if (tab === "prs" && selectedPullRequestId) {
       return {
-        backLabel: "Back to Reviews",
+        get backLabel() {
+          return uiT("Back to Reviews");
+        },
         navigation: { pullRequestId: selectedPullRequestId },
         onBack: () => setSelectedPullRequestId(null),
       };
     }
     if (tab === "commits" && selectedCommitHash) {
       return {
-        backLabel: "Back to Commits",
+        get backLabel() {
+          return uiT("Back to Commits");
+        },
         navigation: {
           commitHash: selectedCommitHash,
           repositoryId: selectedCommitRepository.id,
@@ -245,7 +255,9 @@ export function ProjectHomeWorkspaceSheet({
     }
     if (tab === "files" && filesContext?.onBack) {
       return {
-        backLabel: "Back to Files",
+        get backLabel() {
+          return uiT("Back to Files");
+        },
         navigation: { filePath: filesContext.path },
         onBack: filesContext.onBack,
       };
@@ -273,7 +285,9 @@ export function ProjectHomeWorkspaceSheet({
     if (tab === "issues" && !selectedIssueId) {
       onCreateActionChange?.({
         disabled: project.repositories.length === 0,
-        label: "Create task",
+        get label() {
+          return uiT("Create task");
+        },
         onClick: () => setCreateIssueOpen(true),
       });
       return;
@@ -281,9 +295,15 @@ export function ProjectHomeWorkspaceSheet({
     if (tab === "prs" && !selectedPullRequestId) {
       onCreateActionChange?.({
         disabled: projects.length === 0,
-        label: "Create review",
+        get label() {
+          return uiT("Create review");
+        },
         onClick: () => setCreatePullRequestOpen(true),
-        title: "Create review — choose a repository and branches to compare",
+        get title() {
+          return uiT(
+            "Create review — choose a repository and branches to compare",
+          );
+        },
       });
       return;
     }

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import React, { type CSSProperties, useEffect, useRef, useState } from "react";
 
 export const POOF_TRIGGER_CLASS = "buzz-poof-trigger";
@@ -136,6 +138,8 @@ function playPoofSound() {
 }
 
 export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
+  useUiLanguage();
+
   const [bursts, setBursts] = useState<PoofBurst[]>([]);
   const idRef = useRef(0);
   const timeoutIdsRef = useRef<number[]>([]);

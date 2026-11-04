@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 /**
  * Shared reminder time presets — the single source of truth for both the
  * create dialog and the snooze dropdown. Each preset returns a Unix timestamp
@@ -29,12 +31,34 @@ function nextDayAt9am(dayOffset: number): number {
 }
 
 export const TIME_PRESETS: TimePreset[] = [
-  { label: "In 30 minutes", getTimestamp: () => nowSeconds() + 30 * 60 },
-  { label: "In 1 hour", getTimestamp: () => nowSeconds() + 60 * 60 },
-  { label: "In 3 hours", getTimestamp: () => nowSeconds() + 3 * 60 * 60 },
-  { label: "Tomorrow at 9am", getTimestamp: () => nextDayAt9am(1) },
   {
-    label: "Next Monday at 9am",
+    get label() {
+      return uiT("In 30 minutes");
+    },
+    getTimestamp: () => nowSeconds() + 30 * 60,
+  },
+  {
+    get label() {
+      return uiT("In 1 hour");
+    },
+    getTimestamp: () => nowSeconds() + 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("In 3 hours");
+    },
+    getTimestamp: () => nowSeconds() + 3 * 60 * 60,
+  },
+  {
+    get label() {
+      return uiT("Tomorrow at 9am");
+    },
+    getTimestamp: () => nextDayAt9am(1),
+  },
+  {
+    get label() {
+      return uiT("Next Monday at 9am");
+    },
     getTimestamp: () => {
       const daysUntilMonday = (8 - new Date().getDay()) % 7 || 7;
       return nextDayAt9am(daysUntilMonday);

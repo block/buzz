@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { useSyncExternalStore, useCallback, useEffect } from "react";
 import { getFeature } from "./manifest";
 import { resolveEnabled } from "./resolveEnabled";
@@ -151,7 +153,10 @@ export function usePreviewFeatureWarning(featureId: string): void {
     void import("sonner").then(({ toast }) => {
       if (cancelled) return;
       toast.warning(
-        `${feature.name} is a preview feature. Enable it in Settings → Experiments to surface it in your sidebar.`,
+        uiT(
+          "{0} is a preview feature. Enable it in Settings → Experiments to surface it in your sidebar.",
+          { p0: uiT(feature.name) },
+        ),
       );
     });
     return () => {

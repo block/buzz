@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { Clock } from "lucide-react";
 import * as React from "react";
 
@@ -30,6 +32,8 @@ export function SnoozeMenu({
   disabled?: boolean;
   onSnooze: (notBefore: number) => void;
 }) {
+  useUiLanguage();
+
   const [customOpen, setCustomOpen] = React.useState(false);
   const [customDate, setCustomDate] = React.useState(todayDateString);
   const [customTime, setCustomTime] = React.useState("09:00");
@@ -43,7 +47,7 @@ export function SnoozeMenu({
           className="h-7 w-7 p-0"
           disabled={disabled}
           size="sm"
-          title="Snooze"
+          title={uiT("Snooze")}
           type="button"
           variant="ghost"
         >
@@ -69,14 +73,14 @@ export function SnoozeMenu({
                 setCustomOpen(true);
               }}
             >
-              Custom…
+              {uiT("Custom…")}
             </DropdownMenuItem>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-auto space-y-3">
-            <p className="text-sm font-medium">Snooze until</p>
+            <p className="text-sm font-medium">{uiT("Snooze until")}</p>
             <div className="flex gap-2">
               <Input
-                aria-label="Snooze date"
+                aria-label={uiT("Snooze date")}
                 className="flex-1"
                 min={todayDateString()}
                 onChange={(event) => setCustomDate(event.target.value)}
@@ -84,7 +88,7 @@ export function SnoozeMenu({
                 value={customDate}
               />
               <Input
-                aria-label="Snooze time"
+                aria-label={uiT("Snooze time")}
                 className="w-[120px]"
                 onChange={(event) => setCustomTime(event.target.value)}
                 type="time"
@@ -101,7 +105,7 @@ export function SnoozeMenu({
               }}
               type="button"
             >
-              Snooze
+              {uiT("Snooze")}
             </Button>
           </PopoverContent>
         </Popover>

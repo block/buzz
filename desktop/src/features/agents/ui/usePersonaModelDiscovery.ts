@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 
 import { discoverAgentModels } from "@/shared/api/agentModels";
@@ -47,7 +49,7 @@ export function claudeCodeModelLabel(id: string): string | null {
   if (/[^\p{ASCII}]/u.test(id)) return null;
   const match = /^([^[]+)(\[1m\])?$/i.exec(id.trim());
   const label = match ? generateBareModelLabel(match[1]) : null;
-  return label && match?.[2] ? `${label} (1M context)` : label;
+  return label && match?.[2] ? uiT("{0} (1M context)", { p0: label }) : label;
 }
 
 export function getDiscoveredPersonaModelOptions(
@@ -85,7 +87,7 @@ export function getDiscoveredPersonaModelOptions(
             id: "",
             label:
               provider === "relay-mesh"
-                ? "Default (auto)"
+                ? uiT("Default (auto)")
                 : agentDefaultModel && !defaultIsHarnessEntry
                   ? `Default model (${labelFor(
                       agentDefaultModel,
@@ -94,7 +96,7 @@ export function getDiscoveredPersonaModelOptions(
                       )?.name ?? null,
                       response.agentDefaultModel ?? "",
                     )})`
-                  : "Default model",
+                  : uiT("Default model"),
             ...(defaultIsHarnessEntry && harnessDefaultEntry?.description
               ? { description: harnessDefaultEntry.description }
               : {}),
@@ -131,9 +133,12 @@ export function synthesizeEmptyDiscoveryStatus(
   if (getDiscoveredPersonaModelOptions(response, provider) !== null) {
     return null;
   }
-  const agentLabel = response.agentName.trim() || "This agent";
+  const agentLabel = response.agentName.trim() || uiT("This agent");
   return {
-    message: `${agentLabel} reported no models. Check that the CLI is installed and signed in, then reopen this screen.`,
+    message: uiT(
+      "{0} reported no models. Check that the CLI is installed and signed in, then reopen this screen.",
+      { p0: agentLabel },
+    ),
     tone: "warning",
   };
 }

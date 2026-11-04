@@ -1,3 +1,5 @@
+import { uiT } from "@/shared/i18n/uiTranslation";
+import { uiDateFormatter } from "@/shared/i18n/format";
 /**
  * Relative date labels shared by the chat timeline and the Inbox.
  *
@@ -11,38 +13,35 @@
  * deliberate deviation noted on `formatDayGroupLabel`.
  */
 
-const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const WEEKDAY_FORMATTER = uiDateFormatter({
   weekday: "long",
 });
 
-const WEEKDAY_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const WEEKDAY_MONTH_DAY_FORMATTER = uiDateFormatter({
   weekday: "long",
   month: "long",
   day: "numeric",
 });
 
-const MONTH_DAY_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const MONTH_DAY_YEAR_FORMATTER = uiDateFormatter({
   month: "long",
   day: "numeric",
   year: "numeric",
 });
 
-const SHORT_WEEKDAY_SHORT_MONTH_DAY_FORMATTER = new Intl.DateTimeFormat(
-  "en-US",
-  {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  },
-);
+const SHORT_WEEKDAY_SHORT_MONTH_DAY_FORMATTER = uiDateFormatter({
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+});
 
-const SHORT_MONTH_DAY_YEAR_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const SHORT_MONTH_DAY_YEAR_FORMATTER = uiDateFormatter({
   month: "short",
   day: "numeric",
   year: "numeric",
 });
 
-const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const TIME_FORMATTER = uiDateFormatter({
   hour: "numeric",
   minute: "2-digit",
 });
@@ -87,8 +86,8 @@ export function formatDayGroupLabel(
   const now = new Date(nowSeconds * 1_000);
   const dayDiff = calendarDaysBetween(now, date);
 
-  if (dayDiff === 0) return "Today";
-  if (dayDiff === 1) return "Yesterday";
+  if (dayDiff === 0) return uiT("Today");
+  if (dayDiff === 1) return uiT("Yesterday");
   // Bounded below as well as above: a timestamp in the future (clock skew, or a
   // relay ahead of this machine) must not be labelled with a weekday that reads
   // as the recent past.
@@ -145,7 +144,7 @@ export function formatItemTimestamp(
 
   let dayLabel: string;
   if (dayDiff === 1) {
-    dayLabel = "Yesterday";
+    dayLabel = uiT("Yesterday");
   } else if (dayDiff > 1 && dayDiff < WEEKDAY_BAND_DAYS) {
     dayLabel = WEEKDAY_FORMATTER.format(date);
   } else {
@@ -155,7 +154,7 @@ export function formatItemTimestamp(
         : SHORT_MONTH_DAY_YEAR_FORMATTER.format(date);
   }
 
-  return withTime ? `${dayLabel} at ${time}` : dayLabel;
+  return withTime ? uiT("{0} at {1}", { p0: dayLabel, p1: time }) : dayLabel;
 }
 
 /** Local midnight of the calendar day containing `date`. */

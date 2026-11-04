@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 
@@ -59,6 +61,8 @@ function ThemePreviewSvg({
   vars: ThemePreviewVars | null;
   sidebarGradient?: { top: string; bottom: string };
 }) {
+  useUiLanguage();
+
   const clipId = React.useId().replace(/:/g, "");
   const gradientId = `${clipId}-buzz`;
   const background = hsl(vars, "--background");
@@ -254,6 +258,8 @@ function SystemPreferencePreviewSvg({
   lightGradient?: { top: string; bottom: string };
   darkGradient?: { top: string; bottom: string };
 }) {
+  useUiLanguage();
+
   const clipBase = React.useId().replace(/:/g, "");
   const clipDark = `${clipBase}-dark`;
   const clipLight = `${clipBase}-light`;

@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiMessage, uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -33,6 +35,8 @@ export function JoinPolicyNotice({
   policy,
   relayWsUrl,
 }: JoinPolicyNoticeProps) {
+  useUiLanguage();
+
   const ageConfirmationId = React.useId();
   const agreementConfirmationId = React.useId();
 
@@ -52,7 +56,7 @@ export function JoinPolicyNotice({
             className="cursor-pointer text-xs leading-5 text-muted-foreground"
             htmlFor={ageConfirmationId}
           >
-            I am 18 years of age or older.
+            {uiT("I am 18 years of age or older.")}
           </label>
         </div>
       ) : null}
@@ -71,35 +75,38 @@ export function JoinPolicyNotice({
             className="cursor-pointer text-xs leading-5 text-muted-foreground"
             htmlFor={agreementConfirmationId}
           >
-            I agree to the Buzz{" "}
-            {policy.termsMarkdown ? (
-              <Button
-                className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
-                onClick={(event) => {
-                  event.preventDefault();
-                  void openUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"));
-                }}
-                type="button"
-                variant="link"
-              >
-                Terms of Service
-              </Button>
-            ) : null}
-            {policy.termsMarkdown && policy.privacyMarkdown ? " and " : null}
-            {policy.privacyMarkdown ? (
-              <Button
-                className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
-                onClick={(event) => {
-                  event.preventDefault();
-                  void openUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"));
-                }}
-                type="button"
-                variant="link"
-              >
-                Privacy Policy
-              </Button>
-            ) : null}
-            .
+            {uiMessage("I agree to the Buzz {0}{1}{2} .", {
+              p0: policy.termsMarkdown ? (
+                <Button
+                  className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    void openUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"));
+                  }}
+                  type="button"
+                  variant="link"
+                >
+                  {uiT("Terms of Service")}
+                </Button>
+              ) : null,
+              p1:
+                policy.termsMarkdown && policy.privacyMarkdown
+                  ? uiT(" and ")
+                  : null,
+              p2: policy.privacyMarkdown ? (
+                <Button
+                  className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    void openUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"));
+                  }}
+                  type="button"
+                  variant="link"
+                >
+                  {uiT("Privacy Policy")}
+                </Button>
+              ) : null,
+            })}
           </label>
         </div>
       ) : null}

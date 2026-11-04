@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT } from "@/shared/i18n/uiTranslation";
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -35,9 +37,9 @@ export function useCopyFeedback({
         setCopied(false);
         resetTimerRef.current = null;
       }, 1_500);
-      toast.success(`Copied ${label.toLowerCase()}`);
+      toast.success(uiT("Copied {0}", { p0: label.toLowerCase() }));
     } catch {
-      toast.error(`Couldn't copy ${label.toLowerCase()}.`);
+      toast.error(uiT("Couldn't copy {0}.", { p0: label.toLowerCase() }));
     }
   }, [label, value]);
 

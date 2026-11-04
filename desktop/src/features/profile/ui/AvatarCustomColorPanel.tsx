@@ -1,3 +1,5 @@
+// Buzz source localisation: authored UI strings only; user values stay unchanged.
+import { uiT, useUiLanguage } from "@/shared/i18n/uiTranslation";
 import { motion } from "motion/react";
 import * as React from "react";
 
@@ -57,6 +59,8 @@ export function AvatarCustomColorPanel({
   className,
   compact = false,
 }: AvatarCustomColorPanelProps) {
+  useUiLanguage();
+
   const hueDragUserSelectRef = React.useRef<string | null>(null);
 
   const unlockHueDragSelection = React.useCallback(() => {
@@ -227,7 +231,7 @@ export function AvatarCustomColorPanel({
       </div>
 
       <div
-        aria-label="Choose custom avatar color hue"
+        aria-label={uiT("Choose custom avatar color hue")}
         aria-valuemax={360}
         aria-valuemin={0}
         aria-valuenow={hue}
@@ -291,7 +295,7 @@ export function AvatarCustomColorPanel({
         tabIndex={visible ? 0 : -1}
         type="button"
       >
-        Use color
+        {uiT("Use color")}
       </Button>
     </motion.div>
   );
