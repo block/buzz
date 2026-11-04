@@ -1342,6 +1342,7 @@ pub(crate) async fn emit_membership_notification_tagged(
         actor_pubkey,
         notification_kind,
         extra_tags,
+        None,
     )
     .await
 }
@@ -1358,6 +1359,7 @@ async fn emit_typed_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
     extra_tags: &[Tag],
+    admission: Option<&buzz_db::relay_members::PendingDefaultChannelJoin>,
 ) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
@@ -1398,16 +1400,44 @@ async fn emit_typed_membership_notification(
         Some(at) => builder.custom_created_at(nostr::Timestamp::from(at)),
         None => builder,
     };
+    let builder = if let Some(admission) = admission {
+        builder
+            .custom_created_at(nostr::Timestamp::from(
+                admission.admitted_at.timestamp() as u64
+            ))
+            .tags([Tag::parse(["admission", &admission.token.to_string()])?])
+    } else {
+        builder
+    };
     let event = builder
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
-    // Store with channel_id = None → globally scoped, reachable by global subscribers.
-    let (stored, was_inserted) = state
-        .db
-        .insert_event(tenant.community(), &event, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("membership notification insert failed: {}", e.kind()))?;
+    // Recovery serializes the durable add with departures and the admission
+    // generation. Ordinary notices retain the existing insertion path.
+    let stored = match admission {
+        Some(admission) => {
+            state
+                .db
+                .insert_pending_default_notification(
+                    tenant.community(),
+                    channel_id,
+                    target_pubkey,
+                    admission.token,
+                    &event,
+                )
+                .await?
+        }
+        None => Some(
+            state
+                .db
+                .insert_event(tenant.community(), &event, None)
+                .await?,
+        ),
+    };
+    let Some((stored, was_inserted)) = stored else {
+        return Ok(());
+    };
     if !was_inserted {
         return Ok(());
     }
@@ -2203,6 +2233,7 @@ pub(crate) async fn persist_put_user(
                 &actor_bytes,
                 KIND_MEMBER_ADDED_NOTIFICATION,
                 &[],
+                None,
             )
             .await
             {
@@ -2903,6 +2934,7 @@ async fn handle_delete_group(
                         &actor_bytes,
                         KIND_MEMBER_REMOVED_NOTIFICATION,
                         &[],
+                        None,
                     )
                     .await
                     {
@@ -3046,16 +3078,27 @@ async fn refresh_self_join_discovery(
     state: &Arc<AppState>,
     channel_id: Uuid,
     pubkey: &[u8],
+    admission: &buzz_db::relay_members::PendingDefaultChannelJoin,
 ) -> anyhow::Result<()> {
     state.invalidate_membership(tenant, channel_id, pubkey);
     emit_group_discovery_events(tenant, state, channel_id).await?;
-    emit_membership_notification(
+    let Some(channel_type) = state
+        .db
+        .channel_type_of(tenant.community(), channel_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    emit_typed_membership_notification(
         tenant,
         state,
         channel_id,
+        &channel_type,
         pubkey,
         pubkey,
-        buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+        KIND_MEMBER_ADDED_NOTIFICATION,
+        &[],
+        Some(admission),
     )
     .await?;
     Ok(())
@@ -3082,7 +3125,7 @@ async fn finish_default_channel_joins(
     pubkey_hex: &str,
     gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
 ) -> anyhow::Result<()> {
-    let Some((pending, added_by)) = state
+    let Some(admission) = state
         .db
         .pending_default_channel_join(tenant.community(), pubkey_hex)
         .await?
@@ -3091,7 +3134,8 @@ async fn finish_default_channel_joins(
     };
     let pubkey = hex::decode(pubkey_hex)?;
     // Use the persisted original actor even when a retry comes from the member.
-    let actor = added_by
+    let actor = admission
+        .added_by
         .as_deref()
         .filter(|actor| *actor != "invite")
         .map(hex::decode)
@@ -3108,13 +3152,14 @@ async fn finish_default_channel_joins(
                 info!(member = %pubkey_hex, error = %denied, "default-channel add refused by member policy");
                 state
                     .db
-                    .finish_default_channel_join(tenant.community(), pubkey_hex, pending)
+                    .finish_default_channel_join(tenant.community(), pubkey_hex, admission.token)
                     .await?;
                 return Ok(());
             }
         }
     }
     let channels = state.db.list_auto_join_channels(tenant.community()).await?;
+    let mut failure = None;
     for channel in channels {
         #[cfg(test)]
         if gate.is_some() {
@@ -3127,33 +3172,48 @@ async fn finish_default_channel_joins(
             },
             None => None,
         };
-        match state
-            .db
-            .put_pending_default_member(tenant.community(), channel.id, &pubkey, pending)
-            .await
+        if let Err(error) =
+            finish_default_channel_join(tenant, state, channel.id, &pubkey, &admission).await
         {
-            Ok(buzz_db::channel_members::DefaultMemberOutcome::Joined(_)) => {
-                // Membership is durable even if an announcement fails. A retry
-                // observes the row rather than resurrecting a later leave.
-                emit_self_join_message(tenant, state, channel.id, &pubkey).await?;
-                refresh_self_join_discovery(tenant, state, channel.id, &pubkey).await?;
-                metrics::counter!("buzz_auto_join_channels_total").increment(1);
-                info!(channel = %channel.id, member = %pubkey_hex, "auto-joined default channel");
-            }
-            Ok(buzz_db::channel_members::DefaultMemberOutcome::Active) => {
-                refresh_self_join_discovery(tenant, state, channel.id, &pubkey).await?;
-            }
-            Ok(buzz_db::channel_members::DefaultMemberOutcome::Skipped) => {}
-            // A channel archived, privatized or deleted since listing is no
-            // longer eligible. Database errors must retain the pending work.
-            Err(buzz_db::DbError::AccessDenied(_) | buzz_db::DbError::ChannelNotFound(_)) => {}
-            Err(e) => return Err(e.into()),
+            warn!(channel = %channel.id, member = %pubkey_hex, error = %error,
+                "default-channel join remains pending; continuing other channels");
+            failure = Some(error);
         }
+    }
+    if let Some(error) = failure {
+        return Err(error);
     }
     state
         .db
-        .finish_default_channel_join(tenant.community(), pubkey_hex, pending)
+        .finish_default_channel_join(tenant.community(), pubkey_hex, admission.token)
         .await?;
+    Ok(())
+}
+
+async fn finish_default_channel_join(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel: Uuid,
+    pubkey: &[u8],
+    admission: &buzz_db::relay_members::PendingDefaultChannelJoin,
+) -> anyhow::Result<()> {
+    match state
+        .db
+        .put_pending_default_member(tenant.community(), channel, pubkey, admission.token)
+        .await
+    {
+        Ok(buzz_db::channel_members::DefaultMemberOutcome::Joined(_)) => {
+            emit_self_join_message(tenant, state, channel, pubkey).await?;
+            refresh_self_join_discovery(tenant, state, channel, pubkey, admission).await?;
+            metrics::counter!("buzz_auto_join_channels_total").increment(1);
+        }
+        Ok(buzz_db::channel_members::DefaultMemberOutcome::Active) => {
+            refresh_self_join_discovery(tenant, state, channel, pubkey, admission).await?;
+        }
+        Ok(buzz_db::channel_members::DefaultMemberOutcome::Skipped) => {}
+        Err(buzz_db::DbError::ChannelNotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 

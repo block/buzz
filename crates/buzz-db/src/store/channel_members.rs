@@ -827,7 +827,11 @@ async fn put_first_member_with_pending(
         }
         Err(refused) => {
             tx.rollback().await?;
-            Err(refused)
+            if pending.is_some() && matches!(refused, DbError::AccessDenied(_)) {
+                Ok(DefaultMemberOutcome::Skipped)
+            } else {
+                Err(refused)
+            }
         }
     }
 }
@@ -2312,6 +2316,45 @@ impl Db {
             invited_by,
         )
         .await
+    }
+
+    /// Persist an admission's add notice only while that admission and channel
+    /// membership are current. The channel lock spans the check and durable
+    /// insertion, ordering this notice before any subsequent leave/removal.
+    #[datastore_span(name = "insert_pending_default_notification", system = "postgresql")]
+    pub async fn insert_pending_default_notification(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        pubkey: &[u8],
+        pending: Uuid,
+        event: &nostr::Event,
+    ) -> Result<Option<(buzz_core::StoredEvent, bool)>> {
+        let mut tx = self.begin_event_write_transaction(community).await?;
+        let current: Option<Uuid> = sqlx::query_scalar(
+            "SELECT auto_join_pending FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending = $3 FOR SHARE",
+        )
+        .bind(community.as_uuid())
+        .bind(hex::encode(pubkey))
+        .bind(pending)
+        .fetch_optional(tx.conn())
+        .await?;
+        if current.is_none() {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        acquire_channel_membership_lock(tx.conn(), community, channel).await?;
+        if !is_member_in_transaction(&mut tx, channel, pubkey).await? {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let stored = crate::event::insert_event_in_transaction(&mut tx, event, None).await?;
+        if stored.1 {
+            crate::insert_mentions_in_transaction(&mut tx, event, None).await?;
+        }
+        tx.commit().await?;
+        Ok(Some(stored))
     }
 
     /// Complete one pending default-channel join, preserving leaves since admission.

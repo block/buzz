@@ -1188,6 +1188,17 @@ pub async fn rewrite_nip43_membership_list(
     commit_membership_write(tx, (), true, relay_keypair).await
 }
 
+/// Durable default-channel work for one roster admission.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PendingDefaultChannelJoin {
+    /// Generation checked before writing or completing this work.
+    pub token: Uuid,
+    /// Original actor; `invite` denotes a self-claim.
+    pub added_by: Option<String>,
+    /// Stable timestamp for this admission's idempotent notifications.
+    pub admitted_at: DateTime<Utc>,
+}
+
 impl Db {
     /// Read unfinished default-channel work and its original adding actor.
     #[datastore_span(name = "pending_default_channel_join", system = "postgresql")]
@@ -1195,14 +1206,14 @@ impl Db {
         &self,
         community: CommunityId,
         pubkey: &str,
-    ) -> Result<Option<(Uuid, Option<String>)>> {
+    ) -> Result<Option<PendingDefaultChannelJoin>> {
         let mut conn = observability::acquire_writer(
             &self.pool,
             observability::WriterOperation::Authorization,
         )
         .await?;
         Ok(sqlx::query_as(
-            "SELECT auto_join_pending, added_by FROM relay_members \
+            "SELECT auto_join_pending AS token, added_by, created_at AS admitted_at FROM relay_members \
              WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending IS NOT NULL",
         )
         .bind(community.as_uuid())
