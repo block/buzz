@@ -112,9 +112,11 @@ relay to specific external Nostr identities without granting full access.
 - The relay shows an ordinary member as `bot` if the key has a recorded
   agent owner, and as `member` otherwise, in kind:39002 rosters and every
   other place it reports a role.
-- An agent owner is recorded once, by the first NIP-OA authentication, and
-  never changes. When it is recorded, the relay republishes the kind:39002
-  rosters of that key's channels so they show `bot`.
+- An agent owner is recorded once from verified NIP-OA or NIP-FI authentication,
+  or an owner-attested invite claim, and never changes. When it is recorded,
+  the relay republishes the kind:39002
+  rosters of that key's channels so they carry agent evidence. Ordinary
+  memberships also show `bot`; other roles stay unchanged.
 - `owner`, `admin` and `guest` are stored and shown as asked.
 
 Clients follow three rules:
@@ -123,8 +125,13 @@ Clients follow three rules:
   from older clients and stores the same role it would store for `member`.
 - **Parse:** read a `bot` role in a kind:39002 roster or kind:9000 as `member`
   as soon as it is parsed. Do not keep `bot` as a separate client role.
-- **Identity:** never infer that a key is an agent from its channel role. A
-  key is an agent only when a verified NIP-OA attestation says so.
+- **Identity:** never infer that a key is an agent from its channel role.
+  A verified NIP-OA attestation or an `agent` tag in the selected relay-signed
+  kind:39002 roster supplies positive agent evidence. The roster tag reflects
+  recorded ownership in this community, including for owners, admins and guests.
+  It discloses no owner and grants no permissions; public owner attribution
+  still requires a verified NIP-OA attestation. Missing tags mean unknown,
+  including on older snapshots. See [NIP-CL](docs/nips/NIP-CL.md).
 
 ### Announce channels
 

@@ -2686,11 +2686,28 @@ mod tests {
                     community,
                     channel,
                     &agent.public_key().to_bytes(),
-                    MemberRole::Member,
+                    MemberRole::Admin,
                     Some(&creator.public_key().to_bytes()),
                 )
                 .await
                 .expect("add unowned agent");
+
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-lock");
+            crate::handlers::side_effects::emit_group_discovery_events(
+                &conn.tenant,
+                &state,
+                channel,
+            )
+            .await
+            .expect("publish before enrollment");
+            let before_tags = crate::handlers::group_state_postgres_tests::group_state_tags(
+                &state,
+                &conn.tenant,
+                channel,
+                39002,
+            )
+            .await;
+            assert!(!before_tags.iter().any(|tag| tag[0] == "agent"));
 
             // Hold every republish permit and the roster lock the republish
             // needs.
@@ -2708,7 +2725,6 @@ mod tests {
             let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
                 .expect("sign NIP-OA credential");
             let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
-            let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-lock");
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 handle_auth(
@@ -2746,13 +2762,12 @@ mod tests {
                 .expect("read live roster");
                 live
             };
-            let shows_bot = |live: &Option<serde_json::Value>| {
+            let shows_agent = |live: &Option<serde_json::Value>| {
                 live.as_ref()
                     .and_then(|tags| tags.as_array())
                     .is_some_and(|tags| {
-                        tags.iter().any(|tag| {
-                            tag[0] == "p" && tag[1] == agent_hex.as_str() && tag[3] == "bot"
-                        })
+                        tags.iter()
+                            .any(|tag| tag[0] == "agent" && tag[1] == agent_hex.as_str())
                     })
             };
 
@@ -2763,23 +2778,31 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let waiting = live_roster().await;
             assert_eq!(waiting, before, "no republish runs without a permit");
-            assert!(!shows_bot(&waiting), "{waiting:?}");
+            assert!(!shows_agent(&waiting), "{waiting:?}");
 
-            // Once a permit is free, the background republish names the agent
-            // `bot` in the live roster.
+            // Once a permit is free, the roster gains an agent trait while
+            // preserving the agent's admin authority.
             drop(permits);
             let deadline = Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 let live = live_roster().await;
-                if shows_bot(&live) {
+                if shows_agent(&live) {
                     break;
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "the roster must converge to bot after the lock is released: {live:?}"
+                    "the roster must identify the agent after the lock is released: {live:?}"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
+            let tags = crate::handlers::group_state_postgres_tests::group_state_tags(
+                &state,
+                &conn.tenant,
+                channel,
+                39002,
+            )
+            .await;
+            assert!(tags.contains(&vec!["p".into(), agent_hex, "".into(), "admin".into()]));
         }
 
         /// An untagged AUTH that read a NULL stored owner just before a
@@ -4061,6 +4084,57 @@ mod tests {
                     Case::MemberOwner | Case::NonMemberOwner => {}
                 }
 
+                // A private FI owner assertion must refresh an existing elevated
+                // membership without requiring any public profile or NIP-OA tag.
+                let channel = if matches!(case, Case::MemberOwner) {
+                    use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+                    for key in [agent, owner.public_key()] {
+                        state
+                            .db
+                            .ensure_user(community, key.as_bytes())
+                            .await
+                            .expect("ensure user");
+                    }
+                    let channel = state
+                        .db
+                        .create_channel(
+                            community,
+                            "fi-agent-roster",
+                            ChannelType::Stream,
+                            ChannelVisibility::Open,
+                            None,
+                            owner.public_key().as_bytes(),
+                            None,
+                        )
+                        .await
+                        .expect("create channel")
+                        .id;
+                    state
+                        .db
+                        .add_member(
+                            community,
+                            channel,
+                            agent.as_bytes(),
+                            MemberRole::Admin,
+                            Some(owner.public_key().as_bytes()),
+                        )
+                        .await
+                        .expect("add unowned admin");
+                    crate::handlers::side_effects::emit_group_discovery_events(
+                        &tenant, &state, channel,
+                    )
+                    .await
+                    .expect("publish before FI enrollment");
+                    let tags = crate::handlers::group_state_postgres_tests::group_state_tags(
+                        &state, &tenant, channel, 39002,
+                    )
+                    .await;
+                    assert!(!tags.iter().any(|tag| tag[0] == "agent"));
+                    Some(channel)
+                } else {
+                    None
+                };
+
                 harness.run(harness.auth_event(), state.clone()).await;
 
                 if matches!(case, Case::MemberOwner) {
@@ -4079,6 +4153,28 @@ mod tests {
                         .is_agent_owner(community, agent.as_bytes(), owner.public_key().as_bytes())
                         .await
                         .expect("read stored owner"));
+                    let channel = channel.expect("member owner has a prior roster");
+                    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+                    loop {
+                        let tags = crate::handlers::group_state_postgres_tests::group_state_tags(
+                            &state, &tenant, channel, 39002,
+                        )
+                        .await;
+                        if tags.contains(&vec!["agent".into(), agent.to_hex()]) {
+                            assert!(tags.contains(&vec![
+                                "p".into(),
+                                agent.to_hex(),
+                                "".into(),
+                                "admin".into()
+                            ]));
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "FI enrollment must refresh the existing roster"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
                 } else {
                     harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
                 }

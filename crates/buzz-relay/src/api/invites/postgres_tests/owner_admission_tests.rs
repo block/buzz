@@ -256,6 +256,7 @@ mod postgres_tests {
         use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
 
         let (state, host, community, issuer) = fixture().await;
+        let tenant = buzz_core::tenant::TenantContext::resolved(community, &host);
         let v2 = mint_code(
             state.clone(),
             &host,
@@ -274,7 +275,12 @@ mod postgres_tests {
                 .await
                 .expect("seed agent user");
             let mut channels = Vec::new();
-            for name in ["claim-roster-a", "claim-roster-b"] {
+            for (name, role) in [
+                ("claim-member", MemberRole::Member),
+                ("claim-admin", MemberRole::Admin),
+                ("claim-owner", MemberRole::Owner),
+                ("claim-guest", MemberRole::Guest),
+            ] {
                 let channel = state
                     .db
                     .create_channel(
@@ -295,12 +301,22 @@ mod postgres_tests {
                         community,
                         channel,
                         &agent_bytes,
-                        MemberRole::Member,
+                        role,
                         Some(&issuer.public_key().to_bytes()),
                     )
                     .await
                     .expect("add unowned agent");
-                channels.push(channel);
+                crate::handlers::side_effects::emit_group_discovery_events(
+                    &tenant, &state, channel,
+                )
+                .await
+                .expect("publish before claim");
+                let tags = crate::handlers::group_state_postgres_tests::group_state_tags(
+                    &state, &tenant, channel, 39002,
+                )
+                .await;
+                assert!(!tags.iter().any(|tag| tag[0] == "agent"));
+                channels.push((channel, role));
             }
 
             // An owner check before the claim cached "not owner".
@@ -338,7 +354,7 @@ mod postgres_tests {
 
             let agent_hex = agent.public_key().to_hex();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            for channel in channels {
+            for (channel, role) in channels {
                 loop {
                     let live: Option<serde_json::Value> = sqlx::query_scalar(
                         "SELECT tags FROM events WHERE community_id = $1 AND channel_id = $2 \
@@ -349,20 +365,34 @@ mod postgres_tests {
                     .fetch_optional(state.db.pool())
                     .await
                     .expect("read live roster");
-                    let shows_bot =
+                    let shows_agent =
                         live.as_ref()
                             .and_then(|tags| tags.as_array())
                             .is_some_and(|tags| {
-                                tags.iter().any(|tag| {
-                                    tag[0] == "p" && tag[1] == agent_hex.as_str() && tag[3] == "bot"
-                                })
+                                tags.iter()
+                                    .any(|tag| tag[0] == "agent" && tag[1] == agent_hex.as_str())
                             });
-                    if shows_bot {
+                    if shows_agent {
+                        let tags = crate::handlers::group_state_postgres_tests::group_state_tags(
+                            &state, &tenant, channel, 39002,
+                        )
+                        .await;
+                        let expected = if role == MemberRole::Member {
+                            "bot"
+                        } else {
+                            role.as_str()
+                        };
+                        assert!(tags.contains(&vec![
+                            "p".into(),
+                            agent_hex.clone(),
+                            "".into(),
+                            expected.into()
+                        ]));
                         break;
                     }
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "code {code}: the roster must show the claimant as bot: {live:?}"
+                        "code {code}: the roster must identify the claimant as an agent: {live:?}"
                     );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }

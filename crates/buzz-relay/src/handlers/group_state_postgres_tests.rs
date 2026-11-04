@@ -94,6 +94,11 @@ pub(crate) async fn group_state_tags(
     let event = events
         .first()
         .unwrap_or_else(|| panic!("no kind:{kind} for {channel_id}"));
+    assert_eq!(event.event.pubkey, state.relay_keypair.public_key());
+    event
+        .event
+        .verify()
+        .expect("valid relay-signed group state");
     event
         .event
         .tags
@@ -194,6 +199,105 @@ async fn group_state_events_carry_type_then_creator() {
             vec![creator_hex.as_str()],
             "kind:{kind}: {tags:?}"
         );
+    }
+}
+
+/// Ownership classifies agents across roles without editable profile hints.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn group_members_publish_recorded_agent_type_independent_of_role() {
+    let state = state().await;
+    let creator = Keys::generate();
+    let agent = Keys::generate();
+    let agent_bytes = agent.public_key().to_bytes();
+    let agent_hex = agent.public_key().to_hex();
+    for owned in [true, false] {
+        let tenant = community(&state, "group-state-agent").await;
+        let channel_id = create_channel(&state, &tenant, &creator, &[]).await;
+        state
+            .db
+            .ensure_user(tenant.community(), &agent_bytes)
+            .await
+            .unwrap();
+        if owned {
+            state
+                .db
+                .ensure_user(tenant.community(), &creator.public_key().to_bytes())
+                .await
+                .unwrap();
+            state
+                .db
+                .set_agent_owner(
+                    tenant.community(),
+                    &agent_bytes,
+                    &creator.public_key().to_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        let roles: &[&str] = if owned {
+            &["member", "admin", "owner", "guest"]
+        } else {
+            &["bot"]
+        };
+        for role in roles {
+            let add = EventBuilder::new(Kind::Custom(9000), "")
+                .tags([
+                    Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                    Tag::parse(["p", &agent_hex]).unwrap(),
+                    Tag::parse(["role", role]).unwrap(),
+                ])
+                .sign_with_keys(&creator)
+                .unwrap();
+            let result = ingest_event(&state, &tenant, add, http_auth(&creator))
+                .await
+                .expect("change role");
+            assert!(result.accepted);
+            let tags = group_state_tags(&state, &tenant, channel_id, 39002).await;
+            let traits: Vec<_> = tags
+                .iter()
+                .filter(|tag| tag[0] == "agent")
+                .cloned()
+                .collect();
+            assert_eq!(
+                traits,
+                if owned {
+                    vec![vec!["agent".to_string(), agent_hex.clone()]]
+                } else {
+                    vec![]
+                }
+            );
+            assert!(tags.contains(&vec![
+                "p".to_string(),
+                agent_hex.clone(),
+                "".to_string(),
+                match *role {
+                    "member" | "bot" =>
+                        if owned {
+                            "bot"
+                        } else {
+                            "member"
+                        },
+                    role => role,
+                }
+                .to_string()
+            ]));
+        }
+        let remove = EventBuilder::new(Kind::Custom(9001), "")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["p", &agent_hex]).unwrap(),
+            ])
+            .sign_with_keys(&creator)
+            .unwrap();
+        let result = ingest_event(&state, &tenant, remove, http_auth(&creator))
+            .await
+            .expect("remove member");
+        assert!(result.accepted);
+        let tags = group_state_tags(&state, &tenant, channel_id, 39002).await;
+        assert!(!tags
+            .iter()
+            .any(|tag| (tag[0] == "agent" || tag[0] == "p") && tag[1] == agent_hex));
     }
 }
 

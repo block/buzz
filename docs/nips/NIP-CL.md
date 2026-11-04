@@ -81,6 +81,21 @@ would mix creators with members.
 **Creation time.** The `created_at` tag does not change when the channel is
 edited. Use it, not the event's `created_at`, to compare the age of channels.
 
+**Agent members.** A kind:39002 roster MAY carry `["agent", "<member public key>"]`
+for each active member with a recorded agent owner in this community. This is
+positive identity evidence, independent of the member's channel role and editable
+profile. It does not disclose the owner, establish public ownership attribution,
+or grant permissions. The four-field `p` tags remain unchanged. Clients accept an
+agent tag only from the selected relay-signed roster, with exactly two fields and
+a lowercase 64-character hexadecimal key present in that roster.
+
+These traits are captured when the roster is published, including on membership
+or role changes. First recording an owner schedules republication for all active
+channel memberships, using the existing bounded roster publisher. This does not
+scan older snapshots on upgrade. A failed refresh or older relay may leave a
+snapshot without traits until its next normal publication. Missing traits mean
+unknown, not human.
+
 **Older events.** A relay adds these tags only when it publishes a
 channel-state event. An event that a relay version without this NIP published
 can lack them, including one published during an upgrade. Such an event stays
