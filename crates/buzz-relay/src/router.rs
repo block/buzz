@@ -206,7 +206,7 @@ async fn nip_fi_assertion_guard(
             };
             return crate::nip_fi_policy::with_policy(
                 policy,
-                nip_fi_assertion_guard_with_policy(state, request, next, mode),
+                nip_fi_assertion_guard_with_policy(state, slot, request, next, mode),
             )
             .await;
         }
