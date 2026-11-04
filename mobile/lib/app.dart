@@ -33,6 +33,7 @@ import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'shared/widgets/app_route_observer.dart';
+import 'shared/widgets/forward_history.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/set_status_sheet.dart';
@@ -407,9 +408,15 @@ class App extends HookConsumerWidget {
       });
     }
 
+    // Pages from another community must not come back with a forward swipe.
+    ref.listen(
+      activeCommunityProvider.select((c) => c.value?.relayUrl),
+      (_, _) => forwardHistory.clear(),
+    );
+
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
-      navigatorObservers: [appRouteObserver],
+      navigatorObservers: [appRouteObserver, forwardHistory],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
       theme: mobileAppearanceTheme(Brightness.light, communityTheme.accent),
@@ -432,7 +439,9 @@ class App extends HookConsumerWidget {
                         excluding: pairedCommunity != null,
                         child: AbsorbPointer(
                           absorbing: pairedCommunity != null,
-                          child: child ?? const SizedBox.shrink(),
+                          child: ForwardSwipeHost(
+                            child: child ?? const SizedBox.shrink(),
+                          ),
                         ),
                       ),
                       // Cover the navigator while onboarding is removed and the
