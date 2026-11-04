@@ -8,6 +8,7 @@ import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
+import '../../shared/widgets/forward_history.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
 
@@ -106,6 +107,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/forward_anchor.dart';
 part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
 part 'channel_detail_page/hidden_history_paging.dart';

@@ -55,6 +55,9 @@ class _MessageList extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final forwardAnchor = useForwardRestoration<_TimelineAnchor>();
+    final initialMessageId =
+        this.initialMessageId ?? forwardAnchor.restored?.messageId;
     final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
     final displayedTyping = handoff.typing;
     final workingAgents = {
@@ -246,15 +249,9 @@ class _MessageList extends HookConsumerWidget {
         !isUnreadNavigationDismissed.value &&
         oldestUnreadMessageId.value != null;
 
-    int? reversedIndexOf(String? messageId) {
-      if (messageId == null) return null;
-      final chronologicalIndex = displayEntries.indexWhere(
-        (group) => group.any((entry) => entry.message.id == messageId),
-      );
-      return chronologicalIndex < 0
-          ? null
-          : displayEntries.length - 1 - chronologicalIndex;
-    }
+    int? reversedIndexOf(String? id) => _reversedIndexOf(displayEntries, id);
+    forwardAnchor.save = () =>
+        _timelineAnchor(itemPositionsListener, displayEntries, followsLatest);
 
     double latestAlignment() {
       final viewportHeight = timelineViewportHeight.value;
@@ -762,7 +759,8 @@ class _MessageList extends HookConsumerWidget {
         followsLatest.value = false;
         hasUserScrolled.value = false;
         isAtLatest.value = false;
-        itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+        final alignment = forwardAnchor.restored?.alignment ?? 0.35;
+        itemScrollController.jumpTo(index: targetIndex, alignment: alignment);
       });
       return null;
     }, [initialMessageId, initialThreadRootId, entries.length]);
