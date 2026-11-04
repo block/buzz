@@ -1059,6 +1059,82 @@ pub async fn community_nip_fi_binding(
     })))
 }
 
+/// Default and maximum page sizes for `GET /operator/storage-usage`.
+const STORAGE_USAGE_DEFAULT_LIMIT: i64 = 500;
+const STORAGE_USAGE_MAX_LIMIT: i64 = 1000;
+
+/// Query parameters for `GET /operator/storage-usage`.
+#[derive(Debug, Deserialize)]
+pub struct StorageUsageQuery {
+    /// Return rows after this cursor; `0` (the default) starts at the oldest
+    /// retained row.
+    #[serde(default)]
+    after: i64,
+    /// Page size, 1 to 1000; defaults to 500.
+    limit: Option<i64>,
+}
+
+/// Page the per-community storage usage feed: one row per community per
+/// completed `buzz-admin storage-snapshot` run, oldest first.
+///
+/// The operator owns polling, retry, and its cursor: it stores `next_cursor`
+/// only after it has durably recorded the page, and passes it back as
+/// `after`. Re-reading a page is harmless, so the operator must treat a
+/// repeated cursor as already recorded. An empty page means it has caught up.
+/// Rows are kept for the worker's retention window
+/// (`STORAGE_USAGE_HISTORY_RETENTION_DAYS`).
+pub async fn list_storage_usage(
+    State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<StorageUsageQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &slot,
+        &headers,
+        "GET",
+        "/operator/storage-usage",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+
+    if query.after < 0 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid after: expected a non-negative cursor",
+        ));
+    }
+    let limit = query.limit.unwrap_or(STORAGE_USAGE_DEFAULT_LIMIT);
+    if !(1..=STORAGE_USAGE_MAX_LIMIT).contains(&limit) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid limit: expected 1 to 1000",
+        ));
+    }
+    let rows = state
+        .db
+        .list_storage_usage(query.after, limit)
+        .await
+        .map_err(|e| internal_error(&format!("list storage usage: {e}")))?;
+    let next_cursor = rows.last().map_or(query.after, |row| row.cursor);
+
+    Ok(Json(serde_json::json!({
+        "usage": rows.into_iter().map(|row| serde_json::json!({
+            "cursor": row.cursor,
+            "measured_at": row
+                .measured_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "community_host": row.community_host,
+            "storage_bytes": row.storage_bytes,
+            "storage_objects": row.storage_objects,
+        })).collect::<Vec<_>>(),
+        "next_cursor": next_cursor,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
@@ -4344,5 +4420,123 @@ mod postgres_tests {
         );
         let body = read_json(response).await;
         assert_eq!(body["error"], "internal server error");
+    }
+
+    /// The feed pages history rows for communities that still exist, in
+    /// cursor order, and refuses non-operators and out-of-range parameters.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn storage_usage_feed_pages_history_for_operators_only() {
+        let operator = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("usage-{}.example", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create community")
+            .id;
+        let mut inserted = Vec::new();
+        for (bytes, objects) in [(100_i64, 2_i64), (150, 3)] {
+            let cursor: i64 = sqlx::query_scalar(
+                "INSERT INTO storage_usage_history \
+                 (measured_at, usage_community_id, storage_bytes, storage_objects) \
+                 VALUES ('2026-10-30T03:04:12.5Z', $1, $2, $3) RETURNING id",
+            )
+            .bind(community.as_uuid())
+            .bind(bytes)
+            .bind(objects)
+            .fetch_one(state.db.pool())
+            .await
+            .expect("insert usage history");
+            inserted.push(cursor);
+        }
+        // A severed row (deleted community) is never served.
+        sqlx::query(
+            "INSERT INTO storage_usage_history \
+             (measured_at, usage_community_id, storage_bytes, storage_objects) \
+             VALUES (now(), NULL, 9, 9)",
+        )
+        .execute(state.db.pool())
+        .await
+        .expect("insert severed history");
+
+        let after = inserted[0] - 1;
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "GET",
+            &format!("/operator/storage-usage?after={after}&limit=1"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = read_json(response).await;
+        assert_eq!(
+            page,
+            serde_json::json!({
+                "usage": [{
+                    "cursor": inserted[0],
+                    "measured_at": "2026-10-30T03:04:12Z",
+                    "community_host": host,
+                    "storage_bytes": 100,
+                    "storage_objects": 2,
+                }],
+                "next_cursor": inserted[0],
+            })
+        );
+
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "GET",
+            &format!("/operator/storage-usage?after={}", inserted[0]),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = read_json(response).await;
+        let rows = page["usage"].as_array().expect("usage array");
+        assert_eq!(rows[0]["cursor"], inserted[1]);
+        assert_eq!(rows[0]["storage_bytes"], 150);
+        assert!(rows.iter().all(|row| row["storage_bytes"] != 9));
+        assert_eq!(page["next_cursor"], rows.last().expect("row")["cursor"]);
+
+        let response = signed_operator_request(
+            state.clone(),
+            &operator,
+            "GET",
+            &format!("/operator/storage-usage?after={}", i64::MAX),
+            None,
+        )
+        .await;
+        assert_eq!(
+            read_json(response).await,
+            serde_json::json!({"usage": [], "next_cursor": i64::MAX})
+        );
+
+        for query in ["after=-1", "limit=0", "limit=1001"] {
+            let response = signed_operator_request(
+                state.clone(),
+                &operator,
+                "GET",
+                &format!("/operator/storage-usage?{query}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        }
+
+        let response = signed_operator_request(
+            state,
+            &Keys::generate(),
+            "GET",
+            "/operator/storage-usage",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

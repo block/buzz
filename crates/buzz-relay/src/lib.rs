@@ -72,8 +72,6 @@ pub mod startup_steps;
 /// Shared application state.
 pub mod state;
 pub mod storage_sweep;
-/// Push each new per-community storage snapshot to an operator endpoint.
-pub mod storage_usage_delivery;
 /// Subscription registry with (channel, kind) fan-out index.
 pub mod subscription;
 /// OpenTelemetry tracing initialisation (tracer provider + OTLP exporter).
