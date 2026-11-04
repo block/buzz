@@ -1,7 +1,10 @@
 //! Durable proof of the timestamp overlap used by incremental artifact reads.
 
+#[cfg(test)]
 use buzz_core::CommunityId;
-use sqlx::{pool::PoolConnection, PgConnection, PgPool, Postgres};
+#[cfg(test)]
+use sqlx::PgPool;
+use sqlx::{pool::PoolConnection, PgConnection, Postgres};
 use std::time::Duration;
 use uuid::Uuid;
 
