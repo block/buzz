@@ -187,7 +187,8 @@ bool _hasInlineCloserOnLine(String content, int start, int delimiterLength) {
 }
 
 /// Whether a closing run follows before the paragraph ends: a code span
-/// cannot continue past a blank line or into a list item, heading or fence.
+/// cannot continue past a blank line, a list item, heading, fence or a deeper
+/// block quote.
 bool _hasInlineCloser(String content, int start, int delimiterLength) {
   final end = _paragraphEnd(content, start);
   for (final run in _backtickRunPattern.allMatches(content, start)) {
@@ -198,9 +199,17 @@ bool _hasInlineCloser(String content, int start, int delimiterLength) {
 }
 
 int _paragraphEnd(String content, int start) {
+  // A block quote can interrupt a paragraph, so a line opening a deeper quote
+  // than the paragraph's own line ends it. Equal or shallower markers continue
+  // it, as in a multi-line code span inside a quote.
+  final openerDepth = _lineQuoteDepth(
+    content,
+    start == 0 ? 0 : content.lastIndexOf('\n', start - 1) + 1,
+  );
   var newline = content.indexOf('\n', start);
   while (newline >= 0) {
-    if (_paragraphBreak.matchAsPrefix(content, newline + 1) != null) {
+    if (_lineQuoteDepth(content, newline + 1) > openerDepth ||
+        _paragraphBreak.matchAsPrefix(content, newline + 1) != null) {
       return newline;
     }
     newline = content.indexOf('\n', newline + 1);
