@@ -358,6 +358,7 @@ const MessageTimelineBase = React.forwardRef<
     onScroll,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
+    isBottomPinArmed,
     scrollToMessage,
     onVirtualizerAtBottomStateChange,
   } = useAnchoredScroll({
@@ -424,13 +425,17 @@ const MessageTimelineBase = React.forwardRef<
         }
       } else if (hasConfirmedVirtualizerBottomRef.current) {
         onVirtualizerAtBottomStateChange(false);
-        if (semanticAtBottomRef.current) {
+        // An armed own-send pin owns the next append. Freezing the tail first
+        // would buffer the sent row, and the pin would never see it arrive.
+        // Virtua reports a stale gap here when a discarded render already
+        // counted the sent row in its store.
+        if (semanticAtBottomRef.current && !isBottomPinArmed()) {
           suppressNextSemanticBottomRef.current = true;
           queueSemanticBottom(false);
         }
       }
     },
-    [onVirtualizerAtBottomStateChange, queueSemanticBottom],
+    [isBottomPinArmed, onVirtualizerAtBottomStateChange, queueSemanticBottom],
   );
   const hasPendingLiveRows = bufferedTimeline.pendingCount > 0;
   React.useEffect(() => {
@@ -480,7 +485,13 @@ const MessageTimelineBase = React.forwardRef<
   const prepareForOwnMessage = React.useCallback(() => {
     // The user's own send is the deliberate Zulip exception: release buffered
     // output before arming the next-append bottom pin so the sent row can enter
-    // Virtua's model and become the new physical floor.
+    // Virtua's model and become the new physical floor. Drop a freeze queued
+    // before the send, or it would land after this release.
+    if (semanticBottomRafRef.current !== null) {
+      window.cancelAnimationFrame(semanticBottomRafRef.current);
+      semanticBottomRafRef.current = null;
+    }
+    semanticAtBottomRef.current = true;
     setIsSemanticallyAtBottom(true);
     scrollToBottomOnNextUpdate();
   }, [scrollToBottomOnNextUpdate]);

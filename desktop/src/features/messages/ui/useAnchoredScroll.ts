@@ -88,6 +88,8 @@ type UseAnchoredScrollResult = {
   /** Arm a one-shot scroll-to-bottom that fires on the next appended message
    *  (used by the composer's send flow). */
   scrollToBottomOnNextUpdate: () => void;
+  /** True while that one-shot is armed and its append has not landed. */
+  isBottomPinArmed: () => boolean;
   /** Imperative: scroll a specific message into view; optionally pulse it.
    *  Returns true if the row was found and scrolled, false otherwise. */
   scrollToMessage: (
@@ -445,6 +447,10 @@ export function useAnchoredScroll({
   const scrollToBottomOnNextUpdate = React.useCallback(() => {
     forceBottomOnNextAppendRef.current = true;
   }, []);
+  const isBottomPinArmed = React.useCallback(
+    () => forceBottomOnNextAppendRef.current,
+    [],
+  );
 
   const settleAtBottomAfterLayout = React.useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1059,6 +1065,7 @@ export function useAnchoredScroll({
     scrollToBottom: scrollToBottomImperative,
     settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
+    isBottomPinArmed,
     scrollToMessage: scrollToMessageImperative,
     onVirtualizerAtBottomStateChange,
   };
