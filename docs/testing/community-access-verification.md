@@ -199,6 +199,20 @@ cross the community boundary.
 6. Database failure/grace tests also belong in isolated rehearsal unless the
    owner authorizes a scoped fault. Record which guarantee is source-tested,
    runtime-tested, or unverified; do not infer cross-pod guarantees from a local close.
+   The proposed worker uses a 5-second base grace plus a stable per-socket offset
+   below 9 seconds, evaluated on the 5-second scan cadence. Expect outage closes
+   across two or three sweeps, not a continuous spread; a 6–10-second blip can
+   close some sockets earlier than the former 10-second grace. The conservative
+   bound remains 30 seconds: 5 grace + 9 jitter + 5 cadence + 2×5 scan + 1 query.
+   Confirmed authoritative denials still close immediately.
+7. For a local isolated writer-stall rehearsal, hold a users-table lock on a
+   separate connection. Verify the server cancels batch statements within the
+   900 ms cap (or a tighter operator cap), writer pool slots recover after both
+   timeout and task cancellation, and subsequent writes retain the writer's
+   original statement timeout. Release the lock and verify successful recovery.
+   Count `query_timeout`, `statement_cancelled`, and `pool_timeout` batch outcomes, along
+   with writer pool in-use/idle and fail-closed sessions per scan. A cancellation
+   error alone does not prove that the backend or pool slot was released.
 
 Removal/re-addition and unban use the authoritative state at revalidation. A
 transient removal restored before a scan need not disconnect an existing
