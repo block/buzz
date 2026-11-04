@@ -567,10 +567,19 @@ pub(crate) async fn query_events_on(
         return answer;
     }
 
-    let mut qb = build_query_events_sql(q);
+    // A nested parent's replies are recorded under the thread's root, so only
+    // a top-level target takes the thread route.
+    let root = match thread_reply_root(q) {
+        Some(root) if !is_recorded_reply(conn, q, &root, deadline).await? => Some(root),
+        _ => None,
+    };
     // Thread-reply reads must be planned with their root: a cached generic
     // plan sorts every reply of a large thread. Tag matches likewise.
-    let persistent = !has_tag_values(q) && thread_reply_root(q).is_none();
+    let persistent = !has_tag_values(q) && root.is_none();
+    let mut qb = match root {
+        Some(root) => build_thread_reply_sql(q, root),
+        None => build_query_events_sql(q),
+    };
     let rows = fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?;
 
     let mut out = Vec::with_capacity(rows.len());
@@ -617,11 +626,8 @@ fn page_limit(q: &EventQuery) -> i64 {
         .min(q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT))
 }
 
-/// SQL for [`query_events_on`], after [`answer_without_db`].
+/// Generic SQL for [`query_events_on`], after [`answer_without_db`].
 fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
-    if let Some(root) = thread_reply_root(q) {
-        return build_thread_reply_sql(q, root);
-    }
     let limit_val = page_limit(q);
     let offset_val = q.offset.unwrap_or(0);
 
@@ -834,8 +840,10 @@ const THREAD_REPLY_KINDS: [i32; 2] = [
     buzz_core::kind::KIND_STREAM_MESSAGE_V2 as i32,
 ];
 
-/// The thread root of a "replies to this message" read: one channel, one
-/// lowercase-hex `#e` value, only [`THREAD_REPLY_KINDS`], and no `#p` join.
+/// The candidate thread root of a "replies to this message" read: one channel,
+/// one lowercase-hex `#e` value, only [`THREAD_REPLY_KINDS`], and no `#p`
+/// join. [`query_events_on`] takes the thread route only when the target is
+/// not itself a recorded reply (see [`is_recorded_reply`]).
 ///
 /// The generic `#e` read gathers every event that tags the root before it can
 /// sort and keep a page, so a root with hundreds of thousands of replies cost
@@ -843,9 +851,9 @@ const THREAD_REPLY_KINDS: [i32; 2] = [
 /// `idx_thread_metadata_window`, so the page costs the same at any thread size.
 ///
 /// The relay writes a `thread_metadata` row only for an event whose NIP-10
-/// markers resolve to a valid ancestry. A message that names the root in a
-/// bare or `mention` `e` tag still matches NIP-01 `#e`, but this read omits
-/// it (see `docs/nips/NIP-CW.md`).
+/// `reply` marker resolves to a valid ancestry. A message that names the root
+/// only in a bare, `mention` or lone `root` `e` tag still matches NIP-01 `#e`,
+/// but this read omits it (see `docs/nips/NIP-CW.md`).
 fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
     let [root] = q.e_tags.as_deref()? else {
         return None;
@@ -860,7 +868,26 @@ fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
     routable.then(|| hex::decode(root).ok()).flatten()
 }
 
-/// SQL for [`thread_reply_root`] reads: walk the root's replies newest-first
+/// Whether `id` is itself a recorded reply. Its own replies are recorded under
+/// the thread's root, so a read for them must take the generic path. One
+/// probe of `idx_thread_metadata_event_id`.
+async fn is_recorded_reply(
+    conn: &mut sqlx::PgConnection,
+    q: &EventQuery,
+    id: &[u8],
+    deadline: ReadDeadline,
+) -> Result<bool> {
+    let mut qb = QueryBuilder::new("SELECT 1 FROM thread_metadata WHERE community_id = ");
+    qb.push_bind(q.community_id.as_uuid())
+        .push(" AND event_id = ")
+        .push_bind(id.to_vec())
+        .push(" LIMIT 1");
+    Ok(!fetch_with_read_deadline(conn, &mut qb, true, deadline)
+        .await?
+        .is_empty())
+}
+
+/// SQL for thread-route reads: walk the root's replies newest-first
 /// in `idx_thread_metadata_window`, fetch each event by primary key, and apply
 /// every query predicate (the `#e` match included) before `LIMIT`. The page
 /// is a subset of the generic read's, in the same order.
@@ -3119,7 +3146,11 @@ mod e_tag_filter_shape_tests {
             q.e_tags = Some(vec![root.clone()]);
             q
         };
-        let sql = build_query_events_sql(&routed()).sql().as_str().to_owned();
+        let q = routed();
+        let sql = build_thread_reply_sql(&q, thread_reply_root(&q).unwrap())
+            .sql()
+            .as_str()
+            .to_owned();
         assert!(sql.contains("FROM thread_metadata tm"));
         assert!(!sql.contains("MATERIALIZED"));
         assert!(sql.contains("tags @> ANY("), "the #e match still applies");
@@ -3579,20 +3610,24 @@ mod postgres_tests {
         let root_hex = root.id.to_hex();
         let root_id = root.id.as_bytes();
 
-        // Inserts a reply to `parent` with its thread row; returns its id.
+        // A reply as ingest records one: `reply` names the parent (the root
+        // for a direct reply), and a nested reply also names the root.
         let reply = |kind: u16, parent: Option<&nostr::Event>, at: u64| {
-            let mut tags = vec![
-                vec!["h".into(), h.clone()],
-                vec!["e".into(), root_hex.clone(), String::new(), "root".into()],
-            ];
-            if let Some(p) = parent {
+            let mut tags = vec![vec!["h".into(), h.clone()]];
+            if parent.is_some() {
                 tags.push(vec![
                     "e".into(),
-                    p.id.to_hex(),
+                    root_hex.clone(),
                     String::new(),
-                    "reply".into(),
+                    "root".into(),
                 ]);
             }
+            tags.push(vec![
+                "e".into(),
+                parent.map_or(root_hex.clone(), |p| p.id.to_hex()),
+                String::new(),
+                "reply".into(),
+            ]);
             message(kind, tags, at)
         };
         let mut expected = Vec::new();
@@ -3669,17 +3704,19 @@ mod postgres_tests {
         )
         .await
         .unwrap();
-        let bare = message(
-            9,
-            vec![
-                vec!["h".into(), h.clone()],
-                vec!["e".into(), root_hex.clone()],
-            ],
-            now + 12,
-        );
-        insert_event(&pool, community, &bare, Some(channel))
-            .await
-            .unwrap();
+        // Ingest records no thread row for a bare or a lone `root` e tag.
+        let mut unrecorded = Vec::new();
+        for (i, marker) in [None, Some("root")].into_iter().enumerate() {
+            let mut e = vec!["e".to_string(), root_hex.clone()];
+            if let Some(m) = marker {
+                e.extend([String::new(), m.into()]);
+            }
+            let ev = message(9, vec![vec!["h".into(), h.clone()], e], now + 12 + i as u64);
+            insert_event(&pool, community, &ev, Some(channel))
+                .await
+                .unwrap();
+            unrecorded.insert(0, ev.id);
+        }
         expected.reverse();
 
         let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
@@ -3694,9 +3731,21 @@ mod postgres_tests {
         let mut generic = q.clone();
         generic.kinds = Some(vec![9, 40002, 7]);
         assert!(thread_reply_root(&generic).is_none());
-        let mut with_bare = expected.clone();
-        with_bare.insert(0, bare.id);
-        assert_eq!(ids(query_events(&pool, &generic).await.unwrap()), with_bare);
+        let with_unrecorded = [unrecorded, expected.clone()].concat();
+        assert_eq!(
+            ids(query_events(&pool, &generic).await.unwrap()),
+            with_unrecorded
+        );
+
+        // A nested parent's replies are recorded under the root, so reading
+        // them falls back to the generic path and still finds them.
+        let mut nested_parent = q.clone();
+        nested_parent.e_tags = Some(vec![first.id.to_hex()]);
+        assert!(thread_reply_root(&nested_parent).is_some());
+        assert_eq!(
+            ids(query_events(&pool, &nested_parent).await.unwrap()),
+            vec![nested.id]
+        );
 
         // Keyset pages of two cover the same order.
         let mut paged = Vec::new();
