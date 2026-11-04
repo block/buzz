@@ -173,7 +173,9 @@ class HostedIdentityService {
         return _result(saved, bound, subject);
       }
     }
-    if (statusKeys.isEmpty && bound != null && !matchingDevice) {
+    // Backups for other identities cannot recover the account-bound key.
+    // Offer the same explicit import as an account with no backups.
+    if (bound != null && !statusKeys.contains(bound) && !matchingDevice) {
       return HostedIdentityResult(
         HostedIdentityState.needsSetup,
         pubkey: bound,

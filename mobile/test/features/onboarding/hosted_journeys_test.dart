@@ -257,42 +257,51 @@ void main() {
     );
   }
 
-  journey('linked account without backup imports its key without replacing it', (
-    tester,
-    f,
-  ) async {
-    await f.initialize(localIdentity: false);
-    f.offerProfile = false;
-    await f.mount(tester);
-    // Account restoration may resume independently of the Add choices.
-    await f.flow.signInAccount();
-    await f.settle(tester);
-    expect(f.flow.stage, HostedFlowStage.setupIdentity);
-    expect(f.probes, isEmpty);
-    expect(find.text('Create my Buzz identity'), findsNothing);
-    expect(find.text('Import existing identity'), findsOneWidget);
-    await f.tap(tester, 'Import existing identity');
-    await tester.enterText(
-      find.byType(TextField).hitTestable(),
-      f.secondKeys.nsec,
+  for (final hasOlderBackup in [false, true]) {
+    journey(
+      'linked account imports its missing key (older backup: $hasOlderBackup)',
+      (tester, f) async {
+        await f.initialize(localIdentity: false);
+        f.offerProfile = false;
+        if (hasOlderBackup) f.cloudKeys.add(f.secondKeys);
+        await f.mount(tester);
+        // Account restoration may resume independently of the Add choices.
+        await f.flow.signInAccount();
+        await f.settle(tester);
+        expect(f.flow.stage, HostedFlowStage.setupIdentity);
+        expect(f.probes, isEmpty);
+        expect(find.text('Create my Buzz identity'), findsNothing);
+        expect(find.text('Import existing identity'), findsOneWidget);
+        await f.tap(tester, 'Import existing identity');
+        await tester.enterText(
+          find.byType(TextField).hitTestable(),
+          f.secondKeys.nsec,
+        );
+        await f.tap(tester, 'Preview identity');
+        await f.tap(tester, 'Import this identity');
+        expect(
+          find.text(
+            'This key doesn’t match the identity linked to your Builderlab account.',
+          ),
+          findsOneWidget,
+        );
+        expect(await f.store.read(), isNull);
+        expect(f.bound, f.keys.public);
+        await tester.enterText(
+          find.byType(TextField).hitTestable(),
+          f.keys.nsec,
+        );
+        await f.tap(tester, 'Preview identity');
+        await f.tap(tester, 'Import this identity');
+        expect((await f.store.read())!.pubkey, f.keys.public);
+        expect((await f.store.read())!.backup, isNotNull);
+        expect(
+          f.requests.where((r) => r.url.path.endsWith('/recovery')),
+          isEmpty,
+        );
+      },
     );
-    await f.tap(tester, 'Preview identity');
-    await f.tap(tester, 'Import this identity');
-    expect(
-      find.text(
-        'This key doesn’t match the identity linked to your Builderlab account.',
-      ),
-      findsOneWidget,
-    );
-    expect(await f.store.read(), isNull);
-    expect(f.bound, f.keys.public);
-    await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
-    await f.tap(tester, 'Preview identity');
-    await f.tap(tester, 'Import this identity');
-    expect((await f.store.read())!.pubkey, f.keys.public);
-    expect((await f.store.read())!.backup, isNotNull);
-    expect(f.requests.where((r) => r.url.path.endsWith('/recovery')), isEmpty);
-  });
+  }
 
   journey('system Back leaves community link entry', (tester, f) async {
     await f.initialize();
