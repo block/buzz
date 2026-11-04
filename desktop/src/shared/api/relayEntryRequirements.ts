@@ -7,12 +7,14 @@ export type EntrySnapshot = {
   verdict: "required" | "error" | null;
   pending: boolean;
   upgradeUrl: string | null;
+  upgradeInstructions: string | null;
 };
 const empty: EntrySnapshot = {
   relayUrl: "",
   verdict: null,
   pending: false,
   upgradeUrl: null,
+  upgradeInstructions: null,
 };
 class UpgradeRequiredError extends Error {}
 
@@ -93,6 +95,7 @@ export class RelayEntryRequirements {
     let result: {
       required: boolean;
       upgradeUrl: string | null;
+      upgradeInstructions?: string | null;
     };
     try {
       result = await invokeTauri("fetch_relay_entry_requirements", {
@@ -107,6 +110,7 @@ export class RelayEntryRequirements {
           verdict: "error",
           pending: false,
           upgradeUrl: null,
+          upgradeInstructions: null,
         });
       throw error;
     }
@@ -117,6 +121,7 @@ export class RelayEntryRequirements {
       verdict: result.required ? "required" : null,
       pending: false,
       upgradeUrl: result.upgradeUrl,
+      upgradeInstructions: result.upgradeInstructions ?? null,
     });
     if (result.required)
       throw new UpgradeRequiredError(

@@ -279,6 +279,7 @@ type MockBridgeOptions = {
     requiredRelay?: string;
     required: boolean;
     upgradeUrl?: string;
+    upgradeInstructions?: string;
     error?: string;
   };
   channelsReadError?: string;

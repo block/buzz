@@ -13,6 +13,7 @@ const DEADLINE: Duration = Duration::from_secs(5);
 pub struct RelayEntryRequirements {
     required: bool,
     upgrade_url: Option<String>,
+    upgrade_instructions: Option<String>,
 }
 
 fn discovery_url(relay: &str) -> Result<Url, String> {
@@ -41,11 +42,7 @@ fn configured_upgrade_url(
     destination: Option<&str>,
     supported_platform: bool,
 ) -> Option<String> {
-    if !supported_platform {
-        return None;
-    }
-    let binding = discovery_url(binding?).ok()?;
-    if discovery_url(relay).ok()? != binding {
+    if !configuration_matches(relay, binding, supported_platform) {
         return None;
     }
     let destination = Url::parse(destination?).ok()?;
@@ -55,6 +52,30 @@ fn configured_upgrade_url(
         && destination.password().is_none()
         && destination.fragment().is_none())
     .then(|| destination.to_string())
+}
+
+fn configuration_matches(relay: &str, binding: Option<&str>, supported_platform: bool) -> bool {
+    supported_platform
+        && binding.is_some_and(|binding| {
+            discovery_url(relay)
+                .ok()
+                .zip(discovery_url(binding).ok())
+                .is_some_and(|(relay, binding)| relay == binding)
+        })
+}
+
+fn configured_upgrade_instructions(
+    relay: &str,
+    binding: Option<&str>,
+    instructions: Option<&str>,
+    supported_platform: bool,
+) -> Option<String> {
+    configuration_matches(relay, binding, supported_platform)
+        .then_some(instructions)
+        .flatten()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 async fn fetch_policy(url: Url, deadline: Duration) -> Result<bool, String> {
@@ -114,6 +135,16 @@ pub async fn fetch_relay_entry_requirements(
     let required = fetch_policy(discovery_url(&relay_url)?, DEADLINE).await?;
     Ok(RelayEntryRequirements {
         required,
+        upgrade_instructions: required
+            .then(|| {
+                configured_upgrade_instructions(
+                    &relay_url,
+                    option_env!("BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_RELAY"),
+                    option_env!("BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_INSTRUCTIONS"),
+                    cfg!(all(target_os = "macos", target_arch = "aarch64")),
+                )
+            })
+            .flatten(),
         upgrade_url: required
             .then(|| {
                 configured_upgrade_url(
@@ -169,6 +200,7 @@ mod tests {
             (r#"{"requires_nip_fi":null}"#, None),
             ("[]", None),
             ("invalid", None),
+            ("<!doctype html><html>Proxy sign-in</html>", None),
         ] {
             let (url, request) = serve("200 OK", "", body);
             let actual = fetch_policy(url.clone(), DEADLINE).await;
@@ -279,6 +311,34 @@ mod tests {
         ] {
             assert!(discovery_url(relay).is_err(), "{relay}");
         }
+        let instructions = Some("Open Managed Software Center and install Buzz.");
+        assert_eq!(
+            configured_upgrade_instructions(
+                "wss://community.example",
+                Some("wss://community.example/"),
+                instructions,
+                true
+            )
+            .as_deref(),
+            instructions
+        );
+        assert!(configured_upgrade_instructions(
+            "wss://other.example",
+            Some("wss://community.example"),
+            instructions,
+            true
+        )
+        .is_none());
+        assert!(configured_upgrade_instructions(
+            "wss://community.example",
+            Some("wss://community.example"),
+            instructions,
+            false
+        )
+        .is_none());
+        assert!(
+            configured_upgrade_instructions("wss://community.example", None, None, true).is_none()
+        );
         let binding = Some("wss://community.example");
         let destination = Some("https://downloads.example/new.dmg");
         assert_eq!(

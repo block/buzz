@@ -371,6 +371,7 @@ type E2eConfig = {
       requiredRelay?: string;
       required: boolean;
       upgradeUrl?: string;
+      upgradeInstructions?: string;
       error?: string;
     };
     channelsReadError?: string;
@@ -13610,6 +13611,7 @@ export function maybeInstallE2eTauriMocks() {
         return {
           required: policy?.required ?? false,
           upgradeUrl: policy?.upgradeUrl ?? null,
+          upgradeInstructions: policy?.upgradeInstructions ?? null,
         };
       }
       case "get_relay_ws_url": {

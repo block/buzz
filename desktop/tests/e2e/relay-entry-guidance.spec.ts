@@ -7,6 +7,7 @@ type PolicyWindow = Window & {
         required: boolean;
         requiredRelay?: string;
         upgradeUrl?: string;
+        upgradeInstructions?: string;
         error?: string;
       };
     };
@@ -55,6 +56,18 @@ test("saved desktop community: required, retryable failure, recovery and keys su
   await expect(
     card.getByText("Upgrade Buzz to join this community"),
   ).toBeVisible();
+  await page.evaluate(() => {
+    (window as PolicyWindow).__BUZZ_E2E__.mock.relayEntryPolicy = {
+      required: true,
+      upgradeInstructions:
+        "Open Managed Software Center, search for Buzz, and install or update Buzz.",
+    };
+  });
+  await card.getByRole("button", { name: "Retry community check" }).click();
+  await expect(card).toContainText("Open Managed Software Center");
+  await expect(
+    card.getByRole("button", { name: "Download newer Buzz" }),
+  ).toHaveCount(0);
   await page.evaluate(() => {
     (window as PolicyWindow).__BUZZ_E2E__.mock.relayEntryPolicy = {
       required: true,

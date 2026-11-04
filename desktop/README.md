@@ -28,14 +28,16 @@ Desktop chat shell with:
 
 The legacy desktop reads public NIP-11 metadata before each WebSocket connection.
 Only `requires_nip_fi: true` shows the upgrade card. Missing/false requirements
-keep the existing connection flow. Discovery errors remain unknown policy and
-continue the existing socket/authentication path, where the relay enforces
-admission. Only explicit required policy opens the upgrade modal. Switching communities invalidates pending checks. The card does not
+keep the existing connection flow. Discovery failures retain an unknown-policy
+state and continue the existing socket/authentication path; the relay enforces
+admission. Only explicit required policy opens the upgrade modal. Switching
+communities invalidates pending checks. The card does not
 reset keys or remove saved communities.
 
-Packagers may set both `BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_RELAY` (an exact `ws` or
-`wss` community URL) and `BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_URL` (an HTTPS installer
-URL). The optional destination is compiled into the native command and exposed
+Packagers may set `BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_INSTRUCTIONS` for text
+instructions and/or a verified installer URL. Set the community binding with
+`BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_RELAY` (an exact `ws` or `wss` community URL) and
+optionally `BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_URL` (an HTTPS installer URL). The optional destination is compiled into the native command and exposed
 only for the matching community on Apple Silicon macOS. Unconfigured builds and
 other platforms show administrator guidance with no download link. Discovery
 never supplies a trusted download or sign-in origin.

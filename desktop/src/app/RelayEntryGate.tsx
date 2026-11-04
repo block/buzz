@@ -41,10 +41,10 @@ export function RelayEntryGate({
             keys and saved communities are still here.
           </DialogDescription>
           <p className="break-all text-sm text-muted-foreground">{relayUrl}</p>
-          {!state.upgradeUrl ? (
+          {!state.upgradeUrl || state.upgradeInstructions ? (
             <p className="text-sm">
-              Ask your community administrator for a Buzz installer that
-              supports this community and your computer.
+              {state.upgradeInstructions ??
+                "Ask your community administrator for a Buzz installer that supports this community and your computer."}
             </p>
           ) : null}
           {state.upgradeUrl ? (
