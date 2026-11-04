@@ -37,6 +37,7 @@ class _Lifecycle extends AppLifecycleNotifier {
 
 class _Actions extends Fake implements ChannelActions {
   final calls = <List<String>>[];
+  final roleCalls = <Map<String, String>>[];
   bool failBob = false;
   @override
   Future<void> addMembers({
@@ -46,6 +47,7 @@ class _Actions extends Fake implements ChannelActions {
     Map<String, String> roles = const {},
   }) async {
     calls.add(pubkeys);
+    roleCalls.add(Map.of(roles));
     if (failBob) throw AddMembersException({_bob: 'Try again'});
   }
 }
@@ -55,6 +57,7 @@ Future<void> _pump(
   _Actions actions, {
   Map<String, String>? people,
   Set<String>? agents,
+  String humanRole = 'member',
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -81,6 +84,7 @@ Future<void> _pump(
                 context: context,
                 channelId: 'channel',
                 existingPubkeys: {_existing},
+                humanRole: humanRole,
               ),
               child: const Text('Open picker'),
             ),
@@ -183,6 +187,9 @@ void main() {
           expect(actions.calls, [
             [_bob],
           ]);
+          expect(actions.roleCalls, [
+            {_bob: 'bot'},
+          ]);
         } finally {
           await tester.pumpWidget(const SizedBox());
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -209,7 +216,7 @@ void main() {
           });
       try {
         final actions = _Actions()..failBob = true;
-        await _pump(tester, actions);
+        await _pump(tester, actions, humanRole: 'guest');
         expect(methods.first, 'present');
         expect(find.byType(TextField), findsNothing);
         // No directory dump: people are found by name, as with `@`.
@@ -255,6 +262,10 @@ void main() {
         expect(actions.calls, [
           [_alice, _bob],
           [_bob],
+        ]);
+        expect(actions.roleCalls, [
+          {_alice: 'guest', _bob: 'bot'},
+          {_bob: 'bot'},
         ]);
         expect(find.text('Open picker'), findsOneWidget);
         expect(methods.last, 'dismiss');
