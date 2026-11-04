@@ -41,27 +41,23 @@ export function RelayEntryGate({
             keys and saved communities are still here.
           </DialogDescription>
           <p className="break-all text-sm text-muted-foreground">{relayUrl}</p>
-          {!state.upgradeUrl || state.upgradeInstructions ? (
-            <p className="text-sm">
-              {state.upgradeInstructions ??
-                "Ask your community administrator for a Buzz installer that supports this community and your computer."}
-            </p>
-          ) : null}
-          {state.upgradeUrl ? (
-            <Button
-              onClick={() => {
-                setOpenError(false);
-                if (!state.upgradeUrl) return;
-                void openUrl(state.upgradeUrl).catch(() => setOpenError(true));
-              }}
-            >
-              Download newer Buzz
-            </Button>
-          ) : null}
+          <p className="text-sm">
+            Download the latest Buzz client at builderlab.xyz to continue.
+          </p>
+          <Button
+            onClick={() => {
+              setOpenError(false);
+              void openUrl("https://builderlab.xyz").catch(() =>
+                setOpenError(true),
+              );
+            }}
+          >
+            Download latest Buzz
+          </Button>
           {openError ? (
             <p role="alert" className="text-sm">
-              Could not open the download. Try again or ask your community
-              administrator.
+              Could not open the download page. Open https://builderlab.xyz in
+              your browser to download the latest Buzz client.
             </p>
           ) : null}
           <Button variant="outline" disabled={state.pending} onClick={onRetry}>

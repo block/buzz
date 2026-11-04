@@ -1,8 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 type PolicyWindow = Window & {
+  __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
+    command: string;
+    payload: { url?: string };
+  }>;
   __BUZZ_E2E__: {
     mock: {
+      openerError?: string;
       relayEntryPolicy: {
         required: boolean;
         requiredRelay?: string;
@@ -24,8 +29,8 @@ test("saved desktop community: required, retryable failure, recovery and keys su
     card.getByText("Upgrade Buzz to join this community"),
   ).toBeVisible();
   await expect(
-    card.getByRole("button", { name: "Download newer Buzz" }),
-  ).toHaveCount(0);
+    card.getByRole("button", { name: "Download latest Buzz" }),
+  ).toBeVisible();
   await card.screenshot({ path: "test-results/relay-entry-required.png" });
   let storage = await page.evaluate(() => ({ ...localStorage }));
   // Native networking is the external boundary. The session and rendered gate stay real.
@@ -56,28 +61,33 @@ test("saved desktop community: required, retryable failure, recovery and keys su
   await expect(
     card.getByText("Upgrade Buzz to join this community"),
   ).toBeVisible();
+  // Even stale private-build overrides cannot replace the public destination.
   await page.evaluate(() => {
     (window as PolicyWindow).__BUZZ_E2E__.mock.relayEntryPolicy = {
       required: true,
-      upgradeInstructions:
-        "Open Managed Software Center, search for Buzz, and install or update Buzz.",
+      upgradeInstructions: "Use a private installer",
+      upgradeUrl: "https://downloads.example/private.dmg",
     };
   });
   await card.getByRole("button", { name: "Retry community check" }).click();
-  await expect(card).toContainText("Open Managed Software Center");
-  await expect(
-    card.getByRole("button", { name: "Download newer Buzz" }),
-  ).toHaveCount(0);
+  await expect(card).toContainText(
+    "Download the latest Buzz client at builderlab.xyz to continue.",
+  );
+  await expect(card).not.toContainText("private installer");
+  await card.getByRole("button", { name: "Download latest Buzz" }).click();
+  expect(
+    await page.evaluate(() =>
+      (window as PolicyWindow).__BUZZ_E2E_COMMAND_PAYLOADS__
+        ?.filter((call) => call.command === "plugin:opener|open_url")
+        .map((call) => call.payload.url),
+    ),
+  ).toEqual(["https://builderlab.xyz"]);
   await page.evaluate(() => {
-    (window as PolicyWindow).__BUZZ_E2E__.mock.relayEntryPolicy = {
-      required: true,
-      upgradeUrl: "https://downloads.example/new.dmg",
-    };
+    (window as PolicyWindow).__BUZZ_E2E__.mock.openerError =
+      "No browser available";
   });
-  await card.getByRole("button", { name: "Retry community check" }).click();
-  await expect(
-    card.getByRole("button", { name: "Download newer Buzz" }),
-  ).toBeVisible();
+  await card.getByRole("button", { name: "Download latest Buzz" }).click();
+  await expect(card.getByRole("alert")).toContainText("https://builderlab.xyz");
   await card.getByRole("button", { name: "Change community address" }).click();
   await expect(card).toBeHidden();
   // Returning from address editing keeps the required verdict.
@@ -174,6 +184,12 @@ test("required community can switch to a saved free community and join another r
     card.getByText("Upgrade Buzz to join this community"),
   ).toBeVisible();
   await expect(card).toContainText("new-required.example");
+  await expect(card).toContainText(
+    "Download the latest Buzz client at builderlab.xyz to continue.",
+  );
+  await expect(
+    card.getByRole("button", { name: "Download latest Buzz" }),
+  ).toBeVisible();
   expect(
     await page.evaluate(
       () => JSON.parse(localStorage.getItem("buzz-communities") ?? "[]").length,
