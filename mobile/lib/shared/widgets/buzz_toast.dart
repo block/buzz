@@ -150,9 +150,13 @@ class _ToastBubble extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    // The taller two-action card uses the standard toast entrance rather than
-    // morphing from a capsule-shaped Dynamic Island.
-    final origin = secondaryAction == null
+    // Tall cards need fixed corners and the standard entrance so enlarged
+    // text is not clipped by a capsule or Dynamic Island surface.
+    final stacked =
+        secondaryAction != null ||
+        (onRetry != null &&
+            MediaQuery.textScalerOf(context).scale(14) > 14 * 1.3);
+    final origin = !stacked
         ? islandOrigin ?? _toastIslandOrigin(context)
         : null;
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
@@ -296,9 +300,7 @@ class _ToastBubble extends HookWidget {
                   child: PhysicalShape(
                     clipper: _ToastRevealClipper(
                       reveal,
-                      radius: secondaryAction == null
-                          ? null
-                          : Radii.navigationCapsule,
+                      radius: stacked ? Radii.navigationCapsule : null,
                     ),
                     clipBehavior: Clip.antiAlias,
                     color: island != null && shader != null
@@ -315,6 +317,7 @@ class _ToastBubble extends HookWidget {
                         destructiveAction: destructiveAction,
                         secondaryAction: secondaryAction,
                         onAction: onRetry,
+                        stackActions: stacked,
                       ),
                     ),
                   ),
