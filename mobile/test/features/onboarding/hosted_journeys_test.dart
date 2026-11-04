@@ -126,6 +126,8 @@ void main() {
     f.bound = null;
     f.offerProfile = false;
     await f.mount(tester, addingCommunity: false);
+    expect(find.text('Use an existing identity'), findsNothing);
+    expect(find.text('or sign in with email').hitTestable(), findsOneWidget);
     Future<void> cancelled() async {
       for (var i = 0; i < 100 && f.flow.stage != HostedFlowStage.idle; i++) {
         await Future<void>.delayed(Duration.zero);
@@ -203,7 +205,13 @@ void main() {
                   'ciphertext': Uint8List(48),
                 },
         );
-        await f.flow.signOutAccount();
+        if (importing) {
+          // Keep the authenticated account; import is an in-app setup action.
+          await f.settle(tester);
+          await tester.tap(find.byTooltip('Back').hitTestable());
+        } else {
+          await f.flow.signOutAccount();
+        }
         await f.settle(tester);
         expect(await f.store.read(), isNull);
         var failUpload = true;
@@ -220,7 +228,11 @@ void main() {
         await f.settle(tester);
         expect(find.text('Create my Buzz identity'), findsNothing);
         if (importing) {
-          // The import choice must survive process death after browser sign-in.
+          expect(
+            f.browserStarts,
+            0,
+          ); // Authenticated import never launches Auth0.
+          // The authenticated import choice must survive process death.
           await f.restart(tester);
           await f.tap(tester, 'Community home');
           expect(

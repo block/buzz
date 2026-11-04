@@ -403,7 +403,6 @@ class PairingPage extends HookConsumerWidget {
                         ref.read(pendingDeepLinkProvider.notifier).open(uri);
                       },
                       onBuilderlab: onBuilderlab,
-                      onImportIdentity: onImportIdentity,
                       accountStatus: signedInOnboarding ? null : accountStatus,
                       setupContent: setupContent,
                       builderlabLabel: builderlabLabel,

@@ -20,7 +20,6 @@ class _PairingWelcomeView extends HookWidget {
   final VoidCallback? onCommunityLink;
   final VoidCallback? onCreateCommunity;
   final VoidCallback? onBuilderlab;
-  final VoidCallback? onImportIdentity;
   final String? accountStatus;
   final Widget? setupContent;
   final String builderlabLabel;
@@ -49,7 +48,6 @@ class _PairingWelcomeView extends HookWidget {
     this.onCommunityLink,
     this.onCreateCommunity,
     this.onBuilderlab,
-    this.onImportIdentity,
     this.accountStatus,
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
@@ -162,12 +160,6 @@ class _PairingWelcomeView extends HookWidget {
                     ),
                   ),
                 ],
-                if (!signInPending && onImportIdentity != null)
-                  TextButton(
-                    style: context._onboardingGhostButtonStyle,
-                    onPressed: isBusy ? null : onImportIdentity,
-                    child: const Text('Use an existing identity'),
-                  ),
                 if (showConnectionOptions) ...connectionActions(),
                 if (HostedEnvironment.enabled &&
                     showConnectionOptions &&
