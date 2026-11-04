@@ -227,6 +227,9 @@ class TimelineMessage {
   /// Fold unless the build disables agent-message collapsing.
   bool get shouldFoldAgentAudience => collapseAgentMessages && isAgentAudience;
 
+  /// Whether this bubble needs its own author and avatar grouping boundary.
+  bool get breaksMessageGrouping => hasAttachments || shouldFoldAgentAudience;
+
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
   bool get hasAttachments =>
