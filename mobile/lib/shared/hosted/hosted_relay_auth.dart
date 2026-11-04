@@ -123,6 +123,15 @@ class HostedRelayAuth extends ChangeNotifier {
     return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
   }
 
+  /// [headers] for a request made outside [HostedRelayHttpClient], such as a
+  /// native download. Scoped like that client: only the relay's own origin
+  /// gets the assertion, so it never reaches a third-party host.
+  Future<Map<String, String>> headersForUrl(RelayConfig config, Uri url) async {
+    if (url.scheme != 'http' && url.scheme != 'https') return const {};
+    if (url.origin != Uri.parse(config.baseUrl).origin) return const {};
+    return headers(config);
+  }
+
   Future<Map<String, String>> headers(RelayConfig config) async {
     final client = _accountFor(config);
     if (client == null) return const {};

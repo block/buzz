@@ -6,6 +6,8 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -135,6 +137,26 @@ const _relayCustomEmoji = [
     url: 'https://relay.example/media/buzzbee.png',
   ),
 ];
+
+class _FakeRelayConfigNotifier extends RelayConfigNotifier {
+  _FakeRelayConfigNotifier(this.nsec);
+
+  final String nsec;
+
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://relay.example', nsec: nsec);
+}
+
+/// A hosted relay that issues a fixed assertion.
+class _FakeHostedRelayAuth extends HostedRelayAuth {
+  _FakeHostedRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  @override
+  Future<Map<String, String>> headers(RelayConfig config) async => {
+    'Nostr-Federated-Identity': 'Bearer hosted-token',
+  };
+}
 
 class _FakeCustomEmojiPaletteNotifier extends CustomEmojiPaletteNotifier {
   _FakeCustomEmojiPaletteNotifier(this.palette);
@@ -704,10 +726,13 @@ void main() {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final prefs = await _prefs();
+      final nsec = nostr.Keys.generate().nsec;
       final mediaAuth = MediaGetAuthService(
         baseUrl: 'https://relay.example',
-        nsec: nostr.Keys.generate().nsec,
+        nsec: nsec,
       );
+      final hostedAuth = _FakeHostedRelayAuth();
+      addTearDown(hostedAuth.dispose);
       MethodCall? presentation;
       final selected = <String>[];
       var dismissals = 0;
@@ -728,6 +753,10 @@ void main() {
                 ),
               ),
               mediaGetAuthServiceProvider.overrideWithValue(mediaAuth),
+              relayConfigProvider.overrideWith(
+                () => _FakeRelayConfigNotifier(nsec),
+              ),
+              hostedRelayAuthProvider.overrideWithValue(hostedAuth),
             ],
             child: MaterialApp(
               theme: AppTheme.light(),
@@ -781,6 +810,9 @@ void main() {
           (relayHeaders as Map<Object?, Object?>)['Authorization'],
           startsWith('Nostr '),
         );
+        // Native downloads skip the hosted HTTP client, so the bridge must
+        // carry the relay assertion a hosted relay requires for media reads.
+        expect(relayHeaders['Nostr-Federated-Identity'], 'Bearer hosted-token');
 
         await _sendNativeEmojiPickerCall(tester, 'skinToneChanged', 4);
         await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');

@@ -236,6 +236,25 @@ void main() {
       expect(requests, isEmpty);
     });
 
+    test('URL headers carry the assertion only to the relay origin', () async {
+      await saveSession();
+      final auth = relayAuth(organizationClient());
+      expect(
+        await auth.headersForUrl(
+          relay,
+          Uri.parse('https://$relayHost/media/emoji.png'),
+        ),
+        {'Nostr-Federated-Identity': 'Bearer org-token'},
+      );
+      for (final other in [
+        'https://other.example.com/media/emoji.png',
+        'https://team.$relayHost/media/emoji.png',
+        'http://$relayHost:8080/media/emoji.png',
+      ]) {
+        expect(await auth.headersForUrl(relay, Uri.parse(other)), isEmpty);
+      }
+    });
+
     test('other relays never receive the organization assertion', () async {
       await saveSession();
       final auth = relayAuth(organizationClient());
