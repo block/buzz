@@ -27,6 +27,8 @@ pub enum Op {
     DesktopLive,
     /// Desktop client: EOSE of a closing channel replay subscription.
     DesktopReplay,
+    /// Desktop client: a silence probe, answered by any frame.
+    DesktopProbe,
     /// Desktop client HTTP `/query` reads, one per request type.
     DesktopRoster,
     DesktopMetadata,
@@ -44,7 +46,7 @@ pub enum Op {
 }
 
 impl Op {
-    pub const ALL: [Op; 27] = [
+    pub const ALL: [Op; 28] = [
         Op::WsConnect,
         Op::History,
         Op::PublishEphemeral,
@@ -59,6 +61,7 @@ impl Op {
         Op::DesktopNip11,
         Op::DesktopLive,
         Op::DesktopReplay,
+        Op::DesktopProbe,
         Op::DesktopRoster,
         Op::DesktopMetadata,
         Op::DesktopSidebar,
@@ -90,6 +93,7 @@ impl Op {
             Op::DesktopNip11 => "desktop_nip11",
             Op::DesktopLive => "desktop_live_eose",
             Op::DesktopReplay => "desktop_replay_eose",
+            Op::DesktopProbe => "desktop_probe",
             Op::DesktopRoster => "desktop_roster",
             Op::DesktopMetadata => "desktop_metadata",
             Op::DesktopSidebar => "desktop_sidebar",
