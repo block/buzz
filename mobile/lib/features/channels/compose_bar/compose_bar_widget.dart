@@ -399,7 +399,13 @@ class ComposeBar extends HookConsumerWidget {
         }
 
         var open = findMentionQuery(text, cursor);
+        // A selected mention's `@` does not reopen a query. A query already
+        // open at this `@` stays open, so a newly typed `@Alice S` can still
+        // reach "Alice Smith" when an earlier `@Alice` was selected.
+        final continuing =
+            mentionQuery.value != null && mentionStartIdx.value == open?.start;
         if (open != null &&
+            !continuing &&
             _startsSelectedMention(text, open.start, mentionMap.value.keys)) {
           open = null;
         }

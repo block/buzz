@@ -78,7 +78,7 @@ MentionCandidate? _spaceMention(
 }
 
 /// Whether the `@` at [start] begins a mention the user already selected.
-/// Such an `@` never opens a query, wherever the caret is: text after a
+/// Such an `@` does not open a query, wherever the caret is: text after a
 /// selected mention is prose, so a later `#` can open channel suggestions.
 /// A label followed by more name characters is a different, typed name.
 bool _startsSelectedMention(String text, int start, Iterable<String> names) =>

@@ -1908,6 +1908,31 @@ void main() {
         await settleSearch(tester);
       });
 
+      testWidgets('a longer name can follow a selected shorter one', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice', 'Alice Smith']);
+        await tester.enterText(find.byType(TextField), 'hi @ali');
+        await tester.pump();
+        await tester.tap(find.text('Alice'));
+        await tester.pump();
+        expect(controller.text, 'hi @Alice ');
+
+        // Typing the same label again keeps its query open past the label.
+        await tester.enterText(find.byType(TextField), 'hi @Alice and @Alic');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), 'hi @Alice and @Alice');
+        await tester.pump();
+        await tester.enterText(
+          find.byType(TextField),
+          'hi @Alice and @Alice S',
+        );
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
       testWidgets('a query that continues no name is prose', (tester) async {
         await pumpMembers(tester, ['Alice Smith']);
         await tester.enterText(find.byType(TextField), '@alice sm');
