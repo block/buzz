@@ -1929,18 +1929,57 @@ void main() {
         );
         await tester.pump();
         expect(find.text('Alice Smith'), findsOneWidget);
+
+        // So does a pasted `@Alice Smith`, which arrives in one edit.
+        await tester.enterText(find.byType(TextField), 'hi @Alice and ');
+        await tester.pump();
+        expect(popover(), findsNothing);
+        await tester.enterText(
+          find.byType(TextField),
+          'hi @Alice and @Alice Smith',
+        );
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
         await tester.enterText(find.byType(TextField), '');
         await settleSearch(tester);
       });
 
       testWidgets('a query that continues no name is prose', (tester) async {
-        await pumpMembers(tester, ['Alice Smith']);
+        final searched = <String>[];
+        await pumpMembers(
+          tester,
+          ['Alice Smith'],
+          searchPeople: (query) async {
+            searched.add(query);
+            return const [];
+          },
+        );
         await tester.enterText(find.byType(TextField), '@alice sm');
         await tester.pump();
         expect(popover(), findsOneWidget);
         await tester.enterText(find.byType(TextField), '@alice said');
         await tester.pump();
         expect(popover(), findsNothing);
+        await settleSearch(tester);
+        searched.clear();
+
+        // Prose stays prose as it grows: a `#` opens channel suggestions,
+        // and the longer words never search the directory.
+        await tester.enterText(find.byType(TextField), '@alice said hi #cur');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(popover(), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-suggestions-popover')),
+          findsOneWidget,
+        );
+        expect(searched, isEmpty);
+
+        // Shortening it back to a name's start reopens the chooser.
+        await tester.enterText(find.byType(TextField), '@alice s');
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
         await settleSearch(tester);
       });
 

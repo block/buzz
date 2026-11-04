@@ -253,6 +253,7 @@ class ComposeBar extends HookConsumerWidget {
     final mentionStartIdx = useState(-1);
     // Counts chooser openings: a new `@` starts fresh rows and searches.
     final mentionOpening = useRef(0);
+    final deadMention = useRef<_DeadMention?>(null);
     final shownMentions = useRef<_MentionRows>((
       rows: const [],
       unavailable: const {},
@@ -399,16 +400,17 @@ class ComposeBar extends HookConsumerWidget {
         }
 
         var open = findMentionQuery(text, cursor);
-        // A selected mention's `@` does not reopen a query. A query already
-        // open at this `@` stays open, so a newly typed `@Alice S` can still
-        // reach "Alice Smith" when an earlier `@Alice` was selected.
-        final continuing =
-            mentionQuery.value != null && mentionStartIdx.value == open?.start;
-        if (open != null &&
-            !continuing &&
-            _startsSelectedMention(text, open.start, mentionMap.value.keys)) {
-          open = null;
-        }
+        final closed =
+            open != null &&
+            _mentionQueryStaysClosed(
+              open,
+              before: previousValue.text,
+              text: text,
+              openAt: mentionQuery.value == null ? null : mentionStartIdx.value,
+              selected: mentionMap.value.keys,
+              dead: deadMention.value,
+            );
+        if (closed) open = null;
 
         // Space after an exact, unique name selects it (section 5).
         final previousQuery = mentionQuery.value;
@@ -469,6 +471,8 @@ class ComposeBar extends HookConsumerWidget {
       channelId: channelId,
       query: mentionQuery.value,
       opening: mentionOpening.value,
+      start: mentionStartIdx.value,
+      dead: membersAsync.hasValue ? deadMention : null,
     );
     shownMentions.value = mentionRows;
     final suggestions = mentionRows.rows;
@@ -529,6 +533,7 @@ class ComposeBar extends HookConsumerWidget {
       attachments.value = [];
       mentionMap.value.clear();
       mentionQuery.value = null;
+      deadMention.value = null;
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;
