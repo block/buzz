@@ -2524,8 +2524,8 @@ impl AppState {
     /// cross-pod invalidation is best-effort, so a cached set is served only
     /// for [`OPEN_CHANNELS_MAX_AGE`] after its read's connection checkout: a
     /// channel that left the open set on another pod is granted from the
-    /// cache for at most that long. A caller whose own read straddles a revocation gets what that
-    /// read saw, as with any uncached read.
+    /// cache for at most that long. A caller whose own read straddles a
+    /// revocation gets what that read saw, as with any uncached read.
     pub async fn get_accessible_channel_ids_cached(
         &self,
         community_id: CommunityId,
