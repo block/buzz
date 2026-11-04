@@ -203,6 +203,7 @@ mod postgres_tests {
     use super::*;
     use crate::test_support::ScratchDb;
     use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
