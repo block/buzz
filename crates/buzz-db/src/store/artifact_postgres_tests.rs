@@ -979,3 +979,45 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres; performance measurement"]
+async fn measure_artifact_write_latency() {
+    use std::{sync::Arc, time::Instant};
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(64)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let fixture = Arc::new(Fixture::on(Db::from_pool(pool)).await);
+    for concurrency in [1, 8, 32] {
+        for repetition in 0..3 {
+            let mut workers = tokio::task::JoinSet::new();
+            let start = Instant::now();
+            for _ in 0..concurrency {
+                let f = fixture.clone();
+                workers.spawn(async move {
+                    let mut samples = Vec::new();
+                    for _ in 0..32 {
+                        let event =
+                            f.revision(Uuid::new_v4(), "create", f.a, None, &f.owner, vec![]);
+                        let start = Instant::now();
+                        assert!(matches!(
+                            f.accept(&event, None).await,
+                            ArtifactOutcome::Accepted(_)
+                        ));
+                        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    samples
+                });
+            }
+            let mut samples = Vec::new();
+            while let Some(result) = workers.join_next().await {
+                samples.extend(result.unwrap());
+            }
+            let elapsed = start.elapsed().as_secs_f64();
+            samples.sort_by(f64::total_cmp);
+            println!("PERF write concurrency={concurrency} repetition={repetition} count={} elapsed_s={elapsed:.4} ops_s={:.1} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3}", samples.len(), samples.len() as f64 / elapsed, samples[samples.len()/2], samples[samples.len()*95/100], samples[samples.len()*99/100]);
+        }
+    }
+}
