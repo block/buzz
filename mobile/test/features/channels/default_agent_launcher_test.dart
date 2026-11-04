@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 
@@ -37,8 +38,11 @@ void main() {
       final pending = Completer<List<NostrEvent>>();
       relayB.pendingRead = pending.future;
       var choices = 0;
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       Widget app(MeSync scope) => ProviderScope(
         overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
           meSyncProvider.overrideWithValue(scope),
           relaySessionProvider.overrideWith(() => relayA),
         ],
