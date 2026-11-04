@@ -51,8 +51,8 @@ through the metrics exporter's idle timeout; absence is never reported as zero
 bytes. A valid empty snapshot can report zero bytes.
 
 The reader emits fleet totals from the leader only; per-community storage is
-not a relay metric. It does not need S3 listing permission. The worker still needs that permission and its database
-configuration.
+not a relay metric. It does not need S3 listing permission. The worker still
+needs that permission and its database configuration.
 
 ## Usage delivery
 

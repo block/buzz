@@ -89,7 +89,7 @@ pub async fn run_storage_metrics_tick(
     if result.is_err() {
         record_persisted_snapshot_load_failure(state).await;
     }
-    emit_storage_metrics(state, mode).await;
+    emit_storage_metrics(state).await;
     result
 }
 
@@ -140,10 +140,7 @@ async fn record_persisted_snapshot_load_failure(state: &Mutex<StorageSweepState>
     state.lock().await.persisted_load_ok = Some(false);
 }
 
-async fn emit_storage_metrics(state: &Mutex<StorageSweepState>, mode: StorageMetricsMode) {
-    if mode == StorageMetricsMode::Disabled {
-        return;
-    }
+async fn emit_storage_metrics(state: &Mutex<StorageSweepState>) {
     let state = state.lock().await;
     let Some(load_ok) = state.persisted_load_ok else {
         return;
@@ -255,7 +252,7 @@ mod tests {
         let state = Mutex::new(StorageSweepState::default());
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(&state, StorageMetricsMode::Snapshot));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
         assert!(gauge_snapshot(&recorder).is_empty());
     }
@@ -317,7 +314,7 @@ mod tests {
         .await;
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(&state, StorageMetricsMode::Snapshot));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
         let values = gauge_snapshot(&recorder);
         assert_eq!(values.get("buzz_storage_snapshot_load_ok"), Some(&1.0));
@@ -359,7 +356,7 @@ mod tests {
 
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(&state, StorageMetricsMode::Snapshot));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
 
         let values = gauge_snapshot(&recorder);
@@ -386,7 +383,7 @@ mod tests {
 
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(&state, StorageMetricsMode::Snapshot));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
 
         let values = gauge_snapshot(&recorder);
