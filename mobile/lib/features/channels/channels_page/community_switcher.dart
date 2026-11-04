@@ -192,6 +192,15 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;
+        final signIn = ref.read(organizationSignInProvider);
+        if (signIn != null &&
+            signIn.status != OrganizationSessionStatus.signedIn &&
+            ref
+                .read(hostedRelayAuthProvider)
+                .organizationProtects(ref.read(relayConfigProvider))) {
+          Navigator.of(context).pop();
+          return;
+        }
         // Refresh this scope before awaiting its content. ChannelsNotifier
         // fences cached snapshots to the destination relay and identity.
         if (!arriving) ref.invalidate(channelsProvider);
