@@ -5228,8 +5228,8 @@ mod postgres_tests {
     /// coordinates as well as its roster: a `replace_addressable_event` for
     /// either (the path a rolling relay still publishes them on) waits for
     /// the guard, then loses to the newer head the guard published. One row
-    /// per kind. Mutation: drop that kind from `GROUP_STATE_KINDS` in
-    /// `lock_member_snapshot` → RED (the legacy write never waits).
+    /// per kind. Mutation: skip that kind in `lock_member_snapshot`'s lock loop
+    /// → RED for that row (the legacy write never waits).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn locked_member_snapshot_serializes_legacy_metadata_writers() {
