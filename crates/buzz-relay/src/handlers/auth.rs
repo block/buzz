@@ -3006,11 +3006,11 @@ mod tests {
             for keys in [&person, &agent] {
                 let _ = state
                     .db
-                    .add_relay_member(
+                    .add_relay_member_with_default_channels(
                         community,
                         &keys.public_key().to_hex(),
                         "member",
-                        Some("invite"),
+                        "invite",
                         &state.relay_keypair,
                     )
                     .await
@@ -3040,6 +3040,33 @@ mod tests {
                     .expect("pending")
                     .is_none());
             }
+            // The operator CLI uses roster-only admission. AUTH must not
+            // turn that into default-channel enrollment.
+            let roster_only = Keys::generate();
+            let _ = state
+                .db
+                .add_relay_member(
+                    community,
+                    &roster_only.public_key().to_hex(),
+                    "member",
+                    None,
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("roster-only add");
+            assert!(state
+                .db
+                .pending_default_channel_join(community, &roster_only.public_key().to_hex())
+                .await
+                .expect("pending")
+                .is_none());
+            admit_and_settle(&state, community, &roster_only, "roster-only", None).await;
+            assert!(state
+                .db
+                .get_member_role(community, channel, &roster_only.public_key().to_bytes())
+                .await
+                .expect("membership")
+                .is_none());
             let later = default_channels(&state, community, &owner, &["later"]).await[0];
             admit_and_settle(&state, community, &person, "recover-completed", None).await;
             assert!(
@@ -3104,11 +3131,11 @@ mod tests {
                     if roster {
                         let _ = state
                             .db
-                            .add_relay_member(
+                            .add_relay_member_with_default_channels(
                                 community,
                                 &person.public_key().to_hex(),
                                 "member",
-                                Some("invite"),
+                                "invite",
                                 &state.relay_keypair,
                             )
                             .await

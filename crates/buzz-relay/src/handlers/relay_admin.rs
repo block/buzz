@@ -341,11 +341,11 @@ async fn execute_relay_admin_command(
             // to change an existing member's role.
             let write = state
                 .db
-                .add_relay_member(
+                .add_relay_member_with_default_channels(
                     tenant.community(),
                     &target_hex,
                     &role,
-                    Some(&sender_hex),
+                    &sender_hex,
                     &state.relay_keypair,
                 )
                 .await

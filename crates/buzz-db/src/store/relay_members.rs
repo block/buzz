@@ -151,6 +151,19 @@ pub async fn add_relay_member(
     added_by: Option<&str>,
     relay_keypair: &nostr::Keys,
 ) -> Result<MembershipWrite<bool>> {
+    add_relay_member_with_pending(pool, community, pubkey, role, added_by, None, relay_keypair)
+        .await
+}
+
+async fn add_relay_member_with_pending(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    added_by: Option<&str>,
+    pending: Option<Uuid>,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<bool>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -159,12 +172,13 @@ pub async fn add_relay_member(
     .await?;
     let result = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
-         VALUES ($1, $2, $3, $4, gen_random_uuid()) ON CONFLICT (community_id, pubkey) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(role)
     .bind(added_by)
+    .bind(pending)
     .execute(tx.conn())
     .await?;
     let added = result.rows_affected() > 0;
@@ -1331,6 +1345,29 @@ impl Db {
         relay_keypair: &nostr::Keys,
     ) -> Result<MembershipWrite<bool>> {
         add_relay_member(&self.pool, community, pubkey, role, added_by, relay_keypair).await
+    }
+
+    /// Adds a roster member and records default-channel work atomically.
+    /// Unlike the roster-only `add_relay_member`, this opts into auto-join.
+    #[datastore_span(name = "add_relay_member_with_default_channels", system = "postgresql")]
+    pub async fn add_relay_member_with_default_channels(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        added_by: &str,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<bool>> {
+        add_relay_member_with_pending(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            Some(added_by),
+            Some(Uuid::new_v4()),
+            relay_keypair,
+        )
+        .await
     }
 
     /// Claims relay membership via an invite and atomically persists the

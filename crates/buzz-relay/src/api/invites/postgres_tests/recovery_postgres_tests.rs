@@ -83,11 +83,11 @@ mod postgres_tests {
         );
         let _ = state
             .db
-            .add_relay_member(
+            .add_relay_member_with_default_channels(
                 community,
                 &member.public_key().to_hex(),
                 "member",
-                None,
+                &member.public_key().to_hex(),
                 &state.relay_keypair,
             )
             .await
@@ -346,11 +346,11 @@ mod postgres_tests {
         for (keys, role) in [(&owner, "owner"), (&member, "member")] {
             let _ = state
                 .db
-                .add_relay_member(
+                .add_relay_member_with_default_channels(
                     community,
                     &keys.public_key().to_hex(),
                     role,
-                    Some(&owner.public_key().to_hex()),
+                    &owner.public_key().to_hex(),
                     &state.relay_keypair,
                 )
                 .await
@@ -399,11 +399,11 @@ mod postgres_tests {
             .unwrap();
         let _ = state
             .db
-            .add_relay_member(
+            .add_relay_member_with_default_channels(
                 community,
                 &member_hex,
                 "member",
-                Some(&owner.public_key().to_hex()),
+                &owner.public_key().to_hex(),
                 &state.relay_keypair,
             )
             .await
