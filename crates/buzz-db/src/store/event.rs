@@ -3125,8 +3125,11 @@ mod e_tag_filter_shape_tests {
         assert!(sql.contains("tags @> ANY("), "the #e match still applies");
         assert!(sql.contains("ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT "));
 
-        let generic: [(&str, fn(&mut EventQuery)); 6] = [
-            ("two roots", |q| q.e_tags = Some(vec!["ab".repeat(32), "cd".repeat(32)])),
+        type Change = fn(&mut EventQuery);
+        let generic: [(&str, Change); 6] = [
+            ("two roots", |q| {
+                q.e_tags = Some(vec!["ab".repeat(32), "cd".repeat(32)])
+            }),
             ("reaction kind", |q| q.kinds = Some(vec![9, 7])),
             ("no kinds", |q| q.kinds = None),
             ("no channel", |q| q.channel_id = None),
@@ -3565,10 +3568,14 @@ mod postgres_tests {
                 .sign_with_keys(&keys)
                 .unwrap()
         };
-        let ts = |ev: &nostr::Event| DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).unwrap();
+        let ts = |ev: &nostr::Event| {
+            DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).unwrap()
+        };
 
         let root = message(9, vec![vec!["h".into(), h.clone()]], now);
-        insert_event(&pool, community, &root, Some(channel)).await.unwrap();
+        insert_event(&pool, community, &root, Some(channel))
+            .await
+            .unwrap();
         let root_hex = root.id.to_hex();
         let root_id = root.id.as_bytes();
 
@@ -3579,7 +3586,12 @@ mod postgres_tests {
                 vec!["e".into(), root_hex.clone(), String::new(), "root".into()],
             ];
             if let Some(p) = parent {
-                tags.push(vec!["e".into(), p.id.to_hex(), String::new(), "reply".into()]);
+                tags.push(vec![
+                    "e".into(),
+                    p.id.to_hex(),
+                    String::new(),
+                    "reply".into(),
+                ]);
             }
             message(kind, tags, at)
         };
@@ -3657,8 +3669,17 @@ mod postgres_tests {
         )
         .await
         .unwrap();
-        let bare = message(9, vec![vec!["h".into(), h.clone()], vec!["e".into(), root_hex.clone()]], now + 12);
-        insert_event(&pool, community, &bare, Some(channel)).await.unwrap();
+        let bare = message(
+            9,
+            vec![
+                vec!["h".into(), h.clone()],
+                vec!["e".into(), root_hex.clone()],
+            ],
+            now + 12,
+        );
+        insert_event(&pool, community, &bare, Some(channel))
+            .await
+            .unwrap();
         expected.reverse();
 
         let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
@@ -3684,7 +3705,8 @@ mod postgres_tests {
         loop {
             let rows = query_events(&pool, &page).await.unwrap();
             let Some(last) = rows.last() else { break };
-            page.until = Some(DateTime::from_timestamp(last.event.created_at.as_secs() as i64, 0).unwrap());
+            page.until =
+                Some(DateTime::from_timestamp(last.event.created_at.as_secs() as i64, 0).unwrap());
             page.before_id = Some(last.event.id.as_bytes().to_vec());
             paged.extend(ids(rows));
         }
