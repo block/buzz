@@ -2,10 +2,66 @@
 
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
-use sqlx::Row as _;
+use sqlx::{Connection as _, Row as _};
 use uuid::Uuid;
 
 use crate::{observability, Db, DbError, Result};
+
+/// End-to-end deadline shared with the live-session revalidator.
+pub const LIVE_AUTHORIZATION_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const STATEMENT_TIMEOUT: std::time::Duration =
+    LIVE_AUTHORIZATION_QUERY_TIMEOUT.saturating_sub(std::time::Duration::from_millis(100));
+
+// A cancelled SQLx query must not wait for its unfinished statement in the
+// pool's return-to-pool ping. SQLx bounds close_on_drop; PostgreSQL's own
+// deadline below also terminates work if it has not noticed the disconnect.
+struct AuthorizationConnection {
+    connection: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    reusable: bool,
+}
+
+impl Drop for AuthorizationConnection {
+    fn drop(&mut self) {
+        if !self.reusable {
+            self.connection.close_on_drop();
+        }
+    }
+}
+
+async fn fetch_authorization_rows(
+    pool: &sqlx::PgPool,
+    query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+) -> Result<Vec<sqlx::postgres::PgRow>> {
+    let deadline = tokio::time::Instant::now() + LIVE_AUTHORIZATION_QUERY_TIMEOUT;
+    let mut guard = AuthorizationConnection {
+        connection: observability::acquire_writer_until(
+            pool,
+            observability::WriterOperation::Authorization,
+            deadline,
+        )
+        .await?,
+        reusable: false,
+    };
+    // BEGIN and tighten travel in one message. Keep a stricter operator cap;
+    // rollback restores the writer's session setting on successful reuse.
+    let begin = format!(
+        "BEGIN; SELECT set_config('statement_timeout', CASE \
+         WHEN current_setting('statement_timeout')::interval = interval '0' \
+         OR current_setting('statement_timeout')::interval > interval '{0}ms' \
+         THEN '{0}ms' ELSE current_setting('statement_timeout') END, true)",
+        STATEMENT_TIMEOUT.as_millis(),
+    );
+    // The only interpolation is the integer millisecond value of the
+    // compile-time deadline above; no request data enters this SQL.
+    let mut tx = guard
+        .connection
+        .begin_with(sqlx::AssertSqlSafe(begin))
+        .await?;
+    let rows = query.fetch_all(&mut *tx).await?;
+    tx.rollback().await?;
+    guard.reusable = true;
+    Ok(rows)
+}
 
 /// One admitted principal and captured owner whose live authorization should be revalidated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -67,9 +123,7 @@ async fn live_authorization_state_batch(
         .iter()
         .map(|target| target.session_owner_pubkey.map(|owner| owner.to_vec()))
         .collect::<Vec<_>>();
-    let mut connection =
-        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
-    let rows = sqlx::query(
+    let rows = fetch_authorization_rows(pool, sqlx::query(
         r#"
         WITH requested AS (
             SELECT DISTINCT community_id, pubkey, session_owner_pubkey
@@ -117,8 +171,7 @@ async fn live_authorization_state_batch(
     .bind(community_ids)
     .bind(pubkeys)
     .bind(session_owner_pubkeys)
-    .fetch_all(&mut *connection)
-    .await?;
+    ).await?;
 
     rows.into_iter()
         .map(|row| {
@@ -196,6 +249,175 @@ mod postgres_tests {
 
     fn pubkey() -> [u8; 32] {
         Keys::generate().public_key().to_bytes()
+    }
+
+    async fn wait_for_batch_activity(monitor: &PgPool, application: &str, active: bool) {
+        tokio::time::timeout(std::time::Duration::from_millis(1500), async {
+            loop {
+                let running: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE application_name = $1 AND state = 'active' AND wait_event_type = 'Lock')",
+                )
+                .bind(application)
+                .fetch_one(monitor)
+                .await
+                .expect("observe batch backend");
+                if running == active {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("batch backend reaches expected activity within deadline");
+    }
+
+    async fn blocked_batch_fixture() -> (
+        Db,
+        PgPool,
+        sqlx::Transaction<'static, sqlx::Postgres>,
+        String,
+    ) {
+        use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+        let monitor = setup_db().await;
+        let application = format!("live-auth-deadline-{}", Uuid::new_v4());
+        let options: PgConnectOptions = crate::test_support::database_url().parse().unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::raw_sql("SET statement_timeout = '120s'; SET lock_timeout = '0'")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(options.application_name(&application))
+            .await
+            .unwrap();
+        let mut lock = monitor.pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE users IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        (Db::from_pool(pool), monitor.pool, lock, application)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn batch_deadline_preserves_tighter_cap_and_restores_writer_session() {
+        let (db, _monitor, lock, _application) = blocked_batch_fixture().await;
+        lock.rollback().await.unwrap();
+        for (configured, effective, restored) in
+            [("120s", "900ms", "2min"), ("200ms", "200ms", "200ms")]
+        {
+            let mut conn = db.pool.acquire().await.unwrap();
+            sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+                .bind(configured)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+            drop(conn);
+            let rows = fetch_authorization_rows(
+                &db.pool,
+                sqlx::query("SELECT current_setting('statement_timeout') AS cap"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows[0].get::<String, _>("cap"),
+                effective,
+                "preserve tighter cap inside read"
+            );
+            db.live_authorization_state_batch(&[LiveAuthorizationTarget {
+                community_id: CommunityId::from_uuid(Uuid::new_v4()),
+                pubkey: pubkey(),
+                session_owner_pubkey: None,
+            }])
+            .await
+            .unwrap();
+            let mut conn = db.pool.acquire().await.unwrap();
+            let after: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+            let after_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                after_pid, pid,
+                "successful batch reuses the same writer backend"
+            );
+            assert_eq!(
+                after, restored,
+                "writer writes retain their session timeout"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn batch_statement_deadline_releases_writer_and_cancels_backend() {
+        let (db, monitor, lock, application) = blocked_batch_fixture().await;
+        let target = LiveAuthorizationTarget {
+            community_id: CommunityId::from_uuid(Uuid::new_v4()),
+            pubkey: pubkey(),
+            session_owner_pubkey: None,
+        };
+        let task_db = db.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1500),
+                task_db.live_authorization_state_batch(&[target]),
+            )
+            .await
+        });
+        wait_for_batch_activity(&monitor, &application, true).await;
+        let error = task
+            .await
+            .unwrap()
+            .expect("server cancels before client deadline")
+            .expect_err("locked batch must fail");
+        let DbError::Sqlx(sqlx::Error::Database(error)) = error else {
+            panic!("expected PostgreSQL statement cancellation, got {error:?}");
+        };
+        assert_eq!(error.code().as_deref(), Some("57014"));
+        let _available =
+            tokio::time::timeout(std::time::Duration::from_millis(1500), db.pool.acquire())
+                .await
+                .expect("writer slot released promptly")
+                .unwrap();
+        wait_for_batch_activity(&monitor, &application, false).await;
+        lock.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cancelled_batch_closes_connection_and_stops_backend_within_deadline() {
+        let (db, monitor, lock, application) = blocked_batch_fixture().await;
+        let target = LiveAuthorizationTarget {
+            community_id: CommunityId::from_uuid(Uuid::new_v4()),
+            pubkey: pubkey(),
+            session_owner_pubkey: None,
+        };
+        let task_db = db.clone();
+        let task =
+            tokio::spawn(async move { task_db.live_authorization_state_batch(&[target]).await });
+        wait_for_batch_activity(&monitor, &application, true).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let _available =
+            tokio::time::timeout(std::time::Duration::from_millis(1500), db.pool.acquire())
+                .await
+                .expect("cancelled checkout does not strand writer slot")
+                .unwrap();
+        wait_for_batch_activity(&monitor, &application, false).await;
+        lock.rollback().await.unwrap();
     }
 
     #[tokio::test]
