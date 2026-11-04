@@ -119,7 +119,7 @@ mod external_infra_process {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let mut relay = spawn();
+        let relay = spawn();
         ready(&client, &base, &log).await;
         let channel = Uuid::new_v4();
         let create = EventBuilder::new(Kind::Custom(9007), "")
@@ -173,7 +173,7 @@ mod external_infra_process {
         .bind(community).bind(first["startedAt"].as_str().unwrap()).execute(&mut *tx).await.unwrap();
         tx.commit().await.unwrap();
 
-        relay = spawn();
+        let _relay = spawn();
         ready(&client, &base, &log).await;
         let mut reset = false;
         for _ in 0..30 {
