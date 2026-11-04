@@ -224,9 +224,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                             ? _MembershipSystemMessageContent(
                                 event: groupedMembership,
                                 channelId: channelId,
-                                createdAt: message.createdAt,
                                 resolveLabel: resolveLabel,
-                                userCache: userCache,
                               )
                             : messageStyleActor != null &&
                                   messageStyleActor.isNotEmpty &&
@@ -322,62 +320,98 @@ class _SystemMessageRow extends HookConsumerWidget {
   }
 }
 
+enum _MembershipDisplayKind {
+  /// One person added everyone.
+  added,
+
+  /// Several people added members.
+  addedByMany,
+
+  /// One person removed everyone.
+  removed,
+
+  /// Additions and removals together, or removals by several people.
+  mixed,
+}
+
 class _MembershipDisplayEvent {
+  final _MembershipDisplayKind kind;
+
+  /// The adder or remover for [_MembershipDisplayKind.added] and
+  /// [_MembershipDisplayKind.removed]; null otherwise.
   final String? actorPubkey;
-  final List<String> targetPubkeys;
-  final bool isSelfJoin;
-  final bool isRemoval;
+
+  /// People whose latest change in the group is an addition.
+  final List<String> addedPubkeys;
+
+  /// People whose latest change in the group is a removal.
+  final List<String> removedPubkeys;
 
   const _MembershipDisplayEvent({
+    required this.kind,
     required this.actorPubkey,
-    required this.targetPubkeys,
-    required this.isSelfJoin,
-    required this.isRemoval,
+    required this.addedPubkeys,
+    required this.removedPubkeys,
   });
 }
 
+/// Describes a run of additions (by someone else) and removals. Like
+/// desktop, each person appears once, under their latest change. Returns
+/// null for anything else, such as a self-join.
 _MembershipDisplayEvent? _membershipDisplayEvent(
   List<TimelineMessage> messages,
 ) {
   if (messages.isEmpty) return null;
 
-  final first = messages.first.systemEvent;
-  final firstActor = first?.actorPubkey?.trim().toLowerCase();
-  final firstTarget = first?.targetPubkey?.trim().toLowerCase();
-  if ((first?.type != SystemEventType.memberJoined &&
-          first?.type != SystemEventType.memberRemoved) ||
-      firstActor == null ||
-      firstActor.isEmpty ||
-      firstTarget == null ||
-      firstTarget.isEmpty) {
-    return null;
-  }
-
-  final isRemoval = first!.type == SystemEventType.memberRemoved;
-  final isSelfJoin = !isRemoval && firstActor == firstTarget;
-  final targets = <String>[];
+  final latest = <String, ({SystemEventType type, String actor})>{};
   for (final message in messages) {
     final event = message.systemEvent;
     final actor = event?.actorPubkey?.trim().toLowerCase();
     final target = event?.targetPubkey?.trim().toLowerCase();
-    if (event?.type != first.type ||
+    if (event == null ||
+        (event.type != SystemEventType.memberJoined &&
+            event.type != SystemEventType.memberRemoved) ||
         actor == null ||
         actor.isEmpty ||
         target == null ||
         target.isEmpty ||
-        (isSelfJoin
-            ? actor != target
-            : actor != firstActor || (!isRemoval && actor == target))) {
+        (event.type == SystemEventType.memberJoined && actor == target)) {
       return null;
     }
-    targets.add(target);
+    latest[target] = (type: event.type, actor: actor);
   }
 
+  final added = <String>[];
+  final removed = <String>[];
+  final adders = <String>{};
+  final removers = <String>{};
+  latest.forEach((target, change) {
+    if (change.type == SystemEventType.memberJoined) {
+      added.add(target);
+      adders.add(change.actor);
+    } else {
+      removed.add(target);
+      removers.add(change.actor);
+    }
+  });
+
+  final kind = removed.isEmpty
+      ? adders.length == 1
+            ? _MembershipDisplayKind.added
+            : _MembershipDisplayKind.addedByMany
+      : added.isEmpty && removers.length == 1
+      ? _MembershipDisplayKind.removed
+      : _MembershipDisplayKind.mixed;
+
   return _MembershipDisplayEvent(
-    actorPubkey: isSelfJoin ? null : firstActor,
-    targetPubkeys: targets.toSet().toList(),
-    isSelfJoin: isSelfJoin,
-    isRemoval: isRemoval,
+    kind: kind,
+    actorPubkey: switch (kind) {
+      _MembershipDisplayKind.added => adders.single,
+      _MembershipDisplayKind.removed => removers.single,
+      _ => null,
+    },
+    addedPubkeys: added,
+    removedPubkeys: removed,
   );
 }
 
@@ -424,92 +458,141 @@ List<TimelineReaction> _aggregateSystemMessageReactions(
 class _MembershipSystemMessageContent extends StatelessWidget {
   final _MembershipDisplayEvent event;
   final String channelId;
-  final int createdAt;
   final String Function(String? pubkey) resolveLabel;
-  final Map<String, UserProfile> userCache;
 
   const _MembershipSystemMessageContent({
     required this.event,
     required this.channelId,
-    required this.createdAt,
     required this.resolveLabel,
-    required this.userCache,
   });
 
   @override
   Widget build(BuildContext context) {
-    final firstTarget = event.targetPubkeys.first;
-    final additionalTargets = event.targetPubkeys.skip(1).take(1).toList();
-    final hiddenCount = event.targetPubkeys.length - 2;
-    final actionSpans = <InlineSpan>[
-      TextSpan(
-        text: event.isSelfJoin
-            ? 'joined the channel'
-            : event.isRemoval
-            ? 'removed '
-            : 'added ',
-      ),
-      if (!event.isSelfJoin)
-        _systemNameSpan(context, firstTarget, channelId, resolveLabel),
-      if (additionalTargets.isNotEmpty)
-        TextSpan(
-          text: event.isSelfJoin
-              ? ' along with '
-              : additionalTargets.length == 1 && hiddenCount <= 0
-              ? ' and '
-              : ', ',
-        ),
-      ..._memberNameSpans(
-        context,
-        targets: additionalTargets,
-        channelId: channelId,
-        resolveLabel: resolveLabel,
-      ),
+    InlineSpan name(String pubkey) =>
+        _systemNameSpan(context, pubkey, channelId, resolveLabel);
+
+    final spans = switch (event.kind) {
+      _MembershipDisplayKind.added || _MembershipDisplayKind.removed => () {
+        final removed = event.kind == _MembershipDisplayKind.removed;
+        final targets = removed ? event.removedPubkeys : event.addedPubkeys;
+        return <InlineSpan>[
+          name(event.actorPubkey!),
+          TextSpan(text: removed ? ' removed ' : ' added '),
+          ..._leadingNames(context, targets, name),
+          TextSpan(text: removed ? ' from the channel' : ' to the channel'),
+          ..._seeAll(
+            context,
+            targets,
+            removed ? 'Removed members' : 'Added members',
+          ),
+        ];
+      }(),
+      _MembershipDisplayKind.addedByMany => <InlineSpan>[
+        ..._leadingNames(context, event.addedPubkeys, name),
+        const TextSpan(text: ' were added to the channel'),
+        ..._seeAll(context, event.addedPubkeys, 'Added members'),
+      ],
+      _MembershipDisplayKind.mixed => <InlineSpan>[
+        if (event.addedPubkeys.isNotEmpty)
+          ..._summary(context, event.addedPubkeys, 'added', name),
+        if (event.addedPubkeys.isNotEmpty && event.removedPubkeys.isNotEmpty)
+          const TextSpan(text: ' · '),
+        if (event.removedPubkeys.isNotEmpty)
+          ..._summary(context, event.removedPubkeys, 'removed', name),
+      ],
+    };
+
+    return Text.rich(
+      TextSpan(children: spans),
+      textAlign: TextAlign.center,
+      style: _systemActionTextStyle(context),
+    );
+  }
+
+  /// "Bob", "Bob and Carol", or "Bob, Carol and 3 others".
+  List<InlineSpan> _leadingNames(
+    BuildContext context,
+    List<String> targets,
+    InlineSpan Function(String pubkey) name,
+  ) {
+    final hiddenCount = targets.length - 2;
+    return [
+      name(targets.first),
+      if (targets.length > 1) ...[
+        TextSpan(text: hiddenCount > 0 ? ', ' : ' and '),
+        name(targets[1]),
+      ],
       if (hiddenCount > 0)
         TextSpan(
           text: ' and $hiddenCount ${hiddenCount == 1 ? 'other' : 'others'}',
         ),
-      if (!event.isSelfJoin)
-        TextSpan(
-          text: event.isRemoval ? ' from the channel' : ' to the channel',
-        ),
-      if (hiddenCount > 0) ...[
-        const TextSpan(text: '. '),
-        WidgetSpan(
-          alignment: PlaceholderAlignment.baseline,
-          baseline: TextBaseline.alphabetic,
-          child: Semantics(
-            button: true,
-            child: GestureDetector(
-              onTap: () => showBuzzModalBottomSheet<void>(
-                context: context,
-                title: event.isRemoval ? 'Removed members' : 'Added members',
-                isScrollControlled: true,
-                showDragHandle: true,
-                builder: (_) => _ActivityMembersSheet(
-                  pubkeys: event.targetPubkeys,
-                  channelId: channelId,
-                ),
-              ),
-              child: Text(
-                'See all',
-                style: _systemActionTextStyle(
-                  context,
-                )?.copyWith(fontWeight: FontWeight.w600),
-              ),
-            ),
-          ),
+    ];
+  }
+
+  List<InlineSpan> _seeAll(
+    BuildContext context,
+    List<String> targets,
+    String title,
+  ) {
+    if (targets.length <= 2) return const [];
+    return [
+      const TextSpan(text: '. '),
+      _membersSheetLink(context, 'See all', title, targets),
+    ];
+  }
+
+  /// "Bob was added" or "Bob and 182 others were added", where the count
+  /// opens the full list.
+  List<InlineSpan> _summary(
+    BuildContext context,
+    List<String> targets,
+    String action,
+    InlineSpan Function(String pubkey) name,
+  ) {
+    final othersCount = targets.length - 1;
+    return [
+      name(targets.first),
+      if (othersCount > 0) ...[
+        const TextSpan(text: ' and '),
+        _membersSheetLink(
+          context,
+          '$othersCount ${othersCount == 1 ? 'other' : 'others'}',
+          action == 'added' ? 'Added members' : 'Removed members',
+          targets,
         ),
       ],
+      TextSpan(text: othersCount > 0 ? ' were $action' : ' was $action'),
     ];
+  }
 
-    return _MessageStyleSystemMessageContent(
-      displayPubkey: event.isSelfJoin ? firstTarget : event.actorPubkey!,
-      channelId: channelId,
-      createdAt: createdAt,
-      resolveLabel: resolveLabel,
-      userCache: userCache,
-      actionSpans: actionSpans,
+  WidgetSpan _membersSheetLink(
+    BuildContext context,
+    String label,
+    String title,
+    List<String> pubkeys,
+  ) {
+    return WidgetSpan(
+      alignment: PlaceholderAlignment.baseline,
+      baseline: TextBaseline.alphabetic,
+      child: Semantics(
+        button: true,
+        child: GestureDetector(
+          onTap: () => showBuzzModalBottomSheet<void>(
+            context: context,
+            title: title,
+            isScrollControlled: true,
+            showDragHandle: true,
+            builder: (_) =>
+                _ActivityMembersSheet(pubkeys: pubkeys, channelId: channelId),
+          ),
+          child: Text(
+            label,
+            style: _systemActionTextStyle(
+              context,
+            )?.copyWith(fontWeight: FontWeight.w600),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -589,25 +672,6 @@ WidgetSpan _systemNameSpan(
       ),
     ),
   );
-}
-
-List<InlineSpan> _memberNameSpans(
-  BuildContext context, {
-  required List<String> targets,
-  required String channelId,
-  required String Function(String? pubkey) resolveLabel,
-}) {
-  return [
-    for (var index = 0; index < targets.length; index++) ...[
-      if (index > 0)
-        TextSpan(
-          text: index == targets.length - 1
-              ? (targets.length == 2 ? ' and ' : ', and ')
-              : ', ',
-        ),
-      _systemNameSpan(context, targets[index], channelId, resolveLabel),
-    ],
-  ];
 }
 
 class _ThreadSummaryRow extends ConsumerWidget {
