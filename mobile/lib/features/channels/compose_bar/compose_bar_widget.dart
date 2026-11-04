@@ -400,12 +400,7 @@ class ComposeBar extends HookConsumerWidget {
 
         var open = findMentionQuery(text, cursor);
         if (open != null &&
-            _insideSelectedMention(
-              text,
-              open.start,
-              cursor,
-              mentionMap.value.keys,
-            )) {
+            _startsSelectedMention(text, open.start, mentionMap.value.keys)) {
           open = null;
         }
 

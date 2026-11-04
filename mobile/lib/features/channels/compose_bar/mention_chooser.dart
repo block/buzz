@@ -77,14 +77,15 @@ MentionCandidate? _spaceMention(
   return shown.rows.where((row) => row.pubkey == key).firstOrNull;
 }
 
-/// Whether [caret] is inside a mention the user already selected at [start].
-/// Such an `@` does not open a query.
-bool _insideSelectedMention(
-  String text,
-  int start,
-  int caret,
-  Iterable<String> names,
-) => names.any(
-  (name) =>
-      text.startsWith('@$name', start) && caret <= start + 1 + name.length,
-);
+/// Whether the `@` at [start] begins a mention the user already selected.
+/// Such an `@` never opens a query, wherever the caret is: text after a
+/// selected mention is prose, so a later `#` can open channel suggestions.
+/// A label followed by more name characters is a different, typed name.
+bool _startsSelectedMention(String text, int start, Iterable<String> names) =>
+    names.any((name) {
+      if (!text.startsWith('@$name', start)) return false;
+      final end = start + 1 + name.length;
+      return end == text.length || !_nameContinuation.hasMatch(text[end]);
+    });
+
+final _nameContinuation = RegExp(r'[\p{L}\p{N}_]', unicode: true);

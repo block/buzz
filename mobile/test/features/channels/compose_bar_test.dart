@@ -1865,6 +1865,49 @@ void main() {
         await settleSearch(tester);
       });
 
+      testWidgets('text after a selected mention is prose', (tester) async {
+        final searched = <String>[];
+        await pumpMembers(
+          tester,
+          ['Alice', 'Bob', 'Alicent'],
+          searchPeople: (query) async {
+            searched.add(query);
+            return const [];
+          },
+        );
+        await tester.enterText(find.byType(TextField), 'hi @alice');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), 'hi @alice ');
+        await tester.pump();
+        await settleSearch(tester);
+        searched.clear();
+
+        // A `#` after the chip opens channel suggestions, and the words
+        // after it never become a mention search.
+        await tester.enterText(find.byType(TextField), 'hi @Alice e.g. #cur');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(popover(), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-suggestions-popover')),
+          findsOneWidget,
+        );
+        expect(searched, isEmpty);
+
+        // A second `@` after the chip still opens the chooser.
+        await tester.enterText(find.byType(TextField), 'hi @Alice and @bo');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+        expect(find.text('Bob'), findsOneWidget);
+
+        // More name characters after the label make a different name.
+        await tester.enterText(find.byType(TextField), 'hi @Alicen');
+        await tester.pump();
+        expect(find.text('Alicent'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
       testWidgets('a query that continues no name is prose', (tester) async {
         await pumpMembers(tester, ['Alice Smith']);
         await tester.enterText(find.byType(TextField), '@alice sm');
