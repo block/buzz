@@ -35,11 +35,11 @@ class _Session extends RelaySessionNotifier {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   @override
-  Future<List<NostrEvent>> searchProfiles(
+  Future<({List<NostrEvent> events, bool complete})> searchProfiles(
     String query, {
     int limit = 50,
     Duration timeout = const Duration(seconds: 8),
-  }) async => const [];
+  }) async => (events: const <NostrEvent>[], complete: true);
 
   @override
   Future<List<NostrEvent>> fetchHistory(

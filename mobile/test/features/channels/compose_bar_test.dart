@@ -1922,6 +1922,23 @@ void main() {
         await settleSearch(tester);
       });
 
+      testWidgets('selecting a name with a `#` leaves no channel query', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice #current']);
+        await tester.enterText(find.byType(TextField), '@Alice #cur');
+        await tester.pump();
+        expect(channelPopover(), findsNothing);
+        await tester.tap(find.text('Alice #current'));
+        await tester.pump();
+
+        expect(controller.text, '@Alice #current ');
+        expect(channelPopover(), findsNothing);
+        expect(popover(), findsNothing);
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
       testWidgets('a longer name can follow a selected shorter one', (
         tester,
       ) async {

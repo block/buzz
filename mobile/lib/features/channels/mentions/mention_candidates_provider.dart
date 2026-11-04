@@ -45,7 +45,7 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       if (disposed) return const [];
 
       final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.searchProfiles(
+      final (:events, :complete) = await session.searchProfiles(
         trimmed,
         limit: mentionSearchPageLimit,
       );
@@ -67,16 +67,12 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
         for (final event in latestByPubkey.values) _profileFromEvent(event),
       ];
       // A search that outlived its query or community is not kept. A page
-      // short of the limit holds every match (portable mention rules,
-      // section 6).
+      // the relay reports short of the limit holds every match (portable
+      // mention rules, section 6).
       if (!disposed) {
         ref
             .read(mentionSearchCacheProvider)
-            .put(
-              trimmed,
-              people,
-              complete: events.length < mentionSearchPageLimit,
-            );
+            .put(trimmed, people, complete: complete);
       }
       return people;
     });
@@ -135,14 +131,27 @@ class MentionSearchCache {
   }
 
   /// Whether a complete search for a shorter prefix of [query] holds every
-  /// match for it. The relay matches names by prefix, so a longer query
-  /// needs no search of its own; one that prefix refuted finds no one. An
-  /// exact key is an author lookup that no name prefix answers.
+  /// match for it, so [query] needs no search of its own; one that prefix
+  /// refuted finds no one.
+  ///
+  /// The relay matches every word but the last whole and the last as a
+  /// prefix, so a longer query narrows a shorter one only when the shorter
+  /// one's last word is a plain word the longer one continues with letters
+  /// or digits, or follows with more words. Otherwise the relay can read
+  /// words the prefix lacked: `🤖` has none, `🤖alex` has `alex`. Verified
+  /// names match only once the last word has three characters, so a
+  /// shorter last word answers nothing. An exact key is an author lookup
+  /// that no name prefix answers.
   bool answers(String query) {
     final key = _key(query);
     if (_hexKey.hasMatch(key)) return false;
     for (var end = key.length - 1; end > 0; end--) {
-      if (_complete.contains(key.substring(0, end))) return true;
+      final prefix = key.substring(0, end);
+      if (_complete.contains(prefix) &&
+          _answeringPrefix.hasMatch(prefix) &&
+          _narrowingRest.hasMatch(key.substring(end))) {
+        return true;
+      }
     }
     return false;
   }
@@ -167,6 +176,16 @@ class MentionSearchCache {
 }
 
 final _hexKey = RegExp(r'^[0-9a-f]{64}$');
+
+/// A search whose last word ends in at least three letters or digits,
+/// after at most an opening mark the relay does not read as a word.
+final _answeringPrefix = RegExp(
+  r'''(?:^|\s)[#(\["']*[\p{L}\p{M}\p{Nd}]{3,}$''',
+  unicode: true,
+);
+
+/// More letters or digits for that word, then optionally more words.
+final _narrowingRest = RegExp(r'^[\p{L}\p{M}\p{Nd}]*(?:\s|$)', unicode: true);
 
 /// Nothing in the search cache outlives the community or the signer.
 final mentionSearchCacheProvider = Provider<MentionSearchCache>((ref) {

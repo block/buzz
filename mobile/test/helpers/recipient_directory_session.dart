@@ -24,11 +24,16 @@ class RecipientDirectorySession extends RelaySessionNotifier {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   @override
-  Future<List<NostrEvent>> searchProfiles(
+  Future<({List<NostrEvent> events, bool complete})> searchProfiles(
     String query, {
     int limit = 50,
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    final events = _search(query);
+    return (events: events, complete: events.length < limit);
+  }
+
+  List<NostrEvent> _search(String query) {
     searches.add(query);
     final needle = query.trim().toLowerCase();
     return [

@@ -360,7 +360,10 @@ class ComposeBar extends HookConsumerWidget {
       } finally {
         isModifyingText.value = false;
       }
+      // The caret now follows the inserted separator, so neither query is
+      // open, even when the selected name holds a `#`.
       mentionQuery.value = null;
+      channelQuery.value = null;
     }
 
     // Detect @mention query and broadcast typing on text / selection change.

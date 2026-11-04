@@ -319,7 +319,10 @@ class ChannelActions {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return const [];
 
-    final events = await _session.searchProfiles(trimmed, limit: limit);
+    final (:events, complete: _) = await _session.searchProfiles(
+      trimmed,
+      limit: limit,
+    );
     return directoryUsersFromProfileEvents(events, alphabetize: false)
         .where(
           (user) =>

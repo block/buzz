@@ -3224,8 +3224,9 @@ void main() {
         ),
         findsOneWidget,
       );
-      // The complete page for `b` answers a longer query: no search of its
-      // own (portable mention rules, section 6).
+      // A longer query starts from the people `b` found. A one-letter page
+      // cannot answer it, since verified names match only from three
+      // characters, so it still searches.
       await tester.enterText(find.byKey(const Key('new-dm-search')), 'bo');
       await tester.pump();
       expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
@@ -3235,7 +3236,7 @@ void main() {
       await tester.enterText(find.byKey(const Key('new-dm-search')), 'b');
       await tester.pump();
       expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
-      expect(session.searches, ['b']);
+      expect(session.searches, ['b', 'bo']);
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pumpAndSettle();
 
