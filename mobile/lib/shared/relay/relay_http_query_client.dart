@@ -84,7 +84,17 @@ class RelayHttpQueryClient {
     required Duration timeout,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
-    request.followRedirects = false;
+    // As in [post], a timed-out request on a shared session is aborted.
+    final abort = Completer<void>();
+    final sent =
+        http.AbortableRequest(
+            request.method,
+            request.url,
+            abortTrigger: abort.future,
+          )
+          ..followRedirects = false
+          ..headers.addAll(request.headers)
+          ..bodyBytes = request.bodyBytes;
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
@@ -94,7 +104,7 @@ class RelayHttpQueryClient {
     Future<http.Response> receive() async {
       final transport = _injectedClient ?? generation!.client;
       final client = decorate?.call(transport, () => !finished) ?? transport;
-      final response = await client.send(request);
+      final response = await client.send(sent);
       if (finished) {
         await response.stream.listen(null).cancel();
         throw StateError('Relay request already timed out');
@@ -123,6 +133,7 @@ class RelayHttpQueryClient {
     try {
       return await receive().timeout(timeout);
     } on TimeoutException {
+      abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
       }
