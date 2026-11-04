@@ -138,7 +138,6 @@ class _MentionSuggestions extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                VerifiedMark(pubkey: candidate.pubkey),
               ],
             ),
             subtitle: _MentionSuggestionInfo.build(
