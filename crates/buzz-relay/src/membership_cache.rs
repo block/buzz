@@ -338,7 +338,8 @@ mod postgres_tests {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _recorder = metrics::set_default_local_recorder(&recorder);
-        let misses = || {
+        // DebuggingRecorder resets counters to zero on each snapshot.
+        let misses_since_last_snapshot = || {
             snapshotter
                 .snapshot()
                 .into_vec()
@@ -378,12 +379,20 @@ mod postgres_tests {
         for read in &mut reads {
             assert!(futures_util::poll!(read.as_mut()).is_pending());
         }
-        assert_eq!(misses(), 1, "only one query may wait for the pool");
+        assert_eq!(
+            misses_since_last_snapshot(),
+            1,
+            "only one query may wait for the pool"
+        );
         drop(held);
         for read in reads {
             assert!(read.await.unwrap());
         }
-        assert_eq!(misses(), 1, "280 channel checks share one database query");
+        assert_eq!(
+            misses_since_last_snapshot(),
+            0,
+            "the other channel checks must reuse the first read"
+        );
 
         sqlx::query("UPDATE channel_members SET removed_at = NOW() WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3")
             .bind(community.as_uuid()).bind(channels[0]).bind(&user).execute(&pool).await.unwrap();
@@ -403,7 +412,7 @@ mod postgres_tests {
             .is_member_cached(community, channels[1], &user)
             .await
             .unwrap());
-        assert_eq!(misses(), 2);
+        assert_eq!(misses_since_last_snapshot(), 1);
 
         sqlx::query("UPDATE channel_members SET removed_at = NULL WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3")
             .bind(community.as_uuid()).bind(channels[0]).bind(&user).execute(&pool).await.unwrap();
@@ -412,7 +421,7 @@ mod postgres_tests {
             .is_member_cached(community, channels[0], &user)
             .await
             .unwrap());
-        assert_eq!(misses(), 3);
+        assert_eq!(misses_since_last_snapshot(), 1);
 
         sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
             .bind(community.as_uuid())
@@ -429,7 +438,7 @@ mod postgres_tests {
             .is_member_cached(community, channels[0], &user)
             .await
             .unwrap());
-        assert_eq!(misses(), 4);
+        assert_eq!(misses_since_last_snapshot(), 1);
 
         // Same channel ID and pubkey in another community, plus a second
         // user in this one: neither may inherit the first user's snapshot.
