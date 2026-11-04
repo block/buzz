@@ -14,6 +14,8 @@ pub mod channel;
 pub mod channel_members;
 /// Community lifecycle and host-map persistence.
 pub mod community;
+/// Monotonic community auth policy and operator acceptance receipts.
+pub mod community_auth;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.
 pub mod deletion;
 /// Direct message channel persistence.

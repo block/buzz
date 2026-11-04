@@ -73,6 +73,16 @@ class AccountIdentitySnapshot {
       backup?.pubkey == pubkey;
 }
 
+/// The key a backup protects, and where its confirmed receipt is recorded.
+abstract interface class BackupIdentity {
+  Future<AccountIdentitySnapshot?> read();
+
+  /// Service-only signing boundary; never return keys from [operation].
+  Future<T> withKeys<T>(Future<T> Function(nostr.Keys keys) operation);
+
+  Future<void> confirmBackup(BackupReceipt receipt);
+}
+
 /// Create-only AccountKey slots per backend and authenticated subject. Exact-key retries
 /// are idempotent; they never discard or replace an existing backup receipt. Does not choose or mutate legacy
 /// community identities. Migration must explicitly resolve a candidate first.
@@ -81,7 +91,7 @@ class AccountIdentitySnapshot {
 /// a saved recovered key without its receipt. All instances serialize within the
 /// app isolate. Native extensions/other isolates must not write this slot:
 /// FlutterSecureStorage does not provide a cross-process compare-and-set.
-class AccountIdentityStore {
+class AccountIdentityStore implements BackupIdentity {
   AccountIdentityStore({FlutterSecureStorage? storage, String? subject})
     : _storage = storage ?? accountSecureStorage,
       _subject = subject,
@@ -127,6 +137,7 @@ class AccountIdentityStore {
     return result;
   }
 
+  @override
   Future<AccountIdentitySnapshot?> read() => _serialized(() async {
     final record = await _read();
     return record?.snapshot;
@@ -175,6 +186,7 @@ class AccountIdentityStore {
     return record.snapshot;
   });
 
+  @override
   Future<AccountIdentitySnapshot> confirmBackup(BackupReceipt receipt) =>
       _serialized(() async {
         final record = await _read();
@@ -264,6 +276,7 @@ class AccountIdentityStore {
 
   /// Service-only signing/export boundary. Do not return keys from this closure
   /// to a provider/widget. Avoid reentering this store inside the callback.
+  @override
   Future<T> withKeys<T>(Future<T> Function(nostr.Keys keys) operation) =>
       _serialized(() async {
         final record = await _read();
@@ -333,6 +346,9 @@ class AccountIdentityStore {
 
   /// Validate a candidate without exposing signing material to the UI.
   static String publicKeyForNsec(String nsec) => _keys(nsec).public;
+
+  /// Validated signing keys for an nsec held outside this store.
+  static nostr.Keys keysForNsec(String nsec) => _keys(nsec);
 
   /// Rejects invalid secp256k1 scalars before constructing a signing key.
   static nostr.Keys keysForHex(String hex) {

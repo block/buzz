@@ -50,9 +50,11 @@ abstract final class NostrFilters {
   );
 
   /// A channel's system notices (kind:40099), newest first, below the
-  /// `until` + `before_id` cursor the channel-window pages use.
+  /// `until` + `before_id` cursor the channel-window pages use. [since]
+  /// includes the oldest loaded row's whole second, including id ties.
   static NostrFilter channelNotices(
     String channelId, {
+    int? since,
     int? until,
     String? beforeId,
   }) => NostrFilter(
@@ -61,6 +63,7 @@ abstract final class NostrFilters {
       '#h': [channelId],
     },
     limit: channelNoticePageSize,
+    since: since,
     until: until,
     extensions: {'before_id': ?beforeId},
   );

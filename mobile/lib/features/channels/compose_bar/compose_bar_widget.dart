@@ -184,7 +184,10 @@ class ComposeBar extends HookConsumerWidget {
         },
       );
       WidgetsBinding.instance.addObserver(observer);
-      return () => WidgetsBinding.instance.removeObserver(observer);
+      return () {
+        WidgetsBinding.instance.removeObserver(observer);
+        observer.dispose();
+      };
     }, [appView, focusNode, voiceNote.isPreparing]);
     final resolvedHint =
         hintText ??
