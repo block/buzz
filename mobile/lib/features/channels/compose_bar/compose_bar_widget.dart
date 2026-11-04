@@ -334,6 +334,8 @@ class ComposeBar extends HookConsumerWidget {
     final lastTypingSentMs = useRef(0);
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
+    // `@` offsets that opened a query and were not then selected.
+    final typedMentions = useRef(<int>{});
 
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
@@ -361,6 +363,7 @@ class ComposeBar extends HookConsumerWidget {
         isModifyingText.value = false;
       }
       mentionQuery.value = null;
+      typedMentions.value.remove(start);
     }
 
     // Detect @mention query and broadcast typing on text / selection change.
@@ -370,6 +373,11 @@ class ComposeBar extends HookConsumerWidget {
         final editingValue = controller.value;
         final previousValue = lastObservedEditingValue.value;
         lastObservedEditingValue.value = editingValue;
+        _rebaseOffsets(
+          typedMentions.value,
+          previousValue.text,
+          editingValue.text,
+        );
         if (isModifyingText.value || editingValue == previousValue) return;
         final text = editingValue.text;
         final sel = editingValue.selection;
@@ -402,13 +410,10 @@ class ComposeBar extends HookConsumerWidget {
         }
 
         var open = findMentionQuery(text, cursor);
-        // A selected mention's `@` does not reopen a query. A query already
-        // open at this `@` stays open, so a newly typed `@Alice S` can still
-        // reach "Alice Smith" when an earlier `@Alice` was selected.
-        final continuing =
-            mentionQuery.value != null && mentionStartIdx.value == open?.start;
+        // A selected mention's `@` opens no query; a typed one (even one
+        // reading `@Alice S` after a selected Alice) stays typed.
         if (open != null &&
-            !continuing &&
+            !typedMentions.value.contains(open.start) &&
             _startsSelectedMention(text, open.start, mentionMap.value.keys)) {
           open = null;
         }
@@ -441,6 +446,7 @@ class ComposeBar extends HookConsumerWidget {
           }
           mentionQuery.value = open.query;
           mentionStartIdx.value = open.start;
+          typedMentions.value.add(open.start);
           channelQuery.value = null;
         } else {
           mentionQuery.value = null;

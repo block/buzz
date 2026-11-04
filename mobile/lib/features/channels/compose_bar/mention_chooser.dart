@@ -93,3 +93,33 @@ bool _startsSelectedMention(String text, int start, Iterable<String> names) =>
     });
 
 final _nameContinuation = RegExp(r'[\p{L}\p{N}_]', unicode: true);
+
+/// Moves each text offset in [offsets] across the edit from [before] to
+/// [after]: offsets before the edited span stay, offsets after it shift by
+/// the length change, and offsets inside it are dropped.
+void _rebaseOffsets(Set<int> offsets, String before, String after) {
+  if (offsets.isEmpty || before == after) return;
+  final shorter = math.min(before.length, after.length);
+  var prefix = 0;
+  while (prefix < shorter &&
+      before.codeUnitAt(prefix) == after.codeUnitAt(prefix)) {
+    prefix++;
+  }
+  var suffix = 0;
+  while (suffix < shorter - prefix &&
+      before.codeUnitAt(before.length - 1 - suffix) ==
+          after.codeUnitAt(after.length - 1 - suffix)) {
+    suffix++;
+  }
+  final beforeEnd = before.length - suffix;
+  final moved = {
+    for (final offset in offsets)
+      if (offset < prefix)
+        offset
+      else if (offset >= beforeEnd)
+        offset + after.length - before.length,
+  };
+  offsets
+    ..clear()
+    ..addAll(moved);
+}
