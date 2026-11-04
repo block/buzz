@@ -205,9 +205,10 @@ deletes to ship first, then the constraint drop as a separate contract step.
 ### 3. Backfills are not migrations
 
 A migration MUST contain schema changes only. It MUST NOT `UPDATE`, `INSERT`,
-or `DELETE` existing rows, and MUST NOT scan or rewrite a table while holding a
-write-blocking lock. Scans that do not block writes, such as
-`VALIDATE CONSTRAINT` or a bounded concurrent index build, are allowed (Rule 6).
+or `DELETE` existing rows, and MUST NOT scan or rewrite a large table while
+holding a write-blocking lock. Scans that do not block writes, such as
+`VALIDATE CONSTRAINT` or a concurrent index build, are allowed, as is a plain
+`CREATE INDEX` under Rule 6's lock and statement budgets (Rule 6).
 
 - Historical data repair MUST be a backfill definition that conforms to
   [data-backfills.md](data-backfills.md): stable ID, finite upper bound,
@@ -425,8 +426,9 @@ parity assertion on the table for that window.
   [thread-window-deployment.md](thread-window-deployment.md)) before applying
   the migration, which then verifies it. Frozen migrations `0076`, `0078` and
   `0081` predate this rule; the startup runner builds their indexes first
-  (`INLINE_INDEX_BUILDS` in `crates/buzz-db/src/runtime/migration.rs`), and a
-  source test rejects any other migration that refuses a populated table.
+  (`INLINE_INDEX_BUILDS` in `crates/buzz-db/src/runtime/migration.rs`). A
+  source test rejects any other migration that raises `'prebuild …'`; it
+  matches that wording only, so review must catch other refusals.
   Partitioned parents need per-partition concurrent builds attached to an
   `ON ONLY` parent index.
 - The declarative schema source declares indexes with plain `CREATE INDEX`.

@@ -42,7 +42,8 @@ CREATE INDEX CONCURRENTLY artifact_revisions_moves
 ```
 
 Migration `0078` verifies each index definition and its valid, ready, and live
-flags. It refuses a populated table whose index is missing. A fresh empty
+flags. Applied directly as SQL, it refuses a populated table whose index is
+missing. A fresh empty
 database can build the indexes under the migration's short budgets.
 Migration `0076` also verifies the exact definition and all three flags.
 Remove an invalid index with `DROP INDEX CONCURRENTLY` before a new build.
