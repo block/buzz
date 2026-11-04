@@ -16,7 +16,7 @@ signature; operation idempotency does not bypass transport replay protection.
 Responses use `Cache-Control: no-store`.
 
 `BUZZ_NIP_FI_UPGRADES_ENABLED` defaults to `false`. While disabled, new
-acceptances return 503 `authorization_unavailable` with no policy mutation or
+acceptances return 503 `upgrades_disabled` with no policy mutation or
 receipt. Authorized GET and identical POST receipt recovery remain available;
 principal checks and payload conflicts are unchanged. Enabling this deployment
 switch is an explicit operator action after the enforcement and activation fleet
@@ -132,6 +132,7 @@ a new UUID to hide an ambiguous response. No rollback endpoint exists.
 | 409 | `owner_conflict` | Actor/expected owner/current owner disagree |
 | 409 | `lifecycle_conflict` | Archive/deletion or durable deletion intent |
 | 409 | `issuer_conflict` | Expected issuer/host not approved, or exact stored binding absent |
+| 503 | `upgrades_disabled` | New acceptances disabled; wait for operator enablement, preserving the same UUID |
 | 503 | `authorization_unavailable` | Trusted config or authoritative DB unavailable; retry/read back same UUID |
 
 Malformed GET queries use Axum's existing query-extractor rejection. Transport

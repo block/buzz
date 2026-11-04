@@ -1282,7 +1282,7 @@ pub async fn enable_community_nip_fi(
     let trust = if state.config.nip_fi_upgrades_enabled {
         upgrade_configured_trust(&state, &host, &request.expected_issuer)
     } else {
-        Err("authorization_unavailable")
+        Err("upgrades_disabled")
     };
     let tuple = buzz_db::community_auth::UpgradeRequest {
         operation_id: request.operation_id,
@@ -1312,7 +1312,9 @@ pub async fn enable_community_nip_fi(
         buzz_db::community_auth::UpgradeOutcome::Refused(code) => {
             let status = match code {
                 "community_not_found" => StatusCode::NOT_FOUND,
-                "authorization_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable" | "upgrades_disabled" => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
                 _ => StatusCode::CONFLICT,
             };
             Err(coded_api_error(status, code, code))
@@ -3209,10 +3211,7 @@ mod postgres_tests {
             fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
         assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(disabled.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(
-            read_json(disabled).await["code"],
-            "authorization_unavailable"
-        );
+        assert_eq!(read_json(disabled).await["code"], "upgrades_disabled");
         assert!(
             !state
                 .db
@@ -3327,6 +3326,28 @@ mod postgres_tests {
         .await;
         assert_eq!(reuse_off.status(), StatusCode::CONFLICT);
         assert_eq!(read_json(reuse_off).await["code"], "idempotency_conflict");
+        let new_id = Uuid::new_v4();
+        let new_body = body.replace(&id.to_string(), &new_id.to_string());
+        let disabled_after_acceptance =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(new_body)).await;
+        assert_eq!(
+            disabled_after_acceptance.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            disabled_after_acceptance.headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(
+            read_json(disabled_after_acceptance).await["code"],
+            "upgrades_disabled"
+        );
+        assert!(state
+            .db
+            .community_auth_upgrade_status(new_id, &operator.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
         Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
 
         // Exercise the real HTTP-to-config-to-transaction seam: no raw trust
