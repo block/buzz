@@ -8035,7 +8035,7 @@ mod postgres_tests {
         let _tenant = e2e_tenant(community_id, "worker-midflight-purge.example");
         state
             .membership_cache
-            .insert((cid, channel_id, author.clone()), true);
+            .seed_member((cid, channel_id, author.clone()), true);
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
@@ -8147,7 +8147,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, author.clone()))
+                .cached_member(&(cid, channel_id, author.clone()))
                 .is_none(),
             "crash-recovery must clear membership cache after purged-event kick re-drive"
         );
@@ -9910,7 +9910,7 @@ mod postgres_tests {
 
         state
             .membership_cache
-            .insert((cid, channel_id, target.clone()), true);
+            .seed_member((cid, channel_id, target.clone()), true);
 
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -9970,7 +9970,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_some(),
             "pre-condition: membership cache entry must exist before recovery"
         );
@@ -10012,7 +10012,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_none(),
             "crash-recovery re-drive must clear the membership cache"
         );
@@ -11058,7 +11058,7 @@ mod postgres_tests {
 
         state
             .membership_cache
-            .insert((cid, channel_id, target.clone()), true);
+            .seed_member((cid, channel_id, target.clone()), true);
 
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -11106,7 +11106,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_some(),
             "pre-condition: membership cache entry must exist"
         );
@@ -11172,7 +11172,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_none(),
             "recovery must clear the membership cache for legacy kick row"
         );
@@ -11322,7 +11322,7 @@ mod postgres_tests {
 
         state
             .membership_cache
-            .insert((cid, channel_id, target.clone()), true);
+            .seed_member((cid, channel_id, target.clone()), true);
 
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -11416,7 +11416,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_none(),
             "recovery must clear the membership cache for legacy kick row"
         );
@@ -11515,12 +11515,12 @@ mod postgres_tests {
         // 1. Seed the membership cache.
         state
             .membership_cache
-            .insert((cid, channel_id, target_pubkey.clone()), true);
+            .seed_member((cid, channel_id, target_pubkey.clone()), true);
 
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target_pubkey.clone()))
+                .cached_member(&(cid, channel_id, target_pubkey.clone()))
                 .is_some(),
             "pre-condition: membership cache entry must exist before kick side effects"
         );
@@ -11578,7 +11578,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target_pubkey.clone()))
+                .cached_member(&(cid, channel_id, target_pubkey.clone()))
                 .is_none(),
             "membership cache must not contain a stale entry after kick side effects"
         );

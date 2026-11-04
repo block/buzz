@@ -3218,10 +3218,10 @@ mod tests {
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((community_id, channel_id, member_pk.clone()), true);
+                .seed_member((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((community_id, channel_id, non_member_pk.clone()), false);
+                .seed_member((community_id, channel_id, non_member_pk.clone()), false);
 
             let member = register_conn(&state, Some(member_pk));
             let non_member = register_conn(&state, Some(non_member_pk));
@@ -3337,10 +3337,10 @@ mod tests {
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((community_id, channel_id, member_pk.clone()), true);
+                .seed_member((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((community_id, channel_id, non_member_pk.clone()), false);
+                .seed_member((community_id, channel_id, non_member_pk.clone()), false);
 
             let threaded = crate::state::ThreadedChannelVisibility {
                 community_id,
@@ -3432,7 +3432,7 @@ mod tests {
             private(known);
             state
                 .membership_cache
-                .insert((community_id, known, pk.clone()), true);
+                .seed_member((community_id, known, pk.clone()), true);
             let conn = sync_on(known);
             super::super::fan_out_event_to_local_subscribers(
                 &state,
