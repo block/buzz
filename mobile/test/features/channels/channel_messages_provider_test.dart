@@ -723,54 +723,102 @@ void main() {
     expect(joined.reactions.single.count, 500);
   });
 
-  test(
-    'a page that loads during a failed notice read gets its notices',
-    () async {
-      const id = _paddedId;
+  for (final rowId in [_paddedId('50'), 'z-row']) {
+    test('an empty notice range stops at its message floor: $rowId', () async {
       final relaySession = _RecordingRelaySessionNotifier(
         queryResults: [
           [
-            _event(id: id('a100'), createdAt: 100),
-            _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: id('a100')),
-          ],
-          [
-            _event(id: id('a10'), createdAt: 10),
-            _bounds(dTag: '${_channelId.toLowerCase()}:100:${id('a100')}'),
+            _event(id: rowId, createdAt: 50),
+            _bounds(
+              hasMore: true,
+              cursorCreatedAt: 50,
+              cursorId: _paddedId('50'),
+            ),
           ],
         ],
       );
-      final firstRead = Completer<List<NostrEvent>>();
       relaySession.noticeResults.addAll([
-        firstRead.future,
-        [_joinNotice(id('n50'), 50)],
+        <NostrEvent>[],
+        // Bound a broken implementation too, so a repeated empty-range read
+        // fails the assertion instead of exhausting the test process's heap.
+        Exception('unexpected repeated notice range'),
       ]);
       final container = _buildContainer(relaySession);
       addTearDown(container.dispose);
-
       container.read(channelMessagesProvider(_channelId));
       await relaySession.subscribed;
       await _pumpEventQueue();
       expect(relaySession.noticeFilters, hasLength(1));
-
-      final notifier = container.read(
-        channelMessagesProvider(_channelId).notifier,
-      );
-      expect(await notifier.fetchOlder(), isTrue);
-      await _pumpEventQueue();
-      expect(relaySession.noticeFilters, hasLength(1));
-
-      firstRead.completeError(Exception('notices unavailable'));
-      await _pumpEventQueue();
-      expect(relaySession.noticeFilters, hasLength(2));
       expect(
         container
             .read(channelMessagesProvider(_channelId))
-            .value!
-            .map((event) => event.id),
-        [id('a10'), id('n50'), id('a100')],
+            .requireValue
+            .map((e) => e.id),
+        [rowId],
       );
-    },
-  );
+    });
+  }
+
+  for (final fails in [false, true]) {
+    test(
+      'a page that loads during a notice read gets its notices: fails=$fails',
+      () async {
+        const id = _paddedId;
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: id('a100'), createdAt: 100),
+              _bounds(
+                hasMore: true,
+                cursorCreatedAt: 100,
+                cursorId: id('a100'),
+              ),
+            ],
+            [
+              _event(id: id('a10'), createdAt: 10),
+              _bounds(dTag: '${_channelId.toLowerCase()}:100:${id('a100')}'),
+            ],
+          ],
+        );
+        final firstRead = Completer<List<NostrEvent>>();
+        relaySession.noticeResults.addAll([
+          firstRead.future,
+          [_joinNotice(id('n50'), 50)],
+        ]);
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(1));
+
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        expect(await notifier.fetchOlder(), isTrue);
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(1));
+
+        if (fails) {
+          firstRead.completeError(Exception('notices unavailable'));
+        } else {
+          firstRead.complete([]);
+        }
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(2));
+        expect(relaySession.noticeFilters.first.since, 100);
+        expect(relaySession.noticeFilters.last.since, isNull);
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .value!
+              .map((event) => event.id),
+          [id('a10'), id('n50'), id('a100')],
+        );
+      },
+    );
+  }
 
   test('the notice descent stops at its cap', () async {
     const id = _paddedId;

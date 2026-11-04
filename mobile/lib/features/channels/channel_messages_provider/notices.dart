@@ -67,6 +67,7 @@ extension _ChannelNotices on ChannelMessagesNotifier {
         final events = await session.queryRelay([
           NostrFilters.channelNotices(
             channelId,
+            since: floor?.createdAt,
             until: cursor?.createdAt,
             beforeId: cursor?.eventId,
           ),
@@ -85,7 +86,16 @@ extension _ChannelNotices on ChannelMessagesNotifier {
         final aux = await _readNoticeAux(session, events);
         if (!_isCurrentInit(initVersion)) return;
         if (events.length < NostrFilters.channelNoticePageSize) {
-          _noticesReachedStart = true;
+          if (floor == null) {
+            _noticesReachedStart = true;
+          } else {
+            // Only this range is exhausted. Resume below its message floor
+            // when older pages arrive, even if it was empty. Same-second
+            // notices below the floor are retained and may be read again;
+            // merging by id keeps them unique. Use the captured floor: a
+            // page may have extended the window while this read was in flight.
+            _noticeCursor = floor;
+          }
         } else {
           _noticeCursor = _nextCursor(events, cursor, 'System notices');
         }
