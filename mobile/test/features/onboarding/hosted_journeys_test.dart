@@ -161,10 +161,11 @@ void main() {
   for (final entry in [
     'sign-in',
     'import',
+    'import community link',
     'community link',
     'create community',
   ]) {
-    final importing = entry == 'import';
+    final importing = entry.startsWith('import');
     journey('new account $entry keeps its identity on retry', (
       tester,
       f,
@@ -172,6 +173,7 @@ void main() {
       await f.initialize(localIdentity: false);
       f.bound = null;
       f.offerProfile = false;
+      if (entry == 'import') f.rows.addAll([f.row('one'), f.row('two')]);
       await f.mount(tester, addingCommunity: false);
       if (importing) {
         // An upgraded signed-in account has never chosen import on welcome.
@@ -254,7 +256,14 @@ void main() {
         );
         expect(await f.store.read(), isNull);
         // A new destination must not cancel the pending import choice.
-        await f.link(tester, 'one');
+        if (entry == 'import community link') {
+          await f.link(tester, 'one');
+          expect(find.text('Create my Buzz identity'), findsNothing);
+          expect(await f.store.read(), isNull);
+          await f.link(tester, 'one', invite: false);
+          await f.restart(tester);
+          await f.tap(tester, 'Start login again');
+        }
         expect(find.text('Create my Buzz identity'), findsNothing);
         expect(await f.store.read(), isNull);
         await f.tap(tester, 'Import existing identity');
@@ -286,9 +295,48 @@ void main() {
       expect(f.bound, saved!.pubkey);
       expect(saved.backup, isNull);
       expect(f.flow.problem, HostedFlowProblem.retry);
-      await f.tap(tester, 'Try again');
+      if (importing) {
+        expect(
+          (await f.flow.browser.retainedIntent())!['import_identity'],
+          isNull,
+        );
+        await f.restart(tester);
+        if (entry == 'import community link') {
+          await f.tap(tester, 'Start login again');
+        } else {
+          await f.tap(tester, 'Community home');
+          expect(
+            find.text('Import existing identity').hitTestable(),
+            findsNothing,
+          );
+          await f.tap(tester, 'Find my communities');
+        }
+      } else {
+        await f.tap(tester, 'Try again');
+      }
       expect((await f.store.read())!.pubkey, saved.pubkey);
       expect((await f.store.read())!.backup, isNotNull);
+      if (entry == 'import') {
+        // An older app may have retained the flag after saving this identity.
+        await f.flow.browser.retainIntent({
+          'type': 'account',
+          'import_identity': 'true',
+        });
+        await f.restart(tester);
+        await f.tap(tester, 'Community home');
+        expect(
+          find.text('Import existing identity').hitTestable(),
+          findsNothing,
+        );
+        await f.tap(tester, 'Find my communities');
+        expect(find.text('one').hitTestable(), findsOneWidget);
+        expect((await f.store.read())!.pubkey, saved.pubkey);
+      } else if (entry == 'import community link') {
+        expect(
+          (await f.storage.loadAll()).single.relayUrl,
+          'wss://one.communities.buzz.xyz',
+        );
+      }
     });
   }
 

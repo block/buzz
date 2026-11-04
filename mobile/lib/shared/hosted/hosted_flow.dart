@@ -390,6 +390,16 @@ class HostedFlow extends ChangeNotifier {
       if (!openBrowser) {
         // Mounting the welcome page must not create/bind/back up a key.
         if (_importRequested && restored != null) {
+          final saved = await store.forSubject(restored.subject).read();
+          if (_disposed || generation != _generation) return;
+          if (saved != null) {
+            // Also repair intents saved before import completion was recorded.
+            _importRequested = false;
+            await browser.retainIntent(_accountIntent);
+            if (_disposed || generation != _generation) return;
+          }
+        }
+        if (_importRequested && restored != null) {
           canCreateIdentity = false;
           requiredIdentityPubkey = null;
           _set(HostedFlowStage.setupIdentity);
@@ -587,6 +597,21 @@ class HostedFlow extends ChangeNotifier {
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
     );
+    if (_disposed || generation != _generation) return;
+    if (_importRequested &&
+        {
+          HostedIdentityState.ready,
+          HostedIdentityState.needsBinding,
+          HostedIdentityState.needsBackup,
+        }.contains(resolved.state)) {
+      // Identity selection is durable before binding/backup can fail. Restart
+      // must resume that work rather than ask for the same key again.
+      _importRequested = false;
+      await browser.retainIntent(
+        target == null ? _accountIntent : _intent(target),
+      );
+      if (_disposed || generation != _generation) return;
+    }
     if (resolved.state == HostedIdentityState.needsSetup &&
         resolved.canCreate &&
         createNew &&
@@ -1120,6 +1145,7 @@ class HostedFlow extends ChangeNotifier {
     }
     final fields = Map<String, String>.of(intent)
       ..remove('type')
+      ..remove('import_identity')
       ..remove('paired_pubkey')
       ..remove('paired_protection');
     final host = switch (intent['type']) {
