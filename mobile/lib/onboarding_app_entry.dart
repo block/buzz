@@ -45,6 +45,10 @@ class OnboardingAppEntry extends HookConsumerWidget {
       if (flow == null || !restoreAccount) return null;
       Future<void> restore() async {
         await flow.initialize();
+        if (!context.mounted) return;
+        if (addingCommunity && flow.stage == HostedFlowStage.complete) {
+          await flow.leave();
+        }
         if (context.mounted) await flow.signInAccount(openBrowser: false);
       }
 
@@ -102,7 +106,6 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
       active:
-          !addingCommunity &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
           !creating.value &&
@@ -241,6 +244,9 @@ class OnboardingAppEntry extends HookConsumerWidget {
             : busy
             ? null
             : () => unawaited(flow.signInAccount()),
+        onImportIdentity: flow == null || busy
+            ? null
+            : () => unawaited(flow.signInAccount(importIdentity: true)),
         accountStatus: status,
         builderlabBusy: busy && !signingIn,
         signInPending: signingIn || busy,

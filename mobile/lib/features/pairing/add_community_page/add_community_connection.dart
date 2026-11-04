@@ -9,6 +9,7 @@ class _AddCommunityConnection extends HookWidget {
     this.onSubmitCommunity,
     required this.onboarding,
     this.onFindCommunities,
+    this.onImportIdentity,
     this.onCreateCommunity,
     required this.scannerProgress,
     required this.onBack,
@@ -28,6 +29,7 @@ class _AddCommunityConnection extends HookWidget {
   final ValueChanged<String>? onSubmitCommunity;
   final bool onboarding;
   final VoidCallback? onFindCommunities;
+  final VoidCallback? onImportIdentity;
   final VoidCallback? onCreateCommunity;
   final double scannerProgress;
   final VoidCallback onBack;
@@ -273,7 +275,7 @@ class _AddCommunityConnection extends HookWidget {
                 ),
               ),
             ),
-            if (onboarding && !enteringForm) ...[
+            if (!enteringForm) ...[
               if (onFindCommunities != null)
                 FilledButton(
                   style: FilledButton.styleFrom(
@@ -283,7 +285,12 @@ class _AddCommunityConnection extends HookWidget {
                   onPressed: busy ? null : onFindCommunities,
                   child: const Text('Find my communities'),
                 ),
-              if (onCreateCommunity != null)
+              if (onImportIdentity != null)
+                TextButton(
+                  onPressed: busy ? null : onImportIdentity,
+                  child: const Text('Use an existing identity'),
+                ),
+              if (onboarding && onCreateCommunity != null)
                 FilledButton(
                   style: FilledButton.styleFrom(
                     backgroundColor: context.controlSurface,
