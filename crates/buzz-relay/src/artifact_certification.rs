@@ -25,6 +25,9 @@ pub async fn run(state: Arc<AppState>) {
             }
             match state.db.recover_artifact_certifications_after(after).await {
                 Ok((completed, next)) => {
+                    if completed == 0 && next == after {
+                        break;
+                    }
                     after = next;
                     progress |= completed > 0;
                     if next.is_none() {
