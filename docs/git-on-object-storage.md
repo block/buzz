@@ -525,6 +525,25 @@ transfer:
   consequence of a committed CAS, never the commit itself. A failed 30618
   insert is non-fatal: the push remains durable in the object store, and the
   next read/push surfaces the committed state from the manifest.
+- **kind:30618 order follows the manifest chain.** kind:30618 events are
+  stored side by side, and readers take the one with the greatest
+  `created_at` (lowest id on a tie). Stamping each event with the emitting
+  instance's clock let an older state win: two pushes in one second tie, and a
+  later push on a slower clock sorts first. Each published manifest therefore
+  carries `published_at`, strictly greater than its parent's (`now + 1` after
+  an unstamped parent, such as the announce-time seed), and the derived event
+  uses it as `created_at`. Since the manifests form a chain under CAS, the
+  newest event is the newest manifest regardless of which instance emits it
+  or when. The field is omitted when absent, so the shared empty seed and
+  manifests written before the field existed keep their digests.
+- **A landed CAS stands when the serving lease lapses after it.** The pointer
+  CAS runs under the community serving-write lease, and the lease check after
+  the operation can fail because the heartbeat missed a renewal, not only
+  because deletion has fenced the community. The CAS cannot be undone at that
+  point, so `finalize_push` (and the default-branch setter) keeps its outcome
+  instead of answering 503, and lets the lease-guarded 30618 insert decide
+  whether publication may continue. Lease loss *during* the operation still
+  drops it and answers 503; whether the pointer PUT landed is then unknown.
 - **No advisory lock.** Writer serialization is the CAS. The per-repo mutex the
   legacy persistent-disk path used would only have spanned a single process and
   is incompatible with the multi-instance v1 architecture (§Scope). Dropping it
@@ -647,6 +666,33 @@ concurrent pushers exercise every CAS race relevant to these invariants (a fourt
 adds no qualitatively new interleaving). This is a *bounded* model check, not an
 unbounded proof: it exhaustively verifies the invariants within the bound and is mutation-
 shown non-vacuous, which is the standard claim for a TLC-checked safety spec.
+
+### Implementation-level push model
+
+The TLA+ model treats receive-pack as one atomic step over one ref, so it cannot
+express three behaviors of the code: per-ref `ok`/`ng` results, lease loss
+around the pointer CAS, and the clock that stamps kind:30618. `GitPushPath.qnt`
+is a Quint model of the push path at that level. Two pushers each fetch the
+ref advertisement and then send a receive-pack request, which hydrates from
+whatever pointer is current when it runs. They update three refs (including
+the D/F pair `feature` and `feature/x`), and the publish rule, lease, and
+event timestamps follow `finalize_push`. Its invariants are stated over what
+clients observe:
+
+| Invariant | Statement |
+|---|---|
+| `noFalseSuccess` | a ref the client printed as `ok` reached the published pointer |
+| `noFalseFailure` | a ref the client was told failed did not reach the pointer |
+| `refStateMatchesPointer` | once pushes settle, the kind:30618 readers select matches the pointer |
+
+Each of three flags switches one defect to its fix, and a module per flag
+attributes each counterexample to one defect. The defects are: skipping
+publication on any `ng`, discarding a landed CAS on lease loss, and stamping
+events with the local clock. The `fixed` module, with all three fixes, passes
+200,000 random 14-step simulations (`quint run`) and a bounded symbolic check
+to depth 8 (`quint verify`, using Apalache). Each single-defect module fails
+within 3 to 7 steps. These are bounded checks under small constants, not
+proofs.
 
 ## Summary
 
