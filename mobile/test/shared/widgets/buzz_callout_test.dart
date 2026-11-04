@@ -32,7 +32,7 @@ void main() {
             ),
           ),
         );
-        await tester.pump();
+        await tester.pumpAndSettle();
         final tip = tester.getRect(
           find.ancestor(
             of: find.text('A tip long enough to need room'),
@@ -94,7 +94,7 @@ void cardTests() {
         ),
       ),
     );
-    await tester.pump();
+    await tester.pumpAndSettle();
     final card = tester.getRect(
       find
           .ancestor(of: find.text('Make one'), matching: find.byType(Stack))

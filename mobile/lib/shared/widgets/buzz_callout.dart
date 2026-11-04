@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -17,7 +18,8 @@ const _cardMaxWidth = Grid.xxxl * 6;
 ///
 /// It floats above everything else on the current route without a scrim, so
 /// the screen underneath stays usable, and hides while another route covers
-/// this one.
+/// this one. With a [delay], it waits that long on screen before popping up
+/// from [child], and the wait restarts whenever it's covered.
 ///
 /// The default tip is a short message: any tap, on the tip or elsewhere,
 /// calls [onDismiss]. [BuzzCallout.card] is the loud variant, a full-width
@@ -30,6 +32,7 @@ class BuzzCallout extends HookWidget {
     required this.visible,
     required this.onDismiss,
     required this.child,
+    this.delay = Duration.zero,
     super.key,
   }) : onTap = null,
        artwork = const [];
@@ -41,6 +44,7 @@ class BuzzCallout extends HookWidget {
     required VoidCallback this.onTap,
     required this.child,
     this.artwork = const [],
+    this.delay = Duration.zero,
     super.key,
   });
 
@@ -51,13 +55,30 @@ class BuzzCallout extends HookWidget {
 
   /// Up to six pictures scattered around the card's edges.
   final List<Widget> artwork;
+  final Duration delay;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final showing = visible && (ModalRoute.of(context)?.isCurrent ?? true);
+    final eligible = visible && (ModalRoute.of(context)?.isCurrent ?? true);
+    final waited = useState(false);
+    useEffect(() {
+      waited.value = false;
+      if (!eligible || delay == Duration.zero) return null;
+      return Timer(delay, () => waited.value = true).cancel;
+    }, [eligible, delay]);
+    final showing = eligible && (delay == Duration.zero || waited.value);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final entrance = useAnimationController(duration: appPopoverEnterDuration);
     final controller = useMemoized(OverlayPortalController.new);
     useEffect(() {
+      if (!showing) {
+        entrance.value = 0;
+      } else if (reducedMotion) {
+        entrance.value = 1;
+      } else {
+        unawaited(entrance.forward(from: 0));
+      }
       // The controller can't change during a build, so it follows a frame
       // behind; the builder below hides the callout in the meantime.
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -76,7 +97,7 @@ class BuzzCallout extends HookWidget {
           Offset.zero & info.childSize,
         );
         final padding = MediaQuery.paddingOf(context);
-        return _CalloutPlacement(
+        final placement = _CalloutPlacement(
           target: target,
           margin: EdgeInsets.only(
             left: padding.left + Grid.xs,
@@ -94,6 +115,27 @@ class BuzzCallout extends HookWidget {
                   onTap: onTap,
                   onDismiss: onDismiss,
                 ),
+        );
+        // Pops up from the target: a fade and a short rise while scaling up
+        // around the arrow's tip.
+        return AnimatedBuilder(
+          animation: entrance,
+          builder: (context, placement) {
+            final t = appPopoverEnterCurve.transform(entrance.value);
+            return Opacity(
+              opacity: t,
+              child: Transform.translate(
+                offset: Offset(0, (1 - t) * Grid.xxs),
+                child: Transform.scale(
+                  scale: appPopoverStartScale + (1 - appPopoverStartScale) * t,
+                  alignment: Alignment.topLeft,
+                  origin: Offset(target.center.dx, target.top),
+                  child: placement,
+                ),
+              ),
+            );
+          },
+          child: placement,
         );
       },
       child: child,

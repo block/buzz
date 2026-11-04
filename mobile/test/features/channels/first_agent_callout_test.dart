@@ -18,6 +18,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 
 const _card = 'Create your first agent';
+const _delay = Duration(seconds: 3);
 
 void main() {
   final nsec = nostr.Nip19.encode(
@@ -44,6 +45,8 @@ void main() {
     bool remoteAgents = true,
     List<OwnedAgentDirectoryEntry> owned = const [],
     String? initialBestie,
+    bool reducedMotion = false,
+    bool waitForCard = true,
   }) async {
     final relay = FakeRelay();
     final scope = MeSync(
@@ -68,6 +71,12 @@ void main() {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(disableAnimations: reducedMotion),
+            child: child!,
+          ),
           home: Scaffold(
             body: Center(
               child: TextButton(
@@ -85,6 +94,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    if (waitForCard) {
+      await tester.pump(_delay);
+      await tester.pumpAndSettle();
+    }
   }
 
   bool seen(String community) =>
@@ -229,7 +242,67 @@ void main() {
     expect(find.text(_card), findsNothing);
     navigator.pop();
     await tester.pumpAndSettle();
+    // Coming back restarts the wait.
+    expect(find.text(_card), findsNothing);
+    await tester.pump(_delay);
+    await tester.pumpAndSettle();
     expect(find.text(_card), findsOneWidget);
     expect(seen('https://a.test'), isFalse);
   });
+
+  testWidgets('waits three seconds on Home, then pops up', (tester) async {
+    await pumpHome(tester, waitForCard: false);
+    await tester.pump(_delay - const Duration(milliseconds: 100));
+    expect(find.text(_card), findsNothing);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump();
+    expect(find.text(_card), findsOneWidget);
+    // It starts faint and fades in.
+    expect(_opacity(tester), lessThan(1));
+    await tester.pumpAndSettle();
+    expect(_opacity(tester), 1);
+  });
+
+  testWidgets('with reduced motion it still waits, then appears at once', (
+    tester,
+  ) async {
+    await pumpHome(tester, reducedMotion: true, waitForCard: false);
+    await tester.pump(_delay - const Duration(milliseconds: 100));
+    expect(find.text(_card), findsNothing);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump();
+    expect(find.text(_card), findsOneWidget);
+    expect(_opacity(tester), 1);
+  });
+
+  testWidgets('leaving Home during the wait keeps it from popping up', (
+    tester,
+  ) async {
+    await pumpHome(tester, waitForCard: false);
+    await tester.pump(const Duration(seconds: 2));
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(builder: (_) => const Text('Elsewhere')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(_delay);
+    await tester.pumpAndSettle();
+    expect(find.text(_card), findsNothing);
+    navigator.pop();
+    await tester.pumpAndSettle();
+    // Back on Home, the full wait starts over.
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text(_card), findsNothing);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    expect(find.text(_card), findsOneWidget);
+  });
 }
+
+double _opacity(WidgetTester tester) => tester
+    .widget<Opacity>(
+      find.ancestor(of: find.text(_card), matching: find.byType(Opacity)).first,
+    )
+    .opacity;

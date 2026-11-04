@@ -147,6 +147,8 @@ class DefaultAgentLauncher extends HookConsumerWidget {
     return BuzzCallout.card(
       message: 'Create your first agent',
       visible: showCallout,
+      // Give people a moment with Home before inviting them.
+      delay: const Duration(seconds: 3),
       onTap: open,
       onDismiss: () => dismissFirstAgentCallout(ref),
       artwork: [
