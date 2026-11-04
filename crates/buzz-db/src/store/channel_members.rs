@@ -721,6 +721,17 @@ pub async fn put_members(
     Ok(results)
 }
 
+/// Outcome of a default-channel membership write during roster recovery.
+#[derive(Debug)]
+pub enum DefaultMemberOutcome {
+    /// This transaction joined the member.
+    Joined(MemberRecord),
+    /// Already active; required discovery may still need recovery.
+    Active,
+    /// Left during this admission, or the admission token is no longer current.
+    Skipped,
+}
+
 /// Self-join `pubkey` to `channel_id` as [`put_member`] with no actor and no
 /// requested role (so the channel's `join_role` applies), but only if
 /// `pubkey` has never had a membership row in the channel, active or removed.
@@ -737,25 +748,69 @@ pub async fn put_first_member(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<Option<MemberRecord>> {
+    Ok(
+        match put_first_member_with_pending(pool, community_id, channel_id, pubkey, None).await? {
+            DefaultMemberOutcome::Joined(member) => Some(member),
+            DefaultMemberOutcome::Active | DefaultMemberOutcome::Skipped => None,
+        },
+    )
+}
+
+async fn put_first_member_with_pending(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    pending: Option<Uuid>,
+) -> Result<DefaultMemberOutcome> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    let admitted_at = if let Some(pending) = pending {
+        // Fence removal/re-admission and completion against an older worker.
+        // Keep this lock through the channel write, on the same connection.
+        let current = sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT created_at FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending = $3 FOR SHARE",
+        )
+        .bind(community_id.as_uuid())
+        .bind(hex::encode(pubkey))
+        .bind(pending)
+        .fetch_optional(tx.conn())
+        .await?;
+        let Some(created_at) = current else {
+            tx.rollback().await?;
+            return Ok(DefaultMemberOutcome::Skipped);
+        };
+        Some(created_at)
+    } else {
+        None
+    };
     lock_channel_for_member_put(&mut tx, channel_id).await?;
-    let seen: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM channel_members \
-         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3)",
+    let history: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
+        "SELECT removed_at FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_one(tx.conn())
+    .fetch_optional(tx.conn())
     .await?;
-    if seen {
-        tx.rollback().await?;
-        return Ok(None);
+    if let Some((removed_at,)) = history {
+        // Ordinary first joins preserve all history. Recovery preserves a
+        // leave from this admission, but fresh roster admissions retain the
+        // original behavior of restoring earlier removed memberships.
+        if admitted_at.is_none() || removed_at.is_none() || removed_at >= admitted_at {
+            tx.rollback().await?;
+            return Ok(if removed_at.is_none() {
+                DefaultMemberOutcome::Active
+            } else {
+                DefaultMemberOutcome::Skipped
+            });
+        }
     }
     let target = MemberPut {
         pubkey,
@@ -768,7 +823,7 @@ pub async fn put_first_member(
     match put {
         Ok(put) => {
             tx.commit().await?;
-            Ok(Some(put.member))
+            Ok(DefaultMemberOutcome::Joined(put.member))
         }
         Err(refused) => {
             tx.rollback().await?;
@@ -2257,6 +2312,19 @@ impl Db {
             invited_by,
         )
         .await
+    }
+
+    /// Complete one pending default-channel join, preserving leaves since admission.
+    /// A stale token or a removed relay member writes nothing.
+    #[datastore_span(name = "put_pending_default_member", system = "postgresql")]
+    pub async fn put_pending_default_member(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        pubkey: &[u8],
+        pending: Uuid,
+    ) -> Result<DefaultMemberOutcome> {
+        put_first_member_with_pending(&self.pool, community, channel, pubkey, Some(pending)).await
     }
 
     /// Self-joins `pubkey` with the channel's `join_role` only if they have

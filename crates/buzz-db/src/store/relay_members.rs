@@ -158,8 +158,8 @@ pub async fn add_relay_member(
     )
     .await?;
     let result = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
+         VALUES ($1, $2, $3, $4, gen_random_uuid()) ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
@@ -1189,6 +1189,55 @@ pub async fn rewrite_nip43_membership_list(
 }
 
 impl Db {
+    /// Read unfinished default-channel work and its original adding actor.
+    #[datastore_span(name = "pending_default_channel_join", system = "postgresql")]
+    pub async fn pending_default_channel_join(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<Option<(Uuid, Option<String>)>> {
+        let mut conn = observability::acquire_writer(
+            &self.pool,
+            observability::WriterOperation::Authorization,
+        )
+        .await?;
+        Ok(sqlx::query_as(
+            "SELECT auto_join_pending, added_by FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending IS NOT NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .fetch_optional(&mut *conn)
+        .await?)
+    }
+
+    /// Finish only the admission generation that was actually processed.
+    #[datastore_span(name = "finish_default_channel_join", system = "postgresql")]
+    pub async fn finish_default_channel_join(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        pending: Uuid,
+    ) -> Result<()> {
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE relay_members SET auto_join_pending = NULL \
+             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .bind(pending)
+        .execute(tx.conn())
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
     ///
     /// Replica-routed on the bounded arm — the one PERMISSION read routed by

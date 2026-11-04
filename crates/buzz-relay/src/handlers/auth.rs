@@ -998,25 +998,31 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // the ones they have never been in, under this socket's effect
             // permits. Agents are not.
             let auto_join = !state.config.require_relay_membership && !admitted_agent;
-            if auto_join {
+            {
                 let state = Arc::clone(&state);
                 let tenant = conn.tenant.clone();
                 let gate = Arc::clone(&conn.nip_fi_gate);
                 tokio::spawn(async move {
-                    crate::handlers::side_effects::auto_join_never_joined_channels(
+                    crate::handlers::side_effects::auto_join_default_channels(
                         &tenant,
                         &state,
-                        &pubkey.to_bytes(),
-                        &gate,
+                        &pubkey.to_hex(),
+                        Some(&gate),
                     )
                     .await;
+                    if auto_join {
+                        crate::handlers::side_effects::auto_join_never_joined_channels(
+                            &tenant,
+                            &state,
+                            &pubkey.to_bytes(),
+                            &gate,
+                        )
+                        .await;
+                    } else {
+                        #[cfg(test)]
+                        crate::nip_fi_test_hooks::after_auto_join(tenant.community()).await;
+                    }
                 });
-            }
-            // A test waits on every admission's auto-join outcome, so a skip
-            // reports here as the spawned task does when it finishes.
-            #[cfg(test)]
-            if !auto_join {
-                crate::nip_fi_test_hooks::after_auto_join(conn.tenant.community()).await;
             }
             // _auth_permit drops here — expiry's write guard may proceed.
         }
@@ -2982,6 +2988,71 @@ mod tests {
             assert_eq!(role(&person).await, None, "a leave stands");
         }
 
+        /// Durable roster work is retried by real AUTH admission, including
+        /// agents. Completed work must not enroll members in defaults added later.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn root_auth_recovers_pending_roster_default_joins() {
+            let mut state = auth_test_state_real_db_expect().await;
+            std::sync::Arc::make_mut(
+                &mut std::sync::Arc::get_mut(&mut state)
+                    .expect("unique test state")
+                    .config,
+            )
+            .require_relay_membership = true;
+            let community = seeded_community(&state).await;
+            let (owner, person, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let channel = default_channels(&state, community, &owner, &["recovered"]).await[0];
+            for keys in [&person, &agent] {
+                let _ = state
+                    .db
+                    .add_relay_member(
+                        community,
+                        &keys.public_key().to_hex(),
+                        "member",
+                        Some("invite"),
+                        &state.relay_keypair,
+                    )
+                    .await
+                    .expect("admit with pending work");
+            }
+            let credential = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("credential");
+            let tag: Vec<String> = serde_json::from_str(&credential).expect("tag");
+            for (keys, tag, challenge) in [
+                (&person, None, "recover-person"),
+                (&agent, Some(tag), "recover-agent"),
+            ] {
+                admit_and_settle(&state, community, keys, challenge, tag).await;
+                assert_eq!(
+                    state
+                        .db
+                        .get_member_role(community, channel, &keys.public_key().to_bytes())
+                        .await
+                        .expect("membership")
+                        .as_deref(),
+                    Some("member")
+                );
+                assert!(state
+                    .db
+                    .pending_default_channel_join(community, &keys.public_key().to_hex())
+                    .await
+                    .expect("pending")
+                    .is_none());
+            }
+            let later = default_channels(&state, community, &owner, &["later"]).await[0];
+            admit_and_settle(&state, community, &person, "recover-completed", None).await;
+            assert!(
+                state
+                    .db
+                    .get_member_role(community, later, &person.public_key().to_bytes())
+                    .await
+                    .expect("membership")
+                    .is_none(),
+                "completed work must not become ongoing auto-enrollment"
+            );
+        }
+
         /// The admission auto-join holds the socket's effect permit for each
         /// channel, so a session that ends before a channel's write joins
         /// nothing more: cancelled before the first channel, nothing; between
@@ -2994,67 +3065,90 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn admission_auto_join_stops_when_the_session_ends() {
             use crate::nip_fi_test_hooks::{auto_join_channel_hook, auto_join_done_hook};
-            let state = auth_test_state_real_db_expect().await;
-            let community = seeded_community(&state).await;
-            let owner = Keys::generate();
-            let channels =
-                default_channels(&state, community, &owner, &["general", "announcements"]).await;
-            let roles = |keys: &Keys| {
-                let state = std::sync::Arc::clone(&state);
-                let pubkey = keys.public_key().to_bytes();
-                let channels = channels.clone();
-                async move {
-                    let mut roles = Vec::new();
-                    for channel in channels {
-                        roles.push(
-                            state
-                                .db
-                                .get_member_role(community, channel, &pubkey)
-                                .await
-                                .expect("member role"),
-                        );
-                    }
-                    roles
-                }
-            };
-            let member = Some("member".to_string());
-
-            // `stop_before` channels pass, then the socket is cancelled.
-            for (stop_before, expected) in [(0, [None, None]), (1, [member.clone(), None])] {
-                let person = Keys::generate();
-                let (done, done_release) = auto_join_done_hook::arm(community);
-                let (mut reached, mut release) = auto_join_channel_hook::arm(community);
-                let (conn, _ctrl) = registered_pending_conn(&state, community, "auto-join-stop");
-                handle_auth(
-                    signed_auth(&person, "auto-join-stop", None),
-                    std::sync::Arc::clone(&conn),
-                    std::sync::Arc::clone(&state),
+            for roster in [false, true] {
+                let mut state = auth_test_state_real_db_expect().await;
+                std::sync::Arc::make_mut(
+                    &mut std::sync::Arc::get_mut(&mut state)
+                        .expect("unique test state")
+                        .config,
                 )
-                .await;
-                assert!(matches!(
-                    conn.auth_state_snapshot(),
-                    AuthState::Authenticated(_)
-                ));
-                for _ in 0..stop_before {
-                    reached.await.expect("task reaches a channel");
-                    // Re-arm before the task can run again: this task does
-                    // not yield between the release and the arm.
-                    release.notify_one();
-                    (reached, release) = auto_join_channel_hook::arm(community);
-                }
-                reached.await.expect("task reaches the stop channel");
-                conn.cancel.cancel();
-                release.notify_one();
-                done.await.expect("task finishes");
-                done_release.notify_one();
-                assert_eq!(roles(&person).await, expected, "stop before {stop_before}");
+                .require_relay_membership = roster;
+                let community = seeded_community(&state).await;
+                let owner = Keys::generate();
+                let channels =
+                    default_channels(&state, community, &owner, &["general", "announcements"])
+                        .await;
+                let roles = |keys: &Keys| {
+                    let state = std::sync::Arc::clone(&state);
+                    let pubkey = keys.public_key().to_bytes();
+                    let channels = channels.clone();
+                    async move {
+                        let mut roles = Vec::new();
+                        for channel in channels {
+                            roles.push(
+                                state
+                                    .db
+                                    .get_member_role(community, channel, &pubkey)
+                                    .await
+                                    .expect("member role"),
+                            );
+                        }
+                        roles
+                    }
+                };
+                let member = Some("member".to_string());
 
-                admit_and_settle(&state, community, &person, "auto-join-resume", None).await;
-                assert_eq!(
-                    roles(&person).await,
-                    [member.clone(), member.clone()],
-                    "the next admission joins what was skipped"
-                );
+                // `stop_before` channels pass, then the socket is cancelled.
+                for (stop_before, expected) in [(0, [None, None]), (1, [member.clone(), None])] {
+                    let person = Keys::generate();
+                    if roster {
+                        let _ = state
+                            .db
+                            .add_relay_member(
+                                community,
+                                &person.public_key().to_hex(),
+                                "member",
+                                Some("invite"),
+                                &state.relay_keypair,
+                            )
+                            .await
+                            .expect("pending roster work");
+                    }
+                    let (done, done_release) = auto_join_done_hook::arm(community);
+                    let (mut reached, mut release) = auto_join_channel_hook::arm(community);
+                    let (conn, _ctrl) =
+                        registered_pending_conn(&state, community, "auto-join-stop");
+                    handle_auth(
+                        signed_auth(&person, "auto-join-stop", None),
+                        std::sync::Arc::clone(&conn),
+                        std::sync::Arc::clone(&state),
+                    )
+                    .await;
+                    assert!(matches!(
+                        conn.auth_state_snapshot(),
+                        AuthState::Authenticated(_)
+                    ));
+                    for _ in 0..stop_before {
+                        reached.await.expect("task reaches a channel");
+                        // Re-arm before the task can run again: this task does
+                        // not yield between the release and the arm.
+                        release.notify_one();
+                        (reached, release) = auto_join_channel_hook::arm(community);
+                    }
+                    reached.await.expect("task reaches the stop channel");
+                    conn.cancel.cancel();
+                    release.notify_one();
+                    done.await.expect("task finishes");
+                    done_release.notify_one();
+                    assert_eq!(roles(&person).await, expected, "stop before {stop_before}");
+
+                    admit_and_settle(&state, community, &person, "auto-join-resume", None).await;
+                    assert_eq!(
+                        roles(&person).await,
+                        [member.clone(), member.clone()],
+                        "the next admission joins what was skipped"
+                    );
+                }
             }
         }
 
