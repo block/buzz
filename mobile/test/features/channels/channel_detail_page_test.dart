@@ -17533,9 +17533,18 @@ void main() {
       },
     );
 
-    for (final initialMessageId in [null, 'reply-5']) {
+    // A targeted entry can also hydrate in two steps: the route's snapshot
+    // of the target, then the relay's full thread, which may include the
+    // reader's own earlier replies.
+    for (final (initialMessageId, delayedHydration) in [
+      (null, false),
+      ('reply-5', false),
+      ('reply-5', true),
+    ]) {
       testWidgets('a sent reply stays above the composer as it grows in '
-          '(target: $initialMessageId)', (tester) async {
+          '(target: $initialMessageId, delayed: $delayedHydration)', (
+        tester,
+      ) async {
         final previousPlatform = debugDefaultTargetPlatformOverride;
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(
@@ -17556,7 +17565,7 @@ void main() {
           for (var i = 0; i < 30; i++)
             _textMsg(
               id: 'reply-$i',
-              pubkey: 'bob',
+              pubkey: delayedHydration && i.isEven ? 'self' : 'bob',
               content: 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -17565,10 +17574,16 @@ void main() {
             ),
         ];
 
+        final hydration = Completer<List<NostrEvent>>();
         await tester.pumpWidget(
           _buildTestable(
             messages: [rootEvent],
-            threadReplies: {threadIdThreadDashRoot: replies},
+            threadReplies: delayedHydration
+                ? const {}
+                : {threadIdThreadDashRoot: replies},
+            threadReplyLoaders: delayedHydration
+                ? {threadIdThreadDashRoot: () => hydration.future}
+                : const {},
             users: const {
               'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
               'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
@@ -17578,11 +17593,15 @@ void main() {
         await tester.pumpAndSettle();
 
         final threadHead = formatTimeline([rootEvent]).single;
+        final target = formatTimeline([
+          rootEvent,
+          replies[5],
+        ]).where((message) => message.id == 'reply-5');
         Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
           MaterialPageRoute<void>(
             builder: (_) => ThreadDetailPage(
               threadHead: threadHead,
-              allMessages: [threadHead],
+              allMessages: [threadHead, if (delayedHydration) ...target],
               channelId: _channelId,
               currentPubkey: 'self',
               isMember: true,
@@ -17594,6 +17613,17 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        if (delayedHydration) {
+          hydration.complete(replies);
+          await tester.pumpAndSettle();
+        }
+        if (initialMessageId != null) {
+          expect(
+            find.text('Reply 5').hitTestable(),
+            findsOneWidget,
+            reason: 'The target jump must reveal the hydrated list.',
+          );
+        }
         // Readers scroll a little before replying, which detaches tail follow
         // so focusing the composer no longer snaps to the tail by itself.
         await tester.drag(

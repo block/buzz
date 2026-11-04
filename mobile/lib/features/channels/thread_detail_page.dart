@@ -645,9 +645,11 @@ class ThreadDetailPage extends HookConsumerWidget {
         return null;
       }
       // A targeted entry starts at its target, not the tail. Absorb the
-      // replies it hydrated with once; later arrivals use the ordinary rules
-      // below, so a reply sent from this page still comes into view.
-      if (initialMessageId != null && !initialTailSettle.isComplete) {
+      // replies it hydrates with (a provisional list, then the relay's) until
+      // the target jump reveals the list; a tail correction scheduled earlier
+      // would cancel that one-shot jump and leave the list hidden. Later
+      // arrivals use the ordinary rules below, so a sent reply comes into view.
+      if (initialMessageId != null && !initialViewportReady.value) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
         return null;
