@@ -1,3 +1,4 @@
+import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import '../../shared/widgets/ios_media_carousel.dart';
@@ -441,7 +442,7 @@ class MessageContent extends HookConsumerWidget {
             onMore: onMediaMore == null ? null : mediaMore,
           );
         },
-        textAlign: textAlign,
+        textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
         inlineComponents: inlineComponents,
       ),
@@ -458,15 +459,17 @@ class MessageContent extends HookConsumerWidget {
             children: [
               for (final (index, segment) in segments.indexed)
                 if (segment.attachment)
-                  MessageAttachmentCorners(
-                    borderRadius: _attachmentCorners(
-                      start: bubbleStart && index == 0,
-                      end:
-                          bubbleEnd &&
-                          trailingGallery == null &&
-                          index == segments.length - 1,
+                  MessageReplyDragTarget(
+                    child: MessageAttachmentCorners(
+                      borderRadius: _attachmentCorners(
+                        start: bubbleStart && index == 0,
+                        end:
+                            bubbleEnd &&
+                            trailingGallery == null &&
+                            index == segments.length - 1,
+                      ),
+                      child: renderMarkdown(segment.text),
                     ),
-                    child: renderMarkdown(segment.text),
                   )
                 else
                   Padding(
@@ -479,29 +482,40 @@ class MessageContent extends HookConsumerWidget {
                           ? 0
                           : Grid.quarter,
                     ),
-                    child: LocalSendBubbleSurface(
-                      color: ownMessage
-                          ? chatColors.outgoing
-                          : receivedMessageSurface(context.colors.brightness),
-                      shape: const _MessageBubbleShape(),
-                      child: Padding(
-                        padding: EdgeInsets.fromLTRB(
-                          Grid.xs,
-                          Grid.xxs,
-                          Grid.xs,
-                          hasReactions && index == segments.length - 1
-                              ? Grid.xs
-                              : Grid.xxs,
-                        ),
-                        child: Theme(
-                          data: Theme.of(context).copyWith(
-                            colorScheme: context.colors.copyWith(
-                              primary: linkColor,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth:
+                            MediaQuery.sizeOf(context).width *
+                            messageTextMaxWidthFraction,
+                      ),
+                      child: MessageReplyDragTarget(
+                        child: LocalSendBubbleSurface(
+                          color: ownMessage
+                              ? chatColors.outgoing
+                              : receivedMessageSurface(
+                                  context.colors.brightness,
+                                ),
+                          shape: const _MessageBubbleShape(),
+                          child: Padding(
+                            padding: EdgeInsets.fromLTRB(
+                              Grid.xs,
+                              Grid.xxs,
+                              Grid.xs,
+                              hasReactions && index == segments.length - 1
+                                  ? Grid.xs
+                                  : Grid.xxs,
                             ),
-                          ),
-                          child: GptMarkdownTheme(
-                            gptThemeData: bubbleMarkdownTheme,
-                            child: renderMarkdown(segment.text),
+                            child: Theme(
+                              data: Theme.of(context).copyWith(
+                                colorScheme: context.colors.copyWith(
+                                  primary: linkColor,
+                                ),
+                              ),
+                              child: GptMarkdownTheme(
+                                gptThemeData: bubbleMarkdownTheme,
+                                child: renderMarkdown(segment.text),
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -519,21 +533,23 @@ class MessageContent extends HookConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
-        MessageAttachmentCorners(
-          borderRadius: _attachmentCorners(
-            start: bubbleStart && trailingGallery.content.trim().isEmpty,
-            end: bubbleEnd,
-          ),
-          child: _MessageImageCarousel(
-            key: ValueKey(
-              trailingGallery.items.map((item) => item.url).join('\u0000'),
+        MessageReplyDragTarget(
+          child: MessageAttachmentCorners(
+            borderRadius: _attachmentCorners(
+              start: bubbleStart && trailingGallery.content.trim().isEmpty,
+              end: bubbleEnd,
             ),
-            items: trailingGallery.items,
-            mirrored: ownMessage,
-            leadingOverflow: mediaCarouselLeadingOverflow,
-            trailingOverflow: mediaCarouselTrailingOverflow,
-            onReply: onMediaReply,
-            onMore: onMediaMore,
+            child: _MessageImageCarousel(
+              key: ValueKey(
+                trailingGallery.items.map((item) => item.url).join('\u0000'),
+              ),
+              items: trailingGallery.items,
+              mirrored: ownMessage,
+              leadingOverflow: mediaCarouselLeadingOverflow,
+              trailingOverflow: mediaCarouselTrailingOverflow,
+              onReply: onMediaReply,
+              onMore: onMediaMore,
+            ),
           ),
         ),
       ],

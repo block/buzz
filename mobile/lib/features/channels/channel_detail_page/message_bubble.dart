@@ -267,7 +267,17 @@ class _MessageBubble extends HookConsumerWidget {
                                         children: [
                                           Expanded(
                                             child: MessageAuthorMeta(
-                                              mark: VerifiedMark(pubkey: pk),
+                                              timestampGap: Grid.half,
+                                              showIdentity:
+                                                  showMessageAuthorName(
+                                                    ref,
+                                                    currentChannelId,
+                                                    message.pubkey,
+                                                    currentPubkey,
+                                                  ),
+                                              mark: ownMessage
+                                                  ? null
+                                                  : VerifiedMark(pubkey: pk),
                                               showTimestamp: true,
                                               reversed: false,
                                               alignment: ownMessage
@@ -276,14 +286,16 @@ class _MessageBubble extends HookConsumerWidget {
                                               nameStyle:
                                                   messageUsernameTextStyle
                                                       .copyWith(
-                                                        fontSize: 13.1,
-                                                        height: 17 / 13.1,
+                                                        fontWeight:
+                                                            FontWeight.w500,
+                                                        fontSize: 11,
+                                                        height: 17 / 11,
                                                       ),
                                               metadataStyle:
                                                   messageMetadataTextStyle
                                                       .copyWith(
-                                                        fontSize: 13.1,
-                                                        height: 17 / 13.1,
+                                                        fontSize: 11,
+                                                        height: 17 / 11,
                                                       ),
                                               timestampStyle:
                                                   messageTimestampTextStyle
@@ -291,18 +303,21 @@ class _MessageBubble extends HookConsumerWidget {
                                                         fontSize: 11,
                                                         height: 17 / 11,
                                                       ),
-                                              displayName: displayName,
-                                              username: messageUsernameLabel(
-                                                profile,
-                                              ),
+                                              displayName: ownMessage
+                                                  ? 'You'
+                                                  : displayName,
+                                              username: ownMessage
+                                                  ? null
+                                                  : messageUsernameLabel(
+                                                      profile,
+                                                    ),
                                               timestamp: formatMessageTime(
                                                 message.createdAt,
                                               ),
                                               nameColor:
-                                                  context.colors.onSurface,
-                                              metadataColor: context
-                                                  .colors
-                                                  .onSurfaceVariant,
+                                                  context.tertiaryTextColor,
+                                              metadataColor:
+                                                  context.tertiaryTextColor,
                                               onAuthorTap: () =>
                                                   showUserProfileSheet(
                                                     context,
@@ -355,7 +370,7 @@ class _MessageBubble extends HookConsumerWidget {
                                       bubbleEnd: showAvatar,
                                       bubbleStart: showAuthor,
                                       ownMessage: ownMessage,
-                                      trimTrailingSpacing: endsDay,
+                                      trimTrailingSpacing: true,
                                       mentionNames: resolvedMentionNames,
                                       mentionLabels: mentionLabels,
                                       agentMentionPubkeys: agentMentionPubkeys,

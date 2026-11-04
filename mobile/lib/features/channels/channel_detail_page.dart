@@ -1,3 +1,4 @@
+import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'message_swipe_reply.dart';

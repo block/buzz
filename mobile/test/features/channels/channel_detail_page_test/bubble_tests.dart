@@ -1,6 +1,7 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  messageAuthorVisibilityTests();
   testWidgets('reply footer does not add reaction padding inside the bubble', (
     tester,
   ) async {

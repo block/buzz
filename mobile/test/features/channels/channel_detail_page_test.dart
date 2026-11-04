@@ -107,6 +107,8 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/message_width_tests.dart';
+part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 
@@ -689,7 +691,15 @@ void main() {
           isTrue,
         );
         final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
-        await tester.drag(row, const Offset(220, 0));
+        await tester.drag(
+          find
+              .descendant(
+                of: row,
+                matching: find.byType(LocalSendBubbleSurface),
+              )
+              .first,
+          const Offset(220, 0),
+        );
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(tester.takeException(), isNull);
@@ -937,6 +947,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  messageWidthTests();
   swipeReplyTests();
   reviewAvatarTests();
   setUp(() async {
@@ -4401,30 +4412,27 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, 13.1);
-      expect(aliceText.style?.fontWeight, messageUsernameTextStyle.fontWeight);
-      expect(aliceText.style?.height, 17 / 13.1);
+      expect(aliceText.style?.fontSize, 11);
+      expect(aliceText.style?.fontWeight, FontWeight.w500);
+      expect(aliceText.style?.height, 17 / 11);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, 13.1);
+      expect(aliceUsername.style?.fontSize, 11);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, 17 / 13.1);
+      expect(aliceUsername.style?.height, 17 / 11);
       expect(aliceTimestamp.style?.fontSize, 11);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
+      final timeFinder = find.byKey(const ValueKey('message-timestamp-msg1'));
       expect(
-        tester
-            .getCenter(find.byKey(const ValueKey('message-timestamp-msg1')))
-            .dy,
+        tester.getCenter(timeFinder).dy,
         closeTo(tester.getCenter(aliceName).dy, 0.01),
       );
-      expect(
-        aliceTimestamp.style?.fontSize,
-        lessThan(aliceText.style!.fontSize!),
-      );
+      expect(aliceTimestamp.style?.color, aliceText.style?.color);
+      expect(aliceTimestamp.style?.fontSize, aliceText.style!.fontSize!);
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('message-row-msg1')),
@@ -15534,7 +15542,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(31, 'Tall latest reply').join('\n')
+                  ? List.filled(31, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -15900,7 +15908,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(14, 'Tall latest reply').join('\n')
+                  ? List.filled(14, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
