@@ -582,7 +582,7 @@ for team access setup, onboarding, and the full repo inventory. See
 Prefer a signed Nostr event and the existing WebSocket/`POST /events` ingest
 path over adding endpoint-specific JSON APIs. The relay intentionally exposes
 only a narrow HTTP surface: NIP-11/NIP-05 metadata, `/events`, `/query`,
-`/count`, `/hooks/{id}`, Blossom media, git smart HTTP, git policy hooks, and
+`/count`, `/hooks/{id}`, `/hooks/github/{hook}`, Blossom media, git smart HTTP, git policy hooks, and
 health probes.
 
 If an HTTP endpoint is still necessary:
