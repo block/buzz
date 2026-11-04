@@ -786,12 +786,11 @@ where
 {
     let mode = crate::nip_fi_policy::admission_mode(state, headers)
         .await
-        .map_err(|response| {
+        .inspect_err(|_| {
             slot.method(AuthMethod::NipFi);
             slot.finish(AuthResult::Denied(
                 crate::access::AuthReason::AuthorizationUnavailable,
             ));
-            response
         })?;
     let verifier = state.nip_fi_verifier.as_deref();
     let communities = state.nip_fi_communities();
