@@ -542,8 +542,10 @@ pub async fn search_profile_names(
         qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
     }
     qb.push(
-        "), people AS (SELECT person, min(tier) AS tier, max(rank) AS rank, \
-         max(created_at) AS created_at FROM matches GROUP BY person \
+        // Each person ranks by their single best match, not by mixing sources.
+        "), people AS (SELECT * FROM (SELECT DISTINCT ON (person) person, tier, \
+         rank, created_at FROM matches \
+         ORDER BY person, tier, rank DESC, created_at DESC) AS best \
          ORDER BY tier, rank DESC, created_at DESC, person LIMIT ",
     );
     qb.push_bind(per_page as i64);

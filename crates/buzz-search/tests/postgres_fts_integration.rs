@@ -2300,6 +2300,41 @@ async fn profile_names_match_verified_names() {
         .await
         .is_empty());
 
+    // A person ranks by their single best match. Kim's exact kind:0 name
+    // outranks Ken's, and Ken's better-ranked verified match has a worse tier.
+    let ken = rand_bytes32();
+    let ken_profile = put_profile_for(&pool, c, ken, r#"{"name":"Kname"}"#, 1_700_000_100).await;
+    put_verified(
+        &pool,
+        c,
+        relay,
+        ken,
+        &[
+            ("display_name", "Doctor Kname"),
+            ("username", "doctor-kname"),
+            ("full_name", "Doctor Kname"),
+        ],
+        1_700_000_110,
+    )
+    .await;
+    let kim = rand_bytes32();
+    let kim_profile = put_profile_for(
+        &pool,
+        c,
+        kim,
+        r#"{"name":"Kname","display_name":"Kname"}"#,
+        1_700_000_000,
+    )
+    .await;
+    assert_eq!(
+        people(&pool, c, "kname", Some(relay), 1, 1).await,
+        vec![kim_profile]
+    );
+    assert_eq!(
+        people(&pool, c, "kname", Some(relay), 2, 1).await.first(),
+        Some(&ken_profile)
+    );
+
     teardown(pool, &schema).await;
 }
 
