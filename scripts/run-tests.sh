@@ -378,8 +378,12 @@ run_unit_tests() {
   run_test_step "buzz-relay read cache tests" \
     cargo test -p buzz-relay --lib -- --exact --nocapture \
       state::tests::admitted_index_follows_every_key_change \
+      shared_reads::tests::one_caller_reads_while_the_rest_wait_for_it \
+      shared_reads::tests::a_waiter_stops_waiting_for_a_hung_read \
       state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
+      state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read \
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
+      tenant::tests::an_overlong_host_fails_closed_before_the_resolver \
       state::tests::disconnect_drops_the_cached_restriction_row
 
   run_test_step "buzz-relay router tests" \
