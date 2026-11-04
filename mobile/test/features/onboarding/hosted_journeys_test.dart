@@ -564,8 +564,7 @@ void main() {
       );
       addTearDown(sessionSubscription.close);
       await f.settle(tester);
-      const refused =
-          'Your organization account cannot use this community with this key.';
+      const refused = 'Denied access to this community.';
       expect(find.text(refused), findsOneWidget);
       expectAboveTabBar(tester, 'Use a different account');
       expect(f.sent('/identity/assertions'), isEmpty);
