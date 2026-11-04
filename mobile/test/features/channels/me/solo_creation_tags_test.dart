@@ -14,10 +14,6 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:buzz/shared/profile/user_cache_provider.dart';
-import 'package:buzz/shared/profile/user_profile.dart';
-import 'package:buzz/shared/widgets/app_list.dart';
-import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
@@ -81,7 +77,6 @@ void main() {
             null,
           ),
         );
-        final flutterSheet = defaultTargetPlatform == TargetPlatform.android;
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
         final owner = nostr.Keys.generate(), agent = nostr.Keys.generate();
@@ -173,33 +168,21 @@ void main() {
           }
         });
         final directory = Completer<List<AgentDirectoryEntry>>();
-        if (!recoverExisting) {
-          directory.complete([
+        // A recovered creation keeps its saved agent even when discovery no
+        // longer lists it.
+        directory.complete([
+          if (!recoverExisting)
             AgentDirectoryEntry(
               pubkey: agent.public,
               displayName: 'Owned agent',
             ),
-          ]);
-        } else if (flutterSheet) {
-          directory.complete([]);
-        }
-        final draft = Completer<Map<String, String>>();
-        String? presentationId;
-        Map<Object?, Object?>? agentUpdate;
-        Object? savedAssistant;
-        var forms = 0;
+        ]);
+        final bridgeCalls = <MethodCall>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
         ) async {
-          if (call.method == 'updateChatAssistants') {
-            agentUpdate = call.arguments as Map<Object?, Object?>;
-            return null;
-          }
-          if (++forms > 1) return null;
-          final arguments = call.arguments as Map;
-          presentationId = arguments['presentationId'] as String;
-          savedAssistant = arguments['savedAssistant'];
-          return draft.future;
+          bridgeCalls.add(call);
+          return null;
         });
         addTearDown(
           () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -254,57 +237,24 @@ void main() {
           await tester.tap(find.text('Resume'));
           await tester.pumpAndSettle();
         }
-        if (!recoverExisting) {
+        expect(bridgeCalls, isEmpty, reason: 'No native New chat sheet');
+        if (recoverExisting) {
+          expect(find.byType(ComposeBar), findsNothing);
+          expect(
+            tester
+                .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
+                .nativeActions!
+                .last
+                .onPressed,
+            isNull,
+            reason: 'The saved agent stays locked',
+          );
+          await tester.tap(find.text('Retry'));
+        } else {
           final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
           unawaited(
             composer.onSend('Mobile Solo', const []).catchError((_) {}),
           );
-        } else if (flutterSheet) {
-          final row = find.byKey(const ValueKey('new-session-assistant'));
-          final semantics = tester.ensureSemantics();
-          await tester.pump();
-          expect(find.text('Choose an agent'), findsNothing);
-          expect(find.text(agent.public), findsOneWidget);
-          expect(find.bySemanticsLabel(agent.public), findsOneWidget);
-          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
-          final container = ProviderScope.containerOf(tester.element(row));
-          container
-              .read(userCacheProvider.notifier)
-              .put(
-                UserProfile(pubkey: agent.public, displayName: 'Saved agent'),
-              );
-          await tester.pumpAndSettle();
-          expect(find.text('Saved agent'), findsOneWidget);
-          expect(find.bySemanticsLabel('Saved agent'), findsOneWidget);
-          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
-          semantics.dispose();
-          await tester.tap(find.text('Retry'));
-        } else {
-          expect(
-            forms,
-            1,
-            reason: 'Compose opens even while agents are loading',
-          );
-          if (recoverExisting) {
-            expect(savedAssistant, {
-              'id': agent.public,
-              'name': agent.public,
-              'avatarUrl': '',
-            });
-          }
-          directory.complete([
-            AgentDirectoryEntry(
-              pubkey: agent.public,
-              displayName: 'Owned agent',
-            ),
-          ]);
-          await tester.pumpAndSettle();
-          expect(agentUpdate?['presentationId'], presentationId);
-          expect(
-            (agentUpdate?['assistants'] as List).single['id'],
-            agent.public,
-          );
-          draft.complete({'name': 'Mobile Solo', 'assistant': agent.public});
         }
         for (
           var attempts = 0;
@@ -325,7 +275,14 @@ void main() {
             9000,
             reason: 'Recovery continues with member setup',
           );
-          expect(MeChatCreation.pending(sync)?.id, channelId);
+          final pending = MeChatCreation.pending(sync)!;
+          expect(pending.id, channelId);
+          expect(pending.name, 'Mobile Solo');
+          expect(
+            pending.initialMessage,
+            isNull,
+            reason: 'A named creation from an older build finishes as saved',
+          );
           expect(command.tags, contains(equals(['p', agent.public])));
         } else {
           final pending = MeChatCreation.pending(sync)!;

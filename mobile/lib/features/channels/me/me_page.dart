@@ -2,18 +2,13 @@ import 'dart:convert';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../shared/profile/user_cache_provider.dart';
-import '../../../shared/mentions/agent_identity_provider.dart';
-import '../../../shared/animated_avatar.dart';
-import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/bee_refresh_indicator.dart';
-import 'me_assistant_list.dart';
 import 'me_section.dart';
 import 'me_working_provider.dart';
 import 'solo_working_dots.dart';
@@ -48,7 +43,6 @@ part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
 part 'new_me_chat.dart';
 part 'me_chat_draft.dart';
-part 'native_new_me_chat.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
@@ -127,19 +121,7 @@ class MePage extends HookConsumerWidget {
           });
     final VoidCallback? newChat = busy.value || !groups.hasValue
         ? null
-        : () => perform(() async {
-            final result = await _showNewMeChat(context, ref);
-            if (result == null || !context.mounted) return;
-            await Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ChannelDetailPage(
-                  channel: result.$1,
-                  personalChat: true,
-                  initialAssistant: result.$2,
-                ),
-              ),
-            );
-          });
+        : () => perform(() => _openNewMeChat(context, ref));
 
     useEffect(() {
       var active = true;
