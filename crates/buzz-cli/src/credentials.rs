@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, NostrSigner, PublicKey, Tag};
+use nostr::{
+    Event, EventBuilder, JsonUtil, Keys, Kind, NostrSigner, PublicKey, Tag, UnsignedEvent,
+};
 use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
@@ -164,6 +166,96 @@ fn parse_auth_tag(input: &str, public_key: &PublicKey) -> Result<AuthTag, CliErr
     })
 }
 
+/// The credentials' signer for NIP-42, keeping a desktop signing failure as
+/// a [`CliError`]: protocol code carries only its text, and a throttled
+/// desktop must stay retryable.
+#[derive(Debug)]
+pub struct CapturingSigner {
+    signer: Arc<dyn NostrSigner>,
+    #[cfg(unix)]
+    desktop: Option<Arc<crate::desktop_provider::Provider>>,
+    failure: std::sync::Mutex<Option<CliError>>,
+}
+
+impl CapturingSigner {
+    pub fn new(credentials: &Credentials) -> Self {
+        Self {
+            signer: credentials.signer.clone(),
+            #[cfg(unix)]
+            desktop: credentials.desktop.clone(),
+            failure: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The desktop signing failure, if one happened.
+    pub fn take_failure(&self) -> Option<CliError> {
+        self.failure.lock().ok()?.take()
+    }
+}
+
+impl NostrSigner for CapturingSigner {
+    fn backend(&self) -> nostr::signer::SignerBackend<'_> {
+        self.signer.backend()
+    }
+
+    fn get_public_key(
+        &self,
+    ) -> nostr::util::BoxedFuture<'_, Result<PublicKey, nostr::signer::SignerError>> {
+        self.signer.get_public_key()
+    }
+
+    fn sign_event(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> nostr::util::BoxedFuture<'_, Result<Event, nostr::signer::SignerError>> {
+        #[cfg(unix)]
+        if let Some(provider) = &self.desktop {
+            return Box::pin(async move {
+                provider.sign(unsigned).await.map_err(|e| {
+                    let text = nostr::signer::SignerError::from(e.to_string());
+                    if let Ok(mut slot) = self.failure.lock() {
+                        slot.get_or_insert(e);
+                    }
+                    text
+                })
+            });
+        }
+        self.signer.sign_event(unsigned)
+    }
+
+    fn nip04_encrypt<'b>(
+        &'b self,
+        peer: &'b PublicKey,
+        content: &'b str,
+    ) -> nostr::util::BoxedFuture<'b, Result<String, nostr::signer::SignerError>> {
+        self.signer.nip04_encrypt(peer, content)
+    }
+
+    fn nip04_decrypt<'b>(
+        &'b self,
+        peer: &'b PublicKey,
+        payload: &'b str,
+    ) -> nostr::util::BoxedFuture<'b, Result<String, nostr::signer::SignerError>> {
+        self.signer.nip04_decrypt(peer, payload)
+    }
+
+    fn nip44_encrypt<'b>(
+        &'b self,
+        peer: &'b PublicKey,
+        content: &'b str,
+    ) -> nostr::util::BoxedFuture<'b, Result<String, nostr::signer::SignerError>> {
+        self.signer.nip44_encrypt(peer, content)
+    }
+
+    fn nip44_decrypt<'b>(
+        &'b self,
+        peer: &'b PublicKey,
+        payload: &'b str,
+    ) -> nostr::util::BoxedFuture<'b, Result<String, nostr::signer::SignerError>> {
+        self.signer.nip44_decrypt(peer, payload)
+    }
+}
+
 impl Credentials {
     /// Credentials for an in-memory key with no auth tag and no evidence source.
     pub fn from_keys(keys: Keys) -> Self {
@@ -225,11 +317,6 @@ impl Credentials {
     /// The public key this process acts as.
     pub fn public_key(&self) -> PublicKey {
         self.public_key
-    }
-
-    /// The signer, for protocol code that takes a [`NostrSigner`] (NIP-42).
-    pub fn signer(&self) -> &Arc<dyn NostrSigner> {
-        &self.signer
     }
 
     /// The NIP-OA auth tag, if configured.
@@ -297,7 +384,16 @@ impl Credentials {
     /// Sign `builder` as this identity. Callers own the tags; auth-tag
     /// injection is [`crate::client::BuzzClient::sign_event`]'s job.
     pub async fn sign(&self, builder: EventBuilder) -> Result<Event, CliError> {
-        let unsigned = builder.build(self.public_key);
+        self.sign_unsigned(builder.build(self.public_key)).await
+    }
+
+    /// Sign `unsigned` as this identity. A desktop failure keeps its own
+    /// error, so a throttled desktop stays retryable.
+    pub async fn sign_unsigned(&self, unsigned: UnsignedEvent) -> Result<Event, CliError> {
+        #[cfg(unix)]
+        if let Some(provider) = &self.desktop {
+            return provider.sign(unsigned).await;
+        }
         let event = self
             .signer
             .sign_event(unsigned)
@@ -317,6 +413,10 @@ impl Credentials {
         peer: &PublicKey,
         plaintext: &str,
     ) -> Result<String, CliError> {
+        #[cfg(unix)]
+        if let Some(provider) = &self.desktop {
+            return provider.nip44_encrypt(peer, plaintext).await;
+        }
         self.signer
             .nip44_encrypt(peer, plaintext)
             .await

@@ -90,6 +90,8 @@ fn relay_server_tag(relay_url: &str) -> Option<String> {
 }
 
 /// Maximum number of attempts per request (initial attempt + two retries).
+/// The WebSocket connect and upgrade, before any NIP-42 wait.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RETRY_MAX_ATTEMPTS: u32 = 3;
 
 /// Base sleep durations for full-jitter exponential backoff.
@@ -1236,23 +1238,14 @@ impl BuzzClient {
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
-        // Hard cap — inner wait ceilings sum to 70 s; connect time and network RTT are
-        // additional overhead absorbed by this budget. NIP-42 signing runs inside
-        // it too, and a desktop provider may hold `sign_event` for a person's
-        // decision, so the cap adds that allowance.
-        // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
-        // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
         let headers = self.upgrade_headers().await?;
-        let ok = buzz_ws_client::publish_event(
-            &ws_url,
-            event,
-            self.credentials.signer(),
-            self.credentials.auth_tag().map(|t| &t.tag),
-            headers,
-            75 + crate::desktop_provider::HELD_TIMEOUT.as_secs(),
-        )
-        .await
-        .map_err(|e| match e.upgrade_rejection() {
+        // Two deadlines: the relay's waits are each capped (the connect below,
+        // and buzz_ws_client's AUTH_CHALLENGE / AUTH_OK / PUBLISH_OK ceilings),
+        // and NIP-42 signing between them is bounded by the signer itself. A
+        // desktop provider may wait out throttling and hold `sign_event` for a
+        // person's decision, which no relay budget should cut short.
+        let signer = crate::credentials::CapturingSigner::new(&self.credentials);
+        let ws_error = |e: buzz_ws_client::WsClientError| match e.upgrade_rejection() {
             // A denial decided on the upgrade is an HTTP response (NIP-FI).
             Some((status, body)) => self.relay_error(status, body),
             // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
@@ -1260,7 +1253,19 @@ impl BuzzClient {
                 CliError::Auth(e.to_string())
             }
             None => CliError::Other(e.to_string()),
-        })?;
+        };
+        let mut conn = tokio::time::timeout(
+            WS_CONNECT_TIMEOUT,
+            buzz_ws_client::NostrWsConnection::connect_with_headers(&ws_url, headers),
+        )
+        .await
+        .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
+        .map_err(ws_error)?;
+        conn.authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
+            .await
+            .map_err(|e| signer.take_failure().unwrap_or_else(|| ws_error(e)))?;
+        let ok = conn.send_event(event).await.map_err(ws_error)?;
+        let _ = conn.disconnect().await;
 
         if !ok.accepted {
             return Err(CliError::Relay {
@@ -3237,5 +3242,162 @@ mod federated_identity_route_tests {
         );
         assert_eq!(crate::error::exit_code(&err), 3);
         assert!(!crate::error::is_retryable_error(&err));
+    }
+}
+
+/// A desktop that stays `rate_limited`, or throttles and then holds a
+/// signature, through every command path that signs or encrypts.
+#[cfg(all(test, unix))]
+mod desktop_throttle_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use futures_util::{SinkExt, StreamExt};
+    use nostr::{EventBuilder, Kind};
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::BuzzClient;
+    use crate::desktop_provider::{tests as dp, Provider};
+    use crate::error::CliError;
+
+    /// A desktop holding `keys` that answers `rate_limited` to `throttled`.
+    async fn client(relay: &str, keys: &nostr::Keys, throttled: &'static str) -> BuzzClient {
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.into()]);
+        let (endpoint, _) = dp::provider(move |version, request| {
+            if request["method"] == throttled {
+                return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1});
+            }
+            answer(version, request)
+        })
+        .await;
+        let provider = Provider::open(endpoint, "t".into(), false, relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        BuzzClient::new(relay.into(), credentials).unwrap()
+    }
+
+    /// An HTTP relay answering every query with no events.
+    async fn http_relay() -> String {
+        let app = axum::Router::new().fallback(|| async { axum::Json(serde_json::json!([])) });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        relay
+    }
+
+    fn assert_throttled(err: CliError) {
+        assert!(matches!(err, CliError::Throttled(_)), "{err:?}");
+        assert!(crate::error::is_retryable_error(&err));
+        assert_eq!(crate::error::exit_code(&err), 2);
+    }
+
+    #[tokio::test]
+    async fn persistent_throttling_is_retryable_on_every_signing_path() {
+        let keys = nostr::Keys::generate();
+        let relay = http_relay().await;
+        let c = client(&relay, &keys, "sign_event").await;
+
+        // NIP-98 on an ordinary request.
+        assert_throttled(c.query(&serde_json::json!({})).await.unwrap_err());
+        // Event signing.
+        assert_throttled(
+            c.sign_event(EventBuilder::new(Kind::TextNote, "x"))
+                .await
+                .unwrap_err(),
+        );
+
+        // Memory encryption.
+        let c = client(&relay, &keys, "nip44_encrypt").await;
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        assert_throttled(
+            crate::commands::mem::cmd_set(&c, "mem/a", "v", Some(&owner), false)
+                .await
+                .unwrap_err(),
+        );
+    }
+
+    /// A WebSocket relay that sends a challenge, then OKs AUTH and one event.
+    /// Returns its URL and the count of AUTH and EVENT frames it received.
+    async fn ws_relay() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (auths, events) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (a, e) = (auths.clone(), events.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (a, e) = (a.clone(), e.clone());
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let _ = ws
+                        .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                        .await;
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let counter = if frame[0] == "AUTH" { &a } else { &e };
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                    }
+                });
+            }
+        });
+        (relay, auths, events)
+    }
+
+    #[tokio::test]
+    async fn persistent_throttling_during_nip42_is_retryable() {
+        let keys = nostr::Keys::generate();
+        let (relay, auths, events) = ws_relay().await;
+        let c = client(&relay, &keys, "sign_event").await;
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert_throttled(c.publish_ephemeral_event(event).await.unwrap_err());
+        assert_eq!(auths.load(Ordering::SeqCst), 0);
+        assert_eq!(events.load(Ordering::SeqCst), 0);
+    }
+
+    /// NIP-42 signing that is throttled, then held for a decision, completes
+    /// the publish: provider time is outside the relay's deadlines, and the
+    /// relay sees one AUTH and one EVENT.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_throttled_then_held_nip42_signature_completes_without_replay() {
+        let keys = nostr::Keys::generate();
+        let (relay, auths, events) = ws_relay().await;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let counted = signs.clone();
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.clone()]);
+        let (endpoint, _) = dp::provider(move |version, request| {
+            if request["method"] == "sign_event" {
+                if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30});
+                }
+                // Held for a person's decision.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            answer(version, request)
+        })
+        .await;
+        let provider = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        let c = BuzzClient::new(relay, credentials).unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(signs.load(Ordering::SeqCst), 2);
+        assert_eq!(auths.load(Ordering::SeqCst), 1);
+        assert_eq!(events.load(Ordering::SeqCst), 1);
     }
 }

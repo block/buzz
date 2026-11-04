@@ -4,8 +4,8 @@
 //! The caller never holds the private key. It finds a provider through an
 //! inherited `BUZZ_CREDENTIAL_PROVIDER` token or a paired token in the OS
 //! keychain, and sends each request on a connection whose server side it has
-//! confirmed belongs to the same OS user (inherited tokens skip that check,
-//! because the desktop handed the endpoint to the process directly).
+//! confirmed belongs to the same OS user, for inherited and paired tokens
+//! alike.
 //!
 //! Version 1 has no Windows transport, so the link is compiled for Unix only.
 
@@ -36,6 +36,12 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// up to this many times, each after `retry_after` capped at the wait below.
 const RATE_LIMIT_RETRIES: u32 = 4;
 const RATE_LIMIT_MAX_WAIT_SECS: u64 = 30;
+/// One `retry_after` second; tests shorten it so throttling stays fast.
+const RETRY_AFTER_UNIT: Duration = if cfg!(test) {
+    Duration::from_millis(10)
+} else {
+    Duration::from_secs(1)
+};
 
 /// Re-ask for an assertion this long before its `exp`.
 const REFRESH_MARGIN_SECS: u64 = 30;
@@ -392,7 +398,7 @@ async fn call(
                     .retry_after
                     .unwrap_or(1)
                     .clamp(1, RATE_LIMIT_MAX_WAIT_SECS);
-                tokio::time::sleep(Duration::from_secs(wait)).await;
+                tokio::time::sleep(RETRY_AFTER_UNIT * wait as u32).await;
             }
             other => {
                 return Err(ProviderError::Code {
@@ -515,6 +521,25 @@ impl Provider {
 
     pub fn public_key(&self) -> PublicKey {
         self.public_key
+    }
+
+    /// Sign `unsigned` as this identity; the result is checked.
+    pub async fn sign(&self, unsigned: UnsignedEvent) -> Result<Event, CliError> {
+        let signed = self.call("sign_event", &[unsigned.as_json()]).await?;
+        let event = Event::from_json(&signed)
+            .map_err(|_| CliError::Auth("Buzz desktop returned an unreadable event".into()))?;
+        if event.pubkey != self.public_key || event.verify().is_err() {
+            return Err(CliError::Auth(
+                "Buzz desktop returned an invalid signature".into(),
+            ));
+        }
+        Ok(event)
+    }
+
+    /// NIP-44 encrypt `content` to `peer` as this identity.
+    pub async fn nip44_encrypt(&self, peer: &PublicKey, content: &str) -> Result<String, CliError> {
+        self.call("nip44_encrypt", &[peer.to_hex(), content.to_owned()])
+            .await
     }
 
     async fn call(&self, method: &str, params: &[String]) -> Result<String, CliError> {
@@ -672,18 +697,7 @@ impl nostr::NostrSigner for Provider {
         &self,
         unsigned: UnsignedEvent,
     ) -> nostr::util::BoxedFuture<'_, Result<Event, SignerError>> {
-        Box::pin(async move {
-            let signed = self
-                .call("sign_event", &[unsigned.as_json()])
-                .await
-                .map_err(signer_error)?;
-            let event = Event::from_json(&signed)
-                .map_err(|_| SignerError::from("Buzz desktop returned an unreadable event"))?;
-            if event.pubkey != self.public_key || event.verify().is_err() {
-                return Err("Buzz desktop returned an invalid signature".into());
-            }
-            Ok(event)
-        })
+        Box::pin(async move { Provider::sign(self, unsigned).await.map_err(signer_error) })
     }
 
     fn nip04_encrypt<'a>(
@@ -708,7 +722,7 @@ impl nostr::NostrSigner for Provider {
         content: &'a str,
     ) -> nostr::util::BoxedFuture<'a, Result<String, SignerError>> {
         Box::pin(async move {
-            self.call("nip44_encrypt", &[peer.to_hex(), content.to_owned()])
+            Provider::nip44_encrypt(self, peer, content)
                 .await
                 .map_err(signer_error)
         })
@@ -1377,10 +1391,7 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         let result = call(&endpoint, Some("tok"), false, "sign_event", &[]).await;
         assert_eq!(result.unwrap(), "signed");
-        assert!(
-            started.elapsed() >= Duration::from_secs(1),
-            "honors retry_after"
-        );
+        assert!(started.elapsed() >= RETRY_AFTER_UNIT, "honors retry_after");
         assert_eq!(seen.lock().unwrap().len(), 2);
 
         let (endpoint, seen) = provider(

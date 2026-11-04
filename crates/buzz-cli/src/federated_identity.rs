@@ -79,8 +79,9 @@ struct DenialBody {
 /// no trailing slash, path, query or fragment.
 pub fn canonical_relay_url(relay_url: &str) -> Result<String, CliError> {
     // `wss://host` means 443, so an explicit `:80` would silently alias it;
-    // NIP-FA has no relay on port 80.
-    if url::Url::parse(relay_url).is_ok_and(|u| u.port() == Some(80)) {
+    // NIP-FA has no relay on port 80. The URL parser drops `:80` for
+    // `http`/`ws`, so read the authority as written.
+    if explicit_port(relay_url) == Some("80") {
         return Err(CliError::Usage(format!(
             "NIP-FA does not support a relay on port 80: {relay_url}"
         )));
@@ -90,6 +91,29 @@ pub fn canonical_relay_url(relay_url: &str) -> Result<String, CliError> {
         return Err(CliError::Usage(format!("invalid relay URL: {relay_url}")));
     }
     Ok(format!("wss://{authority}"))
+}
+
+/// The port written in `url`'s authority, if any.
+fn explicit_port(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = host_port.rsplit_once(':')?;
+    (!host.is_empty() && !port.contains(']')).then_some(port)
+}
+
+/// An adapter `Retry-After`: delta-seconds or an HTTP-date (RFC 9110).
+fn parse_retry_after(value: &str, now: u64) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(secs) = value.parse() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .timestamp();
+    Some(Duration::from_secs(
+        u64::try_from(at).ok()?.saturating_sub(now),
+    ))
 }
 
 fn unix_now() -> u64 {
@@ -313,8 +337,7 @@ impl AdapterSession {
             let retry_after = matches!(status, 429 | 503)
                 .then(|| resp.headers().get(reqwest::header::RETRY_AFTER))
                 .flatten()
-                .and_then(|v| v.to_str().ok()?.trim().parse().ok())
-                .map(Duration::from_secs);
+                .and_then(|v| parse_retry_after(v.to_str().ok()?, unix_now()));
             return Ok(Err(Transient {
                 why: format!("HTTP {status}"),
                 retry_after,
@@ -426,10 +449,35 @@ mod tests {
             assert_eq!(canonical_relay_url(input).unwrap(), expected, "{input}");
         }
         assert!(canonical_relay_url("not a url").is_err());
-        assert!(matches!(
-            canonical_relay_url("wss://relay.example.com:80"),
-            Err(CliError::Usage(_))
-        ));
+        for port_80 in [
+            "wss://relay.example.com:80",
+            "https://relay.example.com:80/x",
+            "http://relay.example.com:80",
+            "ws://user@relay.example.com:80",
+            "http://[::1]:80",
+        ] {
+            assert!(
+                matches!(canonical_relay_url(port_80), Err(CliError::Usage(_))),
+                "{port_80}"
+            );
+        }
+        assert!(canonical_relay_url("http://[::80]").is_ok());
+        assert!(canonical_relay_url("http://relay.example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn retry_after_takes_seconds_or_an_http_date() {
+        let now = 784_111_777; // Sun, 06 Nov 1994 08:49:37 GMT
+        assert_eq!(parse_retry_after(" 7 ", now), Some(Duration::from_secs(7)));
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:50:07 GMT", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:00 GMT", now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(parse_retry_after("soon", now), None);
     }
 
     #[test]

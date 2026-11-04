@@ -57,8 +57,10 @@ token and a reachable endpoint is used.
 
 An inherited token decides the identity. A caller that has one MUST use only
 it: when it is revoked, does not apply to the relay or fails, the caller fails.
-It MUST NOT go on to a paired token, which acts as the human, so an agent never
-acts as its owner.
+It MUST NOT go on to a paired token, which acts as the human. This keeps a
+well-behaved caller from acting as the owner by accident. It is not a boundary
+against an agent that can run its own commands. See
+[Security considerations](#security-considerations).
 
 ### 1. Inherited token
 
@@ -402,6 +404,17 @@ an access control list is the planned Windows transport.
   assertion is useless without the identity's key.
 - **Tokens in the environment.** Child processes of an agent inherit
   `BUZZ_CREDENTIAL_PROVIDER` and act as that agent. That matches the agent's
-  existing authority; it never grants the owner's.
+  existing authority.
+- **An agent running as its owner's user can reach the owner's paired tokens.**
+  The no-fallback rule binds only callers that follow it. An agent that can run
+  commands as the same OS user can unset `BUZZ_CREDENTIAL_PROVIDER`, or read the
+  paired tokens from the OS keychain itself, and then act as the owner. On
+  macOS the keychain item belongs to the `buzz` binary, so it opens with no
+  prompt. On Linux, Secret Service is readable once it is unlocked. The
+  same-user check does not help here, because the caller really is the same
+  user. Where agents should not act as their owner, sandbox them so they cannot
+  reach the owner's keychain, or run them as a separate OS user with their own
+  key. The desktop serves only callers running as its own user, so a
+  separate-user agent cannot use it.
 - **Approval fatigue.** The provider prompts only for sensitive operations,
   never for every signature, so prompts stay meaningful.
