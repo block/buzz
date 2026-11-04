@@ -102,7 +102,11 @@ class HostedBackupService {
     if (envelope == null) {
       final Map<String, dynamic> enrollment;
       try {
-        enrollment = await account.post('/v1/buzz/nsec-backups/enrollment', {});
+        enrollment = await account.post(
+          '/v1/buzz/nsec-backups/enrollment',
+          {},
+          expectedSubject: subject,
+        );
       } on AccountFailure catch (failure) {
         if (failure == AccountFailure.rejected) {
           throw HostedBackupFailure.unavailable;
@@ -137,7 +141,11 @@ class HostedBackupService {
     final pending = envelope!;
     final Map<String, dynamic> result;
     try {
-      result = await account.post('/v1/buzz/nsec-backups', pending);
+      result = await account.post(
+        '/v1/buzz/nsec-backups',
+        pending,
+        expectedSubject: subject,
+      );
     } on AccountFailure catch (failure) {
       if (failure != AccountFailure.rejected) rethrow;
       checkAccount();

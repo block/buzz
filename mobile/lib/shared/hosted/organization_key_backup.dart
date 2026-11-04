@@ -160,12 +160,14 @@ class OrganizationKeyBackup {
     if (status['current_nostr_pubkey'] != pubkey) {
       throw HostedBackupFailure.identityMismatch;
     }
+    // The service checks the subject before each request. Its requests share
+    // the organization client's queue, so a sign-out waits for one in flight.
     await HostedBackupService(
       account,
       _CommunityKey(nsec, pubkey),
       hpke: _hpke,
       storage: _storage,
-    ).backup(isCurrent: () => account.account?.subject == subject);
+    ).backup();
   }
 }
 
