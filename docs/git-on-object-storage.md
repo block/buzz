@@ -513,6 +513,13 @@ transfer:
   and break `Inv_RefDerivedFromParent`. The client re-pushes, which re-hydrates
   against the advanced state — that is the only safe retry, and `git` itself
   drives it.
+- **Partially accepted pushes publish their accepted refs.** The model treats
+  receive-pack as one step, but without `--atomic` git applies each ref update
+  independently and reports `ok` or `ng` per ref. `finalize_push` skips the CAS
+  only when the report rejects every ref (a pre-receive hook decline applies
+  nothing). When any ref is reported `ok`, `cas_publish` snapshots the
+  workspace refs, so exactly the accepted updates are published; otherwise the
+  client would record an update the relay discarded.
 - **kind:30618 derived after CAS.** Emission is conditional on
   `manifest_changed = (parent_digest != committed_digest)` — `Manifest::
   canonical_bytes` is deterministic, so equal published state ⇒ equal digest by
