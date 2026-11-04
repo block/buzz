@@ -22,7 +22,9 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       await tester.pumpWidget(
         buildPage([
           channelsProvider.overrideWith(() => _FakeNotifier([])),
-          relaySessionProvider.overrideWith(() => _DmDirectorySession(people)),
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession(people),
+          ),
           channelActionsProvider.overrideWithValue(actions),
         ]),
       );

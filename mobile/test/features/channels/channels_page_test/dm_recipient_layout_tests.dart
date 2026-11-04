@@ -16,7 +16,9 @@ void dmRecipientLayoutTests(Widget Function(List<Override>) harness) {
       final last = _dmKey(mentionSuggestionLimit - 1);
       await tester.pumpWidget(
         harness([
-          relaySessionProvider.overrideWith(() => _DmDirectorySession(people)),
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession(people),
+          ),
         ]),
       );
       await tester.pumpAndSettle();
@@ -107,68 +109,6 @@ void dmRecipientLayoutTests(Widget Function(List<Override>) harness) {
       expect(find.byKey(const Key('new-dm-search')), findsNothing);
     },
   );
-}
-
-/// A connected relay whose profile search finds [people] by name.
-class _DmDirectorySession extends RelaySessionNotifier {
-  _DmDirectorySession(this.people);
-
-  /// Display names by public key.
-  final Map<String, String> people;
-  final searches = <String>[];
-
-  @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
-
-  @override
-  Future<List<NostrEvent>> searchProfiles(
-    String query, {
-    int limit = 50,
-    Duration timeout = const Duration(seconds: 8),
-  }) async {
-    searches.add(query);
-    final needle = query.trim().toLowerCase();
-    return [
-      for (final MapEntry(:key, :value) in people.entries)
-        if (value.toLowerCase().contains(needle))
-          NostrEvent(
-            id: '$key-profile',
-            pubkey: key,
-            createdAt: 1700000000,
-            kind: 0,
-            tags: const [],
-            content: jsonEncode({'display_name': value}),
-            sig: 'sig',
-          ),
-    ];
-  }
-
-  @override
-  Future<List<NostrEvent>> queryRelay(
-    List<NostrFilter> filters, {
-    Duration timeout = const Duration(seconds: 8),
-  }) async => const [];
-
-  @override
-  Future<List<NostrEvent>> fetchHistory(
-    NostrFilter filter, {
-    Duration timeout = const Duration(seconds: 8),
-  }) async => const [];
-
-  @override
-  Future<void Function()> subscribeWithStatus(
-    NostrFilter filter,
-    void Function(NostrEvent) onEvent, {
-    void Function(String message)? onClosed,
-    required void Function(RelaySubscriptionStatus) onStatusChanged,
-  }) => subscribe(filter, onEvent, onClosed: onClosed);
-
-  @override
-  Future<void Function()> subscribe(
-    NostrFilter filter,
-    void Function(NostrEvent) onEvent, {
-    void Function(String message)? onClosed,
-  }) async => () {};
 }
 
 /// A 64-hex test key for [index].

@@ -319,9 +319,15 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     // A Space never picks here, so a search ignores its edge spaces where a
     // composer query would end at one.
     final search = query.value.trim();
-    final ranked = ref.watch(newDmCandidatesProvider(search));
-    final searching = ref.watch(newDmSearchPendingProvider(search));
-    final searchFailed = ref.watch(newDmSearchFailedProvider(search));
+    final ranked = ref.watch(
+      recipientCandidatesProvider((
+        query: search,
+        historyKey: newDmMentionHistoryKey,
+        unsharedAgents: false,
+      )),
+    );
+    final searching = ref.watch(recipientSearchPendingProvider(search));
+    final searchFailed = ref.watch(recipientSearchFailedProvider(search));
     final selectedPubkeys = {
       for (final user in selectedUsers.value) user.pubkey,
     };
@@ -337,7 +343,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     final availableResults = shown.rows;
     final userCache = ref.watch(userCacheProvider);
     String? detail(MentionCandidate user) =>
-        newDmRowDetail(user, currentPubkey, userCache);
+        recipientRowDetail(user, currentPubkey, userCache);
     void select(MentionCandidate user) {
       selectedUsers.value = [...selectedUsers.value, user];
       opening.value++;
@@ -673,10 +679,10 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                         user.pubkey,
                       );
                       final info = detail(user);
-                      // The sheet surface is a ColoredBox: give rows their
-                      // own Material for ink.
-                      return Material(
-                        type: MaterialType.transparency,
+                      return AppListCardItem(
+                        index: index,
+                        itemCount: availableResults.length,
+                        dividerIndent: Grid.xs + 40 + Grid.xs,
                         child: ListTile(
                           key: Key('new-dm-person-${user.pubkey}'),
                           enabled: available,

@@ -99,6 +99,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
+  private let rowColor: UIColor
   /// The app theme's error color, which keeps 4.5:1 contrast on the sheet
   /// where `.systemRed` does not.
   private static let errorColor = UIColor { traits in
@@ -123,8 +124,9 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     self.state = state
     self.loadAvatar = loadAvatar
     self.send = send
-    pageColor = Self.color(state["pageColor"]) ?? .systemBackground
-    super.init(style: .plain)
+    pageColor = Self.color(state["pageColor"]) ?? .systemGroupedBackground
+    rowColor = Self.color(state["rowColor"]) ?? .secondarySystemGroupedBackground
+    super.init(style: .insetGrouped)
     title = state["title"] as? String ?? "Add members"
   }
 
@@ -134,6 +136,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func viewDidLoad() {
     super.viewDidLoad()
     tableView.backgroundColor = pageColor
+    tableView.sectionHeaderTopPadding = 0
     tableView.keyboardDismissMode = .interactive
     tableView.rowHeight = UITableView.automaticDimension
     tableView.estimatedRowHeight = 64
@@ -243,12 +246,24 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   }
 
   override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+  // No section titles, and no grouped-table header bands: a small gap
+  // above the first shown card and between the two.
+  override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+    if section == 0 { return selected.isEmpty ? .leastNormalMagnitude : Self.cardGap }
+    return selected.isEmpty ? Self.cardGap : Self.cardGap * 2
+  }
+  override func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat {
+    .leastNormalMagnitude
+  }
+  override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? { nil }
+  override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? { nil }
+  private static let cardGap: CGFloat = 8
   override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
     section == 0 ? selected.count : shownUsers.count + (status == nil ? 0 : 1)
   }
   override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
     let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
-    cell.backgroundColor = pageColor
+    cell.backgroundColor = rowColor
     var content = cell.defaultContentConfiguration()
     var avatarRequest: (String, String)?
     var memberLabel: String?

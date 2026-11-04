@@ -198,41 +198,55 @@ final mentionCandidatesProvider = Provider.family
 /// [mentionHistoryProvider] key for choices made in the New DM picker.
 const newDmMentionHistoryKey = 'new-dm';
 
-/// Ranked New DM recipients for [query], chosen exactly like mention
-/// autocomplete in a stream: no channel members yet, the viewer's own agents
-/// offered unprompted, agents shared with the viewer, and people from the
-/// community directory search, with the same debounce and search cache.
-final newDmCandidatesProvider = Provider.family
-    .autoDispose<List<MentionCandidate>, String>((ref, query) {
+/// [mentionHistoryProvider] key for choices made in an Add members picker.
+const addMembersMentionHistoryKey = 'add-members';
+
+/// One recipient picker search: its [query], the [historyKey] its choices
+/// are remembered under, and whether agents that do not answer the viewer
+/// are offered too ([unsharedAgents]), as a channel can hold them.
+typedef RecipientSearch = ({
+  String query,
+  String historyKey,
+  bool unsharedAgents,
+});
+
+/// Ranked recipients for a picker (New DM, Add members), chosen exactly like
+/// mention autocomplete in a stream: no channel members yet, the viewer's
+/// own agents offered unprompted, agents shared with the viewer, and people
+/// from the community directory search, with the same debounce and search
+/// cache.
+final recipientCandidatesProvider = Provider.family
+    .autoDispose<List<MentionCandidate>, RecipientSearch>((ref, search) {
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
       return [
         for (final candidate in _chooserCandidates(
           ref,
           members: const [],
-          query: query,
+          query: search.query,
           directory: true,
           offerOwnedAgents: true,
-          historyKey: newDmMentionHistoryKey,
+          offerUnsharedAgents: search.unsharedAgents,
+          historyKey: search.historyKey,
         ))
           if (candidate.pubkey != currentPubkey) candidate,
       ];
     });
 
-/// Whether the New DM directory search for [query] is still running.
-final newDmSearchPendingProvider = Provider.family.autoDispose<bool, String>(
-  (ref, query) =>
-      query.trim().isNotEmpty &&
-      ref.watch(mentionUserSearchProvider(query)).isLoading,
-);
+/// Whether a recipient picker's directory search for [query] still runs.
+final recipientSearchPendingProvider = Provider.family
+    .autoDispose<bool, String>(
+      (ref, query) =>
+          query.trim().isNotEmpty &&
+          ref.watch(mentionUserSearchProvider(query)).isLoading,
+    );
 
-/// Whether the New DM directory search for [query] failed.
-final newDmSearchFailedProvider = Provider.family.autoDispose<bool, String>((
-  ref,
-  query,
-) {
-  final search = ref.watch(mentionUserSearchProvider(query));
-  return search.hasError && !search.isLoading;
-});
+/// Whether a recipient picker's directory search for [query] failed.
+final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
+  (ref, query) {
+    final search = ref.watch(mentionUserSearchProvider(query));
+    return search.hasError && !search.isLoading;
+  },
+);
 
 List<MentionCandidate> _chooserCandidates(
   Ref ref, {
@@ -240,6 +254,7 @@ List<MentionCandidate> _chooserCandidates(
   required String query,
   required bool directory,
   required bool offerOwnedAgents,
+  bool offerUnsharedAgents = false,
   required String historyKey,
 }) {
   final channels =
@@ -279,6 +294,7 @@ List<MentionCandidate> _chooserCandidates(
       currentPubkey: currentPubkey,
       ownedAgents: ownedAgents,
       offerOwnedAgents: offerOwnedAgents,
+      offerUnsharedAgents: offerUnsharedAgents,
     ))
       if (isMentionKey(candidate.pubkey)) candidate,
   ];

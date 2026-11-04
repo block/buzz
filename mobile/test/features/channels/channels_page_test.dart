@@ -70,6 +70,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
+import '../../helpers/recipient_directory_session.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
@@ -3153,7 +3154,7 @@ void main() {
       final bob = _dmKey(1);
       final charlie = _dmKey(2);
       final danielle = _dmKey(3);
-      final session = _DmDirectorySession({
+      final session = RecipientDirectorySession({
         alice: 'Alice',
         bob: 'Bob',
         charlie: 'Charlie',
@@ -3389,7 +3390,9 @@ void main() {
         keyboardInset: 300,
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relaySessionProvider.overrideWith(() => _DmDirectorySession(people)),
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession(people),
+          ),
         ],
       ),
     );
