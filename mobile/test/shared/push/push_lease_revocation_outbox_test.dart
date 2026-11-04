@@ -1,9 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -22,6 +27,60 @@ void main() {
     clock = _Clock(1_000_000);
     scheduler = _WakeScheduler();
     keys = nostr.Keys.generate();
+  });
+
+  test('revocation socket carries the hosted relay assertion', () async {
+    // A hosted relay refuses the WebSocket upgrade without the assertion, so a
+    // queued revocation would retry forever.
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    final origin = 'ws://127.0.0.1:${server.port}';
+    final upgradeHeaders = Completer<HttpHeaders>();
+    server.listen((request) async {
+      if (WebSocketTransformer.isUpgradeRequest(request)) {
+        if (!upgradeHeaders.isCompleted) {
+          upgradeHeaders.complete(request.headers);
+        }
+        final socket = await WebSocketTransformer.upgrade(request);
+        socket.add(jsonEncode(['AUTH', 'challenge']));
+        socket.listen((message) {
+          final frame = jsonDecode(message as String) as List<dynamic>;
+          if (frame.first == 'AUTH' || frame.first == 'EVENT') {
+            final event = frame[1] as Map<String, dynamic>;
+            socket.add(jsonEncode(['OK', event['id'], true, '']));
+          }
+        });
+        return;
+      }
+      request.response
+        ..headers.contentType = ContentType('application', 'nostr+json')
+        ..write(
+          jsonEncode(_descriptorJson(origin, nostr.Keys.generate().public)),
+        )
+        ..close();
+    });
+    final auth = _AssertingRelayAuth();
+    addTearDown(auth.dispose);
+
+    await publishBuzzPushLeaseRevocation(
+      BuzzPushLeaseRevocationRecord(
+        relayUrl: 'http://127.0.0.1:${server.port}',
+        relayOrigin: origin,
+        memberPubkey: keys.public,
+        nsec: keys.nsec,
+        installationId: 'c' * 32,
+        generation: 7,
+        expiresAt: null,
+        attemptCount: 0,
+        nextAttemptAt: 0,
+      ),
+      relayAuth: auth,
+    );
+
+    final headers = await upgradeHeaders.future;
+    expect(headers.value('nostr-federated-identity'), 'Bearer hosted-token');
+    expect(auth.configs.single.baseUrl, 'http://127.0.0.1:${server.port}');
+    expect(auth.configs.single.nsec, keys.nsec);
   });
 
   test('community removal journals one precise lease address', () async {
@@ -370,3 +429,44 @@ class _WakeScheduler {
 class _ScheduledWake {
   bool cancelled = false;
 }
+
+class _AssertingRelayAuth extends HostedRelayAuth {
+  _AssertingRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  final configs = <RelayConfig>[];
+
+  @override
+  Future<Map<String, String>> headers(RelayConfig config) async {
+    configs.add(config);
+    return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
+  }
+}
+
+Map<String, dynamic> _descriptorJson(String origin, String relayPubkey) => {
+  'supported_extensions': ['nip-er', 'buzz-push-v1'],
+  'push': {
+    'origin': origin,
+    'keys': [
+      {'id': 'relay-v1', 'pubkey': relayPubkey, 'current': true},
+    ],
+    'push_kinds': [9, 40002, 45001, 45003],
+    'h_grammar': 'uuid-lowercase',
+    'class_support': {
+      'apns': ['default'],
+    },
+    'limitation': {
+      'max_lease_ttl': 2592000,
+      'max_leases_per_pubkey': 16,
+      'max_subscriptions_per_lease': 16,
+      'max_kinds': 16,
+      'max_authors': 20,
+      'max_h': 50,
+      'max_tag_values': 20,
+      'max_ignore': 8,
+      'max_content_len': 65536,
+      'max_plaintext_len': 32768,
+      'max_endpoint_len': 4096,
+      'max_string_len': 512,
+    },
+  },
+};
