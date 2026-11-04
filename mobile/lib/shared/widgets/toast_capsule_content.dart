@@ -46,11 +46,20 @@ class ToastCapsuleContent extends StatelessWidget {
       String label,
       VoidCallback onPressed, {
       bool destructive = false,
+      bool secondary = false,
     }) => FilledButton(
       onPressed: onPressed,
       style: FilledButton.styleFrom(
-        backgroundColor: destructive ? context.colors.error : Colors.white,
-        foregroundColor: destructive ? context.colors.onError : Colors.black,
+        backgroundColor: destructive
+            ? lightColorScheme.error
+            : secondary
+            ? darkColorScheme.secondaryContainer
+            : Colors.white,
+        foregroundColor: destructive
+            ? lightColorScheme.onError
+            : secondary
+            ? darkColorScheme.secondary
+            : Colors.black,
         shape: const RoundedSuperellipseBorder(
           borderRadius: BorderRadius.all(Radius.circular(999)),
         ),
@@ -76,7 +85,7 @@ class ToastCapsuleContent extends StatelessWidget {
             text,
             action(actionLabel, onAction!, destructive: destructiveAction),
             const SizedBox(height: 6),
-            action(secondary.label, secondary.onPressed),
+            action(secondary.label, secondary.onPressed, secondary: true),
           ],
         ),
       );
