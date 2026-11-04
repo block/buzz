@@ -4,7 +4,8 @@ part of 'channel_actions_sheet.dart';
 /// relay joins every new community member to it. Every value comes from fresh
 /// relay metadata, and a change shows only after the relay confirms it. A
 /// change the relay may have applied blocks further changes until a read-only
-/// check confirms it.
+/// check confirms it, or until a read shows it unapplied and the same signed
+/// change is sent again.
 class _ChannelAdmissionCard extends HookConsumerWidget {
   const _ChannelAdmissionCard({
     required this.channel,
@@ -149,6 +150,18 @@ class _ChannelAdmissionCard extends HookConsumerWidget {
                 ? null
                 : () => save(
                     (actions) => actions.checkAdmissionChange(channel.id),
+                  ),
+          ),
+        if (uncertain != null && uncertain.unseen)
+          AppListRow(
+            key: const ValueKey('channel-access-resend'),
+            icon: BuzzIcons.refreshCw,
+            title: 'Send again',
+            subtitle: 'The relay doesn’t show the change yet.',
+            onTap: saving.value
+                ? null
+                : () => save(
+                    (actions) => actions.resendAdmissionChange(channel.id),
                   ),
           ),
         if (admissionAsync.hasError && admission == null)

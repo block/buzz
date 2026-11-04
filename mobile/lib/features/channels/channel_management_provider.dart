@@ -622,29 +622,62 @@ bool admissionShows(ChannelAdmission admission, List<String> tag) =>
     };
 
 /// An admission change the relay may have applied but has not shown yet.
+@immutable
+class HeldAdmissionChange {
+  const HeldAdmissionChange({
+    required this.tag,
+    required this.event,
+    this.unseen = false,
+  });
+
+  /// The kind:9002 admission tag the change sets.
+  final List<String> tag;
+
+  /// The exact signed command. The relay ignores an event id it already
+  /// stored, so sending this again applies the change at most once.
+  final NostrEvent event;
+
+  /// A read since the change was last sent did not show it.
+  final bool unseen;
+}
+
+/// Holds [HeldAdmissionChange] for one channel.
 ///
 /// It outlives the channel details page so an uncertain change cannot be
 /// published again by closing and reopening it; switching communities clears it.
-class UncertainAdmissionChange extends Notifier<List<String>?> {
+class UncertainAdmissionChange extends Notifier<HeldAdmissionChange?> {
   UncertainAdmissionChange(this.channelId);
 
   final String channelId;
 
   @override
-  List<String>? build() {
+  HeldAdmissionChange? build() {
     ref.watch(relayConfigProvider);
     return null;
   }
 
-  void hold(List<String> tag) => state = tag;
+  void hold(List<String> tag, NostrEvent event) =>
+      state = HeldAdmissionChange(tag: tag, event: event);
+
+  void markUnseen(bool unseen) {
+    final held = state;
+    if (held == null) return;
+    state = HeldAdmissionChange(
+      tag: held.tag,
+      event: held.event,
+      unseen: unseen,
+    );
+  }
 
   void clear() => state = null;
 }
 
 final uncertainAdmissionChangeProvider =
-    NotifierProvider.family<UncertainAdmissionChange, List<String>?, String>(
-      UncertainAdmissionChange.new,
-    );
+    NotifierProvider.family<
+      UncertainAdmissionChange,
+      HeldAdmissionChange?,
+      String
+    >(UncertainAdmissionChange.new);
 
 /// The relay may have applied a change that its metadata does not show yet.
 class ChannelChangeUnconfirmed implements Exception {
