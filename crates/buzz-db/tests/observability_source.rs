@@ -466,15 +466,15 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .split_once("pub async fn try_lock_session_leader(")
         .expect("usage store must expose the legacy leader-lock acquisition")
         .1
-        .split_once("pub async fn usage_community_count(")
-        .expect("usage leader lock must precede counter reads")
+        .split_once("pub async fn usage_community_hosts(")
+        .expect("usage leader lock must precede the host-map read")
         .0;
     assert!(usage_leader_lock.contains("acquire_writer_with_legacy_metrics("));
     assert!(
         usage_production
             .matches("WriterOperation::Maintenance")
             .count()
-            >= 11,
+            >= 2,
         "every periodic usage checkout must be maintenance-attributed"
     );
     for bypass in [

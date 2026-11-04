@@ -77,24 +77,16 @@ fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<
     nostr::Keys::parse(hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))
 }
 
-/// Controls how many per-community gauge series the usage poller emits.
+/// Controls whether the usage poller emits per-community gauge series.
 ///
-/// Datadog cost is proportional to the number of unique time-series.  With ~25
-/// gauge label combinations per community, a relay hosting thousands of
-/// communities would incur five-figure monthly costs if every community always
-/// gets a full set of series.  This knob is the cost lever.
-///
-/// Fleet-wide totals are independent of this mode, but DB-backed families emit
-/// only when a proved reader is available. Their fixed-cardinality availability
-/// gauges distinguish a skipped collection from a real zero.
+/// Datadog cost is proportional to the number of unique time-series, so
+/// per-community series (in-memory connection, subscription, and online-user
+/// gauges, plus storage attribution) are off by default. Fleet-wide totals are
+/// independent of this mode.
 ///
 /// Set via `BUZZ_USAGE_METRICS_PER_COMMUNITY`:
 ///   - `off` — suppress all per-community series; fleet totals only (default)
-///   - `all` — emit per-community series for every community (rollback only)
-///
-/// A `top:<k>` mode (per-community series for the k most-active communities)
-/// is planned as a fast-follow once the series-lifecycle (gauge idle-timeout
-/// and stable tie-breaking across pods) is fully designed.
+///   - `all` — emit per-community series for every community
 #[derive(Debug, Clone)]
 enum EmissionScope {
     All,
@@ -130,139 +122,6 @@ impl EmissionScope {
 
     fn includes_per_community(&self) -> bool {
         matches!(self, Self::All)
-    }
-}
-
-const FLEET_STOCK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-const FLEET_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-const FLEET_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-// Relay-side deadlines for one complete fleet collection: reader acquire,
-// replica proof, transaction begin, and the aggregate. The server-side
-// `statement_timeout` (5s stock, 15s activity) cannot fire when a reader
-// connection stops answering, so these bound the leader's poller tick. Each is
-// above its statement timeout so the server-side error still wins normally.
-const FLEET_STOCK_COLLECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-const FLEET_ACTIVITY_COLLECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
-// Keep each deadline above its statement timeout in `buzz_db::store::usage`
-// (5s stock, 15s activity) so a slow-but-healthy query reports the server-side
-// `query_error`, not `timeout`.
-const _: () = assert!(FLEET_STOCK_COLLECTION_DEADLINE.as_secs() > 5);
-const _: () = assert!(FLEET_ACTIVITY_COLLECTION_DEADLINE.as_secs() > 15);
-
-struct FleetUsageSchedule {
-    next_stock: std::time::Instant,
-    next_activity: std::time::Instant,
-    last_stock_success: Option<std::time::Instant>,
-    last_activity_success: Option<std::time::Instant>,
-    stock_snapshot: Option<buzz_db::usage::FleetStockSnapshot>,
-    activity_snapshot: Option<buzz_db::usage::FleetActiveUsersSnapshot>,
-    // Whether the most recent due refresh of each family succeeded. Cached
-    // snapshots outlive a failed refresh so their series stay scrape-visible,
-    // but availability reports only the latest outcome.
-    stock_refresh_ok: bool,
-    activity_refresh_ok: bool,
-    stock_interval: std::time::Duration,
-    activity_interval: std::time::Duration,
-    retry_interval: std::time::Duration,
-}
-
-impl FleetUsageSchedule {
-    fn new() -> Self {
-        Self::new_at(
-            std::time::Instant::now(),
-            FLEET_STOCK_INTERVAL,
-            FLEET_ACTIVITY_INTERVAL,
-            FLEET_RETRY_INTERVAL,
-        )
-    }
-
-    fn new_at(
-        now: std::time::Instant,
-        stock_interval: std::time::Duration,
-        activity_interval: std::time::Duration,
-        retry_interval: std::time::Duration,
-    ) -> Self {
-        Self {
-            next_stock: now,
-            next_activity: now,
-            last_stock_success: None,
-            last_activity_success: None,
-            stock_snapshot: None,
-            activity_snapshot: None,
-            stock_refresh_ok: false,
-            activity_refresh_ok: false,
-            stock_interval,
-            activity_interval,
-            retry_interval,
-        }
-    }
-
-    fn stock_due(&self, now: std::time::Instant) -> bool {
-        now >= self.next_stock
-    }
-
-    fn activity_due(&self, now: std::time::Instant) -> bool {
-        now >= self.next_activity
-    }
-
-    fn mark_stock_success(
-        &mut self,
-        now: std::time::Instant,
-        snapshot: buzz_db::usage::FleetStockSnapshot,
-    ) {
-        self.next_stock = now + self.stock_interval;
-        self.last_stock_success = Some(now);
-        self.stock_snapshot = Some(snapshot);
-        self.stock_refresh_ok = true;
-    }
-
-    fn mark_stock_failure(&mut self, now: std::time::Instant) {
-        self.next_stock = now + self.retry_interval;
-        self.stock_refresh_ok = false;
-    }
-
-    fn mark_activity_success(
-        &mut self,
-        now: std::time::Instant,
-        snapshot: buzz_db::usage::FleetActiveUsersSnapshot,
-    ) {
-        self.next_activity = now + self.activity_interval;
-        self.last_activity_success = Some(now);
-        self.activity_snapshot = Some(snapshot);
-        self.activity_refresh_ok = true;
-    }
-
-    fn mark_activity_failure(&mut self, now: std::time::Instant) {
-        self.next_activity = now + self.retry_interval;
-        self.activity_refresh_ok = false;
-    }
-
-    /// The `all` rollback collects both families together on every leader
-    /// tick and emits their values directly, so only health state is kept.
-    fn mark_legacy_success(&mut self, now: std::time::Instant) {
-        self.last_stock_success = Some(now);
-        self.last_activity_success = Some(now);
-        self.stock_refresh_ok = true;
-        self.activity_refresh_ok = true;
-    }
-
-    fn stock_available(&self) -> bool {
-        self.stock_refresh_ok
-    }
-
-    fn activity_available(&self) -> bool {
-        self.activity_refresh_ok
-    }
-
-    fn reset_after_demotion(&mut self, now: std::time::Instant) {
-        self.next_stock = now;
-        self.next_activity = now;
-        self.last_stock_success = None;
-        self.last_activity_success = None;
-        self.stock_snapshot = None;
-        self.activity_snapshot = None;
-        self.stock_refresh_ok = false;
-        self.activity_refresh_ok = false;
     }
 }
 
@@ -538,7 +397,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
         replica_read_max_age_ms: config.replica_read_max_age_ms,
-        usage_metrics_replica_max_age_ms: config.usage_metrics_replica_max_age_ms,
         max_connections: config.db_pool_size,
         read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
@@ -1695,24 +1553,22 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
-    // Usage metrics: periodic background task polling per-community stats.
+    // Usage metrics: periodic background task.
     //
-    // DB-derived gauges (users, channels, messages, members, workflows, git
-    // repos, active users/channels) are SET from GROUP BY queries — one per
-    // tick. In-memory gauges (ws_connections, subscriptions, users_online)
-    // are snapshotted from live in-memory state. Both avoid inc/dec drift.
+    // In-memory gauges (ws_connections, subscriptions, users_online) are
+    // snapshotted from live in-memory state, which avoids inc/dec drift. The
+    // relay runs no usage aggregate queries against the database.
     //
     // Multi-pod semantics:
-    //   DB/storage: leader-only; dashboards must filter by
-    //               buzz_usage_poller_is_leader == 1 before aggregating.
-    //   In-memory:  each pod exports its partition → dashboard uses sum().
+    //   Storage:   leader-only; dashboards must filter by
+    //              buzz_usage_poller_is_leader == 1 before aggregating.
+    //   In-memory: each pod exports its partition → dashboard uses sum().
     {
         let usage_state = Arc::clone(&state);
         let emission_scope = EmissionScope::from_env();
         let interval_secs = usage_interval_secs;
         let mut leader = None;
         let mut emitted_in_memory = HashSet::new();
-        let mut fleet_schedule = FleetUsageSchedule::new();
         tokio::spawn(async move {
             // Jitter the first tick by a random fraction of the interval so
             // that a rolling deploy with N pods doesn't hammer the DB
@@ -1734,7 +1590,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     &emission_scope,
                     &mut leader,
                     &mut emitted_in_memory,
-                    &mut fleet_schedule,
                 )
                 .await
                 {
@@ -2584,13 +2439,12 @@ fn dropped_in_memory_keys(
 }
 
 /// Run one usage-metrics tick. Every pod emits its own in-memory gauges, while
-/// one leader owns the heavier database-derived snapshot.
+/// one leader reaps expired invites and publishes the stored storage snapshot.
 async fn run_usage_metrics_tick(
     state: &AppState,
     emission_scope: &EmissionScope,
     leader: &mut Option<buzz_db::SessionLeader>,
     emitted_in_memory: &mut HashSet<InMemoryMetricKey>,
-    fleet_schedule: &mut FleetUsageSchedule,
 ) -> anyhow::Result<()> {
     let host_map: HashMap<Uuid, String> = if emission_scope.includes_per_community() {
         match state.db.usage_community_hosts().await {
@@ -2599,11 +2453,6 @@ async fn run_usage_metrics_tick(
                 .map(|community| (community.id, community.host))
                 .collect(),
             Err(error) => {
-                if leader.is_some() {
-                    warn!("Usage metrics leader demoting: host map collection failed");
-                    *leader = None;
-                    mark_usage_leader_demoted(fleet_schedule);
-                }
                 emit_in_memory_usage_metrics(state, emission_scope, None, emitted_in_memory);
                 return Err(error.into());
             }
@@ -2623,7 +2472,6 @@ async fn run_usage_metrics_tick(
         if !leader_guard.is_live().await {
             warn!("Usage metrics leader lock connection failed liveness check; demoting");
             *leader = None;
-            mark_usage_leader_demoted(fleet_schedule);
             demoted = true;
         }
     }
@@ -2637,17 +2485,6 @@ async fn run_usage_metrics_tick(
         }
     }
     if leader.is_some() {
-        if emission_scope.includes_per_community() {
-            let result = emit_db_usage_metrics(state, emission_scope, &host_map).await;
-            record_legacy_usage_collection(result.is_ok(), fleet_schedule);
-            if let Err(error) = result {
-                warn!("Usage metrics leader demoting: DB collection failed");
-                *leader = None;
-                return Err(error);
-            }
-        } else {
-            emit_fleet_db_usage_metrics(state, fleet_schedule).await;
-        }
         let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
         match state
             .db
@@ -2673,221 +2510,6 @@ async fn run_usage_metrics_tick(
     Ok(())
 }
 
-fn mark_usage_leader_demoted(schedule: &mut FleetUsageSchedule) {
-    schedule.reset_after_demotion(std::time::Instant::now());
-    emit_usage_snapshot_availability(schedule);
-}
-
-/// The `all` rollback collects every family on each leader tick, so a
-/// successful collection makes both families available and a failure demotes
-/// the leader. This keeps the documented availability gates valid in either
-/// emission mode.
-fn record_legacy_usage_collection(succeeded: bool, schedule: &mut FleetUsageSchedule) {
-    if succeeded {
-        schedule.mark_legacy_success(std::time::Instant::now());
-        emit_cached_fleet_usage_metrics(schedule);
-    } else {
-        mark_usage_leader_demoted(schedule);
-    }
-}
-
-fn emit_usage_snapshot_availability(schedule: &FleetUsageSchedule) {
-    let gauge = |available: bool| if available { 1.0 } else { 0.0 };
-    metrics::gauge!("buzz_usage_snapshot_available", "family" => "stock")
-        .set(gauge(schedule.stock_available()));
-    metrics::gauge!("buzz_usage_snapshot_available", "family" => "activity")
-        .set(gauge(schedule.activity_available()));
-}
-
-async fn emit_fleet_db_usage_metrics(state: &AppState, schedule: &mut FleetUsageSchedule) {
-    // Futures are lazy: a family that is not due is never polled.
-    refresh_due_fleet_usage(
-        schedule,
-        state.db.usage_fleet_stock_snapshot(),
-        state.db.usage_fleet_active_users(chrono::Utc::now()),
-    )
-    .await;
-}
-
-/// Run each due fleet collection under its relay-side deadline and apply the
-/// outcome. An expired collection is dropped and treated as a failed refresh,
-/// so a reader that stops answering cannot stall the leader's poller. The
-/// dropped reader connection is closed in the background under SQLx's
-/// bounded close-on-drop rather than returned to the shared reader pool.
-async fn refresh_due_fleet_usage(
-    schedule: &mut FleetUsageSchedule,
-    stock: impl std::future::Future<Output = FleetStockRefresh>,
-    activity: impl std::future::Future<Output = FleetActivityRefresh>,
-) {
-    let now = std::time::Instant::now();
-    if schedule.stock_due(now) {
-        let result = tokio::time::timeout(FLEET_STOCK_COLLECTION_DEADLINE, stock).await;
-        apply_stock_refresh(schedule, now, result);
-    }
-    if schedule.activity_due(now) {
-        let result = tokio::time::timeout(FLEET_ACTIVITY_COLLECTION_DEADLINE, activity).await;
-        apply_activity_refresh(schedule, now, result);
-    }
-    emit_cached_fleet_usage_metrics(schedule);
-}
-
-type FleetStockRefresh = buzz_db::Result<Option<buzz_db::usage::FleetStockSnapshot>>;
-type FleetActivityRefresh = buzz_db::Result<Option<buzz_db::usage::FleetActiveUsersSnapshot>>;
-
-/// Apply one due stock refresh. Success caches the snapshot and marks the
-/// family available; a missing proved reader, a query error, or an expired
-/// deadline keeps the cached values, marks the family unavailable, and
-/// schedules a retry.
-fn apply_stock_refresh(
-    schedule: &mut FleetUsageSchedule,
-    now: std::time::Instant,
-    result: Result<FleetStockRefresh, tokio::time::error::Elapsed>,
-) {
-    match result {
-        Ok(Ok(Some(snapshot))) => schedule.mark_stock_success(now, snapshot),
-        Ok(Ok(None)) => {
-            schedule.mark_stock_failure(now);
-            record_usage_refresh_skip("stock", "reader_unavailable");
-        }
-        Ok(Err(error)) => {
-            schedule.mark_stock_failure(now);
-            warn!(error = %error, "fleet usage stock query failed");
-            record_usage_refresh_skip("stock", "query_error");
-        }
-        Err(_) => {
-            schedule.mark_stock_failure(now);
-            warn!(
-                deadline = ?FLEET_STOCK_COLLECTION_DEADLINE,
-                "fleet usage stock collection timed out"
-            );
-            record_usage_refresh_skip("stock", "timeout");
-        }
-    }
-}
-
-/// Apply one due activity refresh with the same contract as
-/// [`apply_stock_refresh`].
-fn apply_activity_refresh(
-    schedule: &mut FleetUsageSchedule,
-    now: std::time::Instant,
-    result: Result<FleetActivityRefresh, tokio::time::error::Elapsed>,
-) {
-    match result {
-        Ok(Ok(Some(snapshot))) => schedule.mark_activity_success(now, snapshot),
-        Ok(Ok(None)) => {
-            schedule.mark_activity_failure(now);
-            record_usage_refresh_skip("activity", "reader_unavailable");
-        }
-        Ok(Err(error)) => {
-            schedule.mark_activity_failure(now);
-            warn!(error = %error, "fleet usage activity query failed");
-            record_usage_refresh_skip("activity", "query_error");
-        }
-        Err(_) => {
-            schedule.mark_activity_failure(now);
-            warn!(
-                deadline = ?FLEET_ACTIVITY_COLLECTION_DEADLINE,
-                "fleet usage activity collection timed out"
-            );
-            record_usage_refresh_skip("activity", "timeout");
-        }
-    }
-}
-
-fn record_usage_refresh_skip(family: &'static str, reason: &'static str) {
-    metrics::counter!(
-        "buzz_usage_query_skipped_total",
-        "family" => family,
-        "reason" => reason
-    )
-    .increment(1);
-}
-
-/// Refresh cached fixed-cardinality gauges on every poller tick. The
-/// Prometheus recorder evicts gauges after several idle ticks, while the
-/// underlying stock and activity queries intentionally run hourly/daily.
-/// Re-emission preserves the query cadence without letting snapshots disappear
-/// between collections; availability reports whether the latest refresh
-/// succeeded, and age reports how old the cached values are.
-fn emit_cached_fleet_usage_metrics(schedule: &FleetUsageSchedule) {
-    if let Some(snapshot) = schedule.stock_snapshot {
-        emit_fleet_stock_metrics(snapshot);
-    }
-    if let Some(snapshot) = schedule.activity_snapshot {
-        emit_fleet_active_user_metrics(snapshot);
-    }
-    emit_usage_snapshot_availability(schedule);
-
-    if let Some(last_success) = schedule.last_stock_success {
-        metrics::gauge!("buzz_usage_snapshot_age_seconds", "family" => "stock")
-            .set(last_success.elapsed().as_secs_f64());
-    }
-    if let Some(last_success) = schedule.last_activity_success {
-        metrics::gauge!("buzz_usage_snapshot_age_seconds", "family" => "activity")
-            .set(last_success.elapsed().as_secs_f64());
-    }
-}
-
-fn emit_fleet_stock_metrics(snapshot: buzz_db::usage::FleetStockSnapshot) {
-    metrics::gauge!("buzz_communities_estimated").set(snapshot.communities_estimated as f64);
-    metrics::gauge!("buzz_total_users", "type" => "human").set(snapshot.users_human as f64);
-    metrics::gauge!("buzz_total_users", "type" => "agent").set(snapshot.users_agent as f64);
-    for (kind, value) in [
-        ("stream", snapshot.channels_stream),
-        ("forum", snapshot.channels_forum),
-        ("dm", snapshot.channels_dm),
-        ("workflow", snapshot.channels_workflow),
-        ("system", snapshot.channels_system),
-    ] {
-        metrics::gauge!("buzz_total_channels", "type" => kind).set(value as f64);
-    }
-    for (role, value) in [
-        ("owner", snapshot.members_owner),
-        ("admin", snapshot.members_admin),
-        ("member", snapshot.members_member),
-    ] {
-        metrics::gauge!("buzz_total_relay_members", "role" => role).set(value as f64);
-    }
-    for (status, value) in [
-        ("active", snapshot.workflows_active),
-        ("disabled", snapshot.workflows_disabled),
-        ("archived", snapshot.workflows_archived),
-    ] {
-        metrics::gauge!("buzz_total_workflows", "status" => status).set(value as f64);
-    }
-    metrics::gauge!("buzz_total_git_repos").set(snapshot.git_repos as f64);
-}
-
-fn emit_fleet_active_user_metrics(snapshot: buzz_db::usage::FleetActiveUsersSnapshot) {
-    for (window, human, agent, unknown) in [
-        (
-            "1d",
-            snapshot.human_1d,
-            snapshot.agent_1d,
-            snapshot.unknown_1d,
-        ),
-        (
-            "7d",
-            snapshot.human_7d,
-            snapshot.agent_7d,
-            snapshot.unknown_7d,
-        ),
-        (
-            "30d",
-            snapshot.human_30d,
-            snapshot.agent_30d,
-            snapshot.unknown_30d,
-        ),
-    ] {
-        metrics::gauge!("buzz_total_active_users", "window" => window, "type" => "human")
-            .set(human as f64);
-        metrics::gauge!("buzz_total_active_users", "window" => window, "type" => "agent")
-            .set(agent as f64);
-        metrics::gauge!("buzz_total_active_users", "window" => window, "type" => "unknown")
-            .set(unknown as f64);
-    }
-}
-
 /// Read worker storage snapshots only on the existing leader metrics tick.
 async fn run_storage_sweep_tick(
     state: &AppState,
@@ -2910,334 +2532,6 @@ async fn run_storage_sweep_tick(
     }
 }
 
-/// Emit the database-derived usage snapshot from the stable leader only.
-async fn emit_db_usage_metrics(
-    state: &AppState,
-    emission_scope: &EmissionScope,
-    host_map: &HashMap<Uuid, String>,
-) -> anyhow::Result<()> {
-    // --- Collect all DB results before emitting any metrics (C4) ---
-    //
-    // All `.await?` calls happen here. If any query fails the function returns
-    // early — no metrics are emitted for this tick — preventing a mixed
-    // fresh/stale snapshot where later gauges retain their last value while
-    // earlier ones are updated.
-
-    let community_total = state.db.usage_community_count().await?;
-    let user_rows = state.db.usage_user_counts().await?;
-    let channel_rows = state.db.usage_channel_counts().await?;
-    let message_rows = state.db.usage_message_counts().await?;
-    let relay_member_rows = state.db.usage_relay_member_counts().await?;
-    let workflow_rows = state.db.usage_workflow_counts().await?;
-    let git_repo_rows = state.db.usage_git_repo_counts().await?;
-    let active_users_1d = state.db.usage_active_user_counts("1 day").await?;
-    let active_users_7d = state.db.usage_active_user_counts("7 days").await?;
-    let active_users_30d = state.db.usage_active_user_counts("30 days").await?;
-    let active_channels_1d = state.db.usage_active_channel_counts("1 day").await?;
-    let active_channels_7d = state.db.usage_active_channel_counts("7 days").await?;
-
-    // --- Determine which community IDs receive per-community series (K1) ---
-    //
-    // `active_set` is the subset of host_map IDs that get per-community gauges
-    // this tick. Fleet-wide totals (buzz_total_*) always emit regardless.
-    let active_set: HashSet<Uuid> = host_map
-        .keys()
-        .filter(|id| emission_scope.allows(id))
-        .copied()
-        .collect();
-
-    // --- Publish phase: emit all metrics now that every query succeeded ---
-
-    // --- A. Adoption stocks (DB-polled) ---
-
-    // buzz_communities_total (no tag — fleet-wide count)
-    metrics::gauge!("buzz_communities_total").set(community_total as f64);
-
-    // buzz_community_users{community, type:human|agent}
-    // Emit from host_map so communities that have zero users still get a 0
-    // rather than keeping the last nonzero value until process restart.
-    {
-        let rows: HashMap<Uuid, _> = user_rows.into_iter().map(|r| (r.community_id, r)).collect();
-        // Fleet totals (always emitted).
-        let (total_human, total_agent): (i64, i64) = rows
-            .values()
-            .fold((0, 0), |(h, a), r| (h + r.human, a + r.agent));
-        metrics::gauge!("buzz_total_users", "type" => "human").set(total_human as f64);
-        metrics::gauge!("buzz_total_users", "type" => "agent").set(total_agent as f64);
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            let (human, agent) = rows.get(&id).map(|r| (r.human, r.agent)).unwrap_or((0, 0));
-            metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "human")
-                .set(human as f64);
-            metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "agent")
-                .set(agent as f64);
-        }
-    }
-
-    // buzz_community_channels{community, type}
-    // Zero-fill across all (community, channel_type) pairs so a type that
-    // drops to zero emits 0 rather than retaining its last nonzero value.
-    {
-        const CHANNEL_TYPES: &[&str] = &["stream", "forum", "dm", "workflow", "system"];
-        let rows: HashMap<(Uuid, &str), i64> = channel_rows
-            .into_iter()
-            .filter_map(|r| {
-                let matched = CHANNEL_TYPES
-                    .iter()
-                    .find(|&&t| t == r.channel_type.as_str())
-                    .map(|&t| ((r.community_id, t), r.count));
-                if matched.is_none() {
-                    warn!(
-                        channel_type = %r.channel_type,
-                        "usage_channel_counts: unrecognised channel_type — row skipped"
-                    );
-                }
-                matched
-            })
-            .collect();
-        // Fleet totals (always emitted).
-        for &ct in CHANNEL_TYPES {
-            let total: i64 = host_map
-                .keys()
-                .map(|id| rows.get(&(*id, ct)).copied().unwrap_or(0))
-                .sum();
-            metrics::gauge!("buzz_total_channels", "type" => ct).set(total as f64);
-        }
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            for &ct in CHANNEL_TYPES {
-                let count = rows.get(&(id, ct)).copied().unwrap_or(0);
-                metrics::gauge!(
-                    "buzz_community_channels",
-                    "community" => community.clone(),
-                    "type" => ct
-                )
-                .set(count as f64);
-            }
-        }
-    }
-
-    // buzz_community_messages{community}
-    // Emit 0 for communities with no messages so dashboards don't stale-read.
-    {
-        let rows: HashMap<Uuid, i64> = message_rows
-            .into_iter()
-            .map(|r| (r.community_id, r.count))
-            .collect();
-        // Fleet total (always emitted).
-        let total: i64 = rows.values().sum();
-        metrics::gauge!("buzz_total_messages").set(total as f64);
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            let count = rows.get(&id).copied().unwrap_or(0);
-            metrics::gauge!("buzz_community_messages", "community" => community.clone())
-                .set(count as f64);
-        }
-    }
-
-    // buzz_community_relay_members{community, role}
-    // Zero-fill across all (community, role) pairs; relay_members.role is a
-    // CHECK constraint over {'owner', 'admin', 'member'}.
-    {
-        const RELAY_ROLES: &[&str] = &["owner", "admin", "member"];
-        let rows: HashMap<(Uuid, &str), i64> = relay_member_rows
-            .into_iter()
-            .filter_map(|r| {
-                let matched = RELAY_ROLES
-                    .iter()
-                    .find(|&&role| role == r.role.as_str())
-                    .map(|&role| ((r.community_id, role), r.count));
-                if matched.is_none() {
-                    warn!(
-                        role = %r.role,
-                        "usage_relay_member_counts: unrecognised role — row skipped"
-                    );
-                }
-                matched
-            })
-            .collect();
-        // Fleet totals (always emitted).
-        for &role in RELAY_ROLES {
-            let total: i64 = host_map
-                .keys()
-                .map(|id| rows.get(&(*id, role)).copied().unwrap_or(0))
-                .sum();
-            metrics::gauge!("buzz_total_relay_members", "role" => role).set(total as f64);
-        }
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            for &role in RELAY_ROLES {
-                let count = rows.get(&(id, role)).copied().unwrap_or(0);
-                metrics::gauge!(
-                    "buzz_community_relay_members",
-                    "community" => community.clone(),
-                    "role" => role
-                )
-                .set(count as f64);
-            }
-        }
-    }
-
-    // buzz_community_workflows{community, status}
-    // Zero-fill across all (community, status) pairs; workflow_status is a
-    // DB enum: {'active', 'disabled', 'archived'}.
-    {
-        const WORKFLOW_STATUSES: &[&str] = &["active", "disabled", "archived"];
-        let rows: HashMap<(Uuid, &str), i64> = workflow_rows
-            .into_iter()
-            .filter_map(|r| {
-                let matched = WORKFLOW_STATUSES
-                    .iter()
-                    .find(|&&s| s == r.status.as_str())
-                    .map(|&s| ((r.community_id, s), r.count));
-                if matched.is_none() {
-                    warn!(
-                        status = %r.status,
-                        "usage_workflow_counts: unrecognised workflow status — row skipped"
-                    );
-                }
-                matched
-            })
-            .collect();
-        // Fleet totals (always emitted).
-        for &status in WORKFLOW_STATUSES {
-            let total: i64 = host_map
-                .keys()
-                .map(|id| rows.get(&(*id, status)).copied().unwrap_or(0))
-                .sum();
-            metrics::gauge!("buzz_total_workflows", "status" => status).set(total as f64);
-        }
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            for &status in WORKFLOW_STATUSES {
-                let count = rows.get(&(id, status)).copied().unwrap_or(0);
-                metrics::gauge!(
-                    "buzz_community_workflows",
-                    "community" => community.clone(),
-                    "status" => status
-                )
-                .set(count as f64);
-            }
-        }
-    }
-
-    // buzz_community_git_repos{community}
-    // Emit 0 for communities with no repos.
-    {
-        let rows: HashMap<Uuid, i64> = git_repo_rows
-            .into_iter()
-            .map(|r| (r.community_id, r.count))
-            .collect();
-        // Fleet total (always emitted).
-        let total: i64 = rows.values().sum();
-        metrics::gauge!("buzz_total_git_repos").set(total as f64);
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            let count = rows.get(&id).copied().unwrap_or(0);
-            metrics::gauge!("buzz_community_git_repos", "community" => community.clone())
-                .set(count as f64);
-        }
-    }
-
-    // --- C. Engagement — windowed DAU/WAU/MAU + active channels ---
-    // Emit 0 for window/type/community combos that had no activity; this
-    // ensures a community that was active last tick but quiet this tick reads
-    // 0 rather than retaining its last nonzero value.
-
-    for (data, label) in [
-        (active_users_1d, "1d"),
-        (active_users_7d, "7d"),
-        (active_users_30d, "30d"),
-    ] {
-        let rows: HashMap<Uuid, _> = data.into_iter().map(|r| (r.community_id, r)).collect();
-        // Fleet totals (always emitted).
-        let (total_human, total_agent, total_unknown): (i64, i64, i64) =
-            rows.values().fold((0, 0, 0), |(h, a, u), r| {
-                (h + r.human, a + r.agent, u + r.unknown)
-            });
-        metrics::gauge!("buzz_total_active_users", "window" => label, "type" => "human")
-            .set(total_human as f64);
-        metrics::gauge!("buzz_total_active_users", "window" => label, "type" => "agent")
-            .set(total_agent as f64);
-        metrics::gauge!("buzz_total_active_users", "window" => label, "type" => "unknown")
-            .set(total_unknown as f64);
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            let (human, agent, unknown) = rows
-                .get(&id)
-                .map(|r| (r.human, r.agent, r.unknown))
-                .unwrap_or((0, 0, 0));
-            metrics::gauge!(
-                "buzz_community_active_users",
-                "community" => community.clone(),
-                "window" => label,
-                "type" => "human"
-            )
-            .set(human as f64);
-            metrics::gauge!(
-                "buzz_community_active_users",
-                "community" => community.clone(),
-                "window" => label,
-                "type" => "agent"
-            )
-            .set(agent as f64);
-            metrics::gauge!(
-                "buzz_community_active_users",
-                "community" => community.clone(),
-                "window" => label,
-                "type" => "unknown"
-            )
-            .set(unknown as f64);
-        }
-    }
-
-    for (data, label) in [(active_channels_1d, "1d"), (active_channels_7d, "7d")] {
-        let rows: HashMap<Uuid, i64> = data
-            .into_iter()
-            .map(|r| (r.community_id, r.count))
-            .collect();
-        // Fleet total (always emitted).
-        let total: i64 = rows.values().sum();
-        metrics::gauge!("buzz_total_active_channels", "window" => label).set(total as f64);
-        // Per-community series (gated by active_set).
-        for (&id, community) in host_map {
-            if !active_set.contains(&id) {
-                continue;
-            }
-            let count = rows.get(&id).copied().unwrap_or(0);
-            metrics::gauge!(
-                "buzz_community_active_channels",
-                "community" => community.clone(),
-                "window" => label
-            )
-            .set(count as f64);
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -3248,14 +2542,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        apply_activity_refresh, apply_stock_refresh, buzz_auto_migrate_enabled, connect_audit_pool,
-        connect_search_pool, counted_partition_audit, dropped_in_memory_keys,
-        emit_cached_fleet_usage_metrics, idle_timeout_secs, jwks_next_retry_after_failed_refresh,
-        nip_fi_jwks_refresh_loop, record_legacy_usage_collection, refresh_due_fleet_usage,
+        buzz_auto_migrate_enabled, connect_audit_pool, connect_search_pool,
+        counted_partition_audit, dropped_in_memory_keys, idle_timeout_secs,
+        jwks_next_retry_after_failed_refresh, nip_fi_jwks_refresh_loop,
         refresh_legacy_active_gauge_recency, relay_keypair_from_config,
         run_jwks_refresh_supervisor, run_periodic_until_cancelled, startup_partition_audit,
-        EmissionScope, FleetUsageSchedule, InMemoryMetricKey, PartitionAuditSchedule,
-        FLEET_ACTIVITY_COLLECTION_DEADLINE, FLEET_STOCK_COLLECTION_DEADLINE,
+        EmissionScope, InMemoryMetricKey, PartitionAuditSchedule,
     };
     use buzz_db::DbConfig;
     use metrics::GaugeFn;
@@ -3679,433 +2971,6 @@ mod tests {
             EmissionScope::Off
         ));
         assert!(matches!(EmissionScope::parse("all"), EmissionScope::All));
-    }
-
-    #[test]
-    fn fleet_usage_families_have_independent_cadences() {
-        let now = std::time::Instant::now();
-        let mut schedule = FleetUsageSchedule::new_at(
-            now,
-            Duration::from_secs(60),
-            Duration::from_secs(600),
-            Duration::from_secs(10),
-        );
-        assert!(schedule.stock_due(now));
-        assert!(schedule.activity_due(now));
-        assert!(!schedule.stock_available());
-        assert!(!schedule.activity_available());
-
-        schedule.mark_stock_failure(now);
-        assert!(!schedule.stock_due(now + Duration::from_secs(9)));
-        assert!(schedule.stock_due(now + Duration::from_secs(10)));
-        assert!(schedule.activity_due(now));
-
-        let stock_success = now + Duration::from_secs(10);
-        let stock_snapshot = buzz_db::usage::FleetStockSnapshot {
-            communities_estimated: 7,
-            ..Default::default()
-        };
-        schedule.mark_stock_success(stock_success, stock_snapshot);
-        assert!(schedule.stock_available());
-        assert_eq!(
-            schedule
-                .stock_snapshot
-                .expect("cached stock snapshot")
-                .communities_estimated,
-            7
-        );
-        assert!(!schedule.stock_due(stock_success + Duration::from_secs(59)));
-        assert!(schedule.stock_due(stock_success + Duration::from_secs(60)));
-
-        schedule.mark_activity_failure(now);
-        assert!(!schedule.activity_due(now + Duration::from_secs(9)));
-        assert!(schedule.activity_due(now + Duration::from_secs(10)));
-
-        let activity_success = now + Duration::from_secs(10);
-        let activity_snapshot = buzz_db::usage::FleetActiveUsersSnapshot {
-            human_1d: 3,
-            ..Default::default()
-        };
-        schedule.mark_activity_success(activity_success, activity_snapshot);
-        assert!(schedule.activity_available());
-        assert_eq!(
-            schedule
-                .activity_snapshot
-                .expect("cached activity snapshot")
-                .human_1d,
-            3
-        );
-        assert!(!schedule.activity_due(activity_success + Duration::from_secs(599)));
-        assert!(schedule.activity_due(activity_success + Duration::from_secs(600)));
-
-        let demoted_at = activity_success + Duration::from_secs(20);
-        schedule.reset_after_demotion(demoted_at);
-        assert!(!schedule.stock_available());
-        assert!(!schedule.activity_available());
-        assert!(schedule.stock_due(demoted_at));
-        assert!(schedule.activity_due(demoted_at));
-    }
-
-    fn usage_metric_values(
-        recorder: &metrics_util::debugging::DebuggingRecorder,
-    ) -> std::collections::HashMap<String, f64> {
-        recorder
-            .snapshotter()
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter_map(|(key, _, _, value)| {
-                let name = key.key().name();
-                let label = key
-                    .key()
-                    .labels()
-                    .map(|label| format!("{}={}", label.key(), label.value()))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                match value {
-                    DebugValue::Gauge(value) => {
-                        Some((format!("{name}{{{label}}}"), value.into_inner()))
-                    }
-                    DebugValue::Counter(value) => {
-                        Some((format!("{name}{{{label}}}"), value as f64))
-                    }
-                    _ => None,
-                }
-            })
-            .collect()
-    }
-
-    /// Drives the production refresh-to-availability mapping
-    /// (`apply_*_refresh`) through success -> skipped/failed refresh ->
-    /// recovery and asserts the emitted gauges, the retained cached values,
-    /// the skip reason, and the retry schedule.
-    #[test]
-    fn fleet_refresh_outcomes_drive_availability_through_production_mapping() {
-        let now = std::time::Instant::now();
-        let retry = Duration::from_secs(10);
-        let stock = buzz_db::usage::FleetStockSnapshot {
-            communities_estimated: 7,
-            ..Default::default()
-        };
-        let activity = buzz_db::usage::FleetActiveUsersSnapshot {
-            human_1d: 3,
-            ..Default::default()
-        };
-        let stock_available = "buzz_usage_snapshot_available{family=stock}";
-        let activity_available = "buzz_usage_snapshot_available{family=activity}";
-        let cached_stock = "buzz_communities_estimated{}";
-        let cached_activity = "buzz_total_active_users{window=1d,type=human}";
-
-        for (query_error, reason) in [(false, "reader_unavailable"), (true, "query_error")] {
-            let mut schedule = FleetUsageSchedule::new_at(
-                now,
-                Duration::from_secs(60),
-                Duration::from_secs(600),
-                retry,
-            );
-            let tick = |schedule: &mut FleetUsageSchedule,
-                        at: std::time::Instant,
-                        stock_result,
-                        activity_result| {
-                let recorder = metrics_util::debugging::DebuggingRecorder::new();
-                metrics::with_local_recorder(&recorder, || {
-                    apply_stock_refresh(schedule, at, Ok(stock_result));
-                    apply_activity_refresh(schedule, at, Ok(activity_result));
-                    emit_cached_fleet_usage_metrics(schedule);
-                });
-                usage_metric_values(&recorder)
-            };
-
-            let values = tick(&mut schedule, now, Ok(Some(stock)), Ok(Some(activity)));
-            assert_eq!(values.get(stock_available), Some(&1.0), "{reason}");
-            assert_eq!(values.get(activity_available), Some(&1.0), "{reason}");
-
-            let failed_at = now + Duration::from_secs(600);
-            let values = if query_error {
-                tick(
-                    &mut schedule,
-                    failed_at,
-                    Err(buzz_db::DbError::AuthEventRejected),
-                    Err(buzz_db::DbError::AuthEventRejected),
-                )
-            } else {
-                tick(&mut schedule, failed_at, Ok(None), Ok(None))
-            };
-            assert_eq!(values.get(stock_available), Some(&0.0), "{reason}");
-            assert_eq!(values.get(activity_available), Some(&0.0), "{reason}");
-            assert_eq!(values.get(cached_stock), Some(&7.0), "{reason}");
-            assert_eq!(values.get(cached_activity), Some(&3.0), "{reason}");
-            for family in ["stock", "activity"] {
-                let key =
-                    format!("buzz_usage_query_skipped_total{{family={family},reason={reason}}}");
-                assert_eq!(values.get(&key), Some(&1.0), "{key}");
-            }
-            assert!(!schedule.stock_due(failed_at + retry - Duration::from_millis(1)));
-            assert!(schedule.stock_due(failed_at + retry));
-            assert!(schedule.activity_due(failed_at + retry));
-
-            let recovered_at = failed_at + retry;
-            let values = tick(
-                &mut schedule,
-                recovered_at,
-                Ok(Some(stock)),
-                Ok(Some(activity)),
-            );
-            assert_eq!(values.get(stock_available), Some(&1.0), "{reason}");
-            assert_eq!(values.get(activity_available), Some(&1.0), "{reason}");
-            assert!(
-                !values
-                    .keys()
-                    .any(|key| key.starts_with("buzz_usage_query_skipped_total")),
-                "{reason}: recovery must not record a skip"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn each_fleet_family_is_abandoned_at_its_own_deadline() {
-        let stock = || std::future::ready(Ok(Some(buzz_db::usage::FleetStockSnapshot::default())));
-        let activity = || {
-            std::future::ready(Ok(
-                Some(buzz_db::usage::FleetActiveUsersSnapshot::default()),
-            ))
-        };
-        let schedule = || {
-            FleetUsageSchedule::new_at(
-                std::time::Instant::now(),
-                Duration::ZERO,
-                Duration::ZERO,
-                Duration::from_secs(60),
-            )
-        };
-
-        // The outer bound turns a missing deadline into a failure instead of
-        // a hang under paused time.
-        async fn bounded(refresh: impl std::future::Future<Output = ()>) {
-            tokio::time::timeout(Duration::from_secs(60 * 60), refresh)
-                .await
-                .expect("a stalled family must be abandoned at its deadline");
-        }
-
-        let started = tokio::time::Instant::now();
-        bounded(refresh_due_fleet_usage(
-            &mut schedule(),
-            std::future::pending(),
-            activity(),
-        ))
-        .await;
-        assert_eq!(
-            tokio::time::Instant::now() - started,
-            FLEET_STOCK_COLLECTION_DEADLINE
-        );
-
-        let started = tokio::time::Instant::now();
-        bounded(refresh_due_fleet_usage(
-            &mut schedule(),
-            stock(),
-            std::future::pending(),
-        ))
-        .await;
-        assert_eq!(
-            tokio::time::Instant::now() - started,
-            FLEET_ACTIVITY_COLLECTION_DEADLINE
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stalled_fleet_collection_times_out_into_failed_refresh() {
-        let retry = Duration::from_secs(60);
-        let started = std::time::Instant::now();
-        // Zero cadences keep both families due after the seeded success.
-        let mut schedule =
-            FleetUsageSchedule::new_at(started, Duration::ZERO, Duration::ZERO, retry);
-        schedule.mark_stock_success(
-            started,
-            buzz_db::usage::FleetStockSnapshot {
-                communities_estimated: 7,
-                ..Default::default()
-            },
-        );
-        schedule.mark_activity_success(
-            started,
-            buzz_db::usage::FleetActiveUsersSnapshot {
-                human_1d: 3,
-                ..Default::default()
-            },
-        );
-
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        let tick_started = tokio::time::Instant::now();
-        let before = std::time::Instant::now();
-        // A reader that never answers: neither collection ever completes.
-        tokio::time::timeout(
-            Duration::from_secs(60 * 60),
-            refresh_due_fleet_usage(
-                &mut schedule,
-                std::future::pending(),
-                std::future::pending(),
-            ),
-        )
-        .await
-        .expect("a stalled reader must not stall the poller tick");
-        let after = std::time::Instant::now();
-        assert_eq!(
-            tokio::time::Instant::now() - tick_started,
-            FLEET_STOCK_COLLECTION_DEADLINE + FLEET_ACTIVITY_COLLECTION_DEADLINE,
-            "each family is abandoned at its own deadline"
-        );
-
-        let values = usage_metric_values(&recorder);
-        assert_eq!(
-            values.get("buzz_usage_snapshot_available{family=stock}"),
-            Some(&0.0)
-        );
-        assert_eq!(
-            values.get("buzz_usage_snapshot_available{family=activity}"),
-            Some(&0.0)
-        );
-        assert_eq!(values.get("buzz_communities_estimated{}"), Some(&7.0));
-        assert_eq!(
-            values.get("buzz_total_active_users{window=1d,type=human}"),
-            Some(&3.0)
-        );
-        for family in ["stock", "activity"] {
-            let key = format!("buzz_usage_query_skipped_total{{family={family},reason=timeout}}");
-            assert_eq!(values.get(&key), Some(&1.0), "{key}");
-        }
-        // An abandoned collection records no route decision; the documented
-        // signal is the timeout skip above.
-        assert!(
-            !values
-                .keys()
-                .any(|key| key.starts_with("buzz_db_route_decision")),
-            "a timed-out collection must not record a route decision"
-        );
-        assert!(!schedule.stock_due(before + retry - Duration::from_millis(1)));
-        assert!(!schedule.activity_due(before + retry - Duration::from_millis(1)));
-        assert!(schedule.stock_due(after + retry));
-        assert!(schedule.activity_due(after + retry));
-
-        // The next tick still runs and a successful collection recovers.
-        schedule.next_stock = after;
-        schedule.next_activity = after;
-        refresh_due_fleet_usage(
-            &mut schedule,
-            std::future::ready(Ok(Some(buzz_db::usage::FleetStockSnapshot {
-                communities_estimated: 8,
-                ..Default::default()
-            }))),
-            std::future::ready(Ok(Some(buzz_db::usage::FleetActiveUsersSnapshot {
-                human_1d: 4,
-                ..Default::default()
-            }))),
-        )
-        .await;
-        let values = usage_metric_values(&recorder);
-        assert_eq!(
-            values.get("buzz_usage_snapshot_available{family=stock}"),
-            Some(&1.0)
-        );
-        assert_eq!(
-            values.get("buzz_usage_snapshot_available{family=activity}"),
-            Some(&1.0)
-        );
-        assert_eq!(values.get("buzz_communities_estimated{}"), Some(&8.0));
-        assert_eq!(
-            values.get("buzz_total_active_users{window=1d,type=human}"),
-            Some(&4.0)
-        );
-    }
-
-    #[test]
-    fn failed_fleet_refresh_marks_cached_snapshot_unavailable_until_recovery() {
-        let now = std::time::Instant::now();
-        let mut schedule = FleetUsageSchedule::new_at(
-            now,
-            Duration::from_secs(60),
-            Duration::from_secs(600),
-            Duration::from_secs(10),
-        );
-        let stock = buzz_db::usage::FleetStockSnapshot {
-            communities_estimated: 7,
-            ..Default::default()
-        };
-        let activity = buzz_db::usage::FleetActiveUsersSnapshot {
-            human_1d: 3,
-            ..Default::default()
-        };
-        let stock_available = "buzz_usage_snapshot_available{family=stock}";
-        let activity_available = "buzz_usage_snapshot_available{family=activity}";
-        let emit = |schedule: &FleetUsageSchedule| {
-            let recorder = metrics_util::debugging::DebuggingRecorder::new();
-            metrics::with_local_recorder(&recorder, || emit_cached_fleet_usage_metrics(schedule));
-            usage_metric_values(&recorder)
-        };
-
-        schedule.mark_stock_success(now, stock);
-        schedule.mark_activity_success(now, activity);
-        let values = emit(&schedule);
-        assert_eq!(values.get(stock_available), Some(&1.0));
-        assert_eq!(values.get(activity_available), Some(&1.0));
-
-        // A failed due refresh keeps the last values visible, but no longer
-        // advertises them as available.
-        let failed_at = now + Duration::from_secs(600);
-        schedule.mark_stock_failure(failed_at);
-        schedule.mark_activity_failure(failed_at);
-        let values = emit(&schedule);
-        assert_eq!(values.get(stock_available), Some(&0.0));
-        assert_eq!(values.get(activity_available), Some(&0.0));
-        assert_eq!(values.get("buzz_communities_estimated{}"), Some(&7.0));
-        assert_eq!(
-            values.get("buzz_total_active_users{window=1d,type=human}"),
-            Some(&3.0)
-        );
-        assert!(schedule.stock_due(failed_at + Duration::from_secs(10)));
-        assert!(schedule.activity_due(failed_at + Duration::from_secs(10)));
-
-        let recovered_at = failed_at + Duration::from_secs(10);
-        schedule.mark_stock_success(recovered_at, stock);
-        schedule.mark_activity_success(recovered_at, activity);
-        let values = emit(&schedule);
-        assert_eq!(values.get(stock_available), Some(&1.0));
-        assert_eq!(values.get(activity_available), Some(&1.0));
-    }
-
-    #[test]
-    fn legacy_collection_publishes_coherent_availability() {
-        let mut schedule = FleetUsageSchedule::new_at(
-            std::time::Instant::now(),
-            Duration::from_secs(60),
-            Duration::from_secs(600),
-            Duration::from_secs(10),
-        );
-        let stock_available = "buzz_usage_snapshot_available{family=stock}";
-        let activity_available = "buzz_usage_snapshot_available{family=activity}";
-        let mut record = |succeeded: bool| {
-            let recorder = metrics_util::debugging::DebuggingRecorder::new();
-            metrics::with_local_recorder(&recorder, || {
-                record_legacy_usage_collection(succeeded, &mut schedule)
-            });
-            usage_metric_values(&recorder)
-        };
-
-        for (succeeded, expected) in [(true, 1.0), (false, 0.0), (true, 1.0)] {
-            let values = record(succeeded);
-            assert_eq!(values.get(stock_available), Some(&expected), "{succeeded}");
-            assert_eq!(
-                values.get(activity_available),
-                Some(&expected),
-                "{succeeded}"
-            );
-            // Age is the companion freshness signal; it must exist after a
-            // successful rollback collection and not after a demotion.
-            for family in ["stock", "activity"] {
-                let age = format!("buzz_usage_snapshot_age_seconds{{family={family}}}");
-                assert_eq!(values.contains_key(&age), succeeded, "{age}");
-            }
-        }
     }
 
     #[test]

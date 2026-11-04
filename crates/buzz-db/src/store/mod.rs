@@ -74,7 +74,7 @@ pub mod storage_accounting;
 pub mod thread;
 /// Strict newest-first thread windows and auxiliary scans.
 pub mod thread_window;
-/// Per-community usage rollup queries for Prometheus gauges.
+/// Usage-poller leader election and community label lookup.
 pub mod usage;
 /// User profile persistence.
 pub mod user;
