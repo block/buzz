@@ -1342,7 +1342,6 @@ pub(crate) async fn emit_membership_notification_tagged(
         actor_pubkey,
         notification_kind,
         extra_tags,
-        None,
     )
     .await
 }
@@ -1359,7 +1358,6 @@ async fn emit_typed_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
     extra_tags: &[Tag],
-    admission: Option<&buzz_db::relay_members::PendingDefaultChannelJoin>,
 ) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
@@ -1400,40 +1398,16 @@ async fn emit_typed_membership_notification(
         Some(at) => builder.custom_created_at(nostr::Timestamp::from(at)),
         None => builder,
     };
-    let builder = if let Some(admission) = admission {
-        builder.tags([Tag::parse(["admission", &admission.token.to_string()])?])
-    } else {
-        builder
-    };
     let event = builder
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
-    // Recovery serializes the durable add with departures and the admission
-    // generation. Ordinary notices retain the existing insertion path.
-    let stored = match admission {
-        Some(admission) => {
-            state
-                .db
-                .insert_pending_default_notification(
-                    tenant.community(),
-                    channel_id,
-                    target_pubkey,
-                    admission.token,
-                    &event,
-                )
-                .await?
-        }
-        None => Some(
-            state
-                .db
-                .insert_event(tenant.community(), &event, None)
-                .await?,
-        ),
-    };
-    let Some((stored, was_inserted)) = stored else {
-        return Ok(());
-    };
+    // Store with channel_id = None → globally scoped, reachable by global subscribers.
+    let (stored, was_inserted) = state
+        .db
+        .insert_event(tenant.community(), &event, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("membership notification insert failed: {}", e.kind()))?;
     if !was_inserted {
         return Ok(());
     }
@@ -2229,7 +2203,6 @@ pub(crate) async fn persist_put_user(
                 &actor_bytes,
                 KIND_MEMBER_ADDED_NOTIFICATION,
                 &[],
-                None,
             )
             .await
             {
@@ -2930,7 +2903,6 @@ async fn handle_delete_group(
                         &actor_bytes,
                         KIND_MEMBER_REMOVED_NOTIFICATION,
                         &[],
-                        None,
                     )
                     .await
                     {
@@ -3015,36 +2987,9 @@ pub(crate) async fn join_channel_as_self(
 }
 
 /// The side effects of a committed self-join: the membership cache, the
-/// `member_joined` kind:40099, kind:39000/39002 and kind:44100.
+/// `member_joined` kind:40099, kind:39000/39002 and kind:44100. Only the
+/// system message is fatal, as for kind:9021.
 async fn announce_self_join(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-    channel_id: Uuid,
-    pubkey: &[u8],
-) -> anyhow::Result<()> {
-    emit_self_join_message(tenant, state, channel_id, pubkey).await?;
-
-    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
-        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
-    }
-
-    if let Err(e) = emit_membership_notification(
-        tenant,
-        state,
-        channel_id,
-        pubkey,
-        pubkey,
-        buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
-    )
-    .await
-    {
-        warn!("membership notification for join failed: {e}");
-    }
-
-    Ok(())
-}
-
-async fn emit_self_join_message(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -3066,37 +3011,23 @@ async fn emit_self_join_message(
     )
     .await?;
 
-    Ok(())
-}
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    }
 
-async fn refresh_self_join_discovery(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-    channel_id: Uuid,
-    pubkey: &[u8],
-    admission: &buzz_db::relay_members::PendingDefaultChannelJoin,
-) -> anyhow::Result<()> {
-    state.invalidate_membership(tenant, channel_id, pubkey);
-    emit_group_discovery_events(tenant, state, channel_id).await?;
-    let Some(channel_type) = state
-        .db
-        .channel_type_of(tenant.community(), channel_id)
-        .await?
-    else {
-        return Ok(());
-    };
-    emit_typed_membership_notification(
+    if let Err(e) = emit_membership_notification(
         tenant,
         state,
         channel_id,
-        &channel_type,
         pubkey,
         pubkey,
-        KIND_MEMBER_ADDED_NOTIFICATION,
-        &[],
-        Some(admission),
+        buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
     )
-    .await?;
+    .await
+    {
+        warn!("membership notification for join failed: {e}");
+    }
+
     Ok(())
 }
 
@@ -3198,15 +3129,16 @@ async fn finish_default_channel_join(
         .put_pending_default_member(tenant.community(), channel, pubkey, admission.token)
         .await
     {
-        Ok(buzz_db::channel_members::DefaultMemberOutcome::Joined(_)) => {
-            emit_self_join_message(tenant, state, channel, pubkey).await?;
-            refresh_self_join_discovery(tenant, state, channel, pubkey, admission).await?;
+        Ok(Some(_)) => {
+            // Membership is durable now. Announcements keep their existing
+            // failure handling; retries must not replay them for active members.
+            if let Err(error) = announce_self_join(tenant, state, channel, pubkey).await {
+                warn!(channel = %channel, error = %error, "default-channel announcement failed");
+                metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            }
             metrics::counter!("buzz_auto_join_channels_total").increment(1);
         }
-        Ok(buzz_db::channel_members::DefaultMemberOutcome::Active) => {
-            refresh_self_join_discovery(tenant, state, channel, pubkey, admission).await?;
-        }
-        Ok(buzz_db::channel_members::DefaultMemberOutcome::Skipped) => {}
+        Ok(None) => {}
         Err(buzz_db::DbError::ChannelNotFound(_)) => {}
         Err(error) => return Err(error.into()),
     }

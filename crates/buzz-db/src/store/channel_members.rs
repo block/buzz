@@ -721,17 +721,6 @@ pub async fn put_members(
     Ok(results)
 }
 
-/// Outcome of a default-channel membership write during roster recovery.
-#[derive(Debug)]
-pub enum DefaultMemberOutcome {
-    /// This transaction joined the member.
-    Joined(MemberRecord),
-    /// Already active; required discovery may still need recovery.
-    Active,
-    /// Left during this admission, or the admission token is no longer current.
-    Skipped,
-}
-
 /// Self-join `pubkey` to `channel_id` as [`put_member`] with no actor and no
 /// requested role (so the channel's `join_role` applies), but only if
 /// `pubkey` has never had a membership row in the channel, active or removed.
@@ -748,12 +737,7 @@ pub async fn put_first_member(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<Option<MemberRecord>> {
-    Ok(
-        match put_first_member_with_pending(pool, community_id, channel_id, pubkey, None).await? {
-            DefaultMemberOutcome::Joined(member) => Some(member),
-            DefaultMemberOutcome::Active | DefaultMemberOutcome::Skipped => None,
-        },
-    )
+    put_first_member_with_pending(pool, community_id, channel_id, pubkey, None).await
 }
 
 async fn put_first_member_with_pending(
@@ -762,7 +746,7 @@ async fn put_first_member_with_pending(
     channel_id: Uuid,
     pubkey: &[u8],
     pending: Option<Uuid>,
-) -> Result<DefaultMemberOutcome> {
+) -> Result<Option<MemberRecord>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -783,7 +767,7 @@ async fn put_first_member_with_pending(
         .await?;
         let Some(created_at) = current else {
             tx.rollback().await?;
-            return Ok(DefaultMemberOutcome::Skipped);
+            return Ok(None);
         };
         Some(created_at)
     } else {
@@ -805,11 +789,7 @@ async fn put_first_member_with_pending(
         // original behavior of restoring earlier removed memberships.
         if admitted_at.is_none() || removed_at.is_none() || removed_at >= admitted_at {
             tx.rollback().await?;
-            return Ok(if removed_at.is_none() {
-                DefaultMemberOutcome::Active
-            } else {
-                DefaultMemberOutcome::Skipped
-            });
+            return Ok(None);
         }
     }
     let target = MemberPut {
@@ -823,12 +803,12 @@ async fn put_first_member_with_pending(
     match put {
         Ok(put) => {
             tx.commit().await?;
-            Ok(DefaultMemberOutcome::Joined(put.member))
+            Ok(Some(put.member))
         }
         Err(refused) => {
             tx.rollback().await?;
             if pending.is_some() && matches!(refused, DbError::AccessDenied(_)) {
-                Ok(DefaultMemberOutcome::Skipped)
+                Ok(None)
             } else {
                 Err(refused)
             }
@@ -2318,68 +2298,6 @@ impl Db {
         .await
     }
 
-    /// Persist an admission's add notice only while that admission and channel
-    /// membership are current. The channel lock spans the check and durable
-    /// insertion, ordering this notice before any subsequent leave/removal.
-    #[datastore_span(name = "insert_pending_default_notification", system = "postgresql")]
-    pub async fn insert_pending_default_notification(
-        &self,
-        community: CommunityId,
-        channel: Uuid,
-        pubkey: &[u8],
-        pending: Uuid,
-        event: &nostr::Event,
-    ) -> Result<Option<(buzz_core::StoredEvent, bool)>> {
-        let mut tx = self.begin_event_write_transaction(community).await?;
-        let current: Option<Uuid> = sqlx::query_scalar(
-            "SELECT auto_join_pending FROM relay_members \
-             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending = $3 FOR SHARE",
-        )
-        .bind(community.as_uuid())
-        .bind(hex::encode(pubkey))
-        .bind(pending)
-        .fetch_optional(tx.conn())
-        .await?;
-        if current.is_none() {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-        acquire_channel_membership_lock(tx.conn(), community, channel).await?;
-        if !is_member_in_transaction(&mut tx, channel, pubkey).await? {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-        // The first event is the durable per-channel delivery identity. A
-        // retry uses its admission tag instead of minting a new timestamp/ID.
-        // Check under the same membership lock as the insert, so concurrent
-        // workers cannot both create the first notice. Include deleted rows:
-        // recovery must not resurrect a notice deliberately removed later.
-        let recorded: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM events \
-             WHERE community_id = $1 AND pubkey = $2 AND kind = $3 AND tags @> $4)",
-        )
-        .bind(community.as_uuid())
-        .bind(event.pubkey.to_bytes().as_slice())
-        .bind(buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32)
-        .bind(serde_json::json!([
-            ["admission", pending.to_string()],
-            ["h", channel.to_string()],
-            ["p", hex::encode(pubkey)],
-        ]))
-        .fetch_one(tx.conn())
-        .await?;
-        if recorded {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-        let stored = crate::event::insert_event_in_transaction(&mut tx, event, None).await?;
-        if stored.1 {
-            crate::insert_mentions_in_transaction(&mut tx, event, None).await?;
-        }
-        tx.commit().await?;
-        Ok(Some(stored))
-    }
-
     /// Complete one pending default-channel join, preserving leaves since admission.
     /// A stale token or a removed relay member writes nothing.
     #[datastore_span(name = "put_pending_default_member", system = "postgresql")]
@@ -2389,7 +2307,7 @@ impl Db {
         channel: Uuid,
         pubkey: &[u8],
         pending: Uuid,
-    ) -> Result<DefaultMemberOutcome> {
+    ) -> Result<Option<MemberRecord>> {
         put_first_member_with_pending(&self.pool, community, channel, pubkey, Some(pending)).await
     }
 
