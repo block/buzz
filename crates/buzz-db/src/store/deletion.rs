@@ -2318,8 +2318,12 @@ impl DeletionStore {
             .await?;
 
         // Preserve deployment-global operator evidence while severing tenant provenance.
-        for table in ["product_feedback", "rate_limit_violations"] {
-            let sql = format!("UPDATE {table} SET community_id = NULL WHERE community_id = $1");
+        for (table, column) in [
+            ("product_feedback", "community_id"),
+            ("rate_limit_violations", "community_id"),
+            ("storage_usage_history", "usage_community_id"),
+        ] {
+            let sql = format!("UPDATE {table} SET {column} = NULL WHERE {column} = $1");
             let affected = sqlx::query(AssertSqlSafe(sql))
                 .bind(token.community_id.as_uuid())
                 .execute(&mut *tx)
@@ -8636,6 +8640,19 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .as_uuid()
             .to_owned();
         seed_relay_admin_rows(&db, bystander).await;
+        // Storage usage history is provenance-only: purge severs the purged
+        // community's rows and leaves the bystander's attributed.
+        for owner in [community, bystander] {
+            sqlx::query(
+                "INSERT INTO storage_usage_history \
+                 (measured_at, usage_community_id, storage_bytes, storage_objects) \
+                 VALUES (now(), $1, 7, 1)",
+            )
+            .bind(owner)
+            .execute(&db.pool)
+            .await
+            .expect("seed storage usage history");
+        }
         // Operator workflow history is retained even when its provenance
         // community is purged; it is not a tenant-owned serving table.
         let entity = db
@@ -8723,6 +8740,23 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         assert_eq!(deleted.get("relay_admin_actions"), Some(&2));
         assert_eq!(relay_admin_row_counts(&db, community).await, (0, 0));
         assert_eq!(relay_admin_row_counts(&db, bystander).await, (2, 2));
+        let usage_rows = |owner: Uuid| {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM storage_usage_history WHERE usage_community_id = $1",
+            )
+            .bind(owner)
+            .fetch_one(&db.pool)
+        };
+        assert_eq!(usage_rows(community).await.expect("count purged"), 0);
+        assert_eq!(usage_rows(bystander).await.expect("count bystander"), 1);
+        let severed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM storage_usage_history \
+             WHERE usage_community_id IS NULL AND storage_bytes = 7",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("count severed");
+        assert_eq!(severed, 1, "purge severs provenance instead of deleting");
 
         // Logical verification must prove these tables empty too: a straggler
         // direct action (not write-fenced, no report FK) fails the proof.

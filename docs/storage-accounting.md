@@ -55,54 +55,51 @@ cleanup of series for renamed or removed communities. It does not need S3
 listing permission. The worker still needs that permission and its database
 configuration.
 
-## Usage delivery
+## Usage history feed
 
-Set `BUZZ_STORAGE_USAGE_URL` to push each new snapshot's per-community totals
-to an operator endpoint. kgoose's `POST {prefix}/v1/buzz/storage-usage/record`
-receives them and bills sponsored communities in Orb. Unset, nothing is sent.
-Every five minutes, one relay pod (elected by a PostgreSQL session advisory
-lock) compares the stored snapshot's `completed_at` with the last one it
-handled and, when it is new, POSTs every community in consecutive batches of
-at most 50:
+The same transaction that replaces the snapshot appends one
+`storage_usage_history` row per community: every community in the snapshot,
+plus an explicit zero for each serving community (not archived, not being
+deleted) the snapshot omits, so a consumer keeping the latest value per
+community never keeps a stale nonzero one. Each run also prunes rows older
+than 400 days. A worker whose lock session died writes neither the snapshot
+nor history.
+
+An operator reads the history with an operator-signed NIP-98 request:
+
+```text
+GET /operator/storage-usage?after=<cursor>&limit=<1..1000, default 500>
+```
 
 ```json
 {
-  "measured_at": "2026-10-30T03:04:12Z",
-  "communities": [
+  "usage": [
     {
-      "community_host": "acme.communities.buzz.xyz",
+      "cursor": 4812,
+      "measured_at": "2026-10-30T03:04:12Z",
+      "community_host": "acme.example.com",
       "storage_bytes": 123456789,
       "storage_objects": 412
     }
-  ]
+  ],
+  "next_cursor": 4812
 }
 ```
 
-- `measured_at` is the snapshot's completion time in RFC 3339, the same for
-  every batch of a snapshot. Each batch is an independent request.
-- Each request carries a NIP-98 `Authorization` header signed by the relay
-  key, binding the URL and body, as operator-listener mention notifications
-  do. kgoose authenticates the relay by its `buzz` mesh service identity
-  instead, so the relay needs mesh egress to kgoose-builderbot.
-- `storage_bytes` and `storage_objects` are the logical per-community values
-  described above: a blob bound to several communities counts in full for
-  each.
-- Every snapshot community with a community row is sent, including archived
-  or deleting ones that still hold bytes. An active community absent from the
-  snapshot is sent with zero, so a receiver keeping the latest value never
-  retains a stale one. A snapshot community with no community row has no host
-  and is skipped with a warning.
-- A 2xx accepts a batch. A 408, 429, 5xx, or transport error stops the run and
-  re-sends the whole snapshot on the next check. Any other status abandons
-  that snapshot; the next worker run is delivered normally.
-- Which snapshot was handled is kept in memory, so a restart or leader change
-  re-sends the latest snapshot. Receivers MUST treat a repeated community and
-  `measured_at` as already recorded; kgoose bills only a community's first
-  report for each UTC day.
-- A snapshot replaced before it was delivered is never sent. Alert on
-  `time() - buzz_storage_usage_delivered_snapshot_timestamp_seconds` alongside
-  snapshot age; `buzz_storage_usage_deliveries_total{outcome}` counts
-  `accepted`, `retry`, and `rejected` checks. The leader re-publishes the
-  delivered timestamp on every check, so it survives the gauge idle timeout
-  between daily snapshots. After a restart or leader change it has no sample
-  until the next delivery succeeds, so treat a missing series as failing too.
+- Rows come oldest first. `measured_at` is the run's completion time and is
+  the same for every row of a run. `storage_bytes` and `storage_objects` are
+  the logical per-community values described above: a blob bound to several
+  communities counts in full for each.
+- `after` defaults to `0`, the oldest retained row. Store `next_cursor` only
+  after the page is durably recorded, and pass it back as `after`. An empty
+  page means the consumer has caught up; `next_cursor` then echoes `after`.
+- Cursors grow in commit order because runs serialize on the worker lock, so
+  a consumer never skips a row that commits later with a smaller cursor.
+- Archived or deleting communities that still hold bytes are included.
+  `community_host` is the community's current host. Rows for a community with
+  no community row, or whose community was deleted (deletion severs their
+  provenance), are skipped, so a page can be shorter than `limit` without
+  being the last.
+- The relay keeps no delivery state and never calls out. A consumer that
+  falls behind catches up on its next poll, as long as it polls within the
+  retention window.

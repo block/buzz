@@ -2,8 +2,7 @@
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgConnection;
-use uuid::Uuid;
+use sqlx::{postgres::PgConnection, Connection};
 
 use crate::{observability, Db, Result};
 
@@ -15,15 +14,24 @@ pub struct StorageAccountingLeader {
     connection: PgConnection,
 }
 
-/// A community that storage-usage delivery reports on.
+/// Days of per-community usage history kept. Each run prunes older rows in
+/// the same transaction that appends its own, so the table stays bounded at
+/// roughly one row per community per run inside this window.
+pub const STORAGE_USAGE_HISTORY_RETENTION_DAYS: i32 = 400;
+
+/// One per-community measurement from a completed accounting run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StorageUsageCommunity {
-    /// The community UUID used by the snapshot's per-community map.
-    pub id: Uuid,
-    /// The canonical host stored on the community row.
-    pub host: String,
-    /// Whether the community is serving: not archived and not being deleted.
-    pub active: bool,
+pub struct StorageUsageRecord {
+    /// Monotonic feed position; pass the last one back as `after`.
+    pub cursor: i64,
+    /// Commit time of the accounting run that measured it.
+    pub measured_at: DateTime<Utc>,
+    /// The community's current canonical host.
+    pub community_host: String,
+    /// Logical bytes bound to the community.
+    pub storage_bytes: i64,
+    /// Logical objects bound to the community.
+    pub storage_objects: i64,
 }
 
 /// The newest complete snapshot stored by the worker.
@@ -42,7 +50,16 @@ pub struct StoredStorageSnapshot {
 }
 
 impl StorageAccountingLeader {
-    /// Atomically replace the singleton through the lock-owning session.
+    /// Atomically replace the singleton through the lock-owning session and
+    /// append the run's per-community usage history in the same transaction.
+    ///
+    /// History gets one row per community in the snapshot's `per_community`
+    /// map, plus an explicit zero for each serving community the map omits,
+    /// so a consumer keeping the latest value per community never keeps a
+    /// stale nonzero one. Rows past the retention window are pruned in the
+    /// same transaction. A worker whose lock session died can write neither.
+    /// Runs serialize on the worker lock, so history ids grow in commit order
+    /// and are safe to page with an `id > cursor` feed.
     #[datastore_span(name = "save_storage_accounting_snapshot", system = "postgresql")]
     pub async fn save_snapshot(
         &mut self,
@@ -51,6 +68,7 @@ impl StorageAccountingLeader {
         max_objects: i64,
         code_sha: &str,
     ) -> Result<()> {
+        let mut tx = self.connection.begin().await?;
         sqlx::query(
             "INSERT INTO storage_accounting_snapshots \
              (singleton, snapshot, completed_at, duration_ms, max_objects, code_sha) \
@@ -66,8 +84,35 @@ impl StorageAccountingLeader {
         .bind(duration_ms)
         .bind(max_objects)
         .bind(code_sha)
-        .execute(&mut self.connection)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "WITH measured AS ( \
+               SELECT (entry.key)::uuid AS community_id, \
+                      (entry.value->>'bytes')::bigint AS bytes, \
+                      (entry.value->>'objects')::bigint AS objects \
+               FROM jsonb_each(COALESCE($1->'per_community', '{}'::jsonb)) AS entry \
+             ) \
+             INSERT INTO storage_usage_history \
+               (measured_at, usage_community_id, storage_bytes, storage_objects) \
+             SELECT transaction_timestamp(), community_id, bytes, objects FROM measured \
+             UNION ALL \
+             SELECT transaction_timestamp(), c.id, 0, 0 FROM communities c \
+             WHERE c.archived_at IS NULL AND c.deleted_at IS NULL \
+               AND c.deletion_state = 'active' \
+               AND NOT EXISTS (SELECT 1 FROM measured m WHERE m.community_id = c.id)",
+        )
+        .bind(snapshot)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM storage_usage_history \
+             WHERE measured_at < transaction_timestamp() - make_interval(days => $1)",
+        )
+        .bind(STORAGE_USAGE_HISTORY_RETENTION_DAYS)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -113,36 +158,42 @@ impl Db {
         ))
     }
 
-    /// Load only the newest snapshot's commit time, so a poller can detect a
-    /// new snapshot without decoding the full per-community payload.
-    #[datastore_span(name = "load_storage_accounting_completed_at", system = "postgresql")]
-    pub async fn load_storage_accounting_completed_at(&self) -> Result<Option<DateTime<Utc>>> {
+    /// Page the usage history after `after`, oldest first, for communities
+    /// that still have a community row. Rows whose community was deleted
+    /// (provenance severed) or never had a row are skipped, so a page can be
+    /// shorter than `limit` without being the last one; an empty page is.
+    #[datastore_span(name = "list_storage_usage", system = "postgresql")]
+    pub async fn list_storage_usage(
+        &self,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<StorageUsageRecord>> {
         let mut connection =
             observability::acquire_writer(&self.pool, observability::WriterOperation::Maintenance)
                 .await?;
-        Ok(sqlx::query_scalar::<_, DateTime<Utc>>(
-            "SELECT completed_at FROM storage_accounting_snapshots WHERE singleton = TRUE",
+        let rows = sqlx::query_as::<_, (i64, DateTime<Utc>, String, i64, i64)>(
+            "SELECT h.id, h.measured_at, c.host, h.storage_bytes, h.storage_objects \
+             FROM storage_usage_history h \
+             JOIN communities c ON c.id = h.usage_community_id \
+             WHERE h.id > $1 ORDER BY h.id LIMIT $2",
         )
-        .fetch_optional(&mut *connection)
-        .await?)
-    }
-
-    /// List every community with its host and whether it is still serving.
-    #[datastore_span(name = "storage_usage_communities", system = "postgresql")]
-    pub async fn storage_usage_communities(&self) -> Result<Vec<StorageUsageCommunity>> {
-        let mut connection =
-            observability::acquire_writer(&self.pool, observability::WriterOperation::Maintenance)
-                .await?;
-        let rows = sqlx::query_as::<_, (Uuid, String, bool)>(
-            "SELECT id, host, \
-               (archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active') \
-             FROM communities",
-        )
+        .bind(after)
+        .bind(limit)
         .fetch_all(&mut *connection)
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, host, active)| StorageUsageCommunity { id, host, active })
+            .map(
+                |(cursor, measured_at, community_host, storage_bytes, storage_objects)| {
+                    StorageUsageRecord {
+                        cursor,
+                        measured_at,
+                        community_host,
+                        storage_bytes,
+                        storage_objects,
+                    }
+                },
+            )
             .collect())
     }
 }
@@ -260,44 +311,16 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn usage_delivery_reads_snapshot_time_and_community_states() {
+    async fn usage_history_feeds_each_run_with_zero_fill_paging_and_retention() {
         let (pool, _scratch) =
             ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
         let db = Db::from_pool(pool.clone());
-
-        assert_eq!(
-            db.load_storage_accounting_completed_at()
-                .await
-                .expect("load absent completed_at"),
-            None
-        );
-        let mut leader = db
-            .try_lock_storage_accounting()
-            .await
-            .expect("lock")
-            .expect("worker owns lock");
-        leader
-            .save_snapshot(&serde_json::json!({"version": 1}), 10, 100, "a")
-            .await
-            .expect("save snapshot");
-        let stored = db
-            .load_storage_accounting_snapshot()
-            .await
-            .expect("load snapshot")
-            .expect("snapshot exists");
-        assert_eq!(
-            db.load_storage_accounting_completed_at()
-                .await
-                .expect("load completed_at"),
-            Some(stored.completed_at)
-        );
-
-        let mut expected = Vec::new();
-        for (host, archived, state, active) in [
-            ("active.example", false, "active", true),
-            ("archived.example", true, "active", false),
-            ("quiescing.example", false, "quiescing", false),
-            ("tombstone.example", false, "tombstone", false),
+        let mut ids = std::collections::HashMap::new();
+        for (host, archived, state) in [
+            ("measured.example", false, "active"),
+            ("idle.example", false, "active"),
+            ("archived.example", true, "active"),
+            ("quiescing.example", false, "quiescing"),
         ] {
             let id = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO communities (host, archived_at, deletion_state) \
@@ -309,19 +332,96 @@ mod postgres_tests {
             .fetch_one(&pool)
             .await
             .expect("insert community");
-            expected.push(StorageUsageCommunity {
-                id,
-                host: host.to_string(),
-                active,
-            });
+            ids.insert(host, id);
         }
-        let mut communities = db
-            .storage_usage_communities()
+        // A row older than the retention window, pruned by the next run.
+        sqlx::query(
+            "INSERT INTO storage_usage_history \
+             (measured_at, usage_community_id, storage_bytes, storage_objects) \
+             VALUES (now() - make_interval(days => $1 + 1), $2, 1, 1)",
+        )
+        .bind(STORAGE_USAGE_HISTORY_RETENTION_DAYS)
+        .bind(ids["measured.example"])
+        .execute(&pool)
+        .await
+        .expect("insert expired history");
+
+        let mut leader = db
+            .try_lock_storage_accounting()
             .await
-            .expect("list communities");
-        communities.retain(|community| expected.iter().any(|e| e.id == community.id));
-        communities.sort_by(|a, b| a.host.cmp(&b.host));
-        expected.sort_by(|a, b| a.host.cmp(&b.host));
-        assert_eq!(communities, expected);
+            .expect("lock")
+            .expect("worker owns lock");
+        let run = |measured: u64, archived: u64| {
+            serde_json::json!({
+                "per_community": {
+                    ids["measured.example"].to_string(): {"bytes": measured, "objects": 2},
+                    ids["archived.example"].to_string(): {"bytes": archived, "objects": 1},
+                    Uuid::new_v4().to_string(): {"bytes": 9, "objects": 9},
+                },
+            })
+        };
+        leader
+            .save_snapshot(&run(100, 50), 10, 100, "a")
+            .await
+            .expect("save first run");
+        let ours = |records: Vec<StorageUsageRecord>| -> Vec<(String, i64, i64)> {
+            let mut rows: Vec<_> = records
+                .into_iter()
+                .filter(|r| ids.contains_key(r.community_host.as_str()))
+                .map(|r| (r.community_host, r.storage_bytes, r.storage_objects))
+                .collect();
+            rows.sort();
+            rows
+        };
+        let first = db.list_storage_usage(0, 1000).await.expect("first page");
+        let first_cursor = first.last().expect("first run rows").cursor;
+        let first_measured_at = first[0].measured_at;
+        assert!(first.iter().all(|r| r.measured_at == first_measured_at));
+        // Measured and archived-with-bytes rows are reported, the serving
+        // community the run omitted is zero-filled, the quiescing one is not,
+        // the orphan id with no community row is skipped, and the expired row
+        // is gone.
+        assert_eq!(
+            ours(first),
+            vec![
+                ("archived.example".to_owned(), 50, 1),
+                ("idle.example".to_owned(), 0, 0),
+                ("measured.example".to_owned(), 100, 2),
+            ]
+        );
+
+        leader
+            .save_snapshot(&run(150, 50), 10, 100, "b")
+            .await
+            .expect("save second run");
+        let second = db
+            .list_storage_usage(first_cursor, 1000)
+            .await
+            .expect("second page");
+        assert!(second.iter().all(|r| r.cursor > first_cursor));
+        assert!(second.iter().all(|r| r.measured_at > first_measured_at));
+        assert_eq!(
+            ours(second),
+            vec![
+                ("archived.example".to_owned(), 50, 1),
+                ("idle.example".to_owned(), 0, 0),
+                ("measured.example".to_owned(), 150, 2),
+            ]
+        );
+
+        // Single-row pages walk the same feed in cursor order with no gaps.
+        let mut cursor = 0;
+        let mut walked = 0;
+        loop {
+            let page = db.list_storage_usage(cursor, 1).await.expect("page");
+            let Some(row) = page.into_iter().next() else {
+                break;
+            };
+            assert!(row.cursor > cursor);
+            cursor = row.cursor;
+            walked += 1;
+        }
+        let total = db.list_storage_usage(0, 1000).await.expect("all").len();
+        assert_eq!(walked, total);
     }
 }

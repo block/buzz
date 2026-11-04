@@ -139,6 +139,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/operator_listener_outbox.sql
 \i tables/public/relay_operator_audit.sql
 \i tables/public/storage_accounting_snapshots.sql
+\i tables/public/storage_usage_history.sql
 \i tables/public/artifact_heads.sql
 \i tables/public/artifact_revisions.sql
 
@@ -215,5 +216,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/operator_listener_outbox.sql
 \i seeds/relay_operator_audit.sql
 \i seeds/storage_accounting_snapshots.sql
+\i seeds/storage_usage_history.sql
 
 \i tables/public/nip_fi_profile_heads.sql

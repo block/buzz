@@ -562,6 +562,7 @@ mod postgres_tests {
             "relay_admin_outbox",
             "relay_operator_audit",
             "storage_accounting_snapshots",
+            "storage_usage_history",
             "operator_listener_pubkeys",
             "operator_listener_outbox",
         ] {
@@ -777,7 +778,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 81);
+        assert_eq!(migrations.len(), 82);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
