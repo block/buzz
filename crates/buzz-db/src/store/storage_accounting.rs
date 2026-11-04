@@ -2,7 +2,7 @@
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgConnection;
+use sqlx::{postgres::PgConnection, Connection};
 use uuid::Uuid;
 
 use crate::{observability, Db, Result};
@@ -68,6 +68,22 @@ impl StorageAccountingLeader {
         .bind(code_sha)
         .execute(&mut self.connection)
         .await?;
+        Ok(())
+    }
+
+    /// Unlock the lease on its own session, then close that session.
+    ///
+    /// Dropping the leader frees the lease only once PostgreSQL notices the
+    /// closed socket and ends the old backend, which can lag on a loaded
+    /// server. Once this returns, the lease is already free for a
+    /// successor's [`Db::try_lock_storage_accounting`].
+    #[datastore_span(name = "release_storage_accounting", system = "postgresql")]
+    pub async fn release(mut self) -> Result<()> {
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(STORAGE_ACCOUNTING_LOCK_KEY)
+            .execute(&mut self.connection)
+            .await?;
+        self.connection.close().await?;
         Ok(())
     }
 }
@@ -256,6 +272,62 @@ mod postgres_tests {
         assert_eq!(stored.duration_ms, 20);
         assert_eq!(stored.max_objects, 200);
         assert_eq!(stored.code_sha, "b");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn released_lease_admits_successor_before_old_session_exits() {
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
+        let db = Db::from_pool(pool.clone());
+
+        let mut leader = db
+            .try_lock_storage_accounting()
+            .await
+            .expect("first lock")
+            .expect("first worker owns lock");
+        // A closing backend drops its temp tables before it frees session
+        // locks. Locking the leader's temp table keeps that backend alive
+        // after release, so only an explicit unlock can admit a successor.
+        sqlx::query("CREATE TEMP TABLE exit_fence ()")
+            .execute(&mut leader.connection)
+            .await
+            .expect("create leader temp table");
+        let (temp_schema, leader_pid) = sqlx::query_as::<_, (String, i32)>(
+            "SELECT pg_my_temp_schema()::regnamespace::text, pg_backend_pid()",
+        )
+        .fetch_one(&mut leader.connection)
+        .await
+        .expect("load leader session");
+        let mut exit_fence = pool.begin().await.expect("begin exit fence");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {temp_schema}.exit_fence IN ACCESS SHARE MODE"
+        )))
+        .execute(&mut *exit_fence)
+        .await
+        .expect("hold the leader's temp-table cleanup");
+
+        leader.release().await.expect("release lease");
+        let successor = db
+            .try_lock_storage_accounting()
+            .await
+            .expect("successor lock attempt");
+        assert!(
+            successor.is_some(),
+            "a released lease must admit a successor at once"
+        );
+        let leader_alive = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+        )
+        .bind(leader_pid)
+        .fetch_one(&pool)
+        .await
+        .expect("load leader backend");
+        assert!(leader_alive, "the old backend must not have exited yet");
+        exit_fence
+            .rollback()
+            .await
+            .expect("let the old backend exit");
     }
 
     #[tokio::test]
