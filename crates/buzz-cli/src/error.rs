@@ -47,6 +47,8 @@ pub enum CliError {
 
     /// The local credential provider stayed `rate_limited` through its
     /// bounded waits. It refused before acting, so a later re-run is safe.
+    /// Only the Unix desktop provider reports it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     #[error("rate limited: {0}")]
     Throttled(String),
 
