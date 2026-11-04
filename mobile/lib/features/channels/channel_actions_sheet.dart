@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/community/community_membership_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import 'dm_channel_labels.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -37,6 +38,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
+part 'channel_admission_card.dart';
 part 'channel_details_page.dart';
 
 /// Opens the mobile channel actions sheet and returns whether its parent page

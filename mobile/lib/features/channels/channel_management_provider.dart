@@ -549,6 +549,71 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
   return channelDetailsFromEvent(events.first);
 });
 
+/// Who a channel admits, from its relay-signed kind:39000 metadata.
+@immutable
+class ChannelAdmission {
+  const ChannelAdmission({
+    required this.joinRole,
+    required this.autoJoin,
+    required this.canBeDefault,
+  });
+
+  /// Role people get when they join or are joined: `member` or `guest`.
+  final String joinRole;
+
+  /// Whether the relay joins new community members to this channel.
+  final bool autoJoin;
+
+  /// Only an open, unarchived stream channel can be a default channel.
+  final bool canBeDefault;
+}
+
+/// Builds [ChannelAdmission] from kind:39000 metadata.
+@visibleForTesting
+ChannelAdmission channelAdmissionFromEvent(NostrEvent event) {
+  final data = ChannelData.fromEvent(event);
+  return ChannelAdmission(
+    joinRole: data.joinRole,
+    autoJoin: data.isAutoJoin,
+    canBeDefault:
+        data.channelType == 'stream' &&
+        data.visibility == 'open' &&
+        !data.isArchived,
+  );
+}
+
+Future<ChannelAdmission> _fetchChannelAdmission(
+  RelaySessionNotifier session,
+  String channelId,
+) async {
+  final events = await session.fetchHistory(
+    NostrFilter(
+      kinds: [39000],
+      tags: {
+        '#d': [channelId],
+      },
+      limit: 1,
+    ),
+  );
+  if (events.isEmpty) throw Exception('Channel not found: $channelId');
+  return channelAdmissionFromEvent(events.first);
+}
+
+/// Fresh admission settings for one channel; read on demand, never cached.
+final channelAdmissionProvider = FutureProvider.autoDispose
+    .family<ChannelAdmission, String>((ref, channelId) {
+      ref.watch(relayConfigProvider);
+      return _fetchChannelAdmission(
+        ref.watch(relaySessionProvider.notifier),
+        channelId,
+      );
+    });
+
+/// The relay accepted a change that its metadata does not show yet.
+class ChannelChangeUnconfirmed implements Exception {
+  const ChannelChangeUnconfirmed();
+}
+
 /// Channel members from kind:39002 NIP-29 members event.
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {

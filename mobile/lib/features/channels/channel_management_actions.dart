@@ -264,6 +264,52 @@ class ChannelActions {
     await _refreshChannelState(channelId);
   }
 
+  /// Sets the role people get when they join [channelId]: `member` lets them
+  /// participate, `guest` lets them only view. Existing members keep theirs.
+  Future<void> setChannelJoinRole(String channelId, String role) =>
+      _setAdmission(channelId, [
+        'join_role',
+        role,
+      ], (admission) => admission.joinRole == role);
+
+  /// Makes [channelId] a default channel, which the relay joins every new
+  /// community member to. Only community owners and admins may change it.
+  Future<void> setDefaultChannel(String channelId, {required bool enabled}) =>
+      _setAdmission(channelId, [
+        'auto_join',
+        enabled.toString(),
+      ], (admission) => admission.autoJoin == enabled);
+
+  /// Sends one partial kind:9002 change, then confirms it from fresh relay
+  /// metadata. An accepted change that does not read back is reported as
+  /// [ChannelChangeUnconfirmed], never as success, and is not resent.
+  Future<void> _setAdmission(
+    String channelId,
+    List<String> tag,
+    bool Function(ChannelAdmission admission) applied,
+  ) async {
+    _ensureCommunityValid();
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: [
+        ['h', channelId],
+        tag,
+      ],
+    );
+    _ensureCommunityValid();
+    try {
+      final admission = await _fetchChannelAdmission(_session, channelId);
+      if (!applied(admission)) throw const ChannelChangeUnconfirmed();
+    } on ChannelChangeUnconfirmed {
+      rethrow;
+    } catch (_) {
+      throw const ChannelChangeUnconfirmed();
+    } finally {
+      _ref.invalidate(channelAdmissionProvider(channelId));
+    }
+  }
+
   /// Archives the channel and refreshes its cached state.
   Future<void> archiveChannel(String channelId) =>
       _setChannelArchived(channelId, archived: true);

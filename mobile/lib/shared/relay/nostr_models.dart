@@ -305,6 +305,14 @@ class ChannelData {
   /// listings and does not hold its name in the listed-name rule.
   final bool isUnlisted;
 
+  /// Role a person who joins (or is joined to) the channel receives:
+  /// `member` when absent, otherwise `guest` (unknown values fail closed).
+  final String joinRole;
+
+  /// The relay's bare `["auto_join"]` flag, published only while the channel
+  /// is a default channel that new community members are joined to.
+  final bool isAutoJoin;
+
   const ChannelData({
     required this.id,
     required this.name,
@@ -319,6 +327,8 @@ class ChannelData {
     this.ttlDeadline,
     this.isArchived = false,
     this.isUnlisted = false,
+    this.joinRole = 'member',
+    this.isAutoJoin = false,
   });
 
   factory ChannelData.fromEvent(NostrEvent event) {
@@ -356,6 +366,7 @@ class ChannelData {
     // archived — anything else (missing tag, "false", unexpected value) means
     // active.
     final isArchived = event.getTagValue('archived') == 'true';
+    final joinRole = event.getTagValue('join_role');
     return ChannelData(
       id: id,
       name: name,
@@ -374,6 +385,8 @@ class ChannelData {
       ttlDeadline: ttlDeadline,
       isArchived: isArchived,
       isUnlisted: event.tags.any((t) => t.isNotEmpty && t[0] == 'unlisted'),
+      joinRole: joinRole == null || joinRole == 'member' ? 'member' : 'guest',
+      isAutoJoin: event.tags.any((t) => t.isNotEmpty && t[0] == 'auto_join'),
     );
   }
 }
