@@ -20,6 +20,7 @@ void main() {
   );
   final organization = Uri.parse('https://block.example.com');
   const relayHost = 'buzz.block.example.com';
+  const otherRelayHost = 'other.block.example.com';
   final relay = RelayConfig(baseUrl: 'https://$relayHost', nsec: keys.nsec);
   final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
 
@@ -88,6 +89,7 @@ void main() {
     late List<http.Request> requests;
     late Object? boundIdentity;
     late int assertionLifetime;
+    late String Function(String relayUrl) tokenFor;
 
     BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
       accountOrigin: organization,
@@ -109,7 +111,7 @@ void main() {
           ),
           '/api/goose/v1/buzz/identity/assertions' => http.Response(
             jsonEncode({
-              'assertion': 'org-token',
+              'assertion': tokenFor(jsonDecode(request.body)['relay_url']),
               'nostr_pubkey': keys.public,
               'expires_at':
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 +
@@ -140,8 +142,10 @@ void main() {
             ),
           ),
           organization: organizationAccount,
-          organizationRelay: (relay) =>
-              OrganizationEnvironment.matches(relay, [relayHost]),
+          organizationRelay: (relay) => OrganizationEnvironment.matches(relay, [
+            relayHost,
+            otherRelayHost,
+          ]),
           enabled: true,
         );
 
@@ -149,6 +153,7 @@ void main() {
       requests = [];
       boundIdentity = null;
       assertionLifetime = 120;
+      tokenFor = (_) => 'org-token';
     });
 
     test(
@@ -216,6 +221,33 @@ void main() {
         'Nostr-Federated-Identity': 'Bearer org-token',
       });
     });
+
+    test(
+      'issuing for another community keeps the first one cached for reads',
+      () async {
+        await saveSession();
+        tokenFor = (relayUrl) => 'token-for-${Uri.parse(relayUrl).host}';
+        final other = RelayConfig(
+          baseUrl: 'https://$otherRelayHost',
+          nsec: keys.nsec,
+        );
+        final auth = relayAuth(organizationClient());
+        await auth.headers(relay);
+        // A background task such as a push revocation issues for an inactive
+        // community while `relay` stays the active session.
+        await auth.headers(other);
+        expect(auth.cachedHeaders(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
+        });
+        expect(auth.cachedHeaders(other), {
+          'Nostr-Federated-Identity': 'Bearer token-for-$otherRelayHost',
+        });
+        // A refusal evicts only the assertion that was refused.
+        auth.rejected(other, 'Bearer token-for-$otherRelayHost');
+        expect(auth.cachedHeaders(other), isNull);
+        expect(auth.cachedHeaders(relay), isNotNull);
+      },
+    );
 
     test('a different bound key is refused before issuance', () async {
       await saveSession();

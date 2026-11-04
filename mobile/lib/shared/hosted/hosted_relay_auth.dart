@@ -82,14 +82,14 @@ class HostedRelayAuth extends ChangeNotifier {
   final bool Function(Uri relay) organizationRelay;
   final bool enabled;
   final DateTime Function() _now;
-  ({
-    String relay,
-    String pubkey,
-    String token,
-    DateTime expiry,
-    BuilderlabAccount account,
-  })?
-  _cached;
+  // One assertion per relay and key, so issuing for an inactive community (for
+  // example a background revocation) never evicts the active session's
+  // credentials that native media paths read synchronously.
+  final _cached =
+      <
+        ({String relay, String pubkey}),
+        ({String token, DateTime expiry, BuilderlabAccount account})
+      >{};
   // Per account client, so a stalled issuer never delays an unrelated one.
   final _pending = <BuilderlabAccountClient, Future<void>>{};
   bool _disposed = false;
@@ -125,10 +125,14 @@ class HostedRelayAuth extends ChangeNotifier {
   Map<String, String>? cachedHeaders(RelayConfig config) {
     if (_disposed) return null;
     if (!protects(config)) return const {};
-    final cached = _cached;
+    final pubkey = pubkeyFromNsec(config.nsec);
+    if (pubkey == null) return null;
+    final cached =
+        _cached[(
+          relay: Uri.parse(config.wsUrl).replace(path: '').toString(),
+          pubkey: pubkey,
+        )];
     if (cached == null ||
-        cached.relay != Uri.parse(config.wsUrl).replace(path: '').toString() ||
-        cached.pubkey != pubkeyFromNsec(config.nsec) ||
         !identical(cached.account, _accountFor(config)?.account) ||
         !cached.expiry.isAfter(_now())) {
       return null;
@@ -182,10 +186,8 @@ class HostedRelayAuth extends ChangeNotifier {
     final pubkey = pubkeyFromNsec(config.nsec);
     if (pubkey == null) throw AccountFailure.denied;
     while (!_disposed) {
-      final cached = _cached;
+      final cached = _cached[(relay: relay, pubkey: pubkey)];
       if (cached != null &&
-          cached.relay == relay &&
-          cached.pubkey == pubkey &&
           identical(cached.account, client.account) &&
           cached.expiry.isAfter(_now())) {
         return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
@@ -278,9 +280,8 @@ class HostedRelayAuth extends ChangeNotifier {
       if (!identical(session, account.account)) {
         return;
       }
-      _cached = (
-        relay: relay,
-        pubkey: pubkey,
+      _cached.removeWhere((_, entry) => !entry.expiry.isAfter(_now()));
+      _cached[(relay: relay, pubkey: pubkey)] = (
         token: token,
         expiry: expires.subtract(
           Duration(seconds: (expiry - now) > 60 ? 30 : (expiry - now) ~/ 2),
@@ -322,7 +323,7 @@ class HostedRelayAuth extends ChangeNotifier {
     bool terminal = false,
   }) {
     if (!protects(config) || usedToken == null) return;
-    if ('Bearer ${_cached?.token}' == usedToken) _cached = null;
+    _cached.removeWhere((_, entry) => 'Bearer ${entry.token}' == usedToken);
     if (terminal && !_disposed) {
       _record(
         config.baseUrl,
@@ -349,7 +350,7 @@ class HostedRelayAuth extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _cached = null;
+    _cached.clear();
     super.dispose();
   }
 }
