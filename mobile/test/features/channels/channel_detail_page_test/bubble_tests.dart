@@ -1,6 +1,7 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  messageAuthorVisibilityTests();
   testWidgets('reply footer does not add reaction padding inside the bubble', (
     tester,
   ) async {
@@ -179,13 +180,16 @@ void bubbleLayoutTests() {
             find.byType(MessageMediaAvatar),
           );
           expect(incomingAvatar.right, lessThan(incoming.left));
-          final outgoingAvatar = bounds(
-            'outgoing',
-            find.byType(MessageMediaAvatar),
-          );
-          expect(outgoingAvatar.left, greaterThan(outgoing.right));
+          expect(incomingAvatar.size, const Size.square(36));
           expect(
-            outgoingAvatar.right,
+            find.descendant(
+              of: find.byKey(const ValueKey('message-row-outgoing')),
+              matching: find.byType(MessageMediaAvatar),
+            ),
+            findsNothing,
+          );
+          expect(
+            outgoing.right,
             closeTo(
               tester
                   .getRect(find.byKey(const ValueKey('message-row-outgoing')))

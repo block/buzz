@@ -297,7 +297,10 @@ void bubbleContentTests() {
     await tester.pumpWidget(
       _testable(
         MediaQuery(
-          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          data: const MediaQueryData(
+            size: Size(320, 800),
+            textScaler: TextScaler.linear(2),
+          ),
           child: const SizedBox(
             width: 230,
             child: MessageContent(
