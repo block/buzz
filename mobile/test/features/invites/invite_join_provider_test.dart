@@ -258,6 +258,7 @@ void main() {
             visibility: 'private',
           ),
         ],
+        fetchChannel: (_) async => fail('no direct lookup expected'),
         createChannel:
             ({
               required channelId,
@@ -284,6 +285,7 @@ void main() {
       final created = <String, Map<String, Object?>>{};
       final recovery = MobileInviteJoinRecovery(
         loadChannels: () async => const [],
+        fetchChannel: (_) async => fail('no direct lookup expected'),
         createChannel:
             ({
               required channelId,
@@ -342,6 +344,7 @@ void main() {
             _channel(id: 'relay-welcome', name: 'welcome-everyone'),
           ];
         },
+        fetchChannel: (_) async => fail('no direct lookup expected'),
         createChannel:
             ({
               required channelId,
@@ -365,12 +368,269 @@ void main() {
     },
   );
 
+  test(
+    'taken starter names are skipped or converged instead of failing the invite',
+    () async {
+      const origin = 'https://relay.example.com';
+      const refusal = 'invalid: an open channel named "general" already exists';
+      const duplicateId = 'duplicate: channel already exists';
+      final generalId = desktopStarterChannelId(
+        relayHttpOrigin: origin,
+        slug: 'general',
+      );
+      final welcomeId = desktopStarterChannelId(
+        relayHttpOrigin: origin,
+        slug: 'welcome-everyone',
+      );
+      ({
+        List<String> created,
+        List<String> joined,
+        List<String> lookups,
+        MobileInviteJoinRecovery recovery,
+        int Function() loads,
+      })
+      starterSetup({
+        required List<Channel> Function(int load) channelsOnLoad,
+        required String refusalError,
+        Channel? atId,
+        Set<String> refused = const {'general'},
+        bool Function()? isScopeCurrent,
+        void Function()? onLookup,
+      }) {
+        final created = <String>[];
+        final joined = <String>[];
+        final lookups = <String>[];
+        var loadCount = 0;
+        final recovery = MobileInviteJoinRecovery(
+          loadChannels: () async => channelsOnLoad(++loadCount),
+          fetchChannel: (channelId) async {
+            lookups.add(channelId);
+            onLookup?.call();
+            return atId;
+          },
+          createChannel:
+              ({
+                required channelId,
+                required name,
+                required channelType,
+                required visibility,
+                description,
+                ttlSeconds,
+              }) async {
+                created.add(name);
+                if (refused.contains(name)) {
+                  throw Exception(refusalError);
+                }
+                return _channel(id: channelId, name: name, isMember: true);
+              },
+          joinChannel: (channelId) async => joined.add(channelId),
+          relayHttpOrigin: origin,
+          isScopeCurrent: isScopeCurrent,
+        );
+        return (
+          created: created,
+          joined: joined,
+          lookups: lookups,
+          recovery: recovery,
+          loads: () => loadCount,
+        );
+      }
+
+      // A holder the directory shows cannot serve as the starter is neither
+      // joined nor retried; the other starter is still created and focused.
+      final unusableHolders = [
+        (
+          _channel(
+            id: 'old-general',
+            name: 'General',
+            archivedAt: DateTime.utc(2025),
+          ),
+          refusal,
+        ),
+        (
+          _channel(id: 'forum-general', name: 'general', channelType: 'forum'),
+          refusal,
+        ),
+        (
+          _channel(
+            id: generalId,
+            name: 'general',
+            archivedAt: DateTime.utc(2025),
+          ),
+          duplicateId,
+        ),
+      ];
+      for (final (holder, error) in unusableHolders) {
+        final setup = starterSetup(
+          channelsOnLoad: (_) => [holder],
+          refusalError: error,
+        );
+
+        final focusChannelId = await setup.recovery.ensureStarterChannels();
+
+        expect(setup.created, [
+          'general',
+          'welcome-everyone',
+        ], reason: holder.id);
+        expect(setup.joined, isEmpty, reason: holder.id);
+        expect(setup.loads(), 2, reason: holder.id);
+        expect(focusChannelId, welcomeId, reason: holder.id);
+      }
+
+      // An archived channel at the starter's own id, which the directory does
+      // not return, is found by a direct lookup and skipped, not rethrown.
+      final archivedAtId = starterSetup(
+        channelsOnLoad: (_) => const [],
+        refusalError: duplicateId,
+        atId: _channel(
+          id: generalId,
+          name: 'general',
+          archivedAt: DateTime.utc(2025),
+        ),
+      );
+      final focusAfterArchived = await archivedAtId.recovery
+          .ensureStarterChannels();
+      expect(archivedAtId.created, ['general', 'welcome-everyone']);
+      expect(archivedAtId.lookups, [generalId]);
+      expect(archivedAtId.joined, isEmpty);
+      expect(archivedAtId.loads(), 2);
+      expect(focusAfterArchived, welcomeId);
+
+      // The relay refuses a create at an archived channel's id with
+      // `channel is archived`; that starter is skipped without a lookup.
+      final refusedAsArchived = starterSetup(
+        channelsOnLoad: (_) => const [],
+        refusalError: 'invalid: channel is archived',
+      );
+      final focusAfterRefusal = await refusedAsArchived.recovery
+          .ensureStarterChannels();
+      expect(refusedAsArchived.created, ['general', 'welcome-everyone']);
+      expect(refusedAsArchived.lookups, isEmpty);
+      expect(refusedAsArchived.joined, isEmpty);
+      expect(refusedAsArchived.loads(), 2);
+      expect(focusAfterRefusal, welcomeId);
+
+      // The scope fence also holds across the direct lookup, checked on the
+      // last starter so the next starter's own fence cannot mask it.
+      var lookedUp = false;
+      final fencedLookup = starterSetup(
+        channelsOnLoad: (_) => const [],
+        refusalError: duplicateId,
+        refused: const {'welcome-everyone'},
+        atId: _channel(
+          id: welcomeId,
+          name: 'welcome-everyone',
+          archivedAt: DateTime.utc(2025),
+        ),
+        isScopeCurrent: () => !lookedUp,
+        onLookup: () => lookedUp = true,
+      );
+      await expectLater(
+        fencedLookup.recovery.ensureStarterChannels(),
+        throwsStateError,
+      );
+      expect(fencedLookup.lookups, [welcomeId]);
+
+      // Any other duplicate stays recoverable: nothing at the id, or a
+      // channel there that is not archived, may be a starter still settling.
+      for (final atId in [null, _channel(id: generalId, name: 'general')]) {
+        final settling = starterSetup(
+          channelsOnLoad: (_) => const [],
+          refusalError: duplicateId,
+          atId: atId,
+        );
+        await expectLater(
+          settling.recovery.ensureStarterChannels(),
+          throwsException,
+          reason: '$atId',
+        );
+        expect(settling.created, ['general']);
+        expect(settling.lookups, [generalId]);
+        expect(settling.joined, isEmpty);
+      }
+
+      // A taken name whose holder the directory does not show yet stays
+      // recoverable: it may be a usable starter another client just created.
+      final unseen = starterSetup(
+        channelsOnLoad: (_) => const [],
+        refusalError: refusal,
+      );
+      await expectLater(
+        unseen.recovery.ensureStarterChannels(),
+        throwsException,
+      );
+      expect(unseen.created, ['general']);
+      expect(unseen.joined, isEmpty);
+      expect(unseen.loads(), 2);
+      expect(unseen.lookups, isEmpty);
+
+      // An unlisted namesake does not hold the name, so it does not explain
+      // the refusal either: the setup stays recoverable, and a retry joins
+      // the real holder once it appears.
+      final unlistedForum = _channel(
+        id: 'unlisted-general',
+        name: 'general',
+        channelType: 'forum',
+        isUnlisted: true,
+        isMember: true,
+      );
+      final realGeneral = _channel(id: 'real-general', name: 'general');
+      final unlisted = starterSetup(
+        channelsOnLoad: (load) =>
+            load <= 2 ? [unlistedForum] : [unlistedForum, realGeneral],
+        refusalError: refusal,
+      );
+      await expectLater(
+        unlisted.recovery.ensureStarterChannels(),
+        throwsException,
+      );
+      expect(unlisted.created, ['general']);
+      expect(unlisted.joined, isEmpty);
+      final focusAfterRetry = await unlisted.recovery.ensureStarterChannels();
+      expect(unlisted.joined, ['real-general']);
+      expect(focusAfterRetry, welcomeId);
+
+      // A usable open channel that appeared after the first load (lost race)
+      // is joined rather than skipped.
+      final raced = starterSetup(
+        channelsOnLoad: (load) =>
+            load == 1 ? const [] : [_channel(id: 'raced', name: 'general')],
+        refusalError: refusal,
+      );
+      await raced.recovery.ensureStarterChannels();
+      expect(raced.joined, ['raced']);
+
+      // The scope fence still holds after a refusal and its reload.
+      // The reload after the last starter's refusal must be the one that
+      // observes the change, so only the post-reload fence can catch it.
+      var current = true;
+      var fencedLoads = 0;
+      final fenced = starterSetup(
+        channelsOnLoad: (_) {
+          if (++fencedLoads > 2) current = false;
+          return [unusableHolders.first.$1];
+        },
+        refusalError: refusal,
+        refused: const {'general', 'welcome-everyone'},
+        isScopeCurrent: () => current,
+      );
+      await expectLater(
+        fenced.recovery.ensureStarterChannels(),
+        throwsStateError,
+      );
+      expect(fenced.created, ['general', 'welcome-everyone']);
+      expect(fenced.loads(), 3);
+      expect(fenced.joined, isEmpty);
+    },
+  );
+
   test('starter setup surfaces an unavailable starter for recovery', () async {
     final joined = <String>[];
     final recovery = MobileInviteJoinRecovery(
       loadChannels: () async => [
         _channel(id: 'welcome-id', name: 'welcome-everyone'),
       ],
+      fetchChannel: (_) async => fail('no direct lookup expected'),
       createChannel:
           ({
             required channelId,
@@ -497,6 +757,7 @@ void main() {
           _channel(id: 'general-id', name: 'general'),
           _channel(id: 'welcome-id', name: 'welcome-everyone'),
         ],
+        fetchChannel: (_) async => fail('no direct lookup expected'),
         createChannel:
             ({
               required channelId,
@@ -1029,10 +1290,15 @@ Channel _channel({
   required String name,
   String visibility = 'open',
   bool isMember = false,
+  String channelType = 'stream',
+  DateTime? archivedAt,
+  bool isUnlisted = false,
 }) => Channel(
   id: id,
   name: name,
-  channelType: 'stream',
+  channelType: channelType,
+  archivedAt: archivedAt,
+  isUnlisted: isUnlisted,
   visibility: visibility,
   description: '',
   createdBy: 'me',
