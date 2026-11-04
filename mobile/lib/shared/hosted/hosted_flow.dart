@@ -132,6 +132,7 @@ class HostedFlow extends ChangeNotifier {
   BuzzDeepLink? _target;
   bool accountOnly = false;
   bool _importRequested = false;
+  bool canCreateIdentity = false;
   String? requiredIdentityPubkey;
   String? _pairedPubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
@@ -370,7 +371,7 @@ class HostedFlow extends ChangeNotifier {
     }
     final generation = openBrowser ? _nextGeneration() : _generation;
     if (openBrowser) {
-      _importRequested = importIdentity;
+      _importRequested = _importRequested || importIdentity;
       reconnecting = false;
       accountOnly = true;
       _clearCommunityBatch();
@@ -388,7 +389,13 @@ class HostedFlow extends ChangeNotifier {
       if (_disposed || generation != _generation) return;
       if (!openBrowser) {
         // Mounting the welcome page must not create/bind/back up a key.
-        _set(HostedFlowStage.idle);
+        if (_importRequested && restored != null) {
+          canCreateIdentity = false;
+          requiredIdentityPubkey = null;
+          _set(HostedFlowStage.setupIdentity);
+        } else {
+          _set(HostedFlowStage.idle);
+        }
       } else if (restored != null) {
         await _continue(generation);
       } else {
@@ -446,6 +453,7 @@ class HostedFlow extends ChangeNotifier {
 
   Map<String, String> _intent(BuzzDeepLink target) => {
     ..._encode(target),
+    if (_importRequested) 'import_identity': 'true',
     'paired_pubkey': ?_pairedPubkey,
     if (pairedSensitiveActionPolicy == SensitiveActionPolicy.enabled)
       'paired_protection': 'enabled',
@@ -453,7 +461,6 @@ class HostedFlow extends ChangeNotifier {
 
   Future<void> start(BuzzDeepLink target, {bool resumePairing = false}) {
     if (!resumePairing) {
-      _importRequested = false;
       _pairedPubkey = null;
       pairedSensitiveActionPolicy = null;
     }
@@ -523,6 +530,16 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
+  /// Direct links retain an explicit choice because they can bypass welcome.
+  Future<void> createIdentity() {
+    if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
+      return Future.value();
+    }
+    final generation = _nextGeneration();
+    _set(HostedFlowStage.working);
+    return _enqueue(() => _continue(generation, createNew: true));
+  }
+
   /// Import through the secure store, rechecking the account binding.
   /// Errors propagate to the import sheet without discarding the setup choice.
   Future<void> importIdentity(String nsec) {
@@ -541,7 +558,11 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
-  Future<void> _continue(int generation, {String? selectedPubkey}) async {
+  Future<void> _continue(
+    int generation, {
+    String? selectedPubkey,
+    bool createNew = false,
+  }) async {
     final target = _target;
     final session = account.account;
     if ((target == null && !accountOnly) || session == null) {
@@ -570,6 +591,7 @@ class HostedFlow extends ChangeNotifier {
     if (resolved.state == HostedIdentityState.needsSetup &&
         resolved.canCreate &&
         canSealBackup &&
+        (target == null || createNew) &&
         !_importRequested) {
       // Recheck authoritative absence in the service before generating. Never
       // turn failed recovery or a pending backup into a replacement identity.
@@ -661,6 +683,8 @@ class HostedFlow extends ChangeNotifier {
     }
     if (generation != _generation || _disposed) return;
     if (resolved.state == HostedIdentityState.needsSetup) {
+      canCreateIdentity =
+          resolved.canCreate && target != null && !_importRequested;
       requiredIdentityPubkey = resolved.pubkey;
       _set(HostedFlowStage.setupIdentity);
       return;
@@ -762,7 +786,6 @@ class HostedFlow extends ChangeNotifier {
     if (_disposed || account.account?.subject != choices._subject) return false;
     _nextGeneration();
     _target = null;
-    _importRequested = false;
     _pairedPubkey = null;
     pairedSensitiveActionPolicy = null;
     reconnecting = false;

@@ -80,7 +80,7 @@ void main() {
 
   for (final selfHosted in [false, true]) {
     journey(
-      'finishing ${selfHosted ? "self-hosted" : "hosted"} Add restores picker memberships and keeps the new destination',
+      'finishing ${selfHosted ? "self-hosted" : "hosted"} Add connects only the chosen destination',
       (tester, f) async {
         await f.initialize();
         f.offerProfile = false;
@@ -93,7 +93,6 @@ void main() {
         await f.settle(tester);
         expect(find.text('Add a community'), findsOneWidget);
         expect(f.probes, isEmpty);
-        final discoveries = f.sent('/known-communities/list').length;
         f.secondRelayFailures = 1;
         if (selfHosted) {
           await f.tap(tester, 'Enter a community link');
@@ -104,42 +103,18 @@ void main() {
           await f.tap(tester, 'Continue');
           await f.tap(tester, 'Saved identity');
         } else {
-          await f.link(tester, 'three');
-          await tester.tap(find.byType(CheckboxListTile));
+          await f.tap(tester, 'Find my communities');
+          await tester.tap(find.byType(CommunityGridOption).first);
           await f.settle(tester);
-          await f.tap(tester, 'Accept and join');
         }
-        expect(f.flow.stage, HostedFlowStage.blocked);
-        expect(find.text('Couldn’t open two'), findsOneWidget);
-        expect(find.text('Try again').hitTestable(), findsOneWidget);
-        expect(find.text('Community home').hitTestable(), findsNothing);
         final newRelay = selfHosted
             ? 'wss://my-community.example'
-            : 'wss://three.communities.buzz.xyz';
-        final partial = await f.storage.loadAll();
-        expect(
-          partial.map((c) => c.relayUrl),
-          containsAll([newRelay, 'wss://one.communities.buzz.xyz']),
-        );
-        final added = partial.singleWhere((c) => c.relayUrl == newRelay);
-        expect(await f.storage.loadActiveId(), added.id);
-        await f.tap(tester, 'Try again');
-        expect(f.flow.stage, HostedFlowStage.complete);
-        expect(
-          (await f.storage.loadAll()).map((c) => c.relayUrl),
-          unorderedEquals([
-            newRelay,
-            'wss://one.communities.buzz.xyz',
-            'wss://two.communities.buzz.xyz',
-          ]),
-        );
-        expect(await f.storage.loadActiveId(), added.id);
-        expect(f.probes.where((c) => c.relayUrl == newRelay), hasLength(1));
-        expect(
-          f.probes.where((c) => c.relayUrl == 'wss://one.communities.buzz.xyz'),
-          hasLength(1),
-        );
-        expect(f.sent('/known-communities/list'), hasLength(discoveries));
+            : 'wss://one.communities.buzz.xyz';
+        final saved = await f.storage.loadAll();
+        expect(saved.map((c) => c.relayUrl), [newRelay]);
+        expect(await f.storage.loadActiveId(), saved.single.id);
+        expect(f.probes.map((c) => c.relayUrl), [newRelay]);
+        expect(f.secondRelayFailures, 1);
         expect(find.byType(OnboardingAppEntry), findsNothing);
         expect(find.text('Community home').hitTestable(), findsOneWidget);
       },
@@ -189,6 +164,21 @@ void main() {
         f.bound = null;
         f.offerProfile = false;
         await f.mount(tester, addingCommunity: false);
+        if (importing) {
+          // An upgraded signed-in account has never chosen import on welcome.
+          await f.tap(tester, 'Use an existing identity');
+          expect(
+            find.text('Import existing identity').hitTestable(),
+            findsOneWidget,
+          );
+          expect(await f.store.read(), isNull);
+          await tester.tap(find.byTooltip('Back').hitTestable());
+          await f.settle(tester);
+          expect(
+            find.text('Use an existing identity').hitTestable(),
+            findsOneWidget,
+          );
+        }
         // iOS 16 stops before any identity generation, binding or admission.
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -232,8 +222,15 @@ void main() {
         if (importing) {
           // The import choice must survive process death after browser sign-in.
           await f.restart(tester);
-          await f.flow.retry();
-          await f.settle(tester);
+          await f.tap(tester, 'Community home');
+          expect(
+            find.text('Import existing identity').hitTestable(),
+            findsOneWidget,
+          );
+          expect(await f.store.read(), isNull);
+          // A new destination must not cancel the pending import choice.
+          await f.link(tester, 'one');
+          expect(find.text('Create my Buzz identity'), findsNothing);
           expect(await f.store.read(), isNull);
           await f.tap(tester, 'Import existing identity');
           await tester.enterText(
@@ -248,7 +245,7 @@ void main() {
             await release.future;
           };
           await f.tap(tester, 'Import this identity');
-          await started.future;
+          await started.future.timeout(const Duration(seconds: 5));
           // Dismiss while the real import is awaiting its external status response.
           Navigator.of(
             tester.element(find.byType(TextField).hitTestable()),
@@ -264,13 +261,109 @@ void main() {
         expect(f.bound, saved!.pubkey);
         expect(saved.backup, isNull);
         expect(f.flow.problem, HostedFlowProblem.retry);
-        await f.flow.retry();
-        await f.settle(tester);
+        await f.tap(tester, 'Try again');
         expect((await f.store.read())!.pubkey, saved.pubkey);
         expect((await f.store.read())!.backup, isNotNull);
       },
     );
   }
+
+  journey(
+    'web binding keeps an explicit identity choice without backup support',
+    (tester, f) async {
+      await f.initialize(localIdentity: false);
+      f.bound = null;
+      await f.mount(tester);
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/hosted_hpke'),
+        (_) async => false,
+      );
+      final nativeChannels = <MethodChannel>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        (call) async {
+          if (call.method == 'create') {
+            final id = (call.arguments as Map)['id'];
+            final channel = MethodChannel('buzz/ios_navigation_bar/$id');
+            nativeChannels.add(channel);
+            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+              channel,
+              (_) async => null,
+            );
+          }
+          return null;
+        },
+      );
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/url_launcher'),
+        (_) async => true,
+      );
+      try {
+        f.container
+            .read(pendingDeepLinkProvider.notifier)
+            .open(
+              Uri(
+                scheme: 'buzz',
+                host: 'nostr-bind',
+                queryParameters: {
+                  'challenge_id': '12345678-1234-1234-1234-123456789012',
+                  'nonce': 'a' * 43,
+                  'verification_code': '123456',
+                  'audience': 'buzz:nostr-identity',
+                  'action': 'bind_nostr_identity',
+                  'protocol': 'buzz-nostr-identity',
+                  'version': '1',
+                  'origin': HostedEnvironment.origin.toString(),
+                  'expires_at': '2099-01-01T00:00:00Z',
+                  'return': 'browser_fragment_v1',
+                  'callback_url': HostedEnvironment.origin
+                      .resolve('/buzz')
+                      .toString(),
+                },
+              ),
+            );
+        await f.settle(tester);
+        expect(
+          find.text('Create my Buzz identity').hitTestable(),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Import existing identity').hitTestable(),
+          findsOneWidget,
+        );
+        expect(await f.store.read(), isNull);
+        expect(f.bound, isNull);
+        expect(f.sent('/verify'), isEmpty);
+        await f.tap(tester, 'Create my Buzz identity');
+        final saved = (await f.store.read())!;
+        expect(f.bound, saved.pubkey);
+        expect(
+          saved.backup,
+          isNull,
+        ); // Web binding has never promised mobile backup.
+        expect(f.flow.stage, HostedFlowStage.browserReturned);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        debugDefaultTargetPlatformOverride = null;
+        for (final channel in nativeChannels) {
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          );
+        }
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          null,
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/url_launcher'),
+          null,
+        );
+      }
+    },
+  );
 
   journey('linked account without backup imports its key without replacing it', (
     tester,
@@ -904,7 +997,13 @@ void main() {
         } finally {
           browserReturn.complete();
         }
-        expect(find.text('Create my Buzz identity'), findsNothing);
+        await f.settle(tester);
+        expect(await f.store.read(), isNull);
+        expect(
+          find.text('Import existing identity').hitTestable(),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Create my Buzz identity').hitTestable());
         await enrollmentReached.future.timeout(const Duration(seconds: 5));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 400));

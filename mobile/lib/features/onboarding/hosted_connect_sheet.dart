@@ -86,7 +86,9 @@ class HostedConnectSheet extends HookConsumerWidget {
             : 'Adding ${flow.addingCommunityName}…',
       HostedFlowStage.setupIdentity =>
         flow.requiredIdentityPubkey == null
-            ? 'Bring your existing Buzz identity from your other device.'
+            ? flow.canCreateIdentity
+                  ? 'Create a new Buzz identity, or import the identity you already use.'
+                  : 'Bring your existing Buzz identity from your other device.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
@@ -131,7 +133,9 @@ class HostedConnectSheet extends HookConsumerWidget {
       if (!fullScreen && stage == HostedFlowStage.setupIdentity) ...[
         Text(
           flow.requiredIdentityPubkey == null
-              ? 'Import your Buzz identity'
+              ? flow.canCreateIdentity
+                    ? 'Create or import a Buzz identity'
+                    : 'Import your Buzz identity'
               : 'Bring your identity with you',
           style: context.textTheme.titleLarge?.copyWith(
             fontWeight: FontWeight.w600,
@@ -158,6 +162,14 @@ class HostedConnectSheet extends HookConsumerWidget {
           ),
         ),
       if (stage == HostedFlowStage.setupIdentity) ...[
+        if (flow.canCreateIdentity) ...[
+          FilledButton(
+            style: actionStyle,
+            onPressed: flow.createIdentity,
+            child: const Text('Create my Buzz identity'),
+          ),
+          const SizedBox(height: Grid.xxs),
+        ],
         FilledButton(
           style: actionStyle.copyWith(
             backgroundColor: WidgetStatePropertyAll(context.colors.primary),
@@ -255,7 +267,9 @@ class HostedConnectSheet extends HookConsumerWidget {
     final title = switch (stage) {
       HostedFlowStage.setupIdentity =>
         flow.requiredIdentityPubkey == null
-            ? 'Import your Buzz identity'
+            ? flow.canCreateIdentity
+                  ? 'Create or import a Buzz identity'
+                  : 'Import your Buzz identity'
             : 'Bring your identity with you',
       HostedFlowStage.chooseIdentity => 'Choose your identity',
       HostedFlowStage.working =>

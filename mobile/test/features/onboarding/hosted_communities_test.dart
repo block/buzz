@@ -274,10 +274,7 @@ void main() {
         await tester.tap(find.byType(CommunityGridOption).first);
         await tester.pumpAndSettle();
         expect(find.byType(CommunityGridOption), findsNothing);
-        expect(f.admitted, [
-          'one.communities.buzz.xyz',
-          'two.communities.buzz.xyz',
-        ]);
+        expect(f.admitted, ['one.communities.buzz.xyz']);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
@@ -289,13 +286,13 @@ void main() {
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
-        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.tap(find.byType(CommunityGridOption).last);
         await tester.pumpAndSettle();
         expect(find.text('Keep saved identity and skip'), findsOneWidget);
-        expect(find.text('1 community added and kept.'), findsOneWidget);
+        expect(find.text('1 community added and kept.'), findsNothing);
         await tester.tap(find.text('Keep saved identity and skip'));
         await tester.pumpAndSettle();
-        expect(f.admitted, ['one.communities.buzz.xyz']);
+        expect(f.admitted, isEmpty);
         expect(find.byType(HostedConnectPage), findsNothing);
         f.admitted.clear();
         f.beforeAdmission = (name) async {
@@ -305,9 +302,9 @@ void main() {
         await tester.pumpAndSettle();
         expect(f.flow.stage, HostedFlowStage.chooseCommunities);
         expect(find.byType(CommunityGridOption), findsWidgets);
-        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.tap(find.byType(CommunityGridOption).last);
         await tester.pumpAndSettle();
-        expect(find.text('1 community added and kept.'), findsOneWidget);
+        expect(find.text('1 community added and kept.'), findsNothing);
         expect(find.text('Try again').hitTestable(), findsNothing);
         expect(find.text('Skip this community').hitTestable(), findsOneWidget);
         await tester.tap(find.text('Back to choices'));
@@ -320,11 +317,11 @@ void main() {
           ),
           findsWidgets,
         );
-        await tester.tap(find.byType(CommunityGridOption).first);
+        await tester.tap(find.byType(CommunityGridOption).last);
         await tester.pumpAndSettle();
         await tester.tap(find.text('Skip this community'));
         await tester.pumpAndSettle();
-        expect(f.admitted, ['one.communities.buzz.xyz']);
+        expect(f.admitted, isEmpty);
         expect(f.openedCommunity, 'wss://one.communities.buzz.xyz');
         expect(find.byType(HostedConnectPage), findsNothing);
       }

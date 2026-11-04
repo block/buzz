@@ -310,6 +310,7 @@ class PairingPage extends HookConsumerWidget {
               scannerProgress: progress,
               onboarding: signedInOnboarding,
               onFindCommunities: hasKnownCommunities ? onBuilderlab : null,
+              onImportIdentity: signedInOnboarding ? onImportIdentity : null,
               onCreateCommunity: signedInOnboarding ? onCreateCommunity : null,
               enteringCommunityLink: enteringCommunityLink,
               existingUser: existingUser,
