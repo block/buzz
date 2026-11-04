@@ -1,8 +1,10 @@
 import 'dart:io';
+
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/agents/agent_avatar_catalog.dart';
 import 'package:buzz/features/agents/agent_avatar_editor_page.dart';
+
 import 'dart:async';
 
 import 'package:buzz/shared/agents/remote_agents.dart';
@@ -228,6 +230,55 @@ void main() {
       expect(h.registry.calls, contains('publish-policy'));
     },
   );
+
+  testWidgets('a new agent starts on the affordable default model', (
+    tester,
+  ) async {
+    final h = await AgentsHarness.create();
+    h.registry.models = [
+      {
+        'id': 'premium-model',
+        'display_name': 'Premium model',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+      {
+        'id': 'kgoose-claude-sonnet-4-6',
+        'display_name': 'Sonnet',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+    ];
+    await h.open(tester, directory: [existing]);
+    if (!supportsRemoteAgents(h.community)) return;
+    await tester.tap(find.byTooltip('Add agent'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sonnet'), findsOneWidget);
+    expect(find.text('Premium model'), findsNothing);
+    expect(find.text('medium'), findsOneWidget);
+
+    // Naming it is all that's left before Create.
+    await tester.enterText(
+      find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) => widget is Semantics && widget.properties.label == 'Name',
+        ),
+        matching: find.byType(TextField),
+      ),
+      'Scout',
+    );
+    await tester.pump();
+    expect(
+      tester
+          .widget<IconButton>(
+            find.ancestor(
+              of: find.byTooltip('Create'),
+              matching: find.byType(IconButton),
+            ),
+          )
+          .onPressed,
+      isNotNull,
+    );
+  });
 }
 
 class _StalledPosterClient implements HttpClient {

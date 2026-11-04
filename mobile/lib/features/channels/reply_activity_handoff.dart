@@ -45,9 +45,16 @@ class ReplyActivityHandoff extends HookWidget {
     }, [working, reducedMotion]);
     final animated = useAnimation(controller);
     final progress = reducedMotion ? (working ? 0.0 : 1.0) : animated;
-    final style = context.textTheme.labelMedium?.copyWith(
-      color: context.colors.onSurfaceVariant,
+    // Match Text's inherited style and platform Bold Text override so the
+    // measured box fits the glyphs that are actually rendered.
+    var style = DefaultTextStyle.of(context).style.merge(
+      context.textTheme.labelMedium?.copyWith(
+        color: context.colors.onSurfaceVariant,
+      ),
     );
+    if (MediaQuery.boldTextOf(context)) {
+      style = style.merge(const TextStyle(fontWeight: FontWeight.bold));
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final text = TextPainter(

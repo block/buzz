@@ -121,7 +121,7 @@ async fn cancel(pool: &PgPool, (pid, started_us): (i32, i64)) -> &'static str {
         let mut conn = match tokio::time::timeout(CANCEL_ACQUIRE_TIMEOUT, pool.acquire()).await {
             Ok(Ok(conn)) => conn,
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, pid, "search cancel could not get a connection");
+                tracing::warn!(error_kind = %buzz_db::error::sqlx_error_kind(&e), pid, "search cancel could not get a connection");
                 return "error";
             }
             Err(_) => return "pool_busy",
@@ -135,7 +135,7 @@ async fn cancel(pool: &PgPool, (pid, started_us): (i32, i64)) -> &'static str {
             Ok(None) => elsewhere.push(conn),
             Ok(Some(signalled)) => return signal_outcome(signalled),
             Err(e) => {
-                tracing::warn!(error = %e, pid, "search cancel failed");
+                tracing::warn!(error_kind = %buzz_db::error::sqlx_error_kind(&e), pid, "search cancel failed");
                 return "error";
             }
         }

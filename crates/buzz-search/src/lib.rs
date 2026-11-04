@@ -69,15 +69,16 @@ impl SearchService {
         query::search(&self.pool, query).await
     }
 
-    /// Find current profiles by `name` and `display_name`; see
-    /// [`search_profile_names`].
+    /// Find people by profile name, and by verified profile names signed by
+    /// `verified_by`; see [`search_profile_names`].
     pub async fn search_profile_names(
         &self,
         community: CommunityId,
         q: &str,
+        verified_by: Option<[u8; 32]>,
         page: u32,
         per_page: u32,
     ) -> Result<SearchResult, SearchError> {
-        query::search_profile_names(&self.pool, community, q, page, per_page).await
+        query::search_profile_names(&self.pool, community, q, verified_by, page, per_page).await
     }
 }

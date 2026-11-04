@@ -1,3 +1,4 @@
+import 'message_author_visibility.dart';
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -25,7 +26,6 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
-import '../../shared/widgets/verified_mark.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'android_ime_lift.dart';

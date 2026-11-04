@@ -1920,7 +1920,7 @@ async fn profile_names(
     per_page: u32,
 ) -> Vec<[u8; 32]> {
     SearchService::new(pool.clone())
-        .search_profile_names(community, q, page, per_page)
+        .search_profile_names(community, q, None, page, per_page)
         .await
         .expect("profile name search")
         .hits
@@ -2068,6 +2068,337 @@ async fn profile_names_survive_unparsable_content() {
     teardown(pool, &schema).await;
 }
 
+/// Insert a kind:30382 verified profile for `subject`, signed by `author`.
+async fn put_verified(
+    pool: &PgPool,
+    community: CommunityId,
+    author: [u8; 32],
+    subject: [u8; 32],
+    names: &[(&str, &str)],
+    at: i64,
+) -> [u8; 32] {
+    let id = rand_bytes32();
+    let d: String = subject.iter().map(|b| format!("{b:02x}")).collect();
+    let mut tags = vec![format!(r#"["d","{d}"]"#), format!(r#"["p","{d}"]"#)];
+    tags.extend(names.iter().map(|(k, v)| format!(r#"["{k}","{v}"]"#)));
+    let tags = format!("[{}]", tags.join(","));
+    sqlx::query(
+        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, d_tag) \
+         VALUES ($1, $2, $3, to_timestamp($4), 30382, $5::jsonb, '', $6, $7)",
+    )
+    .bind(community.as_uuid())
+    .bind(&id[..])
+    .bind(&author[..])
+    .bind(at)
+    .bind(&tags)
+    .bind(b"signature".as_slice())
+    .bind(&d)
+    .execute(pool)
+    .await
+    .expect("insert verified profile");
+    // The relay keeps the newest one per person as the head.
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let event = format!(
+        r#"{{"id":"{}","pubkey":"{}","created_at":{at},"kind":30382,"tags":{tags},"content":"","sig":""}}"#,
+        hex(&id),
+        hex(&author)
+    );
+    sqlx::query(
+        "INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event) \
+         VALUES ($1, $2, 'issuer', 0, $3::jsonb) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET event = EXCLUDED.event",
+    )
+    .bind(community.as_uuid())
+    .bind(&d)
+    .bind(event)
+    .execute(pool)
+    .await
+    .expect("insert verified profile head");
+    id
+}
+
+/// Insert a kind:0 profile for `pubkey`; returns its event id.
+async fn put_profile_for(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: [u8; 32],
+    content: &str,
+    at: i64,
+) -> [u8; 32] {
+    let id = rand_bytes32();
+    insert_event(pool, community, id, pubkey, 0, content, None, at).await;
+    id
+}
+
+async fn people(
+    pool: &PgPool,
+    community: CommunityId,
+    q: &str,
+    verified_by: Option<[u8; 32]>,
+    page: u32,
+    per_page: u32,
+) -> Vec<[u8; 32]> {
+    SearchService::new(pool.clone())
+        .search_profile_names(community, q, verified_by, page, per_page)
+        .await
+        .expect("profile name search")
+        .hits
+        .into_iter()
+        .map(|hit| hit.event_id)
+        .collect()
+}
+
+/// With a verifying key, people also match on the names in their current
+/// kind:30382 signed by that key. Pages count people; each person returns
+/// their kind:0 then their verified profile, whichever matched.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_match_verified_names() {
+    let (pool, schema) = setup().await;
+    let c = mk_community(&pool, "profile-names-verified.example").await;
+    let other = mk_community(&pool, "profile-names-verified-other.example").await;
+    let relay = rand_bytes32();
+    let forger = rand_bytes32();
+
+    let fake = rand_bytes32();
+    let fake_profile = put_profile_for(
+        &pool,
+        c,
+        fake,
+        r#"{"name":"Fake","display_name":"Fak"}"#,
+        1_700_000_000,
+    )
+    .await;
+    let fake_verified = put_verified(
+        &pool,
+        c,
+        relay,
+        fake,
+        &[
+            ("display_name", "fname"),
+            ("username", "fname"),
+            ("full_name", "Fake Name"),
+        ],
+        1_700_000_010,
+    )
+    .await;
+    // Another Fake, never verified.
+    let namesake = rand_bytes32();
+    let namesake_profile =
+        put_profile_for(&pool, c, namesake, r#"{"name":"Fake"}"#, 1_700_000_020).await;
+    // Verified, with no kind:0 at all.
+    let gina = rand_bytes32();
+    let gina_verified = put_verified(
+        &pool,
+        c,
+        relay,
+        gina,
+        &[("display_name", "gname"), ("full_name", "Name Gina")],
+        1_700_000_030,
+    )
+    .await;
+    // Signed by another key: not a verified profile.
+    let fred = rand_bytes32();
+    put_profile_for(&pool, c, fred, r#"{"name":"Fred"}"#, 1_700_000_040).await;
+    put_verified(
+        &pool,
+        c,
+        forger,
+        fred,
+        &[("full_name", "Fred Name")],
+        1_700_000_050,
+    )
+    .await;
+    // Replaced (soft-deleted) verified profile.
+    let dan = rand_bytes32();
+    put_profile_for(&pool, c, dan, r#"{"name":"Dan"}"#, 1_700_000_060).await;
+    let replaced = put_verified(
+        &pool,
+        c,
+        relay,
+        dan,
+        &[("full_name", "Dan Name")],
+        1_700_000_070,
+    )
+    .await;
+    sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+        .bind(c.as_uuid())
+        .bind(&replaced[..])
+        .execute(&pool)
+        .await
+        .expect("replace verified profile");
+    // Another community.
+    put_verified(
+        &pool,
+        other,
+        relay,
+        rand_bytes32(),
+        &[("full_name", "Olga Name")],
+        1_700_000_080,
+    )
+    .await;
+
+    // Gina is tier 1 (a name starts with "name"); Fake is tier 2.
+    let by_name = vec![gina_verified, fake_profile, fake_verified];
+    assert_eq!(people(&pool, c, "name", Some(relay), 1, 100).await, by_name);
+    assert_eq!(
+        people(&pool, c, "NAME", Some(relay), 1, 1).await,
+        by_name[..1]
+    );
+    assert_eq!(
+        people(&pool, c, "name", Some(relay), 2, 1).await,
+        by_name[1..]
+    );
+    assert!(people(&pool, c, "name", Some(relay), 3, 1).await.is_empty());
+    assert_eq!(
+        people(&pool, c, "fnam", Some(relay), 1, 100).await,
+        vec![fake_profile, fake_verified]
+    );
+    assert_eq!(
+        people(&pool, c, "name fake", Some(relay), 1, 100).await,
+        vec![fake_profile, fake_verified]
+    );
+    // Full name and username together: both are in the verified profile.
+    assert_eq!(
+        people(&pool, c, "fake fname", Some(relay), 1, 100).await,
+        vec![fake_profile, fake_verified]
+    );
+    // A kind:0 match still returns the person's verified profile.
+    let fakes = people(&pool, c, "fake", Some(relay), 1, 100).await;
+    assert_eq!(fakes.len(), 3, "{fakes:?}");
+    let at = fakes
+        .iter()
+        .position(|id| *id == fake_profile)
+        .expect("fake");
+    assert_eq!(fakes.get(at + 1), Some(&fake_verified));
+    assert!(fakes.contains(&namesake_profile));
+    // Verified names need a three-character prefix; kind:0 does not.
+    assert!(people(&pool, c, "gn", Some(relay), 1, 100).await.is_empty());
+    assert_eq!(
+        people(&pool, c, "gna", Some(relay), 1, 100).await,
+        vec![gina_verified]
+    );
+    let mut short = people(&pool, c, "fa", Some(relay), 1, 100).await;
+    short.sort();
+    let mut full = people(&pool, c, "fake", Some(relay), 1, 100).await;
+    full.sort();
+    assert_eq!(short, full);
+    // Words split between kind:0 and the verified profile do not match.
+    assert!(people(&pool, c, "fak fname", Some(relay), 1, 100)
+        .await
+        .is_empty());
+
+    // Without a verifying key, only kind:0 counts, as before.
+    assert!(people(&pool, c, "name", None, 1, 100).await.is_empty());
+    let mut fakes = people(&pool, c, "fake", None, 1, 100).await;
+    fakes.sort();
+    let mut want = vec![fake_profile, namesake_profile];
+    want.sort();
+    assert_eq!(fakes, want);
+    // The forger's key verifies only its own events.
+    assert!(people(&pool, c, "fred name", Some(relay), 1, 100)
+        .await
+        .is_empty());
+
+    // A person ranks by their single best match. Kim's exact kind:0 name
+    // outranks Ken's, and Ken's better-ranked verified match has a worse tier.
+    let ken = rand_bytes32();
+    let ken_profile = put_profile_for(&pool, c, ken, r#"{"name":"Kname"}"#, 1_700_000_100).await;
+    put_verified(
+        &pool,
+        c,
+        relay,
+        ken,
+        &[
+            ("display_name", "Doctor Kname"),
+            ("username", "doctor-kname"),
+            ("full_name", "Doctor Kname"),
+        ],
+        1_700_000_110,
+    )
+    .await;
+    let kim = rand_bytes32();
+    let kim_profile = put_profile_for(
+        &pool,
+        c,
+        kim,
+        r#"{"name":"Kname","display_name":"Kname"}"#,
+        1_700_000_000,
+    )
+    .await;
+    assert_eq!(
+        people(&pool, c, "kname", Some(relay), 1, 1).await,
+        vec![kim_profile]
+    );
+    assert_eq!(
+        people(&pool, c, "kname", Some(relay), 2, 1).await.first(),
+        Some(&ken_profile)
+    );
+
+    teardown(pool, &schema).await;
+}
+
+/// Verified-name search reads `idx_nip_fi_profile_heads_names`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn profile_names_use_verified_name_index() {
+    let (setup_pool, schema) = setup().await;
+    let c = mk_community(&setup_pool, "profile-names-verified-index.example").await;
+    let relay = rand_bytes32();
+    for i in 0..2_000 {
+        put_verified(
+            &setup_pool,
+            c,
+            relay,
+            rand_bytes32(),
+            &[("full_name", &format!("Person{i} Name{i}"))],
+            1_700_000_000 + i,
+        )
+        .await;
+    }
+    sqlx::query("ANALYZE nip_fi_profile_heads")
+        .execute(&setup_pool)
+        .await
+        .expect("analyze heads");
+    // One connection, so this backend's statistics hold the search's scans.
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect test database");
+    let scans = || async {
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(&pool)
+            .await
+            .expect("flush statistics");
+        sqlx::query("SELECT pg_stat_clear_snapshot()")
+            .execute(&pool)
+            .await
+            .expect("clear statistics snapshot");
+        sqlx::query_scalar::<_, i64>(
+            "SELECT idx_scan FROM pg_stat_user_indexes \
+             WHERE indexrelname = 'idx_nip_fi_profile_heads_names'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("index statistics")
+    };
+    let before = scans().await;
+    let found = SearchService::new(pool.clone())
+        .search_profile_names(c, "name1234", Some(relay), 1, 10)
+        .await
+        .expect("profile name search")
+        .hits;
+    assert_eq!(found.len(), 1);
+    assert!(
+        scans().await > before,
+        "verified-name search did not use its index"
+    );
+    pool.close().await;
+    teardown(setup_pool, &schema).await;
+}
+
 /// Connect the way the relay does: [`buzz_search::pool_options`].
 async fn search_pool() -> PgPool {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -2080,12 +2411,14 @@ async fn search_pool() -> PgPool {
 
 /// Backends in this test's database, other than the caller's, that wait on
 /// a lock inside a search. Scoped to the database so concurrent tests in
-/// sibling databases cannot change the count.
+/// sibling databases cannot change the count. Matches each search by its
+/// leading text, since `pg_stat_activity` keeps only the first 1 kB of a query.
 async fn waiting_searches(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() \
-         AND datname = current_database() \
-         AND wait_event_type = 'Lock' AND query LIKE '%ts_rank_cd(%'",
+         AND datname = current_database() AND wait_event_type = 'Lock' \
+         AND (query LIKE 'SELECT id, kind, pubkey, channel_id, %ts_rank_cd(%' \
+           OR query LIKE 'WITH search_query AS (SELECT %')",
     )
     .fetch_one(pool)
     .await
@@ -2187,7 +2520,7 @@ async fn abandoned_search_cancels_its_statement() {
     };
     abandon_under_lock(&pool, "search", || svc.search(&message_query)).await;
     abandon_under_lock(&pool, "search_profile_names", || {
-        svc.search_profile_names(c, "proj", 1, 10)
+        svc.search_profile_names(c, "proj", None, 1, 10)
     })
     .await;
     teardown(pool, &schema).await;

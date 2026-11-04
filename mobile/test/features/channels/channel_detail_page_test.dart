@@ -107,6 +107,8 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/message_width_tests.dart';
+part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 
@@ -276,6 +278,10 @@ Widget _buildTestable({
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
+
+  /// The channel's own history in a personal chat, which [messagesNotifier]
+  /// does not back there.
+  _FakeMessagesNotifier? channelMessagesNotifier,
   _FakeTypingNotifier? typingNotifier,
   _FakeTypingNotifier? huddleTypingNotifier,
   String? canvasContent,
@@ -351,7 +357,7 @@ Widget _buildTestable({
         videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
-            ? _FakeMessagesNotifier(messages)
+            ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
             : fakeMessagesNotifier,
       ),
       channelTypingProvider(
@@ -685,13 +691,91 @@ void main() {
           isTrue,
         );
         final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
-        await tester.drag(row, const Offset(220, 0));
+        await tester.drag(
+          find
+              .descendant(
+                of: row,
+                matching: find.byType(LocalSendBubbleSurface),
+              )
+              .first,
+          const Offset(220, 0),
+        );
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(tester.takeException(), isNull);
       },
     );
   }
+  testWidgets('a saved Bestie welcome keeps a way to older history', (
+    tester,
+  ) async {
+    List<NostrEvent> hiddenPage(int page) => [
+      for (var i = 0; i < 3; i++)
+        _systemMsg(
+          id: 'join$page-$i',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'user$page-$i',
+            'target': 'user$page-$i',
+          },
+          createdAt: 10000 - page * 10 - i,
+        ),
+    ];
+    final messagesNotifier = _FakeMessagesNotifier(
+      hiddenPage(0),
+      olderPages: [
+        for (var page = 1; page <= 5; page++) hiddenPage(page),
+        [_textMsg(id: 'old', pubkey: 'agent', content: 'Older chat')],
+      ],
+    );
+    final dm = Channel(
+      id: _channelId,
+      name: 'Bestie',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'self',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      participantPubkeys: const ['self', 'agent'],
+      isMember: true,
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        signingPubkey: 'self',
+        bestie: 'agent',
+        organization: Stream.value(const MeGroups()),
+        channel: dm,
+        messages: const [],
+        channelMessagesNotifier: messagesNotifier,
+        home: const Scaffold(
+          body: DefaultAgentLauncher(onChooseAgent: _noAgentChoice),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(DefaultAgentLauncher)),
+    );
+    await saveBestieWelcome(
+      container.read(savedPrefsProvider),
+      container.read(meSyncProvider),
+      _channelId,
+      'agent',
+    );
+    await tester.tap(find.byType(IconButton));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BestieWelcome), findsOneWidget);
+    expect(messagesNotifier.fetchOlderCalls, 5);
+    expect(find.text('Load earlier messages'), findsOneWidget);
+
+    await tester.tap(find.text('Load earlier messages'));
+    await tester.pumpAndSettle();
+    expect(findRichText('Older chat'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   for (final hasHistory in [true, false]) {
     testWidgets('a saved Bestie welcome stays at the start of its chat: '
         'history=$hasHistory', (tester) async {
@@ -863,6 +947,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  messageWidthTests();
   swipeReplyTests();
   reviewAvatarTests();
   setUp(() async {
@@ -4327,30 +4412,27 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, 13.1);
-      expect(aliceText.style?.fontWeight, messageUsernameTextStyle.fontWeight);
-      expect(aliceText.style?.height, 17 / 13.1);
+      expect(aliceText.style?.fontSize, 11);
+      expect(aliceText.style?.fontWeight, FontWeight.w500);
+      expect(aliceText.style?.height, 17 / 11);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, 13.1);
+      expect(aliceUsername.style?.fontSize, 11);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, 17 / 13.1);
+      expect(aliceUsername.style?.height, 17 / 11);
       expect(aliceTimestamp.style?.fontSize, 11);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
+      final timeFinder = find.byKey(const ValueKey('message-timestamp-msg1'));
       expect(
-        tester
-            .getCenter(find.byKey(const ValueKey('message-timestamp-msg1')))
-            .dy,
+        tester.getCenter(timeFinder).dy,
         closeTo(tester.getCenter(aliceName).dy, 0.01),
       );
-      expect(
-        aliceTimestamp.style?.fontSize,
-        lessThan(aliceText.style!.fontSize!),
-      );
+      expect(aliceTimestamp.style?.color, aliceText.style?.color);
+      expect(aliceTimestamp.style?.fontSize, aliceText.style!.fontSize!);
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('message-row-msg1')),
@@ -4459,12 +4541,13 @@ void main() {
               payload: {
                 'type': 'member_joined',
                 'actor': 'alice',
-                'target': 'alice',
+                'target': 'bob',
               },
             ),
           ],
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
       );
@@ -4488,7 +4571,7 @@ void main() {
       );
       expect(find.byType(BottomSheet), findsOneWidget);
       expect(find.text('Copy text'), findsNothing);
-      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(findRichText(' added '), findsOneWidget);
       expect(hapticCalls, hasLength(1));
       expect(hapticCalls.single.arguments, 'HapticFeedbackType.mediumImpact');
 
@@ -4508,11 +4591,7 @@ void main() {
           messages: [
             _systemMsg(
               id: 'rebuild-target',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
+              payload: {'type': 'channel_archived', 'actor': 'alice'},
             ),
           ],
           userCacheNotifier: userCache,
@@ -5467,9 +5546,22 @@ void main() {
             createdAt: 1000 + i,
           ),
       ];
+      // A page of only hidden notices sits between, adding no entry.
+      final hiddenPage = [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$i',
+              'target': 'user$i',
+            },
+            createdAt: 1049,
+          ),
+      ];
       final messagesNotifier = _FakeMessagesNotifier(
         newestPage,
-        olderPages: [olderPage],
+        olderPages: [hiddenPage, olderPage],
       );
       final channelsNotifier = _FakeChannelsNotifier(
         [_testChannel],
@@ -5509,7 +5601,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(messagesNotifier.fetchOlderCalls, 1);
+      expect(messagesNotifier.fetchOlderCalls, 2);
       await tester.tap(
         find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
       );
@@ -6147,7 +6239,7 @@ void main() {
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       for (final multiline in [false, true]) {
         testWidgets(
-          'outgoing group keeps one trailing avatar throughout a local send: $platform, multiline=$multiline',
+          'outgoing group hides avatars throughout a local send: $platform, multiline=$multiline',
           (tester) async {
             final previousPlatform = debugDefaultTargetPlatformOverride;
             debugDefaultTargetPlatformOverride = platform;
@@ -6178,7 +6270,7 @@ void main() {
                 of: find.byKey(ValueKey('message-row-$id')),
                 matching: find.byType(AvatarImage),
               );
-              expect(avatar('first'), findsOneWidget);
+              expect(avatar('first'), findsNothing);
               final container = ProviderScope.containerOf(
                 tester.element(find.byType(ChannelDetailPage)),
               );
@@ -6205,12 +6297,12 @@ void main() {
                 );
                 expect(
                   avatar('second'),
-                  findsOneWidget,
+                  findsNothing,
                   reason: 'second avatar frame $frame',
                 );
               }
               await tester.pumpAndSettle();
-              expect(avatar('second'), findsOneWidget);
+              expect(avatar('second'), findsNothing);
             } finally {
               debugDefaultTargetPlatformOverride = previousPlatform;
             }
@@ -10023,9 +10115,7 @@ void main() {
       },
     );
 
-    testWidgets('renders member_joined (self-join) system event', (
-      tester,
-    ) async {
+    testWidgets('hides a self-join', (tester) async {
       final messages = [
         _systemMsg(
           id: 'sys1',
@@ -10041,9 +10131,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText('joined the channel'), findsOneWidget);
-      expect(find.byType(CircleAvatar), findsNothing);
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys1')),
+        findsNothing,
+      );
+      expect(findRichText('joined the channel'), findsNothing);
     });
 
     testWidgets('opens a profile sheet from a membership activity name', (
@@ -10648,6 +10740,433 @@ void main() {
       );
     }
 
+    testWidgets('hides self-joins and leaves and collapses the rest', (
+      tester,
+    ) async {
+      NostrEvent change(String id, Map<String, Object> payload, int at) =>
+          _systemMsg(id: id, payload: payload, createdAt: at);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            change('sys1', {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'alice',
+            }, 1000),
+            change('sys2', {
+              'type': 'member_joined',
+              'actor': 'carol',
+              'target': 'bob',
+            }, 1600),
+            // A normal Leave (kind 9022) carries only the actor.
+            change('sys3', {'type': 'member_left', 'actor': 'dave'}, 2200),
+            // Removing yourself (kind 9001) also names the target.
+            change('sys4', {
+              'type': 'member_left',
+              'actor': 'erin',
+              'target': 'erin',
+            }, 2800),
+            // Hours later, by a different adder and a remover.
+            change('sys5', {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'frank',
+            }, 2800 + 5 * 3600),
+            change('sys6', {
+              'type': 'member_removed',
+              'actor': 'carol',
+              'target': 'gina',
+            }, 2900 + 5 * 3600),
+          ],
+          users: {
+            for (final name in [
+              'alice',
+              'bob',
+              'carol',
+              'dave',
+              'erin',
+              'frank',
+              'gina',
+            ])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys2')),
+        findsOneWidget,
+      );
+      for (final id in ['sys1', 'sys3', 'sys4', 'sys5', 'sys6']) {
+        expect(find.byKey(ValueKey('system-message-row-$id')), findsNothing);
+      }
+      expect(findRichText('joined the channel'), findsNothing);
+      expect(findRichText('left the channel'), findsNothing);
+      expect(findRichText(' were added · '), findsOneWidget);
+      expect(findRichText(' was removed'), findsOneWidget);
+      for (final name in ['bob', 'gina', '1 other']) {
+        expect(find.text(name), findsOneWidget);
+      }
+
+      await tester.tap(find.text('1 other'));
+      await tester.pumpAndSettle();
+      expect(find.text('Added members'), findsOneWidget);
+      for (final pubkey in ['bob', 'frank']) {
+        expect(find.byKey(ValueKey('activity-member-$pubkey')), findsOneWidget);
+      }
+    });
+
+    testWidgets('a run across midnight leaves the next day its divider', (
+      tester,
+    ) async {
+      final dayOne =
+          DateTime(2026, 7, 14, 23, 50).millisecondsSinceEpoch ~/ 1000;
+      final dayTwo = DateTime(2026, 7, 15, 9).millisecondsSinceEpoch ~/ 1000;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys1',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+              createdAt: dayOne,
+            ),
+            _systemMsg(
+              id: 'sys2',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'carol',
+              },
+              createdAt: dayTwo,
+            ),
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Morning',
+              createdAt: dayTwo + 60,
+            ),
+          ],
+          users: {
+            for (final name in ['alice', 'bob', 'carol'])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      for (final timestamp in [dayOne, dayTwo]) {
+        expect(
+          find.descendant(
+            of: find.byType(DayDivider),
+            matching: find.text(formatDayHeading(timestamp)),
+          ),
+          findsOneWidget,
+        );
+      }
+    });
+
+    testWidgets('pages past a newest page of only hidden notices', (
+      tester,
+    ) async {
+      final messagesNotifier = _FakeMessagesNotifier(
+        [
+          for (var i = 0; i < 5; i++)
+            _systemMsg(
+              id: 'join$i',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'user$i',
+                'target': 'user$i',
+              },
+              createdAt: 2000 + i,
+            ),
+        ],
+        failOlderFetch: true,
+        olderPages: [
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      messagesNotifier.throwOlderFetch = true;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A thrown fetch pauses paging once, without retrying on its own.
+      expect(messagesNotifier.fetchOlderCalls, 1);
+      expect(find.text('No messages yet'), findsNothing);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      // So does a fetch that loads nothing, and each leaves a way to resume.
+      messagesNotifier.throwOlderFetch = false;
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+      expect(messagesNotifier.fetchOlderCalls, 2);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      messagesNotifier.failOlderFetch = false;
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 3);
+      expect(findRichText('Older chat'), findsOneWidget);
+    });
+
+    testWidgets('stops automatic paging through hidden-only history', (
+      tester,
+    ) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        hiddenPage(0),
+        olderPages: [
+          for (var page = 1; page <= 7; page++) hiddenPage(page),
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 8);
+      expect(findRichText('Older chat'), findsOneWidget);
+    });
+
+    testWidgets('keeps a way to older history while an agent types', (
+      tester,
+    ) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        hiddenPage(0),
+        olderPages: [for (var page = 1; page <= 7; page++) hiddenPage(page)],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          typing: [
+            TypingEntry(
+              pubkey: 'alice',
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('inline-agent-typing-alice')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('caps hidden-only paging after one scroll', (tester) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'chat$i',
+              pubkey: 'alice',
+              content: 'Chat $i',
+              createdAt: 20000 + i,
+            ),
+        ],
+        olderPages: [for (var page = 1; page <= 20; page++) hiddenPage(page)],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final before = messagesNotifier.fetchOlderCalls;
+
+      await tester.drag(
+        find.byKey(const ValueKey('channel-message-list')),
+        const Offset(0, 20000),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls - before, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+    });
+
+    testWidgets('fills a short collapsed history without a scroll', (
+      tester,
+    ) async {
+      // One collapsed row of additions fits the viewport, so clamping
+      // physics accepts no scroll to page older history.
+      List<NostrEvent> additions(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'add$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'user$page-$i',
+            },
+            createdAt: 900000 - page * 86400 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        additions(0),
+        olderPages: [
+          for (var page = 1; page <= 6; page++) additions(page),
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(findRichText('Older chat'), findsNothing);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 7);
+      expect(findRichText('Older chat'), findsOneWidget);
+      expect(find.text('Load earlier messages'), findsNothing);
+    });
+
+    testWidgets('names no adder when several people added members', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys1',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+              createdAt: 1000,
+            ),
+            _systemMsg(
+              id: 'sys2',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'carol',
+                'target': 'dave',
+              },
+              createdAt: 1060,
+            ),
+          ],
+          users: {
+            for (final name in ['alice', 'bob', 'carol', 'dave'])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText(' were added to the channel'), findsOneWidget);
+      expect(find.text('bob'), findsOneWidget);
+      expect(find.text('dave'), findsOneWidget);
+      expect(find.text('alice'), findsNothing);
+      expect(find.text('carol'), findsNothing);
+    });
+
     testWidgets('aligns grouped reactions with the system message content', (
       tester,
     ) async {
@@ -10746,7 +11265,7 @@ void main() {
       expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
     });
 
-    testWidgets('renders member_left system event', (tester) async {
+    testWidgets('hides a voluntary leave', (tester) async {
       final messages = [
         _systemMsg(
           id: 'sys1',
@@ -10762,8 +11281,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText('left the channel'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys1')),
+        findsNothing,
+      );
     });
 
     testWidgets('renders member_removed system event', (tester) async {
@@ -10835,7 +11356,11 @@ void main() {
         ),
         _systemMsg(
           id: 'sys1',
-          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+          payload: {
+            'type': 'member_removed',
+            'actor': 'bob',
+            'target': 'carol',
+          },
           createdAt: 1010,
         ),
         _textMsg(
@@ -12951,7 +13476,7 @@ void main() {
         ),
         _systemMsg(
           id: 'sys2',
-          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+          payload: {'type': 'member_joined', 'actor': 'alice', 'target': 'bob'},
           createdAt: 1100,
         ),
         _textMsg(
@@ -12973,11 +13498,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice'), findsNWidgets(2));
+      expect(find.text('Alice'), findsNWidgets(3));
       expect(findRichText('created this channel'), findsOneWidget);
       expect(findRichText('Welcome everyone!'), findsOneWidget);
       expect(find.text('Bob'), findsNWidgets(2));
-      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(findRichText(' to the channel'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
     });
   });
@@ -15017,7 +15542,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(31, 'Tall latest reply').join('\n')
+                  ? List.filled(31, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -15383,7 +15908,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(14, 'Tall latest reply').join('\n')
+                  ? List.filled(14, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -17982,7 +18507,10 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
   final List<List<NostrEvent>> _olderPages;
-  final bool failOlderFetch;
+  bool failOlderFetch;
+
+  /// Makes [fetchOlder] throw, as a legacy history request can.
+  bool throwOlderFetch = false;
   final Map<String, ChannelWindowThreadSummary> summaries;
   final loadedEventIds = <String>{};
   @override
@@ -18019,6 +18547,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   @override
   Future<bool> fetchOlder() async {
     fetchOlderCalls += 1;
+    if (throwOlderFetch) throw StateError('offline');
     if (failOlderFetch || _olderPages.isEmpty) return false;
     _messages = [..._olderPages.removeAt(0), ..._messages]
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));

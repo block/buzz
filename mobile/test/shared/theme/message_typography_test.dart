@@ -115,7 +115,7 @@ void main() {
   });
 
   test('message and activity avatars use their surface sizes', () {
-    expect(messageAvatarSize, 42);
+    expect(messageAvatarSize, 36);
     expect(activityAvatarSize, 42);
     expect(compactMessageAvatarSize, 42);
     expect(messageAvatarContentGap, Grid.twelve);

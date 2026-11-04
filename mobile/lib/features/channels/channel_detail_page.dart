@@ -1,3 +1,4 @@
+import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'message_swipe_reply.dart';
@@ -48,7 +49,6 @@ import '../../shared/widgets/flapping_bee.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/message_author_meta.dart';
-import '../../shared/widgets/verified_mark.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -107,6 +107,7 @@ import 'timeline_message.dart';
 part 'channel_detail_page/message_list.dart';
 part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
+part 'channel_detail_page/hidden_history_paging.dart';
 part 'channel_detail_page/oldest_navigation.dart';
 part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
@@ -689,7 +690,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       // End events still update the original card through allMessages.
       timelineMessages
           .where(
-            (message) => !isCollapsedHuddleEnding(message, timelineMessages),
+            (message) =>
+                !isHiddenMembershipNotice(message) &&
+                !isCollapsedHuddleEnding(message, timelineMessages),
           )
           .toList(),
       flat: personalChat,

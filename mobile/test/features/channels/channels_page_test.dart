@@ -1,4 +1,8 @@
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/hosted/browser_auth.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 
@@ -2556,6 +2560,173 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('organization sign-in is reachable before content loads', (
+    tester,
+  ) async {
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+    final notifier = _FakeCommunityListNotifier(communities);
+    final pending = Completer<List<Channel>>();
+    final account = BuilderlabAccountClient();
+    final signIn = OrganizationSignIn(
+      account: account,
+      browser: BrowserAuth(),
+      reconnect: () async {},
+    )..status = OrganizationSessionStatus.signedOut;
+    final auth = HostedRelayAuth(
+      BuilderlabAccountClient(),
+      organization: account,
+      organizationRelay: (uri) => uri.host == 'bravo.example.com',
+    );
+    addTearDown(() {
+      signIn.dispose();
+      auth.dispose();
+      account.dispose();
+    });
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          organizationSignInProvider.overrideWithValue(signIn),
+          hostedRelayAuthProvider.overrideWithValue(auth),
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              testChannels,
+              load: () => notifier.activeId == 'alpha'
+                  ? Future.value(testChannels)
+                  : pending.future,
+            ),
+          ),
+          communityListProvider.overrideWith(() => notifier),
+          activeCommunityProvider.overrideWith((ref) async {
+            await ref.watch(communityListProvider.future);
+            return communities.firstWhere(
+              (community) => community.id == notifier.activeId,
+            );
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+    expect(notifier.switchedIds, ['bravo']);
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(find.textContaining('taking longer to load'), findsNothing);
+    pending.complete(testChannels);
+  });
+
+  testWidgets(
+    'a refused organization key closes the switcher before content loads',
+    (tester) async {
+      final communities = [
+        Community(
+          id: 'alpha',
+          name: 'Alpha',
+          relayUrl: 'wss://alpha.example.com',
+          addedAt: DateTime(2025),
+        ),
+        Community(
+          id: 'bravo',
+          name: 'Bravo',
+          relayUrl: 'wss://bravo.example.com',
+          addedAt: DateTime(2025),
+        ),
+      ];
+      final notifier = _FakeCommunityListNotifier(communities);
+      final pending = Completer<List<Channel>>();
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedIn;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (uri) => uri.host == 'bravo.example.com',
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            organizationSignInProvider.overrideWithValue(signIn),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                testChannels,
+                load: () => notifier.activeId == 'alpha'
+                    ? Future.value(testChannels)
+                    : pending.future,
+              ),
+            ),
+            communityListProvider.overrideWith(() => notifier),
+            activeCommunityProvider.overrideWith((ref) async {
+              await ref.watch(communityListProvider.future);
+              return communities.firstWhere(
+                (community) => community.id == notifier.activeId,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-menu-switch')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(notifier.switchedIds, ['bravo']);
+      // Signed in with no refusal yet: keep waiting for content.
+      expect(find.byKey(const Key('community-switcher-page')), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byKey(const Key('community-switcher-page'))),
+      );
+      auth.rejected(
+        container.read(relayConfigProvider),
+        'Bearer refused',
+        terminal: true,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+      expect(find.textContaining('taking longer to load'), findsNothing);
+      pending.complete(testChannels);
+    },
+  );
+
   for (final timeout in [false, true]) {
     testWidgets(
       'community loading failure can retry the active selection (timeout: $timeout)',
@@ -2918,6 +3089,49 @@ void main() {
       semantics.dispose();
     },
   );
+
+  testWidgets('create channel sheet shows a taken-name refusal as plain text', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          // Same shape relay_session completes a refused publish with.
+          channelActionsProvider.overrideWith(
+            (ref) => _RefusingCreateActions(
+              Exception(
+                'invalid: an open channel named "Launch" already exists',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Create'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('New channel'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('create-channel-name')),
+      'Launch',
+    );
+    await tester.pump();
+    // The sheet submits from the keyboard's done action.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('An open channel named "Launch" already exists'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Exception'), findsNothing);
+    expect(find.textContaining('invalid:'), findsNothing);
+    // The sheet stays open so the user can pick another name.
+    expect(find.text('New channel'), findsOneWidget);
+  });
 
   dmRecipientLayoutTests(
     (overrides) => buildTestable(
@@ -3978,6 +4192,27 @@ class _CreateSheetActions implements ChannelActions {
     });
     throw StateError('Try again');
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _RefusingCreateActions implements ChannelActions {
+  _RefusingCreateActions(this.error);
+
+  final Object error;
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async => throw error;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

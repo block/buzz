@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' show sin, pi;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -9,6 +10,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
 import 'thread_detail_page.dart';
+import 'message_reply_drag_target.dart';
 import 'timeline_message.dart';
 
 /// Reveals the existing reply action as a message is dragged to the right.
@@ -45,6 +47,8 @@ class MessageSwipeReply extends HookConsumerWidget {
     final dragDistance = useRef(0.0);
     final layoutKey = useMemoized(GlobalKey.new);
     final contentCenter = useState<double?>(null);
+    final feedbackLeft = useState(0.0);
+    final dragTarget = useRef<Rect?>(null);
     final didHaptic = useRef(false);
     final cancelled = useRef(false);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
@@ -74,65 +78,85 @@ class MessageSwipeReply extends HookConsumerWidget {
     // cancellation signal so an interrupted gesture cannot open a reply.
     return Listener(
       onPointerCancel: (_) => cancelled.value = true,
-      child: GestureDetector(
+      child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
         excludeFromSemantics: true,
-        onHorizontalDragStart: (_) {
-          final contentBox = contentKey.currentContext?.findRenderObject();
-          final layoutBox = layoutKey.currentContext?.findRenderObject();
-          if (contentBox is RenderBox && layoutBox is RenderBox) {
-            contentCenter.value = layoutBox
-                .globalToLocal(
-                  contentBox.localToGlobal(contentBox.size.center(Offset.zero)),
-                )
-                .dy;
-          }
-          offset.stop();
-          pulse.stop();
-          pulse.value = 0;
-          offset.value = 0;
-          dragDistance.value = 0;
-          didHaptic.value = false;
-          cancelled.value = false;
-        },
-        onHorizontalDragUpdate: (details) {
-          dragDistance.value = (dragDistance.value + details.delta.dx).clamp(
-            0.0,
-            double.infinity,
-          );
-          // Keep pulling beyond readiness, with increasing rubber-band resistance.
-          final excess = dragDistance.value - 72;
-          offset.value = excess <= 0
-              ? dragDistance.value
-              : 72 + 40 * excess / (excess + 80);
-          if (offset.value >= 72 && !didHaptic.value) {
-            didHaptic.value = true;
-            unawaited(HapticFeedback.mediumImpact());
-            if (!reducedMotion) unawaited(pulse.forward(from: 0));
-          }
-          if (offset.value < 72) {
-            didHaptic.value = false;
-            pulse.stop();
-            pulse.value = 0;
-          }
-        },
-        onHorizontalDragCancel: reset,
-        onHorizontalDragEnd: (_) {
-          final reply = !cancelled.value && offset.value >= 72;
-          reset();
-          if (!reply) return;
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => ThreadDetailPage(
-                threadHead: message,
-                allMessages: messages,
-                channelId: channelId,
-                currentPubkey: currentPubkey,
-                isMember: isMember,
-                isArchived: isArchived,
+        gestures: {
+          _MessageReplyDragRecognizer:
+              GestureRecognizerFactoryWithHandlers<_MessageReplyDragRecognizer>(
+                _MessageReplyDragRecognizer.new,
+                (recognizer) => recognizer
+                  ..canStart = (position) {
+                    final bounds = messageReplyDragTargetBounds(
+                      contentKey,
+                      position,
+                    );
+                    dragTarget.value = bounds?.shift(Offset(-offset.value, 0));
+                    return bounds != null;
+                  }
+                  ..onStart = (_) {
+                    final bounds = dragTarget.value;
+                    final layoutBox = layoutKey.currentContext
+                        ?.findRenderObject();
+                    if (bounds != null && layoutBox is RenderBox) {
+                      // Keep the same gutter beside the touched bubble on either
+                      // side of the conversation, independent of row width.
+                      feedbackLeft.value =
+                          layoutBox.globalToLocal(bounds.topLeft).dx -
+                          Grid.lg -
+                          Grid.xxs;
+                      contentCenter.value = layoutBox
+                          .globalToLocal(bounds.center)
+                          .dy;
+                    }
+                    offset.stop();
+                    pulse.stop();
+                    pulse.value = 0;
+                    offset.value = 0;
+                    dragDistance.value = 0;
+                    didHaptic.value = false;
+                    cancelled.value = false;
+                  }
+                  ..onUpdate = (details) {
+                    dragDistance.value = (dragDistance.value + details.delta.dx)
+                        .clamp(0.0, double.infinity);
+                    // Keep pulling beyond readiness, with increasing rubber-band resistance.
+                    final excess = dragDistance.value - 72;
+                    offset.value = excess <= 0
+                        ? dragDistance.value
+                        : 72 + 40 * excess / (excess + 80);
+                    if (offset.value >= 72 && !didHaptic.value) {
+                      didHaptic.value = true;
+                      unawaited(HapticFeedback.mediumImpact());
+                      if (!reducedMotion) {
+                        unawaited(pulse.forward(from: 0));
+                      }
+                    }
+                    if (offset.value < 72) {
+                      didHaptic.value = false;
+                      pulse.stop();
+                      pulse.value = 0;
+                    }
+                  }
+                  ..onCancel = reset
+                  ..onEnd = (_) {
+                    final reply = !cancelled.value && offset.value >= 72;
+                    reset();
+                    if (!reply) return;
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ThreadDetailPage(
+                          threadHead: message,
+                          allMessages: messages,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                          isMember: isMember,
+                          isArchived: isArchived,
+                        ),
+                      ),
+                    );
+                  },
               ),
-            ),
-          );
         },
         child: AnimatedBuilder(
           animation: Listenable.merge([offset, pulse]),
@@ -150,7 +174,7 @@ class MessageSwipeReply extends HookConsumerWidget {
               children: [
                 if (progress > 0)
                   Positioned(
-                    left: 0,
+                    left: feedbackLeft.value,
                     top: contentCenter.value ?? 0,
                     width: Grid.lg,
                     child: FractionalTranslation(
@@ -230,4 +254,14 @@ class MessageSwipeReply extends HookConsumerWidget {
       ),
     );
   }
+}
+
+// Reject outside starts before entering the gesture arena, leaving navigation
+// and other row interactions free to recognize those drags.
+class _MessageReplyDragRecognizer extends HorizontalDragGestureRecognizer {
+  late bool Function(Offset) canStart;
+
+  @override
+  bool isPointerAllowed(PointerEvent event) =>
+      canStart(event.position) && super.isPointerAllowed(event);
 }

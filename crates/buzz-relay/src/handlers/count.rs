@@ -23,6 +23,7 @@ pub async fn handle_count(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
+    let mut access = crate::access::ReadLog::count(&conn, &sub_id, &filters);
     // Require auth
     let (pubkey_bytes, token_channel_ids) = {
         match conn.auth_state_snapshot() {
@@ -34,6 +35,7 @@ pub async fn handle_count(
                     &sub_id,
                     "auth-required: not authenticated",
                 ));
+                access.deny("auth_required");
                 return;
             }
         }
@@ -47,6 +49,7 @@ pub async fn handle_count(
             &sub_id,
             "restricted: p-gated kinds require #p tag matching your pubkey",
         ));
+        access.deny("p_gated");
         return;
     }
     if !super::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
@@ -54,6 +57,7 @@ pub async fn handle_count(
             &sub_id,
             "restricted: agent-engram reads require authors=[self] or #p=[self]",
         ));
+        access.deny("engram_gated");
         return;
     }
     if !super::req::author_only_filters_authorized(&filters, &authed_pubkey_hex) {
@@ -61,6 +65,7 @@ pub async fn handle_count(
             &sub_id,
             "restricted: author-only kinds require authors=[self]",
         ));
+        access.deny("author_only");
         return;
     }
 
@@ -77,6 +82,7 @@ pub async fn handle_count(
                     &sub_id,
                     "restricted: too many explicit channels",
                 ));
+                access.deny("too_many_channels");
                 return;
             }
         };
@@ -88,8 +94,9 @@ pub async fn handle_count(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
+            warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to get accessible channels");
             conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+            access.error("database_error");
             return;
         }
     };
@@ -116,8 +123,9 @@ pub async fn handle_count(
     {
         Ok(ids) => ids,
         Err(e) => {
-            warn!(sub_id = %sub_id, "Failed to get readable named-only channels: {e}");
+            warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to get readable named-only channels");
             conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+            access.error("database_error");
             return;
         }
     };
@@ -140,6 +148,7 @@ pub async fn handle_count(
                 &sub_id,
                 "restricted: authorization denied",
             ));
+            access.deny("session_expired");
             return;
         }
     };
@@ -178,8 +187,9 @@ pub async fn handle_count(
             )
             .await
             {
-                warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
+                warn!(sub_id = %sub_id, error_kind = %e.kind(), "Channel membership confirmation failed");
                 conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+                access.error("database_error");
                 return;
             }
             if let Err(e) = super::system_channels::keep_repaired_named_only_channels_named(
@@ -191,8 +201,9 @@ pub async fn handle_count(
             )
             .await
             {
-                warn!(sub_id = %sub_id, "Failed to classify repaired channels: {e}");
+                warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to classify repaired channels");
                 conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
+                access.error("database_error");
                 return;
             }
             let filter_scope = super::system_channels::filter_channel_scope(
@@ -246,6 +257,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -265,6 +277,7 @@ pub async fn handle_count(
                                 &sub_id,
                                 "restricted: count filter requires narrower constraints",
                             ));
+                            access.deny("count_too_broad");
                             return;
                         }
                         for se in stored_events {
@@ -283,6 +296,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -333,6 +347,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -351,6 +366,7 @@ pub async fn handle_count(
                                 &sub_id,
                                 "restricted: count filter requires narrower constraints",
                             ));
+                            access.deny("count_too_broad");
                             return;
                         }
                         for se in stored_events {
@@ -369,6 +385,7 @@ pub async fn handle_count(
                             &sub_id,
                             &super::req::db_read_closed_reason(&e),
                         ));
+                        access.db_failed(&e);
                         return;
                     }
                 }
@@ -376,6 +393,7 @@ pub async fn handle_count(
         }
     }
     conn.send(RelayMessage::count(&sub_id, total));
+    access.counted(total);
 }
 
 #[cfg(test)]
@@ -425,6 +443,7 @@ mod tests {
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<axum::extract::ws::Message>(1);
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(community, "test.local".to_string()),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),

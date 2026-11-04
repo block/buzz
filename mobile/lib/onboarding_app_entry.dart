@@ -151,6 +151,12 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
     final handlingBack = useRef(false);
     void back() {
+      final pairingStatus = ref.read(pairingProvider).status;
+      if (pairingStatus == PairingStatus.transferring ||
+          pairingStatus == PairingStatus.storing ||
+          pairingStatus == PairingStatus.success) {
+        return;
+      }
       // Nested page and entry PopScopes receive the same system Back event.
       if (handlingBack.value) return;
       handlingBack.value = true;
