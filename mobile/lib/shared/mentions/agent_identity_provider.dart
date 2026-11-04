@@ -60,9 +60,16 @@ Map<String, dynamic>? _tryDecodeJsonMap(String content) {
 }
 
 /// The agent directory and owners last read over a live connection.
+///
+/// Only the newest directory read writes here, so a read that outlived its
+/// connection never replaces a newer one. [owners] are kept with the
+/// [ownersOf] directory they were read for, and only for the directory
+/// held, so a reconnect never pairs a fresh directory with older owners.
 class _AgentDirectoryMemo {
+  var reads = 0;
   List<AgentDirectoryEntry>? agents;
   Map<String, String>? owners;
+  List<AgentDirectoryEntry>? ownersOf;
 }
 
 /// One memo per community, so nothing read in one reaches another.
@@ -84,11 +91,14 @@ final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   if (sessionState.status != SessionStatus.connected) {
     return memo.agents ?? const [];
   }
+  final read = ++memo.reads;
   final session = ref.read(relaySessionProvider.notifier);
   final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  return memo.agents = [
+  final agents = [
     for (final event in events) AgentDirectoryEntry.fromEvent(event),
   ];
+  if (read == memo.reads) memo.agents = agents;
+  return agents;
 });
 
 /// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
@@ -101,7 +111,9 @@ final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
   // While the session reconnects, the owners last read stand with the
   // directory they belong to.
   final status = ref.read(relaySessionProvider).status;
-  if (status != SessionStatus.connected) return memo.owners ?? const {};
+  if (status != SessionStatus.connected) {
+    return identical(memo.ownersOf, agents) ? memo.owners! : const {};
+  }
   final session = ref.read(relaySessionProvider.notifier);
   final events = await session.fetchHistory(
     NostrFilters.profilesBatch([for (final agent in agents) agent.pubkey]),
@@ -111,7 +123,12 @@ final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
     final owner = verifiedOaOwnerPubkey(event.tags, event.pubkey);
     if (owner != null) owners[event.pubkey.toLowerCase()] = owner;
   }
-  return memo.owners = owners;
+  if (identical(agents, memo.agents)) {
+    memo
+      ..owners = owners
+      ..ownersOf = agents;
+  }
+  return owners;
 });
 
 /// Pubkeys currently known to represent agents across the active relay.

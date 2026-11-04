@@ -238,6 +238,26 @@ void main() {
       [agent],
     );
     expect(session.fetches, 1);
+
+    // A read that outlives its connection never replaces a newer one.
+    final stale = session.holdNext();
+    session.goOnline();
+    final pending = container.read(agentDirectoryProvider.future);
+    session.drop();
+    await pending;
+    session.agentKey = 'b' * 64;
+    session.goOnline();
+    await container.read(agentDirectoryProvider.future);
+    stale.complete();
+    await Future<void>.delayed(Duration.zero);
+    session.drop();
+    expect(
+      [
+        for (final entry in await container.read(agentDirectoryProvider.future))
+          entry.pubkey,
+      ],
+      ['b' * 64],
+    );
   });
 
   test('blank profile labels defer to the directory label', () {
@@ -377,11 +397,18 @@ bool _matches(NostrFilter filter, NostrEvent event) {
 /// A session whose directory read finds one agent, and which can drop.
 class _DirectorySession extends RelaySessionNotifier {
   var fetches = 0;
+  var agentKey = 'a' * 64;
+  Completer<void>? _held;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   void drop() => state = const SessionState(status: SessionStatus.disconnected);
+  void goOnline() =>
+      state = const SessionState(status: SessionStatus.connected);
+
+  /// Holds the next directory read until the returned completer completes.
+  Completer<void> holdNext() => _held = Completer<void>();
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -390,10 +417,15 @@ class _DirectorySession extends RelaySessionNotifier {
   }) async {
     if (state.status != SessionStatus.connected) throw StateError('offline');
     fetches++;
+    final key = agentKey;
+    if (_held case final held?) {
+      _held = null;
+      await held.future;
+    }
     return [
       NostrEvent(
         id: 'agent-profile',
-        pubkey: 'a' * 64,
+        pubkey: key,
         createdAt: 1700000000,
         kind: 10100,
         tags: const [],
