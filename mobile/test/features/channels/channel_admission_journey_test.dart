@@ -381,6 +381,7 @@ void main() {
     // So is a change made while disconnected, and it works after reconnect.
     relay
       ..rejects = false
+      ..applies = true
       ..disconnected = true;
     await tester.tap(find.text('Default channel'));
     await tester.pumpAndSettle();
