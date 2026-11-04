@@ -177,7 +177,8 @@ void main() {
     f.beforeBrowserReturn = null;
     await f.tap(tester, 'or sign in with email');
     await f.settle(tester);
-    expect(find.text('Create my Buzz identity').hitTestable(), findsOneWidget);
+    expect(find.text('Create my Buzz identity'), findsNothing);
+    expect((await f.store.read())!.backup, isNotNull);
   });
 
   for (final importing in [false, true]) {
@@ -187,7 +188,7 @@ void main() {
         await f.initialize(localIdentity: false);
         f.bound = null;
         f.offerProfile = false;
-        await f.mount(tester);
+        await f.mount(tester, addingCommunity: false);
         // iOS 16 stops before any identity generation, binding or admission.
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -212,15 +213,28 @@ void main() {
                   'ciphertext': Uint8List(48),
                 },
         );
-        // Account restoration may resume independently of the Add choices.
-        await f.flow.signInAccount();
+        await f.flow.signOutAccount();
         await f.settle(tester);
-        expect(f.flow.stage, HostedFlowStage.setupIdentity);
-        expect(f.probes, isEmpty);
-        expect(find.text('Create my Buzz identity'), findsOneWidget);
-        expect(find.text('Import existing identity'), findsOneWidget);
         expect(await f.store.read(), isNull);
+        var failUpload = true;
+        f.beforeUploadReturn = () async {
+          if (failUpload) {
+            failUpload = false;
+            throw AccountFailure.unavailable;
+          }
+        };
+        await f.tap(
+          tester,
+          importing ? 'Use an existing identity' : 'or sign in with email',
+        );
+        await f.settle(tester);
+        expect(find.text('Create my Buzz identity'), findsNothing);
         if (importing) {
+          // The import choice must survive process death after browser sign-in.
+          await f.restart(tester);
+          await f.flow.retry();
+          await f.settle(tester);
+          expect(await f.store.read(), isNull);
           await f.tap(tester, 'Import existing identity');
           await tester.enterText(
             find.byType(TextField).hitTestable(),
@@ -244,16 +258,16 @@ void main() {
           f.beforeStatusReturn = null;
           await f.settle(tester);
           expect(f.bound, f.keys.public);
-        } else {
-          await f.tap(tester, 'Create my Buzz identity');
         }
         final saved = await f.store.read();
         expect(saved, isNotNull);
         expect(f.bound, saved!.pubkey);
-        expect(saved.backup, isNotNull);
+        expect(saved.backup, isNull);
+        expect(f.flow.problem, HostedFlowProblem.retry);
         await f.flow.retry();
         await f.settle(tester);
         expect((await f.store.read())!.pubkey, saved.pubkey);
+        expect((await f.store.read())!.backup, isNotNull);
       },
     );
   }
@@ -890,8 +904,7 @@ void main() {
         } finally {
           browserReturn.complete();
         }
-        await f.settle(tester);
-        await tester.tap(find.text('Create my Buzz identity'));
+        expect(find.text('Create my Buzz identity'), findsNothing);
         await enrollmentReached.future.timeout(const Duration(seconds: 5));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 400));

@@ -131,7 +131,7 @@ class HostedFlow extends ChangeNotifier {
   List<DeviceIdentityChoice> identityChoices = const [];
   BuzzDeepLink? _target;
   bool accountOnly = false;
-  bool canCreateIdentity = false;
+  bool _importRequested = false;
   String? requiredIdentityPubkey;
   String? _pairedPubkey;
   SensitiveActionPolicy? pairedSensitiveActionPolicy;
@@ -270,6 +270,7 @@ class HostedFlow extends ChangeNotifier {
     _codes = browser.codes.listen((code) {
       final generation = _generation;
       _enqueue(() async {
+        _importRequested = code.intent['import_identity'] == 'true';
         reconnecting = code.intent['type'] == 'reconnect';
         accountOnly = reconnecting || code.intent['type'] == 'account';
         if (accountOnly) {
@@ -315,6 +316,7 @@ class HostedFlow extends ChangeNotifier {
         final retained = await browser.retainedIntent();
         if (_disposed || generation != _generation) return;
         if (retained != null && _target == null) {
+          _importRequested = retained['import_identity'] == 'true';
           if (retained['type'] == 'reconnect') {
             reconnecting = true;
             accountOnly = true;
@@ -350,9 +352,17 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
+  Map<String, String> get _accountIntent => {
+    'type': 'account',
+    if (_importRequested) 'import_identity': 'true',
+  };
+
   /// Explicit Connect completes identity setup and discovers joined communities.
   /// Passive startup restore only checks the saved session.
-  Future<void> signInAccount({bool openBrowser = true}) {
+  Future<void> signInAccount({
+    bool openBrowser = true,
+    bool importIdentity = false,
+  }) {
     if (_target != null ||
         stage == HostedFlowStage.working ||
         stage == HostedFlowStage.signIn) {
@@ -360,6 +370,7 @@ class HostedFlow extends ChangeNotifier {
     }
     final generation = openBrowser ? _nextGeneration() : _generation;
     if (openBrowser) {
+      _importRequested = importIdentity;
       reconnecting = false;
       accountOnly = true;
       _clearCommunityBatch();
@@ -368,6 +379,10 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() async {
       if (!openBrowser) {
         if (_target != null || stage != HostedFlowStage.idle) return;
+      }
+      if (openBrowser) {
+        await browser.retainIntent(_accountIntent);
+        if (_disposed || generation != _generation) return;
       }
       final restored = await account.restore();
       if (_disposed || generation != _generation) return;
@@ -378,7 +393,7 @@ class HostedFlow extends ChangeNotifier {
         await _continue(generation);
       } else {
         _set(HostedFlowStage.signIn);
-        await browser.start({'type': 'account'});
+        await browser.start(_accountIntent);
       }
     });
   }
@@ -438,6 +453,7 @@ class HostedFlow extends ChangeNotifier {
 
   Future<void> start(BuzzDeepLink target, {bool resumePairing = false}) {
     if (!resumePairing) {
+      _importRequested = false;
       _pairedPubkey = null;
       pairedSensitiveActionPolicy = null;
     }
@@ -486,7 +502,7 @@ class HostedFlow extends ChangeNotifier {
         await start(target, resumePairing: _pairedPubkey != null);
       } else {
         _set(HostedFlowStage.working);
-        await _enqueue(() => _resume(generation, {'type': 'account'}));
+        await _enqueue(() => _resume(generation, _accountIntent));
       }
     } catch (_) {
       if (!_disposed && generation == _generation) {
@@ -507,17 +523,7 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  /// A new identity is offered only after authoritative absence was established.
-  Future<void> createIdentity() {
-    if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
-      return Future.value();
-    }
-    final generation = _nextGeneration();
-    _set(HostedFlowStage.working);
-    return _enqueue(() => _continue(generation, createNew: true));
-  }
-
-  /// Import through the existing secure store, rechecking the account binding.
+  /// Import through the secure store, rechecking the account binding.
   /// Errors propagate to the import sheet without discarding the setup choice.
   Future<void> importIdentity(String nsec) {
     final generation = _generation;
@@ -535,11 +541,7 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
-  Future<void> _continue(
-    int generation, {
-    String? selectedPubkey,
-    bool createNew = false,
-  }) async {
+  Future<void> _continue(int generation, {String? selectedPubkey}) async {
     final target = _target;
     final session = account.account;
     if ((target == null && !accountOnly) || session == null) {
@@ -549,9 +551,7 @@ class HostedFlow extends ChangeNotifier {
     // subject and destination while completing the same browser handoff.
     if (session.needsAccountSetup) {
       _set(HostedFlowStage.signIn);
-      await browser.start(
-        target == null ? {'type': 'account'} : _intent(target),
-      );
+      await browser.start(target == null ? _accountIntent : _intent(target));
       return;
     }
     final store = this.store.forSubject(session.subject);
@@ -566,8 +566,18 @@ class HostedFlow extends ChangeNotifier {
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
-      createNew: createNew && canSealBackup,
     );
+    if (resolved.state == HostedIdentityState.needsSetup &&
+        resolved.canCreate &&
+        canSealBackup &&
+        !_importRequested) {
+      // Recheck authoritative absence in the service before generating. Never
+      // turn failed recovery or a pending backup into a replacement identity.
+      resolved = await identity.resolve(
+        isCurrent: _isCurrent(generation),
+        createNew: true,
+      );
+    }
     if (_pairedPubkey != null && resolved.pubkey != _pairedPubkey) {
       _set(HostedFlowStage.blocked, HostedFlowProblem.identityMismatch);
       return;
@@ -651,7 +661,6 @@ class HostedFlow extends ChangeNotifier {
     }
     if (generation != _generation || _disposed) return;
     if (resolved.state == HostedIdentityState.needsSetup) {
-      canCreateIdentity = resolved.canCreate;
       requiredIdentityPubkey = resolved.pubkey;
       _set(HostedFlowStage.setupIdentity);
       return;
@@ -753,6 +762,7 @@ class HostedFlow extends ChangeNotifier {
     if (_disposed || account.account?.subject != choices._subject) return false;
     _nextGeneration();
     _target = null;
+    _importRequested = false;
     _pairedPubkey = null;
     pairedSensitiveActionPolicy = null;
     reconnecting = false;
@@ -1036,6 +1046,7 @@ class HostedFlow extends ChangeNotifier {
     _nextGeneration();
     final generation = _generation;
     _target = null;
+    _importRequested = false;
     _pairedPubkey = null;
     pairedSensitiveActionPolicy = null;
     reconnecting = false;

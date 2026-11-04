@@ -244,6 +244,9 @@ class OnboardingAppEntry extends HookConsumerWidget {
             : busy
             ? null
             : () => unawaited(flow.signInAccount()),
+        onImportIdentity: flow == null || busy
+            ? null
+            : () => unawaited(flow.signInAccount(importIdentity: true)),
         accountStatus: status,
         builderlabBusy: busy && !signingIn,
         signInPending: signingIn || busy,

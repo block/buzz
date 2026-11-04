@@ -85,8 +85,8 @@ class HostedConnectSheet extends HookConsumerWidget {
             ? 'Securing your account and finding communities…'
             : 'Adding ${flow.addingCommunityName}…',
       HostedFlowStage.setupIdentity =>
-        flow.canCreateIdentity
-            ? 'Your Buzz identity is how communities recognize you. Create a new one, or import your existing identity if you already use Buzz.'
+        flow.requiredIdentityPubkey == null
+            ? 'Bring your existing Buzz identity from your other device.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
@@ -130,8 +130,8 @@ class HostedConnectSheet extends HookConsumerWidget {
     final children = <Widget>[
       if (!fullScreen && stage == HostedFlowStage.setupIdentity) ...[
         Text(
-          flow.canCreateIdentity
-              ? 'Create or import a Buzz identity'
+          flow.requiredIdentityPubkey == null
+              ? 'Import your Buzz identity'
               : 'Bring your identity with you',
           style: context.textTheme.titleLarge?.copyWith(
             fontWeight: FontWeight.w600,
@@ -158,37 +158,20 @@ class HostedConnectSheet extends HookConsumerWidget {
           ),
         ),
       if (stage == HostedFlowStage.setupIdentity) ...[
-        if (flow.canCreateIdentity) ...[
-          FilledButton(
-            style: actionStyle.copyWith(
-              backgroundColor: WidgetStatePropertyAll(context.colors.primary),
-              foregroundColor: WidgetStatePropertyAll(context.colors.onPrimary),
-            ),
-            onPressed: flow.createIdentity,
-            child: const Text('Create my Buzz identity'),
+        FilledButton(
+          style: actionStyle.copyWith(
+            backgroundColor: WidgetStatePropertyAll(context.colors.primary),
+            foregroundColor: WidgetStatePropertyAll(context.colors.onPrimary),
           ),
-          const SizedBox(height: Grid.xxs),
-          TextButton(
-            style: actionStyle,
-            onPressed: importIdentity,
-            child: const Text('Import existing identity'),
-          ),
-        ] else ...[
-          FilledButton(
-            style: actionStyle.copyWith(
-              backgroundColor: WidgetStatePropertyAll(context.colors.primary),
-              foregroundColor: WidgetStatePropertyAll(context.colors.onPrimary),
-            ),
-            onPressed: importIdentity,
-            child: const Text('Import existing identity'),
-          ),
-          const SizedBox(height: Grid.twelve),
-          Text(
-            'We’ll securely back it up so your next sign-in is easier.',
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodySmall,
-          ),
-        ],
+          onPressed: importIdentity,
+          child: const Text('Import existing identity'),
+        ),
+        const SizedBox(height: Grid.twelve),
+        Text(
+          'We’ll securely back it up so your next sign-in is easier.',
+          textAlign: TextAlign.center,
+          style: context.textTheme.bodySmall,
+        ),
         if (flow.requiredIdentityPubkey != null) ...[
           const SizedBox(height: Grid.xxs),
           TextButton(
@@ -271,8 +254,8 @@ class HostedConnectSheet extends HookConsumerWidget {
     }
     final title = switch (stage) {
       HostedFlowStage.setupIdentity =>
-        flow.canCreateIdentity
-            ? 'Create or import a Buzz identity'
+        flow.requiredIdentityPubkey == null
+            ? 'Import your Buzz identity'
             : 'Bring your identity with you',
       HostedFlowStage.chooseIdentity => 'Choose your identity',
       HostedFlowStage.working =>
