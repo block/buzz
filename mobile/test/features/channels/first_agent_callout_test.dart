@@ -122,7 +122,6 @@ void main() {
       tester.getSemantics(find.text(_card)),
       matchesSemantics(
         label: _card,
-        isLiveRegion: true,
         isButton: true,
         hasDismissAction: true,
         hasTapAction: true,

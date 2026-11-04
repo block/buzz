@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/first_agent_callout.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/default_agent_writer.dart';
 import 'package:buzz/shared/me/me_sync.dart';
@@ -45,6 +47,7 @@ void main() {
           savedPrefsProvider.overrideWithValue(prefs),
           meSyncProvider.overrideWithValue(scope),
           relaySessionProvider.overrideWith(() => relayA),
+          remoteAgentsEnabledProvider.overrideWithValue(true),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
@@ -67,8 +70,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(choices, 0);
       expect(relayB.writes, 0);
-      pending.complete([]);
+      // A failed read can keep A's Bestie as B's value. That must not retire
+      // the first-agent card in B, which has no Bestie.
+      pending.completeError(StateError('offline'));
       await tester.pumpAndSettle();
+      expect(container.read(defaultAgentProvider).hasError, isTrue);
+      expect(prefs.getBool(firstAgentCalloutKey(b)), isNot(true));
+      relayB.pendingRead = null;
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(choices, 0);
+      expect(prefs.getBool(firstAgentCalloutKey(b)), isNot(true));
       await tester.tap(button);
       expect(choices, 1);
       expect(tester.takeException(), isNull);

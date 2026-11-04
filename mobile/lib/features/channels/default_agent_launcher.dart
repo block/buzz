@@ -59,14 +59,17 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       if (pubkey != null) {
         ref.read(userCacheProvider.notifier).preload([pubkey]);
       }
-      // Having a Bestie, however it was chosen, retires the tip for good.
+      // Having a Bestie, however it was chosen, retires the tip for good. A
+      // failed read can still hold the previous community's Bestie, so only
+      // current data counts.
       if (pubkey != null &&
+          !preference.hasError &&
           remoteAgents &&
           !ref.read(firstAgentCalloutSeenProvider)) {
         dismissFirstAgentCallout(ref);
       }
       return null;
-    }, [pubkey, remoteAgents]);
+    }, [pubkey, preference.hasError, remoteAgents]);
     final label = pubkey != null
         ? 'Chat with ${profile?.label ?? 'your Bestie'}'
         : preference.hasError
@@ -144,7 +147,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       }
     }
 
-    return BuzzCallout.card(
+    return BuzzCallout(
       message: 'Create your first agent',
       visible: showCallout,
       // Give people a moment with Home before inviting them.

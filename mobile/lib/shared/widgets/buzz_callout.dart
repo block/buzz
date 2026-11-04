@@ -14,34 +14,22 @@ const _arrowWidth = Grid.xs;
 const _targetGap = Grid.half;
 const _cardMaxWidth = Grid.xxxl * 6;
 
-/// A non-blocking callout that points down at [child] while [visible].
+/// A non-blocking callout card that points down at [child] while [visible].
 ///
 /// It floats above everything else on the current route without a scrim, so
 /// the screen underneath stays usable, and hides while another route covers
 /// this one. With a [delay], it waits that long on screen before popping up
 /// from [child], and the wait restarts whenever it's covered.
 ///
-/// The default tip is a short message: any tap, on the tip or elsewhere,
-/// calls [onDismiss]. [BuzzCallout.card] is the loud variant, a full-width
-/// card with [artwork] scattered around a centered message: tapping it calls
-/// [onTap], and only its close button calls [onDismiss]. Screen readers can
-/// dismiss either one.
+/// The card spans a phone, with [artwork] scattered around a centered
+/// message. Tapping it calls [onTap]; only its close button, or a screen
+/// reader's dismiss action, calls [onDismiss].
 class BuzzCallout extends HookWidget {
   const BuzzCallout({
     required this.message,
     required this.visible,
+    required this.onTap,
     required this.onDismiss,
-    required this.child,
-    this.delay = Duration.zero,
-    super.key,
-  }) : onTap = null,
-       artwork = const [];
-
-  const BuzzCallout.card({
-    required this.message,
-    required this.visible,
-    required this.onDismiss,
-    required VoidCallback this.onTap,
     required this.child,
     this.artwork = const [],
     this.delay = Duration.zero,
@@ -50,8 +38,8 @@ class BuzzCallout extends HookWidget {
 
   final String message;
   final bool visible;
+  final VoidCallback onTap;
   final VoidCallback onDismiss;
-  final VoidCallback? onTap;
 
   /// Up to six pictures scattered around the card's edges.
   final List<Widget> artwork;
@@ -87,7 +75,6 @@ class BuzzCallout extends HookWidget {
       });
       return null;
     }, [showing]);
-    final onTap = this.onTap;
     return OverlayPortal.overlayChildLayoutBuilder(
       controller: controller,
       overlayChildBuilder: (context, info) {
@@ -104,17 +91,14 @@ class BuzzCallout extends HookWidget {
             right: padding.right + Grid.xs,
             top: padding.top + Grid.xs,
           ),
-          fullWidth: onTap != null,
           color: _calloutColors(context).$1,
           shadowColor: appPopoverShadowColor(context),
-          child: onTap == null
-              ? _Tip(message: message, onDismiss: onDismiss)
-              : _Card(
-                  message: message,
-                  artwork: artwork,
-                  onTap: onTap,
-                  onDismiss: onDismiss,
-                ),
+          child: _Card(
+            message: message,
+            artwork: artwork,
+            onTap: onTap,
+            onDismiss: onDismiss,
+          ),
         );
         // Pops up from the target: a fade and a short rise while scaling up
         // around the arrow's tip.
@@ -153,40 +137,6 @@ class BuzzCallout extends HookWidget {
       : (colors.inverseSurface, colors.onInverseSurface);
 }
 
-class _Tip extends StatelessWidget {
-  const _Tip({required this.message, required this.onDismiss});
-
-  final String message;
-  final VoidCallback onDismiss;
-
-  @override
-  Widget build(BuildContext context) {
-    return TapRegion(
-      onTapInside: (_) => onDismiss(),
-      onTapOutside: (_) => onDismiss(),
-      child: Semantics(
-        container: true,
-        liveRegion: true,
-        onDismiss: onDismiss,
-        onTap: onDismiss,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xs,
-            vertical: Grid.twelve,
-          ),
-          child: Text(
-            message,
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodyMedium?.copyWith(
-              color: _calloutColors(context).$2,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// Where the card's artwork sits, after desktop's empty Agents tile: each
 /// picture hangs partly off an edge, tilted, clear of the close button. The
 /// message sits on top where they meet.
@@ -214,10 +164,12 @@ class _Card extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Not a live region: it reappears on every return to Home, and would be
+    // announced each time. It stays in traversal with its actions.
     return Semantics(
       container: true,
-      liveRegion: true,
       button: true,
+      label: message,
       onTap: onTap,
       onDismiss: onDismiss,
       child: GestureDetector(
@@ -243,19 +195,24 @@ class _Card extends StatelessWidget {
                   ),
                 ),
               // The message sets the card's height, keeping a close-button
-              // row above it at any text size.
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.xs,
-                  vertical: Grid.xxl,
-                ),
-                child: Center(
-                  heightFactor: 1,
-                  child: Text(
-                    message,
-                    textAlign: TextAlign.center,
-                    style: context.textTheme.titleLarge?.copyWith(
-                      color: _calloutColors(context).$2,
+              // row above it at any text size. Where large text outgrows the
+              // room above the target, it scrolls instead of clipping. The
+              // card itself carries the message for screen readers.
+              ExcludeSemantics(
+                child: SingleChildScrollView(
+                  primary: false,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.xs,
+                    vertical: Grid.xxl,
+                  ),
+                  child: Center(
+                    heightFactor: 1,
+                    child: Text(
+                      message,
+                      textAlign: TextAlign.center,
+                      style: context.textTheme.titleLarge?.copyWith(
+                        color: _calloutColors(context).$2,
+                      ),
                     ),
                   ),
                 ),
@@ -285,7 +242,6 @@ class _CalloutPlacement extends SingleChildRenderObjectWidget {
   const _CalloutPlacement({
     required this.target,
     required this.margin,
-    required this.fullWidth,
     required this.color,
     required this.shadowColor,
     required super.child,
@@ -293,13 +249,12 @@ class _CalloutPlacement extends SingleChildRenderObjectWidget {
 
   final Rect target;
   final EdgeInsets margin;
-  final bool fullWidth;
   final Color color;
   final Color shadowColor;
 
   @override
   _RenderCalloutPlacement createRenderObject(BuildContext context) =>
-      _RenderCalloutPlacement(target, margin, fullWidth, color, shadowColor);
+      _RenderCalloutPlacement(target, margin, color, shadowColor);
 
   @override
   void updateRenderObject(
@@ -309,7 +264,6 @@ class _CalloutPlacement extends SingleChildRenderObjectWidget {
     renderObject
       ..target = target
       ..margin = margin
-      ..fullWidth = fullWidth
       ..color = color
       ..shadowColor = shadowColor;
   }
@@ -319,7 +273,6 @@ class _RenderCalloutPlacement extends RenderShiftedBox {
   _RenderCalloutPlacement(
     this._target,
     this._margin,
-    this._fullWidth,
     this._color,
     this._shadowColor,
   ) : super(null);
@@ -335,13 +288,6 @@ class _RenderCalloutPlacement extends RenderShiftedBox {
   set margin(EdgeInsets value) {
     if (value == _margin) return;
     _margin = value;
-    markNeedsLayout();
-  }
-
-  bool _fullWidth;
-  set fullWidth(bool value) {
-    if (value == _fullWidth) return;
-    _fullWidth = value;
     markNeedsLayout();
   }
 
@@ -368,11 +314,11 @@ class _RenderCalloutPlacement extends RenderShiftedBox {
     if (child == null) return;
     final bottom = _target.top - _targetGap - _arrowHeight;
     final room = math.max(0.0, size.width - _margin.horizontal);
-    // A card spans a phone; on wider screens it stays phone-sized.
-    final width = _fullWidth ? math.min(room, _cardMaxWidth) : room;
+    // The card spans a phone; on wider screens it stays phone-sized.
+    final width = math.min(room, _cardMaxWidth);
     child.layout(
       BoxConstraints(
-        minWidth: _fullWidth ? width : 0,
+        minWidth: width,
         maxWidth: width,
         maxHeight: math.max(0, bottom - _margin.top),
       ),

@@ -4,61 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  for (final (width, scale) in [(320.0, 1.0), (320.0, 3.0), (1024.0, 1.0)]) {
-    testWidgets(
-      'stays on screen beside an edge target, $width wide at ${scale}x',
-      (tester) async {
-        tester.view.physicalSize = Size(width, 700);
-        tester.view.devicePixelRatio = 1;
-        tester.platformDispatcher.textScaleFactorTestValue = scale;
-        addTearDown(tester.view.reset);
-        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-        await tester.pumpWidget(
-          MaterialApp(
-            theme: AppTheme.dark(),
-            home: Scaffold(
-              body: Align(
-                alignment: Alignment.bottomRight,
-                child: BuzzCallout(
-                  message: 'A tip long enough to need room',
-                  visible: true,
-                  onDismiss: () {},
-                  child: const SizedBox.square(
-                    key: Key('target'),
-                    dimension: 56,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-        await tester.pumpAndSettle();
-        final tip = tester.getRect(
-          find.ancestor(
-            of: find.text('A tip long enough to need room'),
-            matching: find.byType(TapRegion),
-          ),
-        );
-        final target = tester.getRect(find.byKey(const Key('target')));
-        expect(tip.right, lessThanOrEqualTo(width - Grid.xs));
-        expect(tip.left, greaterThanOrEqualTo(Grid.xs));
-        expect(tip.bottom, lessThan(target.top));
-      },
-    );
-  }
-  cardTests();
-}
-
-void cardTests() {
   Future<Rect> pumpCard(
     WidgetTester tester, {
     required double width,
+    double height = 700,
+    String message = 'Make one',
     double scale = 1,
     VoidCallback? onTap,
     VoidCallback? onDismiss,
     VoidCallback? onPage,
   }) async {
-    tester.view.physicalSize = Size(width, 700);
+    tester.view.physicalSize = Size(width, height);
     tester.view.devicePixelRatio = 1;
     tester.platformDispatcher.textScaleFactorTestValue = scale;
     addTearDown(tester.view.reset);
@@ -77,8 +33,8 @@ void cardTests() {
               ),
               Align(
                 alignment: Alignment.bottomRight,
-                child: BuzzCallout.card(
-                  message: 'Make one',
+                child: BuzzCallout(
+                  message: message,
                   visible: true,
                   onTap: onTap ?? () {},
                   onDismiss: onDismiss ?? () {},
@@ -96,9 +52,7 @@ void cardTests() {
     );
     await tester.pumpAndSettle();
     final card = tester.getRect(
-      find
-          .ancestor(of: find.text('Make one'), matching: find.byType(Stack))
-          .first,
+      find.ancestor(of: find.text(message), matching: find.byType(Stack)).first,
     );
     expect(
       card.bottom,
@@ -122,6 +76,37 @@ void cardTests() {
     expect(card.contains(message.topLeft), isTrue);
     expect(card.contains(message.bottomRight), isTrue);
     expect(message.top, greaterThanOrEqualTo(close.bottom));
+  });
+
+  testWidgets('a card scrolls large text that outgrows a short screen', (
+    tester,
+  ) async {
+    const message = 'Create your first agent';
+    final card = await pumpCard(
+      tester,
+      width: 568,
+      height: 320,
+      message: message,
+      scale: 3,
+    );
+    expect(tester.takeException(), isNull);
+    final close = tester.getRect(find.byTooltip('Dismiss'));
+    expect(card.contains(close.topLeft), isTrue);
+    expect(card.contains(close.bottomRight), isTrue);
+    final scrollable = find.descendant(
+      of: find.byType(BuzzCallout),
+      matching: find.byType(Scrollable),
+    );
+    expect(
+      tester.state<ScrollableState>(scrollable).position.maxScrollExtent,
+      greaterThan(0),
+    );
+    await tester.drag(scrollable, const Offset(0, -1000));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.text(message)).bottom,
+      lessThanOrEqualTo(card.bottom),
+    );
   });
 
   testWidgets('a card stays phone-sized on a wide screen', (tester) async {
