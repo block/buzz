@@ -908,7 +908,7 @@ mod postgres_tests {
                                 .await
                                 .expect("lock member snapshot");
                             let inserted = snapshot
-                                .replace_member_event(&event)
+                                .replace_group_state_event(&event)
                                 .await
                                 .expect("replace roster")
                                 .1;
@@ -1048,7 +1048,7 @@ mod postgres_tests {
         );
         assert!(
             snapshot
-                .replace_member_event(&fresh_b)
+                .replace_group_state_event(&fresh_b)
                 .await
                 .expect("new writer publishes B")
                 .1

@@ -1454,3 +1454,131 @@ async fn a_relay_operator_may_not_rename_an_unlisted_channel() {
         assert_eq!(after.name, before.name, "{label}");
     }
 }
+
+/// A publisher that read the channel before a kind:9002 edit committed must
+/// not overwrite the edit's kind:39000. This is the race behind the flaky
+/// `test_nip29_announce_channel_wire`: on an open relay, the actor's own
+/// WebSocket admission spawns an auto-join into the still-`auto_join`
+/// channel, and that join republishes group state while the kind:9002 that
+/// clears the flag runs. The test holds the stale publisher right after its
+/// channel read, commits the edit, waits until the edit's publisher is
+/// either blocked or done, then lets the stale one finish. The newest
+/// kind:39000 must reflect the edit. Mutation: read the channel before
+/// `lock_member_snapshot` in `emit_group_discovery_events` (or drop the
+/// 39000 key from its lock set) → RED: the stale publisher writes
+/// `auto_join` one second after the edit's event and wins.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_stale_publisher_cannot_overwrite_a_newer_metadata_edit() {
+    use crate::handlers::side_effects::{emit_group_discovery_events, group_state_test_hooks};
+    use std::time::Duration;
+
+    let state = state().await;
+    let tenant = community(&state, "group-state-stale-publisher").await;
+    let relay_owner = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &relay_owner.public_key().to_hex(),
+            "owner",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .expect("seed relay owner");
+    let channel = create_channel(&state, &tenant, &relay_owner, &[]).await;
+    edit_channel(
+        &state,
+        &tenant,
+        &relay_owner,
+        channel,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect("relay owner flags the channel");
+    assert!(has_marker(
+        &group_state_tags(&state, &tenant, channel, 39000).await,
+        "auto_join"
+    ));
+
+    // The stale publisher: it reads `auto_join = true` and is held there.
+    let (arrived, release) = group_state_test_hooks::arm(tenant.community());
+    let stale = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        async move { emit_group_discovery_events(&tenant, &state, channel).await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), arrived)
+        .await
+        .expect("the stale publisher reaches its channel read")
+        .expect("hook sender kept");
+
+    // The edit commits `auto_join = false`, then publishes.
+    let edit = tokio::spawn({
+        let state = Arc::clone(&state);
+        let tenant = tenant.clone();
+        let relay_owner = relay_owner.clone();
+        async move {
+            edit_channel(
+                &state,
+                &tenant,
+                &relay_owner,
+                channel,
+                &[&["auto_join", "false"]],
+            )
+            .await
+        }
+    });
+    // Wait until the edit's publisher is blocked behind the stale one's
+    // locks (fixed) or has already published (racy), so the stale publisher
+    // resumes after the edit has done all it can.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if edit.is_finished() {
+            break;
+        }
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock' \
+               AND wait_event = 'advisory')",
+        )
+        .fetch_one(state.db.pool())
+        .await
+        .expect("read lock waiters");
+        if waiting {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the edit neither finished nor waited for the held publisher"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(10), stale)
+        .await
+        .expect("the stale publisher finishes")
+        .expect("stale publisher task")
+        .expect("stale publisher");
+    tokio::time::timeout(Duration::from_secs(10), edit)
+        .await
+        .expect("the edit finishes")
+        .expect("edit task")
+        .expect("relay owner clears the flag");
+    assert!(
+        !state
+            .db
+            .get_channel(tenant.community(), channel)
+            .await
+            .expect("channel")
+            .auto_join,
+        "the edit committed"
+    );
+    let tags = group_state_tags(&state, &tenant, channel, 39000).await;
+    assert!(
+        !has_marker(&tags, "auto_join"),
+        "the newest kind:39000 must reflect the edit, not the stale read: {tags:?}"
+    );
+}
