@@ -158,126 +158,138 @@ void main() {
     expect((await f.store.read())!.backup, isNotNull);
   });
 
-  for (final importing in [false, true]) {
-    journey(
-      'new account ${importing ? 'imports' : 'creates'} and keeps its identity on retry',
-      (tester, f) async {
-        await f.initialize(localIdentity: false);
-        f.bound = null;
-        f.offerProfile = false;
-        await f.mount(tester, addingCommunity: false);
-        if (importing) {
-          // An upgraded signed-in account has never chosen import on welcome.
-          await f.tap(tester, 'Use an existing identity');
-          expect(
-            find.text('Import existing identity').hitTestable(),
-            findsOneWidget,
-          );
-          expect(await f.store.read(), isNull);
-          await tester.tap(find.byTooltip('Back').hitTestable());
-          await f.settle(tester);
-          expect(
-            find.text('Use an existing identity').hitTestable(),
-            findsOneWidget,
-          );
-        }
-        // iOS 16 stops before any identity generation, binding or admission.
-        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          const MethodChannel('buzz/hosted_hpke'),
-          (_) async => false,
+  for (final entry in [
+    'sign-in',
+    'import',
+    'community link',
+    'create community',
+  ]) {
+    final importing = entry == 'import';
+    journey('new account $entry keeps its identity on retry', (
+      tester,
+      f,
+    ) async {
+      await f.initialize(localIdentity: false);
+      f.bound = null;
+      f.offerProfile = false;
+      await f.mount(tester, addingCommunity: false);
+      if (importing) {
+        // An upgraded signed-in account has never chosen import on welcome.
+        await f.tap(tester, 'Use an existing identity');
+        expect(
+          find.text('Import existing identity').hitTestable(),
+          findsOneWidget,
         );
-        try {
-          await f.flow.signInAccount();
-          expect(f.flow.problem, HostedFlowProblem.unsupportedPlatform);
-          expect(await f.store.read(), isNull);
-          expect(f.bound, isNull);
-          expect(f.probes, isEmpty);
-        } finally {
-          debugDefaultTargetPlatformOverride = null;
-        }
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          const MethodChannel('buzz/hosted_hpke'),
-          (call) async => call.method == 'isSupported'
-              ? true
-              : {
-                  'enc': Uint8List.fromList([4, ...List.filled(64, 2)]),
-                  'ciphertext': Uint8List(48),
-                },
-        );
-        if (importing) {
-          // Keep the authenticated account; import is an in-app setup action.
-          await f.settle(tester);
-          await tester.tap(find.byTooltip('Back').hitTestable());
-        } else {
-          await f.flow.signOutAccount();
-        }
-        await f.settle(tester);
         expect(await f.store.read(), isNull);
-        var failUpload = true;
-        f.beforeUploadReturn = () async {
-          if (failUpload) {
-            failUpload = false;
-            throw AccountFailure.unavailable;
-          }
-        };
+        await tester.tap(find.byTooltip('Back').hitTestable());
+        await f.settle(tester);
+        expect(
+          find.text('Use an existing identity').hitTestable(),
+          findsOneWidget,
+        );
+      }
+      // iOS 16 stops before any identity generation, binding or admission.
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/hosted_hpke'),
+        (_) async => false,
+      );
+      try {
+        await f.flow.signInAccount();
+        expect(f.flow.problem, HostedFlowProblem.unsupportedPlatform);
+        expect(await f.store.read(), isNull);
+        expect(f.bound, isNull);
+        expect(f.probes, isEmpty);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/hosted_hpke'),
+        (call) async => call.method == 'isSupported'
+            ? true
+            : {
+                'enc': Uint8List.fromList([4, ...List.filled(64, 2)]),
+                'ciphertext': Uint8List(48),
+              },
+      );
+      if (importing) {
+        // Keep the authenticated account; import is an in-app setup action.
+        await f.settle(tester);
+        await tester.tap(find.byTooltip('Back').hitTestable());
+      } else {
+        await f.flow.signOutAccount();
+      }
+      await f.settle(tester);
+      expect(await f.store.read(), isNull);
+      var failUpload = true;
+      f.beforeUploadReturn = () async {
+        if (failUpload) {
+          failUpload = false;
+          throw AccountFailure.unavailable;
+        }
+      };
+      if (entry == 'community link') {
+        await f.link(tester, 'one', invite: false);
+      } else if (entry == 'create community') {
+        await f.flow.start(HostedCreateCommunity('new-home'));
+      } else {
         await f.tap(
           tester,
           importing ? 'Use an existing identity' : 'or sign in with email',
         );
-        await f.settle(tester);
+      }
+      await f.settle(tester);
+      expect(find.text('Create my Buzz identity'), findsNothing);
+      if (importing) {
+        expect(
+          f.browserStarts,
+          0,
+        ); // Authenticated import never launches Auth0.
+        // The authenticated import choice must survive process death.
+        await f.restart(tester);
+        await f.tap(tester, 'Community home');
+        expect(
+          find.text('Import existing identity').hitTestable(),
+          findsOneWidget,
+        );
+        expect(await f.store.read(), isNull);
+        // A new destination must not cancel the pending import choice.
+        await f.link(tester, 'one');
         expect(find.text('Create my Buzz identity'), findsNothing);
-        if (importing) {
-          expect(
-            f.browserStarts,
-            0,
-          ); // Authenticated import never launches Auth0.
-          // The authenticated import choice must survive process death.
-          await f.restart(tester);
-          await f.tap(tester, 'Community home');
-          expect(
-            find.text('Import existing identity').hitTestable(),
-            findsOneWidget,
-          );
-          expect(await f.store.read(), isNull);
-          // A new destination must not cancel the pending import choice.
-          await f.link(tester, 'one');
-          expect(find.text('Create my Buzz identity'), findsNothing);
-          expect(await f.store.read(), isNull);
-          await f.tap(tester, 'Import existing identity');
-          await tester.enterText(
-            find.byType(TextField).hitTestable(),
-            f.keys.nsec,
-          );
-          await f.tap(tester, 'Preview identity');
-          final started = Completer<void>();
-          final release = Completer<void>();
-          f.beforeStatusReturn = () async {
-            if (!started.isCompleted) started.complete();
-            await release.future;
-          };
-          await f.tap(tester, 'Import this identity');
-          await started.future.timeout(const Duration(seconds: 5));
-          // Dismiss while the real import is awaiting its external status response.
-          Navigator.of(
-            tester.element(find.byType(TextField).hitTestable()),
-          ).pop();
-          await f.settle(tester);
-          release.complete();
-          f.beforeStatusReturn = null;
-          await f.settle(tester);
-          expect(f.bound, f.keys.public);
-        }
-        final saved = await f.store.read();
-        expect(saved, isNotNull);
-        expect(f.bound, saved!.pubkey);
-        expect(saved.backup, isNull);
-        expect(f.flow.problem, HostedFlowProblem.retry);
-        await f.tap(tester, 'Try again');
-        expect((await f.store.read())!.pubkey, saved.pubkey);
-        expect((await f.store.read())!.backup, isNotNull);
-      },
-    );
+        expect(await f.store.read(), isNull);
+        await f.tap(tester, 'Import existing identity');
+        await tester.enterText(
+          find.byType(TextField).hitTestable(),
+          f.keys.nsec,
+        );
+        await f.tap(tester, 'Preview identity');
+        final started = Completer<void>();
+        final release = Completer<void>();
+        f.beforeStatusReturn = () async {
+          if (!started.isCompleted) started.complete();
+          await release.future;
+        };
+        await f.tap(tester, 'Import this identity');
+        await started.future.timeout(const Duration(seconds: 5));
+        // Dismiss while the real import is awaiting its external status response.
+        Navigator.of(
+          tester.element(find.byType(TextField).hitTestable()),
+        ).pop();
+        await f.settle(tester);
+        release.complete();
+        f.beforeStatusReturn = null;
+        await f.settle(tester);
+        expect(f.bound, f.keys.public);
+      }
+      final saved = await f.store.read();
+      expect(saved, isNotNull);
+      expect(f.bound, saved!.pubkey);
+      expect(saved.backup, isNull);
+      expect(f.flow.problem, HostedFlowProblem.retry);
+      await f.tap(tester, 'Try again');
+      expect((await f.store.read())!.pubkey, saved.pubkey);
+      expect((await f.store.read())!.backup, isNotNull);
+    });
   }
 
   journey(

@@ -530,7 +530,7 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  /// Direct links retain an explicit choice because they can bypass welcome.
+  /// Web-binding links retain an explicit choice before creating an identity.
   Future<void> createIdentity() {
     if (stage != HostedFlowStage.setupIdentity || !canCreateIdentity) {
       return Future.value();
@@ -597,7 +597,7 @@ class HostedFlow extends ChangeNotifier {
     if (resolved.state == HostedIdentityState.needsSetup &&
         resolved.canCreate &&
         canSealBackup &&
-        (target == null || target is InviteDeepLink || createNew) &&
+        (target is! NostrBindDeepLink || createNew) &&
         !_importRequested) {
       // Recheck authoritative absence in the service before generating. Never
       // turn failed recovery or a pending backup into a replacement identity.
