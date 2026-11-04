@@ -323,9 +323,5 @@ mod postgres_tests {
         communities.sort_by(|a, b| a.host.cmp(&b.host));
         expected.sort_by(|a, b| a.host.cmp(&b.host));
         assert_eq!(communities, expected);
-
-        drop(leader);
-        drop(db);
-        pool.close().await;
     }
 }
