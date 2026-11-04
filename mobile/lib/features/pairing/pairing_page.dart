@@ -365,6 +365,14 @@ class PairingPage extends HookConsumerWidget {
                 backgroundColor: Colors.transparent,
                 appBar: pairingAppBar,
                 body: SafeArea(
+                  minimum: websiteWelcome
+                      ? EdgeInsets.symmetric(
+                          horizontal: math.max(
+                            MediaQuery.paddingOf(context).left,
+                            MediaQuery.paddingOf(context).right,
+                          ),
+                        )
+                      : EdgeInsets.zero,
                   child: ValueListenableBuilder<double>(
                     valueListenable: islandScannerProgress,
                     builder: (context, progress, child) => ExcludeFocus(
