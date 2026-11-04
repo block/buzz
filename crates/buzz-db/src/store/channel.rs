@@ -161,9 +161,7 @@ pub async fn create_channel(
     .execute(tx.conn())
     .await?;
 
-    tx.record_artifact_change().await?;
-    sqlx::query(
-        r#"
+    let (sql, operation) = tx.artifact_change_query(r#"
         INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
         VALUES ($1, $2, $3, 'owner', $4)
         ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
@@ -171,14 +169,15 @@ pub async fn create_channel(
             removed_at = NULL,
             removed_by = NULL,
             role = EXCLUDED.role
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(id)
-    .bind(created_by)
-    .bind(created_by)
-    .execute(tx.conn())
-    .await?;
+        "#, 1, 5, true);
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(id)
+        .bind(created_by)
+        .bind(created_by)
+        .bind(operation)
+        .execute(tx.conn())
+        .await?;
 
     let row = sqlx::query(
         r#"
@@ -404,9 +403,7 @@ async fn insert_channel_rows(
 
     if was_created {
         // Bootstrap the creator as owner.
-        tx.record_artifact_change().await?;
-        sqlx::query(
-            r#"
+        let (sql, operation) = tx.artifact_change_query(r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'owner', $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
@@ -414,14 +411,15 @@ async fn insert_channel_rows(
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .bind(created_by)
-        .bind(created_by)
-        .execute(tx.conn())
-        .await?;
+            "#, 1, 5, true);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(created_by)
+            .bind(created_by)
+            .bind(operation)
+            .execute(tx.conn())
+            .await?;
 
         for member in members
             .iter()
@@ -433,20 +431,24 @@ async fn insert_channel_rows(
                     member.len()
                 )));
             }
-            tx.record_artifact_change().await?;
-            sqlx::query(
+            let (sql, operation) = tx.artifact_change_query(
                 r#"
                 INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
                 VALUES ($1, $2, $3, 'member', $4)
                 ON CONFLICT (community_id, channel_id, pubkey) DO NOTHING
                 "#,
-            )
-            .bind(community_id.as_uuid())
-            .bind(channel_id)
-            .bind(member)
-            .bind(created_by)
-            .execute(tx.conn())
-            .await?;
+                1,
+                5,
+                true,
+            );
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .bind(member)
+                .bind(created_by)
+                .bind(operation)
+                .execute(tx.conn())
+                .await?;
         }
     }
 
@@ -1168,6 +1170,19 @@ async fn update_channel_on(
         set_parts.join(", ")
     );
 
+    let policy_changed = if updates.visibility.is_some()
+        || updates.ttl_seconds.is_some()
+        || updates.unlisted.is_some()
+    {
+        sqlx::query_scalar::<_,bool>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6)) FROM channels WHERE community_id=$1 AND id=$2")
+            .bind(community_id.as_uuid()).bind(channel_id).bind(updates.visibility.as_deref())
+            .bind(updates.ttl_seconds.is_some()).bind(updates.ttl_seconds.flatten()).bind(updates.unlisted)
+            .fetch_one(tx.conn()).await?
+    } else {
+        false
+    };
+    let (sql, operation) =
+        tx.artifact_change_query(&sql, param_idx, channel_param_idx + 1, policy_changed);
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     if let Some(ref name) = updates.name {
         q = q.bind(name);
@@ -1195,21 +1210,8 @@ async fn update_channel_on(
     }
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
+    q = q.bind(operation);
 
-    let policy_changed = if updates.visibility.is_some()
-        || updates.ttl_seconds.is_some()
-        || updates.unlisted.is_some()
-    {
-        sqlx::query_scalar::<_,bool>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6)) FROM channels WHERE community_id=$1 AND id=$2")
-            .bind(community_id.as_uuid()).bind(channel_id).bind(updates.visibility.as_deref())
-            .bind(updates.ttl_seconds.is_some()).bind(updates.ttl_seconds.flatten()).bind(updates.unlisted)
-            .fetch_one(tx.conn()).await?
-    } else {
-        false
-    };
-    if policy_changed {
-        tx.record_artifact_change().await?;
-    }
     let result = q.execute(tx.conn()).await?;
     if result.rows_affected() == 0 {
         return Err(DbError::ChannelNotFound(channel_id));
@@ -1570,10 +1572,16 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
     }
     let channel_id = w.channel_id;
     let community_id = w.tx.community();
-    w.tx.record_artifact_change().await?;
-    sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+    let (sql, operation) = w.tx.artifact_change_query(
+        "UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2",
+        1,
+        3,
+        true,
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .bind(channel_id)
+        .bind(operation)
         .execute(w.tx.conn())
         .await?;
     sqlx::query("UPDATE communities SET artifact_policy_modified_at=GREATEST(clock_timestamp(),artifact_policy_modified_at + interval '1 microsecond') WHERE id=$1")

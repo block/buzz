@@ -134,14 +134,40 @@ impl AdmittedTx {
         }
     }
 
-    /// Record work before the first change that affects incremental artifact reads.
-    pub(crate) async fn record_artifact_change(&mut self) -> Result<()> {
-        if self.artifact_certification.is_none() {
+    /// Add one durable record to an existing mutation without another SQL call.
+    pub(crate) fn artifact_change_query(
+        &mut self,
+        sql: &str,
+        community_parameter: usize,
+        operation_parameter: usize,
+        needed: bool,
+    ) -> (String, Option<Uuid>) {
+        let operation = if needed && self.artifact_certification.is_none() {
             let operation = Uuid::new_v4();
-            sqlx::query("INSERT INTO artifact_sync_pending (community_id,operation_id,earliest_at) VALUES ($1,$2,clock_timestamp())")
-                .bind(self.community.as_uuid()).bind(operation).execute(&mut *self.tx).await?;
             self.artifact_certification = Some(operation);
-        }
+            Some(operation)
+        } else {
+            None
+        };
+        // The transaction clock is a conservative bound for NOW() defaults.
+        // CTE execution order cannot move this lower bound past the change.
+        let sql = format!(
+            "WITH buzz_artifact_certification AS (INSERT INTO artifact_sync_pending \
+             (community_id,operation_id,earliest_at) \
+             SELECT ${community_parameter},${operation_parameter}::uuid,LEAST(transaction_timestamp(),statement_timestamp()) \
+             WHERE ${operation_parameter}::uuid IS NOT NULL) {sql}"
+        );
+        (sql, operation)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_artifact_change(&mut self) -> Result<()> {
+        let (sql, operation) = self.artifact_change_query("SELECT $1::uuid", 1, 2, true);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(self.community.as_uuid())
+            .bind(operation)
+            .execute(self.conn())
+            .await?;
         Ok(())
     }
 

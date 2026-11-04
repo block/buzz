@@ -291,7 +291,8 @@ Each pass fixes `startedAt` from the database clock. A later pass reads from
 the previous completed start time minus 120 seconds through its own start
 time, inclusive. New head writes, move-source records, and membership changes
 use database `clock_timestamp()`. A relay with durable certification records
-pending work in the same transaction, before the first sync stamp. After
+pending work in the same statement as a relevant change. The record uses
+a conservative timestamp from the start of the transaction or statement. After
 commit, it proves visibility within the 120-second overlap or requests a
 policy reset. Recovery finishes pending work after a crash without a caller
 retry. The reset and completion of certification commit together.

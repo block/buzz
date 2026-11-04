@@ -79,8 +79,9 @@ migrations enabled, the older binary still has the SQLx `VersionMissing`
 restriction described in `docs/database.md`.
 
 Each supported writer records one pending operation in its admitted transaction.
-The operation has a unique UUID. Its timestamp precedes every relevant sync
-stamp in that transaction. Repeated changes in the transaction reuse the record.
+The operation has a unique UUID. The existing mutation statement also inserts the record, with no extra SQL
+round trip. Its timestamp uses the earlier transaction or statement clock as
+a conservative bound for the relevant sync stamps. Repeated changes in the transaction reuse the record.
 Rollback removes both the changes and the record. An uncertain commit leaves
 both committed or neither committed. Recovery does not require a caller retry.
 
@@ -88,9 +89,11 @@ Every relay starts a recovery worker, even when the incremental gate is off.
 The worker reads bounded batches. It rotates across communities, including
 after a failed attempt. It locks pending rows with `SKIP LOCKED`. Each tick
 has a five-second work budget and at most 100 batches. Each batch has at most
-100 records. A blocked community cannot exclude other communities. Each
-operation has a short deadline. Recovery closes certification connections
-instead of returning an uncertain connection to the pool.
+1,000 records across communities in one transaction. Only one worker processes
+a batch across the fleet. The election lock applies only to recovery. Serving
+writes do not take it. A blocked community cannot exclude other communities.
+Each operation has a short deadline. Recovery reuses a connection after a
+confirmed commit. Errors or cancellation close that connection.
 After it observes a committed record, it reads database time. If less than
 120 seconds separate that time from the early timestamp, the overlap covers
 visibility of the write. A clock reversal or a delay of at least 120 seconds

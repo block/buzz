@@ -83,7 +83,12 @@ async fn certification_crash_rolls_back_reset_and_completion_together() {
     tx.commit().await.unwrap();
 
     let mut recovery = begin(&db, community).await;
-    assert_eq!(certify_pending(&mut recovery, None).await.unwrap(), 1);
+    assert_eq!(
+        certify_pending(recovery.conn(), &[*community.as_uuid()], None)
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(state(&db, community).await, (initial.0, 1));
     drop(recovery);
     let (a, b) = tokio::join!(
@@ -190,16 +195,10 @@ async fn blocked_community_does_not_exclude_other_pending_work() {
         .recover_artifact_certifications_after(None)
         .await
         .unwrap();
-    assert_eq!(completed, 0);
-    assert_eq!(after, Some(*communities[0].as_uuid()));
-    let (completed, after) = db
-        .recover_artifact_certifications_after(after)
-        .await
-        .unwrap();
-    assert_eq!(completed, 100);
+    assert_eq!(completed, 101);
     assert_eq!(after, Some(*communities[1].as_uuid()));
     assert_eq!(state(&db, communities[0]).await.1, 101);
-    assert_eq!(state(&db, communities[1]).await.1, 1);
+    assert_eq!(state(&db, communities[1]).await.1, 0);
     blocker.rollback().await.unwrap();
 }
 
@@ -321,4 +320,140 @@ async fn lost_commit_acknowledgement_recovers_the_committed_operation() {
         0
     );
     assert_eq!(state(&db, community).await, completed);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn recovery_reuses_confirmed_connections_and_elects_one_worker() {
+    let (db, community) = fixture().await;
+    let mut tx = begin(&db, community).await;
+    tx.record_artifact_change().await.unwrap();
+    tx.commit().await.unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let recovery = Db::from_pool(pool.clone());
+    let mut election = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(RECOVERY_LOCK)
+        .execute(&mut *election)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery
+            .recover_artifact_certifications_after(None)
+            .await
+            .unwrap(),
+        (0, None)
+    );
+    assert_eq!(state(&db, community).await.1, 1);
+    election.rollback().await.unwrap();
+    assert_eq!(recovery.recover_artifact_certifications().await.unwrap(), 1);
+    assert_eq!(recovery.recover_artifact_certifications().await.unwrap(), 0);
+    let next: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pid, next);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cancellation_discards_the_recovery_connection() {
+    let (db, community) = fixture().await;
+    let mut tx = begin(&db, community).await;
+    tx.record_artifact_change().await.unwrap();
+    tx.commit().await.unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut block = db.pool().begin().await.unwrap();
+    sqlx::query("LOCK TABLE artifact_sync_pending IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *block)
+        .await
+        .unwrap();
+    let recovery = Db::from_pool(pool.clone());
+    let task = tokio::spawn(async move { recovery.recover_artifact_certifications().await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')")
+                .bind(pid).fetch_one(db.pool()).await.unwrap();
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    block.rollback().await.unwrap();
+    let next: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(pid, next);
+    assert_eq!(db.recover_artifact_certifications().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deletion_admission_does_not_block_other_communities() {
+    let (db, a) = fixture().await;
+    let (_, b) = fixture().await;
+    for community in [a, b] {
+        let mut tx = begin(&db, community).await;
+        tx.record_artifact_change().await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let mut deletion = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+        .bind(a.as_uuid())
+        .execute(&mut *deletion)
+        .await
+        .unwrap();
+    assert_eq!(db.recover_artifact_certifications().await.unwrap(), 1);
+    assert_eq!(state(&db, a).await.1, 1);
+    assert_eq!(state(&db, b).await.1, 0);
+    deletion.rollback().await.unwrap();
+    assert_eq!(db.recover_artifact_certifications().await.unwrap(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres; performance measurement"]
+async fn measure_certification_backlog() {
+    let (db, _) = fixture().await;
+    for communities in [1, 100] {
+        for repetition in 0..3 {
+            for _ in 0..communities {
+                let (_, community) = fixture().await;
+                sqlx::query("INSERT INTO artifact_sync_pending(community_id,operation_id,earliest_at) SELECT $1,gen_random_uuid(),clock_timestamp() FROM generate_series(1,$2)")
+                    .bind(community.as_uuid()).bind(10_000 / communities).execute(db.pool()).await.unwrap();
+            }
+            let start = std::time::Instant::now();
+            let mut after = None;
+            let mut completed = 0;
+            let mut calls = 0;
+            while completed < 10_000 {
+                let (count, next) = db
+                    .recover_artifact_certifications_after(after)
+                    .await
+                    .unwrap();
+                completed += count;
+                after = next;
+                calls += 1;
+                assert!(calls < 30_000);
+            }
+            println!("PERF recovery communities={communities} repetition={repetition} count={completed} calls={calls} elapsed_ms={:.3}", start.elapsed().as_secs_f64()*1000.0);
+        }
+    }
 }

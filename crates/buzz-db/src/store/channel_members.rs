@@ -253,9 +253,7 @@ impl ChannelMembershipLocks<'_> {
     ) -> Result<()> {
         self.check_covers(channel_id)?;
         let community_id = self.tx.community();
-        self.tx.record_artifact_change().await?;
-        sqlx::query(
-            r#"
+        let (sql, operation) = self.tx.artifact_change_query(r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             VALUES ($1, $2, $3, 'member'::member_role, $4)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
@@ -263,14 +261,15 @@ impl ChannelMembershipLocks<'_> {
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .bind(pubkey)
-        .bind(invited_by)
-        .execute(self.tx.conn())
-        .await?;
+            "#, 1, 5, true);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(pubkey)
+            .bind(invited_by)
+            .bind(operation)
+            .execute(self.tx.conn())
+            .await?;
         Ok(())
     }
 }
@@ -1016,9 +1015,7 @@ async fn put_members_on(
     let mut written: std::collections::HashMap<Vec<u8>, MemberRecord> =
         std::collections::HashMap::with_capacity(write_keys.len());
     if !write_keys.is_empty() {
-        tx.record_artifact_change().await?;
-        let rows = sqlx::query(
-            r#"
+        let (sql, operation) = tx.artifact_change_query(r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
             SELECT $1, $2, t.pubkey, t.role::member_role, $5
             FROM UNNEST($3::bytea[], $4::text[]) AS t(pubkey, role)
@@ -1028,15 +1025,16 @@ async fn put_members_on(
                 removed_by = NULL,
                 role = EXCLUDED.role
             RETURNING channel_id, pubkey, role::text AS role, joined_at, invited_by, removed_at
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .bind(&write_keys)
-        .bind(&write_roles)
-        .bind(invited_by)
-        .fetch_all(tx.conn())
-        .await?;
+            "#, 1, 6, true);
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(&write_keys)
+            .bind(&write_roles)
+            .bind(invited_by)
+            .bind(operation)
+            .fetch_all(tx.conn())
+            .await?;
         for row in rows {
             let member = row_to_member_record(row)?;
             written.insert(member.pubkey.clone(), member);
@@ -1154,20 +1152,24 @@ pub async fn remove_member(
         }
     }
 
-    tx.record_artifact_change().await?;
-    let result = sqlx::query(
+    let (sql, operation) = tx.artifact_change_query(
         r#"
         UPDATE channel_members
         SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
-    )
-    .bind(actor_pubkey)
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(pubkey)
-    .execute(tx.conn())
-    .await?;
+        2,
+        5,
+        true,
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(actor_pubkey)
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(pubkey)
+        .bind(operation)
+        .execute(tx.conn())
+        .await?;
 
     if result.rows_affected() == 0 {
         return Err(DbError::MemberNotFound(channel_id));

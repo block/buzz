@@ -718,20 +718,24 @@ pub async fn execute_kick_with_marker(
     crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
         .await?;
 
-    tx.record_artifact_change().await?;
-    let kick = sqlx::query(
+    let (sql, operation) = tx.artifact_change_query(
         r#"
         UPDATE channel_members
         SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
-    )
-    .bind(actor_pubkey)
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(target_pubkey)
-    .execute(tx.conn())
-    .await?;
+        2,
+        5,
+        true,
+    );
+    let kick = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(actor_pubkey)
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(target_pubkey)
+        .bind(operation)
+        .execute(tx.conn())
+        .await?;
 
     if kick.rows_affected() == 0 {
         tx.rollback().await?;
@@ -1727,20 +1731,24 @@ pub async fn deploy_kick_member(
         .await?;
     // Use a direct UPDATE to avoid the tenant ownership check in channel::remove_member.
     // This is the deployment-authority primitive: no actor role check.
-    tx.record_artifact_change().await?;
-    let result = sqlx::query(
+    let (sql, operation) = tx.artifact_change_query(
         r#"
         UPDATE channel_members
         SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
-    )
-    .bind(actor_pubkey)
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(target_pubkey)
-    .execute(tx.conn())
-    .await?;
+        2,
+        5,
+        true,
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(actor_pubkey)
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(target_pubkey)
+        .bind(operation)
+        .execute(tx.conn())
+        .await?;
     tx.commit().await?;
 
     if result.rows_affected() > 0 {
