@@ -9,13 +9,16 @@ use std::sync::Arc;
 use nostr::{Event, PublicKey};
 use tracing::{info, warn};
 
-use buzz_core::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_PROFILE};
+use buzz_core::kind::{
+    KIND_IA_ARCHIVED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_PROFILE,
+};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::EventQuery;
 
 use crate::handlers::side_effects::{
-    publish_nipia_archival_list, publish_nipia_archived, publish_nipia_unarchived,
+    latest_nipia_delta, publish_nipia_archival_list, publish_nipia_archived,
+    publish_nipia_unarchived,
 };
 use crate::state::AppState;
 
@@ -97,45 +100,84 @@ pub async fn handle_identity_archive_event(
         "identity archive request processed"
     );
 
-    if !changed {
+    if kind == KIND_IA_UNARCHIVE_REQUEST {
+        if changed {
+            if let Err(e) = publish_nipia_unarchived(
+                tenant,
+                state,
+                &target_hex,
+                consent_path.as_str(),
+                &actor_hex,
+                &request_event_id,
+                &event.content,
+                reason.as_deref(),
+            )
+            .await
+            {
+                warn!(error = %e, "failed to publish NIP-IA delta");
+            }
+            if let Err(e) = publish_nipia_archival_list(tenant, state).await {
+                warn!(error = %e, "failed to publish NIP-IA archival list");
+            }
+        }
         return Ok(());
     }
 
-    let publish_delta = if kind == KIND_IA_ARCHIVE_REQUEST {
-        publish_nipia_archived(
-            tenant,
-            state,
-            &target_hex,
-            consent_path.as_str(),
-            &actor_hex,
-            &request_event_id,
-            &event.content,
-            reason.as_deref(),
-            replaced_by.as_deref(),
-        )
+    // The stored row is the archive state its delta reports: a request that
+    // only adds a replacement keeps an earlier reason it does not restate.
+    let Some(row) = state
+        .db
+        .get_archived(tenant.community(), &target_hex)
         .await
-    } else {
-        publish_nipia_unarchived(
-            tenant,
-            state,
-            &target_hex,
-            consent_path.as_str(),
-            &actor_hex,
-            &request_event_id,
-            &event.content,
-            reason.as_deref(),
-        )
-        .await
+        .map_err(|e| format!("database error: {e}"))?
+    else {
+        // Unarchived concurrently; that request publishes its own delta.
+        return Ok(());
     };
+    // Clients read reason and replacement only from the newest delta, and the
+    // snapshot carries neither. When that delta never reached storage, a
+    // repeat request republishes it from the row instead of doing nothing.
+    if !changed {
+        let latest = latest_nipia_delta(tenant, state, &target_hex)
+            .await
+            .map_err(|e| format!("database error: {e}"))?;
+        if latest.is_some_and(|delta| delta_reports(&delta, &row)) {
+            return Ok(());
+        }
+    }
 
-    if let Err(e) = publish_delta {
+    let published = publish_nipia_archived(
+        tenant,
+        state,
+        &row.pubkey,
+        &row.consent_path,
+        &row.actor,
+        &row.request_event_id,
+        if changed { event.content.as_str() } else { "" },
+        row.reason.as_deref(),
+        row.replaced_by.as_deref(),
+    )
+    .await;
+    if changed {
+        if let Err(e) = publish_nipia_archival_list(tenant, state).await {
+            warn!(error = %e, "failed to publish NIP-IA archival list");
+        }
+    }
+    published.map_err(|e| {
         warn!(error = %e, "failed to publish NIP-IA delta");
-    }
-    if let Err(e) = publish_nipia_archival_list(tenant, state).await {
-        warn!(error = %e, "failed to publish NIP-IA archival list");
-    }
+        "archive applied but its delta was not published; retry the request".to_string()
+    })
+}
 
-    Ok(())
+/// Whether `delta` is an archive delta that carries `row`'s replacement.
+fn delta_reports(delta: &Event, row: &buzz_db::archived_identities::ArchivedIdentity) -> bool {
+    let replaced_by = delta.tags.iter().find_map(|tag| {
+        let fields = tag.as_slice();
+        (fields.first().map(String::as_str) == Some("replaced-by"))
+            .then(|| fields.get(1).map(String::as_str))
+            .flatten()
+    });
+    delta.kind.as_u16() as u32 == KIND_IA_ARCHIVED && replaced_by == row.replaced_by.as_deref()
 }
 
 fn enforce_freshness(event: &Event) -> Result<(), String> {
@@ -823,34 +865,126 @@ mod tests {
             })
         };
 
-        for replaced_by in [
-            None,
-            None,
-            Some(successor_hex.as_str()),
-            Some(successor_hex.as_str()),
-        ] {
+        let snapshot_id = || async {
+            state
+                .db
+                .query_events(&EventQuery {
+                    kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                    pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                    limit: Some(1),
+                    global_only: true,
+                    ..EventQuery::for_community(tenant.community())
+                })
+                .await
+                .expect("query archive snapshot")
+                .first()
+                .map(|stored| stored.event.id)
+        };
+
+        for replaced_by in [None, None] {
             handle_identity_archive_event(&tenant, &state, &request(replaced_by))
                 .await
                 .expect("self archive accepted");
         }
+        let before = snapshot_id().await;
+        assert!(before.is_some(), "the archive publishes a snapshot");
 
-        let published = deltas().await;
+        // Only an actor that may archive the key may add its replacement.
+        let stranger = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+            .tags([
+                Tag::parse(["-"]).expect("protected tag"),
+                Tag::parse(["p", old_hex.as_str()]).expect("p tag"),
+                Tag::parse(["replaced-by", successor_hex.as_str()]).expect("replaced-by tag"),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign stranger request");
+        handle_identity_archive_event(&tenant, &state, &stranger)
+            .await
+            .expect_err("a stranger cannot add a replacement");
+
+        for _ in 0..2 {
+            handle_identity_archive_event(&tenant, &state, &request(Some(&successor_hex)))
+                .await
+                .expect("self archive accepted");
+        }
+        assert_ne!(
+            snapshot_id().await,
+            before,
+            "adding the replacement publishes a fresh snapshot"
+        );
+
+        let mut published = deltas().await;
+        published.sort_by_key(|stored| stored.event.created_at);
         assert_eq!(
             published.len(),
             2,
             "one delta for the archive and one for the added replacement; repeats publish nothing"
         );
-        let mut replacements: Vec<_> = published.iter().map(|e| replacement(&e.event)).collect();
-        replacements.sort();
-        assert_eq!(replacements, vec![None, Some(successor_hex.clone())]);
+        assert_eq!(replacement(&published[0].event), None);
+        assert_eq!(
+            replacement(&published[1].event),
+            Some(successor_hex.clone())
+        );
+        // Same-second deltas must not tie: readers take the newest one.
+        assert!(published[0].event.created_at < published[1].event.created_at);
+        let latest = latest_nipia_delta(&tenant, &state, &old_hex)
+            .await
+            .expect("latest delta")
+            .expect("a delta");
+        assert_eq!(replacement(&latest), Some(successor_hex.clone()));
         let row = state
             .db
-            .list_archived(tenant.community())
+            .get_archived(tenant.community(), &old_hex)
             .await
-            .expect("list archived")
-            .into_iter()
-            .find(|row| row.pubkey == old_hex)
+            .expect("get archived")
             .expect("archived row");
         assert_eq!(row.replaced_by.as_deref(), Some(successor_hex.as_str()));
+        assert_eq!(row.reason.as_deref(), Some("rotated"));
+
+        // A replacement whose delta never reached storage: a repeat request
+        // republishes it from the row, once.
+        let lost_keys = Keys::generate();
+        let lost_hex = lost_keys.public_key().to_hex();
+        assert!(state
+            .db
+            .archive(
+                tenant.community(),
+                &lost_hex,
+                "self",
+                &lost_hex,
+                Some("rotated"),
+                Some(&successor_hex),
+                &"a".repeat(64),
+            )
+            .await
+            .expect("archive row without its delta"));
+        let repeat = || {
+            EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+                .tags([
+                    Tag::parse(["-"]).expect("protected tag"),
+                    Tag::parse(["p", lost_hex.as_str()]).expect("p tag"),
+                    Tag::parse(["replaced-by", successor_hex.as_str()]).expect("replaced-by tag"),
+                ])
+                .allow_self_tagging()
+                .sign_with_keys(&lost_keys)
+                .expect("sign repeat request")
+        };
+        for _ in 0..2 {
+            handle_identity_archive_event(&tenant, &state, &repeat())
+                .await
+                .expect("repeat archive accepted");
+        }
+        let repaired = deltas().await;
+        let repaired: Vec<_> = repaired
+            .iter()
+            .filter(|stored| {
+                stored.event.tags.iter().any(|tag| {
+                    tag.as_slice().first().map(String::as_str) == Some("p")
+                        && tag.as_slice().get(1) == Some(&lost_hex)
+                })
+            })
+            .collect();
+        assert_eq!(repaired.len(), 1, "the missing delta is republished once");
+        assert_eq!(replacement(&repaired[0].event), Some(successor_hex.clone()));
     }
 }

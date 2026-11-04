@@ -48,13 +48,38 @@ pub async fn is_archived(pool: &PgPool, community_id: CommunityId, pubkey: &str)
     Ok(row.is_some())
 }
 
+/// Returns the archive row for `pubkey` in `community_id`, if it is archived.
+pub async fn get_archived(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &str,
+) -> Result<Option<ArchivedIdentity>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let row = sqlx::query(
+        "SELECT pubkey, consent_path, actor, reason, replaced_by, request_event_id, archived_at \
+         FROM archived_identities WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.map(row_to_archived_identity)
+        .transpose()
+        .map_err(crate::error::DbError::from)
+}
+
 /// Archives an identity in `community_id`.
 ///
 /// Returns `true` if the archive state changed: the row was inserted, or an
 /// archive with no replacement gained `replaced_by` (a key rotated before its
 /// successor existed). The request that adds the replacement also supplies the
-/// row's consent, actor, reason and request id, so the row matches its delta.
-/// Any other re-archive is idempotent, returns `false` and leaves the row as is.
+/// row's consent, actor and request id, and its reason when it has one; an
+/// earlier reason it does not restate is kept. Any other re-archive is
+/// idempotent, returns `false` and leaves the row as is.
 #[allow(clippy::too_many_arguments)]
 pub async fn archive(
     pool: &PgPool,
@@ -79,7 +104,7 @@ pub async fn archive(
          ON CONFLICT (community_id, pubkey) DO UPDATE SET \
              consent_path = EXCLUDED.consent_path, \
              actor = EXCLUDED.actor, \
-             reason = EXCLUDED.reason, \
+             reason = COALESCE(EXCLUDED.reason, archived_identities.reason), \
              replaced_by = EXCLUDED.replaced_by, \
              request_event_id = EXCLUDED.request_event_id \
          WHERE archived_identities.replaced_by IS NULL \
@@ -198,6 +223,16 @@ impl Db {
         unarchive(&self.pool, community_id, pubkey).await
     }
 
+    /// Returns the archive row for `pubkey` in `community_id`, if it is archived.
+    #[datastore_span(name = "get_archived", system = "postgresql")]
+    pub async fn get_archived(
+        &self,
+        community_id: CommunityId,
+        pubkey: &str,
+    ) -> Result<Option<ArchivedIdentity>> {
+        get_archived(&self.pool, community_id, pubkey).await
+    }
+
     /// Returns all identities archived in `community_id`, ordered by archive
     /// time ascending.
     #[datastore_span(name = "list_archived", system = "postgresql")]
@@ -309,13 +344,15 @@ mod postgres_tests {
         let successor = "3".repeat(64);
         let other = "4".repeat(64);
         let row = |pool: PgPool| async move {
-            list_archived(&pool, community)
+            get_archived(&pool, community, &"1".repeat(64))
                 .await
-                .expect("list")
-                .into_iter()
-                .next()
+                .expect("get")
                 .expect("archived row")
         };
+        assert!(get_archived(&pool, community, &pubkey)
+            .await
+            .expect("get before archive")
+            .is_none());
 
         assert!(archive(
             &pool,
@@ -323,7 +360,7 @@ mod postgres_tests {
             &pubkey,
             "admin",
             &admin,
-            Some("rotated"),
+            Some("left-organization"),
             None,
             &"a".repeat(64)
         )
@@ -335,7 +372,7 @@ mod postgres_tests {
             &pubkey,
             "admin",
             &admin,
-            Some("rotated"),
+            Some("left-organization"),
             None,
             &"b".repeat(64)
         )
@@ -349,7 +386,7 @@ mod postgres_tests {
             &pubkey,
             "self",
             &pubkey,
-            Some("rotated"),
+            None,
             Some(&successor),
             &"c".repeat(64)
         )
@@ -360,6 +397,8 @@ mod postgres_tests {
         assert_eq!(added.consent_path, "self");
         assert_eq!(added.actor, pubkey);
         assert_eq!(added.request_event_id, "c".repeat(64));
+        // A replacement request that names no reason keeps the earlier one.
+        assert_eq!(added.reason.as_deref(), Some("left-organization"));
 
         for (replaced_by, request) in [(Some(other.as_str()), "d"), (None, "e")] {
             assert!(!archive(
