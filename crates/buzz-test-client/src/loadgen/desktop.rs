@@ -88,6 +88,15 @@ pub(super) enum Route {
     Replay,
 }
 
+impl Route {
+    /// Whether the route takes part in [`Establishment`]. A replay serves
+    /// its batch, and presence replays nothing, so neither is resumed,
+    /// carried nor recovered, and neither cuts a renewal's carry.
+    fn establishes(self) -> bool {
+        !matches!(self, Route::Presence | Route::Replay)
+    }
+}
+
 /// One REQ frame.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Req {
@@ -156,7 +165,9 @@ fn global_reqs(viewer: &str, presence: &[String], since: u64) -> Vec<Req> {
     if !presence.is_empty() {
         reqs.push(Req {
             id: "presence".into(),
-            filters: vec![json!({"kinds": [KIND_PRESENCE_UPDATE], "authors": presence})],
+            filters: vec![
+                json!({"kinds": [KIND_PRESENCE_UPDATE], "authors": presence, "since": since, "limit": 0}),
+            ],
             route: Route::Presence,
         });
     }
@@ -427,7 +438,7 @@ impl Establishment {
     /// `route` reached its EOSE, its replay `cut` or not. Returns the routes
     /// that establish now, each with its continuity.
     pub(super) fn eose(&mut self, route: Route, cut: bool) -> Vec<(Route, bool)> {
-        if route == Route::Replay {
+        if !route.establishes() {
             return Vec::new();
         }
         let cut = cut || !self.resumed.contains(&route);
@@ -455,7 +466,7 @@ impl Establishment {
     /// were cut, but only an EOSE proves a route live: it is not caught up,
     /// so the next connection cannot resume or carry it.
     pub(super) fn timeout(&mut self, route: Route) -> Vec<(Route, bool)> {
-        if route != Route::Replay {
+        if route.establishes() {
             self.timed_out.push(route);
         }
         self.eose(route, true)
@@ -1247,7 +1258,8 @@ impl Client {
         let mut waiting: HashMap<String, Waiting<'_>> = HashMap::new();
         let mut open: HashSet<String> = HashSet::new();
         // Whether any frame came since the last tick, the probe a silent
-        // tick sends, and that probe's subscription, closed by the next one.
+        // tick sends, and that probe's subscription, closed at its EOSE or,
+        // failing that, by the next probe.
         let mut heard = false;
         // When the deadlines past due were first deferred to a backlog.
         let mut deferred_since: Option<Instant> = None;
@@ -1312,13 +1324,35 @@ impl Client {
             // The first frame waits; after it, only frames already in hand
             // are handled (at most DRAIN_FRAMES), so an EOSE buffered while a
             // publish waited for its OK is seen before deadlines are judged.
+            // Each frame is judged by when it arrived, not when it is read:
+            // one that came after its deadline is no answer.
             let mut established = Vec::new();
+            // REQs whose EOSE came after their deadline.
+            let mut late = Vec::new();
+            let req_timeout = self.req_timeout;
+            let in_time = move |sent: Instant, at: Instant| at.duration_since(sent) < req_timeout;
             let mut drained = 0;
-            let mut next = conn.next_event(wait).await;
+            let mut next = conn.next_event_received(wait).await;
             let backlogged = loop {
-                match next {
-                    Ok(RelayMessage::Eose { subscription_id }) => {
-                        if let Some(w) = waiting.remove(&subscription_id) {
+                let (at, message) = match next {
+                    Ok(received) => received,
+                    Err(WsClientError::Timeout) => break false,
+                    Err(e) => break 'session disconnected(e),
+                };
+                match message {
+                    RelayMessage::Eose { subscription_id } => {
+                        if probe_id.as_deref() == Some(subscription_id.as_str()) {
+                            // The app closes its probe at its EOSE.
+                            probe_id = None;
+                            if let Err(e) = close(conn, &subscription_id).await {
+                                break 'session disconnected(e);
+                            }
+                        } else if waiting
+                            .get(&subscription_id)
+                            .is_some_and(|w| !in_time(w.sent, at))
+                        {
+                            late.extend(waiting.remove_entry(&subscription_id));
+                        } else if let Some(w) = waiting.remove(&subscription_id) {
                             w.pending.ok();
                             let retired = match (w.route, w.slot) {
                                 (Route::Replay, _) => Some(subscription_id),
@@ -1343,10 +1377,10 @@ impl Client {
                             }
                         }
                     }
-                    Ok(RelayMessage::Closed {
+                    RelayMessage::Closed {
                         subscription_id,
                         message,
-                    }) => {
+                    } => {
                         // Live subscriptions the relay refuses end the session,
                         // as for the basic human; a refused replay is an error.
                         if let Some(w) = waiting.remove(&subscription_id) {
@@ -1362,7 +1396,7 @@ impl Client {
                             break 'session End::Failed;
                         }
                     }
-                    Ok(message) => {
+                    message => {
                         // An event before EOSE is replay, which the app counts
                         // against its limit; only events after EOSE are delivery.
                         if let RelayMessage::Event {
@@ -1378,19 +1412,18 @@ impl Client {
                             }
                         }
                     }
-                    Err(WsClientError::Timeout) => break false,
-                    Err(e) => break 'session disconnected(e),
                 }
-                // Any frame proves the socket still reaches the relay.
+                // Any frame proves the socket still reaches the relay, but
+                // answers the probe only if it came by the probe's deadline.
                 heard = true;
-                if let Some(p) = probe.take() {
+                if let Some(p) = probe.take_if(|p| in_time(p.sent, at)) {
                     p.pending.ok();
                 }
                 drained += 1;
                 if drained == DRAIN_FRAMES {
                     break true;
                 }
-                next = conn.next_event(Duration::ZERO).await;
+                next = conn.next_event_received(Duration::ZERO).await;
             };
 
             // A REQ past its deadline: a replay or a replacement is closed (a
@@ -1409,10 +1442,11 @@ impl Client {
                 .filter(|(_, w)| !deferring && overdue(w))
                 .map(|(id, _)| id.clone())
                 .collect();
-            for id in timed_out {
-                let Some(w) = waiting.remove(&id) else {
-                    continue;
-                };
+            // A REQ whose EOSE came late timed out, whatever the backlog
+            // still holds.
+            let mut expired = late;
+            expired.extend(timed_out.iter().filter_map(|id| waiting.remove_entry(id)));
+            for (id, w) in expired {
                 w.pending.err("EOSE timeout");
                 if w.route == Route::Replay || w.slot.is_some() {
                     if w.slot.is_some() {
@@ -1428,7 +1462,7 @@ impl Client {
             }
 
             // A probe nothing answered: the socket stopped delivering. Any
-            // frame drained above has answered it.
+            // frame drained above that came in time has answered it.
             if let Some(p) = probe.take_if(|p| p.sent.elapsed() >= self.req_timeout) {
                 p.pending.err("probe timeout");
                 break End::Failed;
@@ -1854,6 +1888,20 @@ mod tests {
             early.eose(Route::Membership, false),
             [(Route::Membership, false)]
         );
+
+        // Presence, like a replay, establishes nothing: neither its timeout
+        // nor its EOSE after one cuts a renewal's carry, and it is never
+        // caught up.
+        let mut presence = Establishment::new(Situation::Renewal, &all);
+        assert!(presence.timeout(Route::Presence).is_empty());
+        assert!(presence.eose(Route::Presence, false).is_empty());
+        for route in all {
+            assert!(presence.eose(route, false).is_empty());
+        }
+        assert_eq!(presence.caught_up(), all);
+        let mut after = Establishment::new(Situation::Renewal, &presence.caught_up());
+        assert!(after.eose(Route::Presence, false).is_empty());
+        assert!(after.eose(Route::Profiles, false).is_empty());
     }
 
     #[test]
@@ -1872,9 +1920,10 @@ mod tests {
                 ],
                 "{mode:?}"
             );
+            // Live-only, as the app sends it: no history query.
             assert_eq!(
                 reqs[2].filters,
-                [json!({"kinds": [20001], "authors": ["a", "b"]})]
+                [json!({"kinds": [20001], "authors": ["a", "b"], "since": 100, "limit": 0})]
             );
             let alone = connect_reqs(mode, "v", &[], &ids(5), 100, 1);
             assert!(alone.iter().all(|r| r.route != Route::Presence));
@@ -2982,23 +3031,37 @@ hold_secs = 1
         assert!(ended.expect("the read task ended").is_err());
     }
 
-    #[tokio::test]
-    async fn an_eose_in_time_is_not_expired_behind_a_slow_ok() {
-        // Every EOSE comes 1.2 s after its REQ, well within the deadline,
-        // but while the first presence heartbeat (within a second of the
-        // connect) waits 3.5 s for its OK, past the deadline.
+    /// One client whose four routes each get their EOSE `eose_after` the
+    /// REQ, while the first presence heartbeat (within a second of the
+    /// connect) waits 3.5 s for its OK, past the 2.5 s deadline. Every EOSE
+    /// arrives while the client waits for that OK.
+    async fn eoses_behind_a_slow_ok(eose_after: Duration) -> Outcome {
         let mut rig = solo(5, &format!("mode = \"current\"\n{QUIET}"));
         rig.presence_secs = 1.0;
         rig.ok_delay = Duration::from_millis(3_500);
         rig.req_timeout = Duration::from_millis(2_500);
-        rig.plan = Arc::new(|_, _| (0, Duration::from_millis(1_200)));
-        let out = drive(rig, Duration::ZERO, |o| {
-            o.count("publish_ephemeral_ok") >= 1 && o.count("desktop_live_eose") >= 4
+        rig.plan = Arc::new(move |_, _| (0, eose_after));
+        drive(rig, Duration::ZERO, |o| {
+            let eoses = o.count("desktop_live_eose") + o.errors("desktop_live_eose");
+            o.count("publish_ephemeral_ok") >= 1 && eoses >= 4
         })
-        .await;
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_eose_in_time_is_not_expired_behind_a_slow_ok() {
+        let out = eoses_behind_a_slow_ok(Duration::from_millis(1_200)).await;
         assert_eq!(out.errors("desktop_live_eose"), 0, "{:?}", out.ops);
         assert_eq!(out.count("desktop_live_eose"), 4, "{:?}", out.ops);
         assert!(!out.saw("CLOSE", "batch-1-0"), "{:?}", out.frames);
+    }
+
+    #[tokio::test]
+    async fn a_late_eose_is_not_answered_behind_a_slow_ok() {
+        // Read only once the OK comes, but they came after the deadline.
+        let out = eoses_behind_a_slow_ok(Duration::from_millis(3_000)).await;
+        assert_eq!(out.errors("desktop_live_eose"), 4, "{:?}", out.ops);
+        assert_eq!(out.count("desktop_live_eose"), 0, "{:?}", out.ops);
     }
 
     #[tokio::test]
@@ -3094,6 +3157,48 @@ hold_secs = 1
             "{:?}",
             out.frames
         );
+    }
+
+    #[tokio::test]
+    async fn a_probe_answered_late_behind_a_slow_ok_reconnects() {
+        // Ticks every 0.25 s; a heartbeat every 2 s waits 1.5 s for its OK.
+        // The tick after an OK hears it, so the next one probes, 0.25 s
+        // before the next heartbeat. On the first connection, the probe's
+        // EOSE comes 1.3 s after it, past its 1 s deadline, while that
+        // heartbeat waits; the OK itself comes later still. Neither answers.
+        let mut rig = solo(5, "mode = \"current\"");
+        rig.tick_secs = Some(0.25);
+        rig.presence_secs = 2.0;
+        rig.ok_delay = Duration::from_millis(1_500);
+        rig.req_timeout = Duration::from_secs(1);
+        rig.plan = Arc::new(|conn, id| {
+            let late = conn == 0 && id.starts_with("probe-");
+            (0, Duration::from_millis(if late { 1_300 } else { 0 }))
+        });
+        let out = drive(rig, Duration::ZERO, |o| {
+            o.errors("desktop_probe") >= 1 && o.count("ws_connect_auth") >= 2
+        })
+        .await;
+        assert_eq!(out.errors("desktop_probe"), 1, "{:?}", out.ops);
+        // The probe that failed went out before a heartbeat on its
+        // connection, whose OK wait held its EOSE.
+        let first = out.at("REQ", "probe-1").expect("probe-1 was sent");
+        assert!(
+            out.frames[first..]
+                .iter()
+                .any(|(conn, verb, id)| *conn == 0 && verb == "EVENT" && id == "20001"),
+            "{:?}",
+            out.frames
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answered_probe_is_closed_at_its_eose() {
+        // The app closes a probe at its EOSE, not when it sends the next.
+        let rig = solo(5, "mode = \"current\"\ntick_secs = 1.0");
+        let out = drive(rig, Duration::ZERO, |o| o.saw("CLOSE", "probe-1")).await;
+        assert_eq!(out.count("desktop_probe"), 1, "{:?}", out.ops);
+        assert!(!out.saw("REQ", "probe-2"), "{:?}", out.frames);
     }
 
     #[tokio::test]

@@ -129,8 +129,9 @@ the report.
 On a **cold start** it:
 
 1. reads the relay's NIP-11 document (`desktop_nip11`);
-2. opens its profile and membership subscriptions, a live-only presence
-   subscription over up to 256 co-members, and its channel subscriptions
+2. opens its profile and membership subscriptions, a live-only (`limit: 0`)
+   presence subscription over up to 256 co-members, which replays nothing
+   and recovers nothing, and its channel subscriptions
    (`desktop_live_eose`). With up to ten channels both modes
    open one per-channel batch that replays the newest 500 events. With more,
    `legacy` opens one such batch per ten channels; `current` opens one
@@ -188,14 +189,16 @@ profile read runs again when the profile subscription next establishes. A
 replacement is live-only and is opened before the subscription it replaces
 is closed. A replacement that misses its EOSE deadline is closed, the
 subscription it would have replaced stays, and the next tick tries again.
-A deadline that passes while frames received in time are still unread waits
-for them, for up to one more timeout, so under sustained traffic a missing
-EOSE times out up to one timeout late.
+A frame is judged by when it arrived, even if it is read later because a
+publish was waiting for its `OK`: an EOSE that arrived after its deadline is
+a timeout. A deadline that passes while frames received in time are still
+unread waits for them, for up to one more timeout, so under sustained
+traffic a missing EOSE times out up to one timeout late.
 In both modes, a tick with no frame from the relay since the previous tick
 sends a silence probe, a live-only REQ for the viewer's membership notices
-(`desktop_probe`). Any frame answers it, a publish's `OK` included; none
-within 10 s ends the session as failed, and the client reconnects with
-backoff.
+(`desktop_probe`), closed at its EOSE. Any frame that arrives within 10 s
+answers it, a publish's `OK` included; if none does, the session ends as
+failed and the client reconnects with backoff.
 
 `legacy` is a lower bound on the app before its fixes. That app also gave
 each open channel, and each channel it watched without being a member, a
