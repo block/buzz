@@ -1194,6 +1194,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // sub_registry, conn_manager) and before the cron loop starts.
     let action_sink = Arc::new(buzz_relay::workflow_sink::RelayActionSink::new(&state));
     workflow_engine.set_action_sink(action_sink);
+    workflow_engine.set_relay_pubkey(state.relay_keypair.public_key().to_bytes().to_vec());
 
     // Start the cron loop AFTER the action sink is wired.
     let wf_cron = Arc::clone(&workflow_engine);

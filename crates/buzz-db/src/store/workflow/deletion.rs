@@ -191,6 +191,14 @@ async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<
     .bind(id)
     .execute(tx.conn())
     .await?;
+    sqlx::query(
+        "DELETE FROM workflow_waits WHERE community_id = $1 AND run_id IN (SELECT id FROM \
+             workflow_runs WHERE community_id = $1 AND workflow_id = $2)",
+    )
+    .bind(community)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
     sqlx::query("DELETE FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2")
         .bind(community)
         .bind(id)

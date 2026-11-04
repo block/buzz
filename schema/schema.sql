@@ -92,6 +92,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/workflows.sql
 \i tables/public/workflow_runs.sql
 \i tables/public/workflow_approvals.sql
+\i tables/public/workflow_waits.sql
 \i tables/public/scheduled_workflow_fires.sql
 \i tables/public/api_tokens.sql
 \i tables/public/rate_limit_violations.sql

@@ -110,6 +110,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "thread_metadata",
     "users",
     "workflow_approvals",
+    "workflow_waits",
     "workflow_runs",
     "workflows",
 ];
@@ -134,6 +135,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "personal_read_frontiers",
     "personal_read_accounts",
     "workflow_approvals",
+    "workflow_waits",
     "scheduled_workflow_fires",
     "workflow_runs",
     "push_wake_outbox",
@@ -8616,6 +8618,74 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .fetch_one(&db.pool)
         .await
         .expect("count relay admin rows")
+    }
+
+    /// `workflow_waits` has no fence trigger: its writers are fenced by
+    /// community admission, and purge must remove its rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_waits_refuse_writes_once_deletion_starts_and_purge_removes_rows() {
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        db.create_workflow_wait(
+            community,
+            Uuid::new_v4(),
+            "msg",
+            "reaction_added",
+            None,
+            expires_at,
+        )
+        .await
+        .expect("seed wait");
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let generation = store.fence(&claim.lease).await.expect("fence");
+
+        let refused = db
+            .create_workflow_wait(
+                community,
+                Uuid::new_v4(),
+                "msg",
+                "reaction_added",
+                None,
+                expires_at,
+            )
+            .await;
+        assert!(refused.is_err(), "wait write must be refused once fenced");
+
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        assert_eq!(deleted.get("workflow_waits"), Some(&1));
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow_waits WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count waits");
+        assert_eq!(remaining, 0);
     }
 
     /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK

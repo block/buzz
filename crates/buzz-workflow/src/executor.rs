@@ -471,6 +471,17 @@ pub fn resolve_step_templates(
             message: t(message)?,
             timeout: timeout.clone(),
         }),
+        WaitFor {
+            on,
+            message_id,
+            emoji,
+            timeout,
+        } => Ok(WaitFor {
+            on: *on,
+            message_id: t(message_id)?,
+            emoji: emoji.clone(),
+            timeout: timeout.clone(),
+        }),
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
@@ -521,8 +532,23 @@ pub enum StepResult {
         /// Token used to resume or reject this approval gate.
         approval_token: String,
     },
+    /// Step is a `wait_for`; execution pauses until a matching event arrives.
+    AwaitingEvent(PendingWait),
     /// Step was skipped due to `if:` condition being false.
     Skipped,
+}
+
+/// A `wait_for` step waiting for its first matching event.
+#[derive(Debug)]
+pub struct PendingWait {
+    /// Event ID (hex) of the message being watched.
+    pub message_id: String,
+    /// Event kind awaited.
+    pub on: crate::schema::WaitOn,
+    /// Required reaction emoji, or any when `None`.
+    pub emoji: Option<String>,
+    /// When the wait closes.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn resolve_send_message_channel(
@@ -809,6 +835,28 @@ pub async fn dispatch_action(
                     Ok(StepResult::Suspended {
                         approval_token: token,
                     })
+                }
+
+                WaitFor {
+                    on,
+                    message_id,
+                    emoji,
+                    timeout,
+                } => {
+                    if message_id.len() != 64 || !message_id.chars().all(|c| c.is_ascii_hexdigit())
+                    {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "WaitFor: message_id must be a 64-char hex event id, got '{message_id}'"
+                        )));
+                    }
+                    // Range-checked at save time by `WorkflowDef::validate`.
+                    let secs = parse_duration_secs(timeout)?;
+                    Ok(StepResult::AwaitingEvent(PendingWait {
+                        message_id: message_id.to_ascii_lowercase(),
+                        on: *on,
+                        emoji: emoji.clone(),
+                        expires_at: chrono::Utc::now() + chrono::Duration::seconds(secs as i64),
+                    }))
                 }
 
                 Delay { duration } => {
@@ -1104,6 +1152,8 @@ pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
     pub approval_token: Option<String>,
+    /// Set when execution suspended at a `WaitFor` step.
+    pub wait: Option<PendingWait>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -1353,6 +1403,17 @@ async fn execute_steps(
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
                     approval_token: Some(approval_token),
+                    wait: None,
+                    step_index: i,
+                    step_outputs,
+                    trace,
+                });
+            }
+            StepResult::AwaitingEvent(wait) => {
+                info!(run_id = %run_id, step = %step.id, "Step suspended — waiting for event");
+                return Ok(ExecutionResult {
+                    approval_token: None,
+                    wait: Some(wait),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1371,6 +1432,7 @@ async fn execute_steps(
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
         approval_token: None,
+        wait: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,

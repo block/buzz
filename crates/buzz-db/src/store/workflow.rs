@@ -1033,6 +1033,163 @@ pub async fn update_workflow_run(
     Ok(())
 }
 
+// -- Waits -------------------------------------------------------------------
+
+/// Record the wait a suspended run is waiting on.
+pub async fn create_workflow_wait(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    message_id: &str,
+    wait_on: &str,
+    emoji: Option<&str>,
+    expires_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO workflow_waits (community_id, run_id, message_id, wait_on, emoji, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(message_id)
+    .bind(wait_on)
+    .bind(emoji)
+    .bind(expires_at)
+    .execute(tx.conn())
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomically take every open wait on `message_id` (first caller wins: the
+/// DELETE row lock serializes concurrent reactors), so each run waiting on
+/// the same message gets its own first match.
+///
+/// Returns the runs to resume, empty when nothing is takeable: no open
+/// wait, already taken, expired, or `emoji` differs from the required one.
+/// A crash after this returns and before the run resumes leaves the run
+/// suspended, the same known gap as approvals.
+pub async fn take_workflow_wait(
+    pool: &PgPool,
+    community_id: CommunityId,
+    message_id: &str,
+    wait_on: &str,
+    emoji: &str,
+) -> Result<Vec<Uuid>> {
+    // Every reaction lands here; skip the admitted write for the common miss.
+    let open: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM workflow_waits WHERE community_id = $1 AND message_id = $2 AND expires_at > NOW())",
+    )
+    .bind(community_id.as_uuid())
+    .bind(message_id)
+    .fetch_one(pool)
+    .await?;
+    if !open {
+        return Ok(Vec::new());
+    }
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let run_ids = sqlx::query_scalar(
+        "DELETE FROM workflow_waits \
+         WHERE community_id = $1 AND message_id = $2 \
+           AND wait_on = $3 AND expires_at > NOW() AND (emoji IS NULL OR emoji = $4) \
+         RETURNING run_id",
+    )
+    .bind(community_id.as_uuid())
+    .bind(message_id)
+    .bind(wait_on)
+    .bind(emoji)
+    .fetch_all(tx.conn())
+    .await?;
+    tx.commit().await?;
+    Ok(run_ids)
+}
+
+/// The earliest active reaction on `message_id` that could wait it: `emoji`
+/// matches (any when `None`) and the reactor is not `relay_pubkey`. Returns
+/// `(reactor pubkey, emoji)`. Closes the window where a reaction lands before
+/// the wait row exists.
+pub async fn earliest_matching_reaction(
+    pool: &PgPool,
+    community_id: CommunityId,
+    message_id: &[u8],
+    emoji: Option<&str>,
+    relay_pubkey: &[u8],
+) -> Result<Option<(Vec<u8>, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT pubkey, emoji::text FROM reactions \
+         WHERE community_id = $1 AND event_id = $2 AND removed_at IS NULL \
+           AND ($3::text IS NULL OR emoji = $3) AND pubkey <> $4 \
+         ORDER BY created_at LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(message_id)
+    .bind(emoji)
+    .bind(relay_pubkey)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Complete runs whose wait window closed unwaited. Handles at most 100
+/// waits per call, oldest first; a community that fails admission is logged
+/// and skipped. Returns how many runs were completed.
+pub async fn expire_workflow_waits(pool: &PgPool) -> Result<usize> {
+    let expired: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT community_id, run_id FROM workflow_waits \
+         WHERE expires_at <= NOW() ORDER BY expires_at LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut completed = 0;
+    for (community_id, run_id) in expired {
+        let result: Result<u64> = async {
+            let mut tx = crate::begin_community_write_transaction(
+                pool,
+                CommunityId::from_uuid(community_id),
+                crate::observability::WriterOperation::EventWrite,
+            )
+            .await?;
+            let deleted = sqlx::query(
+                "DELETE FROM workflow_waits \
+                 WHERE community_id = $1 AND run_id = $2 AND expires_at <= NOW()",
+            )
+            .bind(community_id)
+            .bind(run_id)
+            .execute(tx.conn())
+            .await?
+            .rows_affected();
+            if deleted > 0 {
+                sqlx::query(
+                    "UPDATE workflow_runs SET status = 'completed', completed_at = NOW() \
+                     WHERE community_id = $1 AND id = $2 AND status = 'waiting_approval'",
+                )
+                .bind(community_id)
+                .bind(run_id)
+                .execute(tx.conn())
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(deleted)
+        }
+        .await;
+        match result {
+            Ok(deleted) => completed += deleted as usize,
+            Err(e) => tracing::warn!(%community_id, %run_id, "expire workflow wait failed: {e}"),
+        }
+    }
+    Ok(completed)
+}
+
 // -- Approval CRUD ------------------------------------------------------------
 
 /// Parameters for creating a new approval request.
@@ -1437,6 +1594,67 @@ impl Db {
             failure,
         )
         .await
+    }
+
+    /// Record the wait a suspended run is waiting on.
+    #[datastore_span(name = "create_workflow_wait", system = "postgresql")]
+    pub async fn create_workflow_wait(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        message_id: &str,
+        wait_on: &str,
+        emoji: Option<&str>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        crate::workflow::create_workflow_wait(
+            &self.pool,
+            community_id,
+            run_id,
+            message_id,
+            wait_on,
+            emoji,
+            expires_at,
+        )
+        .await
+    }
+
+    /// Take the open wait on a message for its first reactor.
+    #[datastore_span(name = "take_workflow_wait", system = "postgresql")]
+    pub async fn take_workflow_wait(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        wait_on: &str,
+        emoji: &str,
+    ) -> Result<Vec<Uuid>> {
+        crate::workflow::take_workflow_wait(&self.pool, community_id, message_id, wait_on, emoji)
+            .await
+    }
+
+    /// Earliest active non-relay reaction that could wait a message.
+    #[datastore_span(name = "earliest_matching_reaction", system = "postgresql")]
+    pub async fn earliest_matching_reaction(
+        &self,
+        community_id: CommunityId,
+        message_id: &[u8],
+        emoji: Option<&str>,
+        relay_pubkey: &[u8],
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        crate::workflow::earliest_matching_reaction(
+            &self.pool,
+            community_id,
+            message_id,
+            emoji,
+            relay_pubkey,
+        )
+        .await
+    }
+
+    /// Complete runs whose wait window closed unwaited.
+    #[datastore_span(name = "expire_workflow_waits", system = "postgresql")]
+    pub async fn expire_workflow_waits(&self) -> Result<usize> {
+        crate::workflow::expire_workflow_waits(&self.pool).await
     }
 
     /// Create an approval request.
@@ -2741,6 +2959,127 @@ mod postgres_tests {
             .expect("B's workflow must survive A's delete");
         assert_eq!(surviving_b.community_id, community_b);
         assert_eq!(surviving_b.name, "wf-B");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn wait_goes_to_first_matching_reaction_until_it_expires() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let workflow_id = Uuid::new_v4();
+        insert_workflow_with_ids(&pool, community, workflow_id, Uuid::new_v4(), "wf").await;
+        let pool_ref = &pool;
+        let open_wait = |message: &'static str, emoji, ttl: i64| async move {
+            let pool = pool_ref;
+            let run = create_workflow_run(pool, community, workflow_id, None, None)
+                .await
+                .expect("run");
+            create_workflow_wait(
+                pool,
+                community,
+                run,
+                message,
+                "reaction_added",
+                emoji,
+                Utc::now() + chrono::Duration::seconds(ttl),
+            )
+            .await
+            .expect("wait");
+            run
+        };
+
+        let run = open_wait("msg-a", Some("🙋"), 3600).await;
+        let wrong = take_workflow_wait(&pool, community, "msg-a", "reaction_added", "👍").await;
+        assert_eq!(
+            wrong.expect("wrong emoji"),
+            Vec::<Uuid>::new(),
+            "wrong emoji must not match"
+        );
+        let first = take_workflow_wait(&pool, community, "msg-a", "reaction_added", "🙋").await;
+        assert_eq!(first.expect("first"), vec![run]);
+        let second = take_workflow_wait(&pool, community, "msg-a", "reaction_added", "🙋").await;
+        assert_eq!(
+            second.expect("second"),
+            Vec::<Uuid>::new(),
+            "second reactor must lose"
+        );
+
+        let any_emoji = open_wait("msg-b", None, 3600).await;
+        let got = take_workflow_wait(&pool, community, "msg-b", "reaction_added", "👍").await;
+        assert_eq!(got.expect("any emoji"), vec![any_emoji]);
+
+        let (first_run, second_run) = (
+            open_wait("msg-d", None, 3600).await,
+            open_wait("msg-d", None, 3600).await,
+        );
+        let mut both = take_workflow_wait(&pool, community, "msg-d", "reaction_added", "🙋")
+            .await
+            .expect("two runs");
+        both.sort();
+        let mut want = vec![first_run, second_run];
+        want.sort();
+        assert_eq!(both, want, "one reaction must resume every waiting run");
+
+        let expired = open_wait("msg-c", None, -1).await;
+        let late = take_workflow_wait(&pool, community, "msg-c", "reaction_added", "🙋").await;
+        assert_eq!(
+            late.expect("expired"),
+            Vec::<Uuid>::new(),
+            "expired wait must not match"
+        );
+        let suspend = RunStatus::WaitingApproval;
+        update_workflow_run(
+            &pool,
+            community,
+            expired,
+            suspend,
+            0,
+            &serde_json::json!([]),
+            None,
+        )
+        .await
+        .expect("suspend");
+        assert!(expire_workflow_waits(&pool).await.expect("expire") >= 1);
+        let run = get_workflow_run(&pool, community, expired)
+            .await
+            .expect("get");
+        assert_eq!(run.status, RunStatus::Completed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn earliest_matching_reaction_skips_relay_removed_and_wrong_emoji() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (message, relay) = ([7u8; 32], [1u8; 32]);
+        let at = Utc::now();
+        for (pubkey, emoji) in [
+            (relay, "🙋"),
+            ([2; 32], "👍"),
+            ([3; 32], "🙋"),
+            ([4; 32], "🙋"),
+        ] {
+            let sql = "INSERT INTO reactions (community_id, event_created_at, event_id, pubkey, emoji, created_at) \
+                       VALUES ($1, $2, $3, $4, $5, clock_timestamp())";
+            sqlx::query(sql)
+                .bind(community.as_uuid())
+                .bind(at)
+                .bind(&message[..])
+                .bind(&pubkey[..])
+                .bind(emoji)
+                .execute(&pool)
+                .await
+                .expect("insert reaction");
+        }
+        sqlx::query("UPDATE reactions SET removed_at = NOW() WHERE pubkey = $1")
+            .bind(&[3u8; 32][..])
+            .execute(&pool)
+            .await
+            .expect("remove");
+        let any = earliest_matching_reaction(&pool, community, &message, None, &relay).await;
+        assert_eq!(any.expect("any").map(|r| r.0), Some(vec![2; 32]));
+        let bell = earliest_matching_reaction(&pool, community, &message, Some("🙋"), &relay).await;
+        assert_eq!(bell.expect("bell").map(|r| r.0), Some(vec![4; 32]));
     }
 
     /// Issue 4 (approval path): the same approval token can hash to the same

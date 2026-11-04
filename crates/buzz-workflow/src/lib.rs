@@ -107,6 +107,8 @@ pub struct WorkflowEngine {
     /// banned owner's workflow is denied on every matching event and every
     /// cron tick; this keeps that expected denial from flooding the log.
     pub(crate) ban_denial_warned: moka::sync::Cache<(CommunityId, Uuid), ()>,
+    /// The relay's signing pubkey; its reactions never satisfy a `wait_for`.
+    relay_pubkey: OnceLock<Vec<u8>>,
 }
 
 /// How often a banned owner's workflow denial is logged at WARN. Denials in
@@ -129,7 +131,14 @@ impl WorkflowEngine {
                 .time_to_live(std::time::Duration::from_secs(10))
                 .build(),
             ban_denial_warned: ban_denial_warn_cache(BAN_DENIAL_WARN_INTERVAL),
+            relay_pubkey: OnceLock::new(),
         }
+    }
+
+    /// Set the relay's signing pubkey (32 bytes) so relay-signed reactions
+    /// are ignored by `wait_for`. Called once at startup.
+    pub fn set_relay_pubkey(&self, pubkey: Vec<u8>) {
+        let _ = self.relay_pubkey.set(pubkey);
     }
 
     /// Drop the cached enabled-workflow list for a channel.
@@ -264,7 +273,7 @@ impl WorkflowEngine {
     /// `existing_trace` is prepended to the executor's trace — used by the
     /// approval-resume path where pre-approval steps already have trace entries.
     pub async fn finalize_run(
-        &self,
+        self: &Arc<Self>,
         community_id: CommunityId,
         run_id: uuid::Uuid,
         result: Result<ExecutionResult, (WorkflowError, PartialProgress)>,
@@ -279,7 +288,63 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
+                if let Some(wait) = result.wait {
+                    // Reuses `waiting_approval`: a new enum value would break
+                    // an older relay decoding these rows during rollout.
+                    // Status first, so a fast reaction never sees a running run.
+                    let suspended = self
+                        .db
+                        .update_workflow_run(
+                            community_id,
+                            run_id,
+                            RunStatus::WaitingApproval,
+                            step_count,
+                            &trace_json,
+                            None,
+                        )
+                        .await;
+                    let recorded = match suspended {
+                        Ok(()) => self
+                            .db
+                            .create_workflow_wait(
+                                community_id,
+                                run_id,
+                                &wait.message_id,
+                                wait.on.as_str(),
+                                wait.emoji.as_deref(),
+                                wait.expires_at,
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    if recorded.is_ok() {
+                        // A reaction may have landed between posting the
+                        // message and recording the wait; its `on_event`
+                        // found nothing, so match it here.
+                        self.resume_on_earliest_reaction(community_id, &wait).await;
+                    }
+                    if let Err(e) = recorded {
+                        tracing::error!(run_id = %run_id, "Failed to suspend run at wait_for: {e}");
+                        if let Err(db_err) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some(buzz_db::workflow::WorkflowRunFailure {
+                                    code: "wait_not_recorded",
+                                    message: &e,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::error!(run_id = %run_id, "Failed to mark run Failed: {db_err}");
+                        }
+                    }
+                } else if result.approval_token.is_some() {
                     // Approval gates are not yet implemented (WF-08).
                     // Fail explicitly rather than creating unreachable WaitingApproval rows.
                     tracing::warn!(
@@ -391,6 +456,19 @@ impl WorkflowEngine {
             return Ok(());
         }
 
+        if kind_u32 == KIND_REACTION && !self.is_relay_signed(&event.event) {
+            let mut ctx = build_trigger_context(event);
+            ctx.message_id.make_ascii_lowercase();
+            // Empty content is a "+" reaction, as at ingest.
+            let emoji = if ctx.emoji.is_empty() {
+                "+".to_owned()
+            } else {
+                ctx.emoji.clone()
+            };
+            self.resume_on_match(community_id, ctx.message_id.clone(), emoji, ctx)
+                .await;
+        }
+
         let cache_key = (community_id, channel_id);
         let workflows = match self.workflow_cache.get(&cache_key) {
             Some(cached) => cached,
@@ -447,17 +525,9 @@ impl WorkflowEngine {
             // Looked up once, and only once a workflow actually fires.
             if !author_name_loaded {
                 author_name_loaded = true;
-                match self
-                    .db
-                    .get_user(community_id, &event.event.pubkey.to_bytes())
-                    .await
-                {
-                    Ok(user) => {
-                        trigger_ctx.author_name =
-                            user.and_then(|u| u.display_name).unwrap_or_default();
-                    }
-                    Err(e) => tracing::warn!("Failed to load trigger author name: {e}"),
-                }
+                trigger_ctx.author_name = self
+                    .author_name(community_id, &event.event.pubkey.to_bytes())
+                    .await;
             }
             let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
                 Ok(v) => v,
@@ -506,6 +576,198 @@ impl WorkflowEngine {
         }
 
         Ok(())
+    }
+
+    async fn author_name(&self, community_id: CommunityId, pubkey: &[u8]) -> String {
+        match self.db.get_user(community_id, pubkey).await {
+            Ok(user) => user.and_then(|u| u.display_name).unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("Failed to load trigger author name: {e}");
+                String::new()
+            }
+        }
+    }
+
+    fn is_relay_signed(&self, event: &nostr::Event) -> bool {
+        self.relay_pubkey
+            .get()
+            .is_some_and(|pk| pk.as_slice() == event.pubkey.to_bytes())
+    }
+
+    /// Take the open `reaction_added` wait on `message_id` and, if one was
+    /// still open, resume its run in the background with `ctx` as the step
+    /// output. A crash between the take and the resume leaves the run
+    /// suspended, as with approvals.
+    ///
+    /// Boxed so the `finalize_run` -> `resume_on_match` -> `resume_waiting_run`
+    /// -> `finalize_run` cycle does not make the futures' `Send` unprovable.
+    fn resume_on_match<'a>(
+        self: &'a Arc<Self>,
+        community_id: CommunityId,
+        message_id: String,
+        emoji: String,
+        ctx: executor::TriggerContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            match self
+                .db
+                .take_workflow_wait(
+                    community_id,
+                    &message_id,
+                    schema::WaitOn::ReactionAdded.as_str(),
+                    &emoji,
+                )
+                .await
+            {
+                Ok(run_ids) => {
+                    for run_id in run_ids {
+                        let engine = Arc::clone(self);
+                        let ctx = ctx.clone();
+                        tokio::spawn(async move {
+                            engine.resume_waiting_run(community_id, run_id, ctx).await;
+                        });
+                    }
+                }
+                Err(e) => tracing::error!("Failed to look up workflow wait: {e}"),
+            }
+        })
+    }
+
+    async fn resume_on_earliest_reaction(
+        self: &Arc<Self>,
+        community_id: CommunityId,
+        wait: &executor::PendingWait,
+    ) {
+        let Ok(message_id) = hex::decode(&wait.message_id) else {
+            return;
+        };
+        let relay_pubkey = self
+            .relay_pubkey
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        match self
+            .db
+            .earliest_matching_reaction(
+                community_id,
+                &message_id,
+                wait.emoji.as_deref(),
+                relay_pubkey,
+            )
+            .await
+        {
+            Ok(Some((pubkey, emoji))) => {
+                let ctx = executor::TriggerContext {
+                    text: emoji.clone(),
+                    author: hex::encode(pubkey),
+                    emoji: emoji.clone(),
+                    message_id: wait.message_id.clone(),
+                    ..Default::default()
+                };
+                self.resume_on_match(community_id, wait.message_id.clone(), emoji, ctx)
+                    .await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!("Failed to look up early wait_for reaction: {e}"),
+        }
+    }
+
+    /// Resume a run suspended at a `wait_for` step: record the matched event's
+    /// fields as the step's output and execute the remaining steps.
+    async fn resume_waiting_run(
+        self: &Arc<Self>,
+        community_id: CommunityId,
+        run_id: Uuid,
+        mut ctx: executor::TriggerContext,
+    ) {
+        let run = match self.db.get_workflow_run(community_id, run_id).await {
+            Ok(r) if r.status == RunStatus::WaitingApproval => r,
+            Ok(r) => {
+                tracing::warn!(run_id = %run_id, status = %r.status, "Waiting run is not suspended");
+                return;
+            }
+            Err(e) => {
+                tracing::error!(run_id = %run_id, "Failed to load waiting run: {e}");
+                return;
+            }
+        };
+        let step_index = run.current_step as usize;
+        let workflow = match self.db.get_workflow(community_id, run.workflow_id).await {
+            Ok(w) => Some(w),
+            Err(buzz_db::DbError::NotFound(_)) => None,
+            Err(e) => {
+                tracing::error!(run_id = %run_id, "Failed to load workflow for waiting run: {e}");
+                return;
+            }
+        };
+        let def: Option<WorkflowDef> =
+            workflow.and_then(|w| serde_json::from_value(w.definition).ok());
+        let Some(def) = def.filter(|d| {
+            matches!(
+                d.steps.get(step_index).map(|s| &s.action),
+                Some(ActionDef::WaitFor { .. })
+            )
+        }) else {
+            if let Err(e) = self
+                .db
+                .update_workflow_run(
+                    community_id,
+                    run_id,
+                    RunStatus::Failed,
+                    run.current_step,
+                    &run.execution_trace,
+                    Some(buzz_db::workflow::WorkflowRunFailure {
+                        code: "invalid_definition",
+                        message: "workflow changed or was removed while waiting for an event",
+                    }),
+                )
+                .await
+            {
+                tracing::error!(run_id = %run_id, "Failed to mark waiting run Failed: {e}");
+            }
+            return;
+        };
+
+        let trigger_ctx: executor::TriggerContext = run
+            .trigger_context
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        if ctx.channel_id.is_empty() {
+            ctx.channel_id = trigger_ctx.channel_id.clone();
+        }
+        if let Ok(author) = hex::decode(&ctx.author) {
+            ctx.author_name = self.author_name(community_id, &author).await;
+        }
+        let output = serde_json::to_value(&ctx).unwrap_or_default();
+
+        let mut trace = run.execution_trace.as_array().cloned().unwrap_or_default();
+        trace.push(serde_json::json!({
+            "step_id": def.steps[step_index].id,
+            "status": "completed",
+            "output": output,
+        }));
+        let outputs: HashMap<String, serde_json::Value> = trace
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry.get("step_id")?.as_str()?.to_owned(),
+                    entry.get("output")?.clone(),
+                ))
+            })
+            .collect();
+
+        let result = executor::execute_from_step(
+            self,
+            community_id,
+            run_id,
+            &def,
+            &trigger_ctx,
+            step_index + 1,
+            Some(outputs),
+        )
+        .await;
+        self.finalize_run(community_id, run_id, result, Some(trace))
+            .await;
     }
 
     /// Interval prefilter: decide whether the interval workflow should fire this
@@ -558,6 +820,9 @@ impl WorkflowEngine {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
+            if let Err(e) = self.db.expire_workflow_waits().await {
+                tracing::error!("Failed to expire workflow waits: {e}");
+            }
             self.cron_tick(Utc::now()).await;
         }
     }
@@ -2508,5 +2773,217 @@ steps:
             .execute(db.pool())
             .await
             .expect("drop failing restriction schema");
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        dms: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl ActionSink for RecordingSink {
+        fn send_message(
+            &self,
+            _: CommunityId,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, ActionSinkError>> + Send + '_>,
+        > {
+            Box::pin(async { Ok("ab".repeat(32)) })
+        }
+
+        fn send_dm(
+            &self,
+            _: CommunityId,
+            recipient: &str,
+            text: &str,
+            _: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, ActionSinkError>> + Send + '_>,
+        > {
+            self.dms
+                .lock()
+                .expect("lock")
+                .push((recipient.to_owned(), text.to_owned()));
+            Box::pin(async { Ok("cd".repeat(32)) })
+        }
+
+        fn edit_message(
+            &self,
+            _: CommunityId,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, ActionSinkError>> + Send + '_>,
+        > {
+            Box::pin(async { Ok("ef".repeat(32)) })
+        }
+    }
+
+    /// A community with a `message_posted` workflow: offer, wait for a
+    /// reaction, then DM the reactor by name.
+    async fn bufo_workflow(db: &buzz_db::Db, emoji: &str) -> (CommunityId, Uuid, Uuid) {
+        let creator = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(db, &creator, &member).await;
+        let def_json = serde_json::json!({
+            "name": "bufo-giver",
+            "trigger": {"on": "message_posted"},
+            "steps": [
+                {"id": "offer", "action": "send_message", "text": "react to claim"},
+                {"id": "claim", "action": "wait_for", "on": "reaction_added", "message_id": "{{steps.offer.output.event_id}}", "emoji": emoji, "timeout": "1h"},
+                {"id": "gift", "action": "send_dm", "to": "{{steps.claim.output.author}}", "text": "enjoy {{steps.claim.output.author_name}}"},
+            ],
+            "enabled": true,
+        })
+        .to_string();
+        let workflow_id = db
+            .create_workflow(
+                community,
+                Some(channel_id),
+                &member,
+                "bufo",
+                &def_json,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create workflow");
+        (community, channel_id, workflow_id)
+    }
+
+    async fn wait_for_status(
+        db: &buzz_db::Db,
+        community: CommunityId,
+        workflow_id: Uuid,
+        want: RunStatus,
+    ) {
+        for _ in 0..50 {
+            let runs = db
+                .list_workflow_runs(community, workflow_id, 10)
+                .await
+                .expect("runs");
+            if runs.first().map(|r| &r.status) == Some(&want) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("run never reached {want:?}");
+    }
+
+    fn engine_with_sink(
+        db: &buzz_db::Db,
+        relay: &nostr::Keys,
+    ) -> (Arc<WorkflowEngine>, Arc<RecordingSink>) {
+        let sink = Arc::new(RecordingSink::default());
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+        engine.set_action_sink(sink.clone());
+        engine.set_relay_pubkey(relay.public_key().to_bytes().to_vec());
+        (engine, sink)
+    }
+
+    /// The first reaction with the right emoji after the wait resumes the run
+    /// with that reactor's fields (including `author_name`) as the step
+    /// output; wrong emoji, relay-signed and later reactions do not, and an
+    /// empty reaction counts as "+".
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn wait_for_resumes_run_with_first_reactor_fields() {
+        let db = setup_db().await;
+        let relay = nostr::Keys::generate();
+        let (engine, sink) = engine_with_sink(&db, &relay);
+        let (community, channel_id, workflow_id) = bufo_workflow(&db, "+").await;
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("trigger");
+        wait_for_status(&db, community, workflow_id, RunStatus::WaitingApproval).await;
+
+        let winner = nostr::Keys::generate();
+        db.ensure_user(community, &winner.public_key().to_bytes())
+            .await
+            .expect("winner user");
+        db.update_user_profile(
+            community,
+            &winner.public_key().to_bytes(),
+            Some("Wendy"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("winner name");
+        let react = |keys: &nostr::Keys, content: &str| {
+            let event = nostr::EventBuilder::new(nostr::Kind::Reaction, content)
+                .tags([nostr::Tag::parse(["e", &"ab".repeat(32)]).expect("e tag")])
+                .sign_with_keys(keys)
+                .expect("sign");
+            buzz_core::StoredEvent::new(event, Some(channel_id))
+        };
+        for event in [
+            react(&nostr::Keys::generate(), "👍"),
+            react(&relay, "+"),
+            react(&winner, ""),
+            react(&nostr::Keys::generate(), "+"),
+        ] {
+            engine.on_event(community, &event).await.expect("reaction");
+        }
+        wait_for_status(&db, community, workflow_id, RunStatus::Completed).await;
+        assert_eq!(
+            *sink.dms.lock().expect("lock"),
+            vec![(winner.public_key().to_hex(), "enjoy Wendy".to_owned())]
+        );
+    }
+
+    /// Reactions stored before the wait row exists (the stub sink always
+    /// posts message `abab..`) still match: earliest non-relay reactor first,
+    /// and its name reaches the next step.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn wait_for_matches_reaction_that_landed_before_the_wait_row() {
+        let db = setup_db().await;
+        let relay = nostr::Keys::generate();
+        let (engine, sink) = engine_with_sink(&db, &relay);
+        let (community, channel_id, workflow_id) = bufo_workflow(&db, "+").await;
+        let early = nostr::Keys::generate();
+        db.ensure_user(community, &early.public_key().to_bytes())
+            .await
+            .expect("early user");
+        db.update_user_profile(
+            community,
+            &early.public_key().to_bytes(),
+            Some("Early"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("early name");
+        for keys in [&relay, &early, &nostr::Keys::generate()] {
+            db.add_reaction(
+                community,
+                &[0xab; 32],
+                Utc::now(),
+                &keys.public_key().to_bytes(),
+                "+",
+                None,
+            )
+            .await
+            .expect("seed reaction");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        engine
+            .on_event(community, &message_event(channel_id))
+            .await
+            .expect("trigger");
+        wait_for_status(&db, community, workflow_id, RunStatus::Completed).await;
+        assert_eq!(
+            *sink.dms.lock().expect("lock"),
+            vec![(early.public_key().to_hex(), "enjoy Early".to_owned())]
+        );
     }
 }

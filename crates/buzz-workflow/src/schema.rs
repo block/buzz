@@ -154,11 +154,43 @@ pub enum ActionDef {
         #[serde(default)]
         timeout: Option<String>,
     },
+    /// Suspend until an event happens on a message, then continue with the
+    /// event's fields as `{{steps.ID.output.*}}` (`author`, `author_name`,
+    /// `emoji`, ...). When nothing happens before `timeout`, the run ends
+    /// without running later steps.
+    WaitFor {
+        /// Event to wait for.
+        on: WaitOn,
+        /// Event ID (hex) of the message to watch, e.g. `{{steps.offer.output.event_id}}`.
+        message_id: String,
+        /// Only this emoji matches; any reaction matches when omitted.
+        #[serde(default)]
+        emoji: Option<String>,
+        /// How long to wait (e.g. `"1h"`). Between 1s and 24h.
+        timeout: String,
+    },
     /// Pause execution for a duration (e.g. `"5m"`, `"1h"`).
     Delay {
         /// Duration string (e.g. `"5m"`, `"1h"`).
         duration: String,
     },
+}
+
+/// Event a `wait_for` step waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitOn {
+    /// Someone reacts to the message.
+    ReactionAdded,
+}
+
+impl WaitOn {
+    /// Stable name stored with the suspended run.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaitOn::ReactionAdded => "reaction_added",
+        }
+    }
 }
 
 impl WorkflowDef {
@@ -217,6 +249,18 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+        }
+
+        for step in &self.steps {
+            if let ActionDef::WaitFor { timeout, .. } = &step.action {
+                let secs = crate::executor::parse_duration_secs(timeout)?;
+                if secs == 0 || secs > 24 * 3600 {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': wait_for timeout must be between 1s and 24h",
+                        step.id
+                    )));
+                }
             }
         }
 
@@ -440,6 +484,33 @@ mod tests {
         );
         let missing = "name: E\ntrigger:\n  on: reaction_added\nsteps:\n  - id: mark\n    action: edit_message\n    text: claimed\n";
         assert!(parse_yaml(missing).is_err());
+    }
+
+    #[test]
+    fn wait_for_requires_message_id_and_timeout_within_24h() {
+        let wait = |extra: &str| {
+            format!(
+                "name: W\ntrigger:\n  on: message_posted\nsteps:\n  - id: w\n    action: wait_for\n    on: reaction_added\n    message_id: abc\n{extra}"
+            )
+        };
+        let (def, _) =
+            parse_yaml(&wait("    emoji: x\n    timeout: 24h\n")).expect("24h is allowed");
+        assert!(
+            matches!(&def.steps[0].action, ActionDef::WaitFor { on: WaitOn::ReactionAdded, emoji: Some(e), .. } if e == "x")
+        );
+        let (def, _) = parse_yaml(&wait("    timeout: 1s\n")).expect("1s is allowed");
+        assert!(matches!(
+            &def.steps[0].action,
+            ActionDef::WaitFor { emoji: None, .. }
+        ));
+        assert!(parse_yaml(&wait("")).is_err(), "timeout is required");
+        assert!(parse_yaml(&wait("    timeout: 25h\n")).is_err());
+        assert!(parse_yaml(&wait("    timeout: 0s\n")).is_err());
+        assert!(parse_yaml(&wait("    timeout: soon\n")).is_err());
+        let no_id = "name: W\ntrigger:\n  on: message_posted\nsteps:\n  - id: w\n    action: wait_for\n    on: reaction_added\n    timeout: 1h\n";
+        assert!(parse_yaml(no_id).is_err(), "message_id is required");
+        let bad_on = wait("    timeout: 1h\n").replace("reaction_added", "message_posted");
+        assert!(parse_yaml(&bad_on).is_err(), "unknown `on` is rejected");
     }
 
     #[test]

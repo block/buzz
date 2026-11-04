@@ -642,13 +642,14 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **4 trigger types:** `message_posted`, `reaction_added`, `schedule`, `webhook`
 
-**8 action types:**
+**9 action types:**
 
 | Action | Description |
 |--------|-------------|
 | `send_message` | Post to the workflow's channel (or override channel) |
 | `send_dm` | Direct message from the workflow owner to a user (hex or npub, e.g. `{{trigger.author}}`); opens or reuses the DM, rejects self-DM |
 | `edit_message` | Replace the text of a message posted by a workflow of the same owner (`message_id`, `text`); relay-signed kind:40003, `@Name` mentions get `p` tags. Not exclusive: concurrent triggers each run, and the last edit wins |
+| `wait_for` | Suspend until someone reacts to `message_id` (`on: reaction_added`, optional `emoji`, required `timeout` 1s-24h). The first match resumes the run and its event fields (`author`, `author_name`, `emoji`, ...) become `{{steps.ID.output.*}}`; relay reactions are ignored. On expiry the run completes and later steps do not run |
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |
 | `call_webhook` | HTTP POST to external URL (SSRF-protected, redirects disabled, 1 MiB response cap) |
