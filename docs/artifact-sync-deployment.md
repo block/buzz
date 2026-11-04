@@ -111,4 +111,3 @@ before enablement or after a rollback to an old writer.
 
 This change does not authorize deployment, gate enablement, or a production
 maintenance write.
-
