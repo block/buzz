@@ -10,7 +10,6 @@ import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr/nostr.dart' as nostr;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/community/community_storage_test.dart';
@@ -736,173 +735,6 @@ void main() {
     expect(find.text('Join this Buzz community?'), findsOneWidget);
   });
 
-  testWidgets('opens retry setup after durable starter recovery fails', (
-    tester,
-  ) async {
-    const link = InviteDeepLink(
-      relayUrl: 'wss://relay.example.com',
-      code: 'invite-code',
-    );
-    final container = ProviderContainer(
-      overrides: [
-        pendingDeepLinkProvider.overrideWith(
-          () => _FakePendingDeepLinkNotifier(link),
-        ),
-        inviteJoinProvider.overrideWith(
-          _FailedStarterRecoveryInviteJoinNotifier.new,
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: const MaterialApp(
-          home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Finish setting up'), findsOneWidget);
-    expect(find.text('Retry setup'), findsOneWidget);
-    expect(find.text('Starter setup failed'), findsOneWidget);
-  });
-
-  testWidgets(
-    'shows saved starter recovery progress, then opens welcome-everyone',
-    (tester) async {
-      const relayUrl = 'wss://relay.example.com';
-      const welcomeId = 'welcome-everyone-id';
-      final storage = CommunityStorage(secure: FakeSecureStorage());
-      await storage.save(
-        Community(
-          id: 'incomplete-community',
-          name: 'Relay',
-          relayUrl: relayUrl,
-          pubkey: 'pubkey',
-          nsec: nostr.Keys.generate().nsec,
-          addedAt: DateTime.utc(2026),
-          starterSetupIncomplete: true,
-        ),
-      );
-      final recovery = _DeferredInviteJoinRecovery();
-      final container = ProviderContainer(
-        overrides: [
-          communityStorageProvider.overrideWithValue(storage),
-          pendingDeepLinkProvider.overrideWith(
-            () => _FakePendingDeepLinkNotifier(
-              const InviteDeepLink(relayUrl: relayUrl, code: 'invite-code'),
-            ),
-          ),
-          inviteJoinRecoveryProvider.overrideWithValue((_) => recovery),
-          channelsProvider.overrideWith(
-            () =>
-                _FakeChannelsNotifier(Future.value([_welcomeEveryoneChannel])),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            home: DeepLinkDispatcher(
-              destinationBuilder: (channel, link) =>
-                  _CapturedDestination(channel: channel, link: link),
-              child: const Scaffold(body: SizedBox()),
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-      await tester.pump();
-      expect(recovery.started.isCompleted, isTrue);
-
-      expect(find.text('Finish setting up'), findsOneWidget);
-      expect(find.text('Finishing setup…'), findsOneWidget);
-      expect(
-        tester
-            .widget<FilledButton>(
-              find.widgetWithText(FilledButton, 'Finishing setup…'),
-            )
-            .onPressed,
-        isNull,
-      );
-
-      recovery.complete(welcomeId);
-      await tester.pumpAndSettle();
-
-      expect(find.text('Continue to #welcome-everyone'), findsOneWidget);
-      await tester.tap(find.text('Continue to #welcome-everyone'));
-      await tester.pumpAndSettle();
-      final destination = tester.widget<_CapturedDestination>(
-        find.byType(_CapturedDestination),
-      );
-      expect(destination.link, const ChannelDeepLink(channelId: welcomeId));
-    },
-  );
-
-  testWidgets('renders setup-specific recovery failures after membership', (
-    tester,
-  ) async {
-    const relayUrl = 'wss://relay.example.com';
-    final storage = CommunityStorage(secure: FakeSecureStorage());
-    await storage.save(
-      Community(
-        id: 'incomplete-community',
-        name: 'Relay',
-        relayUrl: relayUrl,
-        pubkey: 'pubkey',
-        nsec: nostr.Keys.generate().nsec,
-        addedAt: DateTime.utc(2026),
-        starterSetupIncomplete: true,
-      ),
-    );
-    final recovery = _DeferredInviteJoinRecovery();
-    final container = ProviderContainer(
-      overrides: [
-        communityStorageProvider.overrideWithValue(storage),
-        pendingDeepLinkProvider.overrideWith(
-          () => _FakePendingDeepLinkNotifier(
-            const InviteDeepLink(relayUrl: relayUrl, code: 'invite-code'),
-          ),
-        ),
-        inviteJoinRecoveryProvider.overrideWithValue((_) => recovery),
-        channelsProvider.overrideWith(
-          () => _FakeChannelsNotifier(Future.value(const [])),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await tester.pumpWidget(
-      UncontrolledProviderScope(
-        container: container,
-        child: const MaterialApp(
-          home: DeepLinkDispatcher(child: Scaffold(body: SizedBox())),
-        ),
-      ),
-    );
-    await tester.pump();
-    await tester.pump();
-    expect(recovery.started.isCompleted, isTrue);
-
-    recovery.completeError(Exception('relay did not respond'));
-    await tester.pumpAndSettle();
-
-    expect(
-      find.text(
-        'Starter channels could not be set up. Retry setup to try again.',
-      ),
-      findsOneWidget,
-    );
-    expect(find.text('Retry setup'), findsOneWidget);
-    expect(find.textContaining('Could not join this community'), findsNothing);
-  });
-
   testWidgets('waits for an invite modal before preparing the next invite', (
     tester,
   ) async {
@@ -1066,7 +898,7 @@ void main() {
     },
   );
 
-  testWidgets('continues a successful invite into welcome-everyone', (
+  testWidgets('a successful invite ends on the success sheet, not a channel', (
     tester,
   ) async {
     const invite = InviteDeepLink(
@@ -1079,7 +911,7 @@ void main() {
           () => _FakePendingDeepLinkNotifier(invite),
         ),
         channelsProvider.overrideWith(
-          () => _FakeChannelsNotifier(Future.value([_welcomeEveryoneChannel])),
+          () => _FakeChannelsNotifier(Future.value([_channel])),
         ),
         inviteJoinProvider.overrideWith(_SuccessfulInviteJoinNotifier.new),
       ],
@@ -1102,19 +934,14 @@ void main() {
 
     await tester.tap(find.widgetWithText(FilledButton, 'Join'));
     await tester.pumpAndSettle();
-    expect(find.text('Continue to #welcome-everyone'), findsOneWidget);
+    expect(find.text('You joined Example'), findsOneWidget);
+    expect(find.textContaining('welcome-everyone'), findsNothing);
 
-    await tester.tap(find.text('Continue to #welcome-everyone'));
+    await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();
 
-    final destination = tester.widget<_CapturedDestination>(
-      find.byType(_CapturedDestination),
-    );
-    expect(destination.channel.id, 'welcome-everyone-id');
-    expect(
-      destination.link,
-      const ChannelDeepLink(channelId: 'welcome-everyone-id'),
-    );
+    expect(find.text('You joined Example'), findsNothing);
+    expect(find.byType(_CapturedDestination), findsNothing);
   });
 }
 
@@ -1143,17 +970,6 @@ final _notificationCommunity = Community(
   relayUrl: 'wss://notification.example',
   addedAt: DateTime(2026),
 );
-final _welcomeEveryoneChannel = Channel(
-  id: 'welcome-everyone-id',
-  name: 'welcome-everyone',
-  channelType: 'stream',
-  visibility: 'open',
-  description: 'Say hi',
-  createdBy: 'creator',
-  createdAt: DateTime(2026),
-  memberCount: 1,
-  isMember: true,
-);
 
 class _SuccessfulInviteJoinNotifier extends InviteJoinNotifier {
   @override
@@ -1171,27 +987,7 @@ class _SuccessfulInviteJoinNotifier extends InviteJoinNotifier {
 
   @override
   Future<void> confirmJoin() async {
-    state = state.copyWith(
-      status: InviteJoinStatus.success,
-      focusChannelId: 'welcome-everyone-id',
-    );
-  }
-}
-
-class _FailedStarterRecoveryInviteJoinNotifier extends InviteJoinNotifier {
-  @override
-  InviteJoinState build() => const InviteJoinState();
-
-  @override
-  Future<void> prepare(InviteDeepLink invite) async {
-    state = InviteJoinState(
-      status: InviteJoinStatus.error,
-      invite: invite,
-      host: 'relay.example.com',
-      communityName: 'Relay',
-      errorMessage: 'Starter setup failed',
-      isStarterSetupRecovery: true,
-    );
+    state = state.copyWith(status: InviteJoinStatus.success);
   }
 }
 
@@ -1344,21 +1140,6 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
   @override
   Future<List<Channel>> build() => channels;
-}
-
-class _DeferredInviteJoinRecovery implements InviteJoinRecovery {
-  final Completer<String?> _result = Completer<String?>();
-  final Completer<void> started = Completer<void>();
-
-  @override
-  Future<String?> ensureStarterChannels() {
-    started.complete();
-    return _result.future;
-  }
-
-  void complete(String? focusChannelId) => _result.complete(focusChannelId);
-
-  void completeError(Object error) => _result.completeError(error);
 }
 
 class _CapturedDestination extends StatelessWidget {

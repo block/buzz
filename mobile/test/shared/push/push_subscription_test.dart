@@ -8,20 +8,20 @@ void main() {
   const channelA = '123e4567-e89b-42d3-a456-426614174000';
   const channelB = '123e4567-e89b-42d3-a456-426614174001';
 
-  test('subscribes to and mutes UUIDv5 starter channels', () {
-    const starter = 'fee88e92-da9f-5958-a910-48db3264ad38';
+  test('subscribes to and mutes non-v4 UUID channels', () {
+    const uuidV5 = 'fee88e92-da9f-5958-a910-48db3264ad38';
     final subscriptions = buildDesiredBuzzPushSubscriptions(
       myPubkey: me,
-      channelIds: [starter, channelA],
+      channelIds: [uuidV5, channelA],
     );
-    expect(subscriptions.last.filter.hTags, [channelA, starter]);
+    expect(subscriptions.last.filter.hTags, [channelA, uuidV5]);
     final muted = buildDesiredBuzzPushSubscriptions(
       myPubkey: me,
-      channelIds: [starter, channelA],
-      mutedChannelIds: [starter],
+      channelIds: [uuidV5, channelA],
+      mutedChannelIds: [uuidV5],
     );
     expect(muted.last.filter.hTags, [channelA]);
-    expect(muted.first.ignore.last.hTags, [starter]);
+    expect(muted.first.ignore.last.hTags, [uuidV5]);
     expect(
       BuzzPushSubscription.fromJson(muted.first.toJson()).toJson(),
       muted.first.toJson(),
@@ -144,13 +144,13 @@ void main() {
   });
 
   test('ignores mutes outside the push channel grammar', () {
-    // Starter channels use UUIDv5 IDs; muting one must not break push setup.
-    const starterChannel = 'fee88e92-da9f-5958-a910-48db3264ad38';
+    // Channel IDs of any UUID version are valid; muting one must not break push setup.
+    const uuidV5Channel = 'fee88e92-da9f-5958-a910-48db3264ad38';
 
     final subscriptions = buildDesiredBuzzPushSubscriptions(
       myPubkey: me,
       channelIds: [channelA],
-      mutedChannelIds: [starterChannel, 'not-a-channel'],
+      mutedChannelIds: [uuidV5Channel, 'not-a-channel'],
     );
 
     expect(subscriptions, hasLength(2));

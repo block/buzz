@@ -125,9 +125,7 @@ void main() {
     expect(config?['onPrimaryArgb'], theme.colorScheme.onPrimary.toARGB32());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-  testWidgets('recovery error is scrollable and exposes retry setup', (
-    tester,
-  ) async {
+  testWidgets('claim error is scrollable and exposes retry', (tester) async {
     tester.view.physicalSize = const Size(375, 400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -136,14 +134,14 @@ void main() {
       WidgetHelpers.testable(
         child: const InviteJoinSheet(),
         overrides: [
-          inviteJoinProvider.overrideWith(_RecoveryErrorInviteJoinNotifier.new),
+          inviteJoinProvider.overrideWith(_ClaimErrorInviteJoinNotifier.new),
         ],
       ),
     );
     await tester.pump();
 
-    expect(find.text('Finish setting up'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Retry setup'), findsOneWidget);
+    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
     expect(find.byType(SingleChildScrollView), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -156,15 +154,6 @@ void main() {
         host: 'relay.example.com',
       ),
       label: 'Joining…',
-    ),
-    (
-      name: 'starter recovery',
-      state: const InviteJoinState(
-        status: InviteJoinStatus.claiming,
-        host: 'relay.example.com',
-        isStarterSetupRecovery: true,
-      ),
-      label: 'Finishing setup…',
     ),
   ]) {
     testWidgets('${fixture.name} cannot dismiss the in-flight invite sheet', (
@@ -225,15 +214,14 @@ class _StaticInviteJoinNotifier extends InviteJoinNotifier {
   InviteJoinState build() => _state;
 }
 
-class _RecoveryErrorInviteJoinNotifier extends InviteJoinNotifier {
+class _ClaimErrorInviteJoinNotifier extends InviteJoinNotifier {
   @override
   InviteJoinState build() => const InviteJoinState(
     status: InviteJoinStatus.error,
     host: 'relay.example.com',
     communityName: 'Example',
     errorMessage:
-        'Starter setup could not reach the relay. Retry when the connection is available.',
-    isStarterSetupRecovery: true,
+        'Could not reach the relay. Check your connection and try again.',
   );
 }
 

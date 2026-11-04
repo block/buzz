@@ -7,6 +7,8 @@ void main() {
       'id': 'one',
       'name': 'Buzz',
       'relayUrl': 'https://relay.test',
+      // Written by earlier builds; saved records must still load.
+      'starterSetupIncomplete': true,
       'addedAt': '2026-08-05T00:00:00.000Z',
     });
 
@@ -14,7 +16,7 @@ void main() {
       community.sensitiveActionPolicy,
       SensitiveActionPolicy.disabledByUser,
     );
-    expect(community.starterSetupIncomplete, isFalse);
+    expect(community.toJson(), isNot(contains('starterSetupIncomplete')));
     expect(community.pushLeaseInstallationId, isNull);
     expect(community.pushNotificationsEnabled, isTrue);
     expect(community.pushSubscriptionState.pendingTombstoneGeneration, isNull);
@@ -43,13 +45,11 @@ void main() {
       relayUrl: 'https://relay.test',
       sensitiveActionPolicy: SensitiveActionPolicy.enabled,
       pushLeaseInstallationId: 'a' * 32,
-      starterSetupIncomplete: true,
       addedAt: DateTime.utc(2026, 8, 5),
     );
 
     final roundTrip = Community.fromJson(community.toJson());
     expect(roundTrip.sensitiveActionPolicy, SensitiveActionPolicy.enabled);
-    expect(roundTrip.starterSetupIncomplete, isTrue);
     expect(roundTrip.pushLeaseInstallationId, 'a' * 32);
   });
 

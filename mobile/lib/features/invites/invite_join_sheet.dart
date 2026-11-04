@@ -14,8 +14,7 @@ Future<bool?> showInviteJoinSheet(BuildContext context) async {
   final container = ProviderScope.containerOf(context);
   final state = container.read(inviteJoinProvider);
   if (defaultTargetPlatform == TargetPlatform.iOS &&
-      state.status == InviteJoinStatus.confirming &&
-      !state.isStarterSetupRecovery) {
+      state.status == InviteJoinStatus.confirming) {
     final joined = await NativeCommunityEntry.show(
       name: state.host ?? 'Unknown community',
       dark: Theme.of(context).brightness == Brightness.dark,
@@ -55,13 +54,13 @@ Future<bool?> showInviteJoinSheet(BuildContext context) async {
     );
     if (joined == false) return false;
     if (!context.mounted) return joined;
-    // Preserve the existing success screen and starter-channel destination.
+    // Preserve the existing success screen.
   }
   return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     // The route remains a normal modal while idle, but its contents install a
-    // PopScope once a membership claim or starter setup begins. Keep drag and
+    // PopScope once a membership claim begins. Keep drag and
     // the shared close affordance out of this sheet so they cannot bypass that
     // in-flight guard.
     enableDrag: false,
@@ -88,25 +87,16 @@ class InviteJoinSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(inviteJoinProvider);
     final isClaiming = state.status == InviteJoinStatus.claiming;
-    final isStarterSetupRecovery = state.isStarterSetupRecovery;
     final host = state.host ?? 'unknown host';
     final derivedName = state.communityName;
     final primaryLabel = state.requiresPolicyAcceptance
         ? 'Review requirements'
-        : switch ((isClaiming, isStarterSetupRecovery, state.status)) {
-            (true, true, _) => 'Finishing setup…',
-            (true, false, _) => 'Joining…',
-            (false, true, InviteJoinStatus.error) => 'Retry setup',
-            (false, true, _) => 'Finish setting up',
-            _ => 'Join',
-          };
+        : isClaiming
+        ? 'Joining…'
+        : 'Join';
 
     if (state.status == InviteJoinStatus.success) {
-      return _InviteJoinSuccess(
-        host: host,
-        communityName: derivedName,
-        hasFocusChannel: state.focusChannelId != null,
-      );
+      return _InviteJoinSuccess(host: host, communityName: derivedName);
     }
 
     return SafeArea(
@@ -119,9 +109,7 @@ class InviteJoinSheet extends ConsumerWidget {
             Icon(BuzzIcons.userPlus, size: 40, color: context.colors.primary),
             const SizedBox(height: Grid.sm),
             Text(
-              isStarterSetupRecovery
-                  ? 'Finish setting up'
-                  : 'Join this Buzz community?',
+              'Join this Buzz community?',
               style: context.textTheme.titleLarge,
             ),
             const SizedBox(height: Grid.xxs),
@@ -159,15 +147,6 @@ class InviteJoinSheet extends ConsumerWidget {
               ),
             ],
             const SizedBox(height: Grid.sm),
-            if (isStarterSetupRecovery) ...[
-              Text(
-                'Your membership is ready, but starter channels still need to be set up. You can safely retry without claiming the invite again.',
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: Grid.sm),
-            ],
             Text(
               'This phone is the only copy of this identity. If you lose it before pairing or backing up, you’ll lose access as this member.',
               style: context.textTheme.bodyMedium?.copyWith(
@@ -224,9 +203,7 @@ class InviteJoinSheet extends ConsumerWidget {
                             height: 16,
                             child: BuzzLoadingIndicator(
                               size: 16,
-                              semanticLabel: isStarterSetupRecovery
-                                  ? 'Finishing setup'
-                                  : 'Joining community',
+                              semanticLabel: 'Joining community',
                             ),
                           )
                         : const Icon(BuzzIcons.check),
@@ -245,13 +222,8 @@ class InviteJoinSheet extends ConsumerWidget {
 class _InviteJoinSuccess extends StatelessWidget {
   final String host;
   final String? communityName;
-  final bool hasFocusChannel;
 
-  const _InviteJoinSuccess({
-    required this.host,
-    required this.hasFocusChannel,
-    this.communityName,
-  });
+  const _InviteJoinSuccess({required this.host, this.communityName});
 
   @override
   Widget build(BuildContext context) {
@@ -294,10 +266,8 @@ class _InviteJoinSuccess extends StatelessWidget {
             ),
             const SizedBox(height: Grid.xs),
             TextButton(
-              onPressed: () => Navigator.of(context).pop(hasFocusChannel),
-              child: Text(
-                hasFocusChannel ? 'Continue to #welcome-everyone' : 'Not now',
-              ),
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Not now'),
             ),
           ],
         ),

@@ -13,7 +13,7 @@ import '../../shared/community/community_storage_test.dart';
 
 void main() {
   for (final finishReadBeforeJoin in [false, true]) {
-    test('first invite setup succeeds when old active read finishes '
+    test('first invite claim succeeds when old active read finishes '
         '${finishReadBeforeJoin ? 'before' : 'after'} new selection', () async {
       final storage = _PausedActiveReadStorage();
       final old = Community.create(
@@ -23,7 +23,6 @@ void main() {
       );
       await storage.save(old);
       await storage.saveActiveId(old.id);
-      var recoveryCalls = 0;
       final container = ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
@@ -36,10 +35,6 @@ void main() {
               ),
             ),
           ),
-          inviteJoinRecoveryProvider.overrideWithValue((_) {
-            recoveryCalls++;
-            return _SuccessfulRecovery();
-          }),
         ],
       );
       addTearDown(container.dispose);
@@ -65,22 +60,15 @@ void main() {
       final result = container.read(inviteJoinProvider);
       expect(result.status, InviteJoinStatus.success);
       expect(result.errorMessage, isNull);
-      expect(recoveryCalls, 1);
       final communities = await storage.loadAll();
       final joined = communities.singleWhere((c) => c.id != old.id);
       expect(await storage.loadActiveId(), joined.id);
-      expect(joined.starterSetupIncomplete, isFalse);
       expect(
         (await container.read(activeCommunityProvider.future))?.id,
         joined.id,
       );
     });
   }
-}
-
-class _SuccessfulRecovery implements InviteJoinRecovery {
-  @override
-  Future<String?> ensureStarterChannels() async => 'welcome';
 }
 
 /// Delays the storage read after the provider captures its community list.

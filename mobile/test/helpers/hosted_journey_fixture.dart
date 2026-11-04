@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/hosted_app_gate.dart';
@@ -53,14 +52,12 @@ class HostedJourneyFixture {
   String? refusedSelfHostedPubkey;
   final profileWrites = <String>[];
   final profileAvatars = <String?>[];
-  final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
   final cloudKeys = <nostr.Keys>[];
   HostedFlow? activeFlow;
   HostedFlow get flow => activeFlow!;
   late ProviderContainer container;
   String? bound;
-  int starterFailures = 0;
   final policyResponses = <http.Response>[];
   int browserStarts = 0;
   final browserUrls = <Uri>[];
@@ -499,9 +496,6 @@ class HostedJourneyFixture {
           communitySnapshotWriterProvider.overrideWithValue((_) async {}),
           channelsProvider.overrideWith(_NoChannels.new),
           profileProvider.overrideWith(() => _Profile(this)),
-          inviteJoinRecoveryProvider.overrideWithValue(
-            (scope) => _Recovery(this, scope),
-          ),
           selfHostedEntryProvider.overrideWithValue(
             SelfHostedEntry(
               accountStore: AccountIdentityStore(storage: identityStorage),
@@ -664,19 +658,6 @@ class _Profile extends ProfileNotifier {
     }
     fixture.profileWrites.add(name);
     fixture.profileAvatars.add(avatarUrl);
-  }
-}
-
-// This boundary proves pending-flag/retry ownership, not relay memberships.
-class _Recovery implements InviteJoinRecovery {
-  _Recovery(this.fixture, this.scope);
-  final HostedJourneyFixture fixture;
-  final InviteJoinRecoveryScope scope;
-  @override
-  Future<String?> ensureStarterChannels() async {
-    fixture.recoveryScopes.add(scope);
-    if (fixture.starterFailures-- > 0) throw AccountFailure.unavailable;
-    return 'general';
   }
 }
 
