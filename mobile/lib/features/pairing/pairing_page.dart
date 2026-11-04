@@ -300,8 +300,7 @@ class PairingPage extends HookConsumerWidget {
                     ),
                   ),
                 )
-        : (addingCommunity || (signedInOnboarding && !creatingCommunity)) &&
-              connectionLanding
+        : (addingCommunity || signedInOnboarding) && connectionLanding
         ? ValueListenableBuilder<double>(
             valueListenable: islandScannerProgress,
             builder: (context, progress, _) => AddCommunityPage(
@@ -312,6 +311,8 @@ class PairingPage extends HookConsumerWidget {
                   : null,
               onCreateCommunity: signedInOnboarding ? onCreateCommunity : null,
               enteringCommunityLink: enteringCommunityLink,
+              creatingCommunity: creatingCommunity,
+              onSubmitCommunity: onSubmitCommunity,
               existingUser: existingUser,
               onBack: onWelcomeBack ?? () => Navigator.of(context).pop(),
               onCommunityLink: onCommunityLink,
