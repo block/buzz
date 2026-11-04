@@ -52,3 +52,24 @@ browser tests cover different boundaries; neither substitutes for installed-app
 and human acceptance. Refresh the pinned fixtures from the merged BUZZ-511
 producer before readiness. Host-policy rollout and maintenance-feed promotion
 are separate release operations.
+
+Before any bb-public community is switched to required FI:
+
+1. Choose and test a public `desktop-v0.5.x` maintenance candidate containing
+   this patch. Review its main delta or validate a tag-based backport.
+2. Publish its supported-platform installers through `.github/workflows/release.yml`,
+   install and accept them, then use **Promote OSS Desktop Auto-Update** as
+   documented in [RELEASING.md](../RELEASING.md#promote-an-oss-desktop-release-to-auto-update).
+   Verify `buzz-desktop-latest/latest.json` lists that exact maintenance version
+   and the expected macOS (both chips), Linux and Windows update artifacts.
+   Publishing a tag alone does not update existing public clients.
+3. Verify bb-public runs the merged BUZZ-511 producer with corrected effective
+   `requires_nip_fi`: Off false, Shadow optional false, Shadow required true,
+   Enforce true. Confirm live discovery and refresh the consumer fixtures.
+4. Exercise the installed legacy maintenance client against the deployed relay,
+   including the public builderlab.xyz action, before any required-host rollout.
+
+The Block `mdx/sprout/latest.json` feed is a separate maintenance route and cannot
+substitute for public updater delivery. Whether that route is needed remains an
+owner decision. These are release prerequisites, not authorization to tag, build,
+promote an updater feed, or change relay policy.
