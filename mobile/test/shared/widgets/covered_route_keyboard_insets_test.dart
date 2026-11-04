@@ -135,6 +135,7 @@ void main() {
     EdgeInsets? padding;
     final navigator = GlobalKey<NavigatorState>();
     var landscape = false;
+    var keyboard = 0.0;
     late StateSetter setOuter;
     final app = MaterialApp(
       navigatorKey: navigator,
@@ -158,6 +159,7 @@ void main() {
               padding: landscape
                   ? const EdgeInsets.symmetric(horizontal: 44)
                   : const EdgeInsets.only(top: 44, bottom: 34),
+              viewInsets: EdgeInsets.only(bottom: keyboard),
             ),
             child: app,
           );
@@ -174,6 +176,12 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+
+    // The covering route raises its own keyboard, so only the size change can
+    // release the held portrait padding.
+    setOuter(() => keyboard = 300);
+    await tester.pump();
+    expect(padding, const EdgeInsets.only(top: 44, bottom: 34));
 
     setOuter(() => landscape = true);
     await tester.pump();
