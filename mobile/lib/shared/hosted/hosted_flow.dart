@@ -581,13 +581,19 @@ class HostedFlow extends ChangeNotifier {
       _clearCommunityBatch();
       _batchSubject = session.subject;
     }
-    final canSealBackup =
-        target is NostrBindDeepLink || await HpkeBackup.supportsSealing();
+    final canSealBackup = await HpkeBackup.supportsSealing();
     if (_disposed || generation != _generation) return;
     var resolved = await identity.resolve(
       isCurrent: _isCurrent(generation),
       selectedPubkey: selectedPubkey ?? _pairedPubkey,
     );
+    if (resolved.state == HostedIdentityState.needsSetup &&
+        resolved.canCreate &&
+        createNew &&
+        !canSealBackup) {
+      _set(HostedFlowStage.blocked, HostedFlowProblem.unsupportedPlatform);
+      return;
+    }
     if (resolved.state == HostedIdentityState.needsSetup &&
         resolved.canCreate &&
         canSealBackup &&

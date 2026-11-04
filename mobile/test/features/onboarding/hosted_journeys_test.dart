@@ -336,6 +336,18 @@ void main() {
         expect(f.bound, isNull);
         expect(f.sent('/verify'), isEmpty);
         await f.tap(tester, 'Create my Buzz identity');
+        expect(f.flow.problem, HostedFlowProblem.unsupportedPlatform);
+        expect(await f.store.read(), isNull);
+        expect(f.bound, isNull);
+        // Once the OS supports sealing, creation still requires an explicit tap.
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/hosted_hpke'),
+          (_) async => true,
+        );
+        await f.flow.retry();
+        await f.settle(tester);
+        expect(await f.store.read(), isNull);
+        await f.tap(tester, 'Create my Buzz identity');
         final saved = (await f.store.read())!;
         expect(f.bound, saved.pubkey);
         expect(
