@@ -125,6 +125,8 @@ jobs:
         run: |
           scripts/test-postgres-test-discovery.sh
           scripts/test-postgres-test-wrapper.sh
+      - name: PR base overlap guard
+        run: scripts/test-branch-skew.sh
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
       - name: Relay image eligibility contract
