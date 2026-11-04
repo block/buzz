@@ -102,9 +102,13 @@ bool _startsSelectedMention(String text, int start, Iterable<String> names) =>
 
 final _nameContinuation = RegExp(r'[\p{L}\p{N}_]', unicode: true);
 
-/// Whether the edit from [before] to [after] inserted the character at
-/// [index] of [after], so an `@` there was pasted or typed just now.
-bool _insertedByEdit(String before, String after, int index) {
+/// The span an edit from [before] to [after] replaced: text before
+/// `prefix` and from `beforeEnd` in [before] (`afterEnd` in [after]) on is
+/// unchanged.
+({int prefix, int beforeEnd, int afterEnd}) _editSpan(
+  String before,
+  String after,
+) {
   final shorter = math.min(before.length, after.length);
   var prefix = 0;
   while (prefix < shorter &&
@@ -117,8 +121,58 @@ bool _insertedByEdit(String before, String after, int index) {
           after.codeUnitAt(after.length - 1 - suffix)) {
     suffix++;
   }
-  return index >= prefix && index < after.length - suffix;
+  return (
+    prefix: prefix,
+    beforeEnd: before.length - suffix,
+    afterEnd: after.length - suffix,
+  );
 }
+
+/// Whether the edit from [before] to [after] inserted the character at
+/// [index] of [after], so an `@` there was pasted or typed just now.
+bool _insertedByEdit(String before, String after, int index) {
+  final span = _editSpan(before, after);
+  return index >= span.prefix && index < span.afterEnd;
+}
+
+/// Moves [dead] with its `@` after an edit from [before] to [after] wholly
+/// before it, and drops it when the edit replaced that `@` or no longer
+/// leaves the dead query after it. Every edit,
+/// including chip insertion, passes through here.
+void _rebaseDeadMention(
+  ObjectRef<_DeadMention?> dead,
+  String before,
+  String after,
+) {
+  final current = dead.value;
+  if (current == null || before == after) return;
+  final span = _editSpan(before, after);
+  final next = span.prefix > current.start
+      ? current
+      : span.beforeEnd > current.start
+      ? null
+      : (
+          start: current.start + after.length - before.length,
+          query: current.query,
+        );
+  // Shortening or changing the dead text revives the query.
+  dead.value =
+      next != null &&
+          after.substring(next.start).toLowerCase().startsWith('@${next.query}')
+      ? next
+      : null;
+}
+
+/// Whether every source of mention choices has loaded, so a query with no
+/// rows has truly settled: channel members and the agent directories.
+bool _mentionSourcesSettled(
+  WidgetRef ref,
+  AsyncValue<List<ChannelMember>> members,
+) =>
+    members.hasValue &&
+    !ref.watch(agentDirectoryProvider).isLoading &&
+    !ref.watch(agentOwnersProvider).isLoading &&
+    !ref.watch(ownedAgentDirectoryProvider).isLoading;
 
 /// The `@` position and lowercased query of a query that settled as prose.
 typedef _DeadMention = ({int start, String query});
@@ -154,7 +208,8 @@ bool _mentionQueryStaysClosed(
 /// rules, section 2). Adding to it cannot find a name, so it stays closed,
 /// and searches nothing, until the user shortens it. A query still searching
 /// or with a failed search has not settled. Callers pass no dead-query ref
-/// until channel members load, since rows from a partial roster settle nothing.
+/// until every choice source loads ([_mentionSourcesSettled]), since rows
+/// from a partial roster settle nothing.
 _DeadMention? _settledDeadMention(
   _DeadMention? current,
   String query,

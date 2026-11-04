@@ -1832,6 +1832,7 @@ void main() {
         WidgetTester tester,
         List<String> names, {
         Future<List<UserProfile>> Function(String query)? searchPeople,
+        bool ownedAgentsUnknown = false,
       }) async {
         final members = [
           for (var i = 0; i < names.length; i++)
@@ -1851,6 +1852,9 @@ void main() {
             onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
             // No directory people unless a test supplies them.
             searchPeople: searchPeople ?? (_) async => const [],
+            // The owner's agents load (none) unless a test holds them.
+            ownedAgents: ownedAgentsUnknown ? null : const [],
+            ownedAgentsUnknown: ownedAgentsUnknown,
           ),
         );
         await _expandComposer(tester);
@@ -1980,7 +1984,7 @@ void main() {
 
       testWidgets('a query that continues no name is prose', (tester) async {
         final searched = <String>[];
-        await pumpMembers(
+        final controller = await pumpMembers(
           tester,
           ['Alice Smith'],
           searchPeople: (query) async {
@@ -2009,10 +2013,57 @@ void main() {
         );
         expect(searched, isEmpty);
 
+        // Text typed before the `@` moves the prose along with it.
+        await tester.enterText(
+          find.byType(TextField),
+          'so @alice said hi #cur',
+        );
+        await tester.pump();
+        await settleSearch(tester);
+        expect(popover(), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-suggestions-popover')),
+          findsOneWidget,
+        );
+        expect(searched, isEmpty);
+
         // Shortening it back to a name's start reopens the chooser.
         await tester.enterText(find.byType(TextField), '@alice s');
         await tester.pump();
         expect(find.text('Alice Smith'), findsOneWidget);
+
+        // A pasted full name and space settles as prose; deleting the space
+        // revives it, and Space then selects the name.
+        await tester.enterText(find.byType(TextField), '@alice smith ');
+        await tester.pump();
+        await settleSearch(tester);
+        await tester.enterText(find.byType(TextField), '@alice smith');
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '@alice smith ');
+        await tester.pump();
+        expect(controller.text, '@Alice Smith ');
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
+      testWidgets('a query is not prose while agents still load', (
+        tester,
+      ) async {
+        await pumpMembers(tester, ['Alice Smith'], ownedAgentsUnknown: true);
+        await tester.enterText(find.byType(TextField), '@alice said');
+        await tester.pump();
+        await settleSearch(tester);
+
+        // An agent named "Alice Said…" could still arrive, so the query
+        // stays open and `#` is part of it.
+        await tester.enterText(find.byType(TextField), '@alice said hi #cur');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(
+          find.byKey(const ValueKey('channel-suggestions-popover')),
+          findsNothing,
+        );
         await tester.enterText(find.byType(TextField), '');
         await settleSearch(tester);
       });

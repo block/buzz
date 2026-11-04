@@ -371,6 +371,7 @@ class ComposeBar extends HookConsumerWidget {
         final editingValue = controller.value;
         final previousValue = lastObservedEditingValue.value;
         lastObservedEditingValue.value = editingValue;
+        _rebaseDeadMention(deadMention, previousValue.text, editingValue.text);
         if (isModifyingText.value || editingValue == previousValue) return;
         final text = editingValue.text;
         final sel = editingValue.selection;
@@ -475,7 +476,7 @@ class ComposeBar extends HookConsumerWidget {
       query: mentionQuery.value,
       opening: mentionOpening.value,
       start: mentionStartIdx.value,
-      dead: membersAsync.hasValue ? deadMention : null,
+      dead: _mentionSourcesSettled(ref, membersAsync) ? deadMention : null,
     );
     shownMentions.value = mentionRows;
     final suggestions = mentionRows.rows;
