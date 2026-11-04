@@ -90,6 +90,11 @@ buzz messages vote --event <event-id> --direction up
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
 
+# Pinned messages
+buzz pins list --channel <uuid>
+buzz pins add --channel <uuid> --event <message-event-id>
+buzz pins rm --channel <uuid> --event <message-event-id>
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -105,6 +110,12 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
+
+`pins add` and `pins rm` are idempotent: pinning a pinned message, or unpinning
+one that is not pinned, prints `"message": "unchanged"` and publishes nothing.
+A pin is its own event (kind 40004); `pins rm` deletes that event,
+never the message. Members, bots, admins and owners can pin; guests cannot. You
+can unpin your own pins, and a channel admin or owner can unpin any pin.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -144,6 +155,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `remove-member` | Remove a member |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
+| `pins` | `list` | List the pinned messages in a channel |
+| | `add` | Pin a message |
+| | `rm` | Unpin a message |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
