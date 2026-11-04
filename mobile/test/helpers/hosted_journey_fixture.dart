@@ -581,7 +581,7 @@ class HostedJourneyFixture {
         .open(
           Uri(
             scheme: 'buzz',
-            host: invite ? 'join' : 'add',
+            host: invite ? 'join' : 'add-community',
             queryParameters: {
               'relay': 'wss://$name.communities.buzz.xyz',
               if (invite) 'code': 'invite-$name',

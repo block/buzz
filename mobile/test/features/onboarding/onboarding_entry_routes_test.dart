@@ -138,9 +138,9 @@ void main() {
       await f.flow.signInAccount();
       await tester.pumpAndSettle();
       expect(f.admitted, isEmpty);
-      await tester.tap(find.byType(CommunityGridOption).first);
+      await tester.tap(find.byType(CommunityGridOption).last);
       await tester.pumpAndSettle();
-      expect(f.admitted, ['one.communities.buzz.xyz']);
+      expect(f.admitted, isEmpty);
       expect(f.flow.stage, HostedFlowStage.communityConflict);
       expect(
         find.text('Keep saved identity and skip').hitTestable(),
@@ -161,10 +161,7 @@ void main() {
       f.beforeAdmission = null;
       await tester.tap(find.byType(CommunityGridOption).first);
       await tester.pumpAndSettle();
-      expect(f.admitted, [
-        'one.communities.buzz.xyz',
-        'two.communities.buzz.xyz',
-      ]);
+      expect(f.admitted, ['one.communities.buzz.xyz']);
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);
       f.admitted.clear();
