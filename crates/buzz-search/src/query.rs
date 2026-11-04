@@ -442,27 +442,35 @@ fn tier_name(column: &str) -> String {
 /// Largest page size [`search_profile_names`] accepts.
 pub const PROFILE_NAMES_PER_PAGE_MAX: u32 = 100;
 
-/// Find current kind:0 profiles whose `name` or `display_name` matches `q`.
+/// Find people whose current kind:0 `name` or `display_name` matches `q`,
+/// or, with `verified_by`, whose current verified profile does.
 ///
 /// Matching is the NIP-50 [`SearchMode::Prefix`] rule (every completed query
 /// word must equal a word, the last may be a prefix, in any order), applied to
-/// the two name fields only. Other profile fields, such as `picture` data URLs,
-/// `about` and `nip05`, cannot satisfy a word. The result set is therefore the
-/// prefix-mode kind:0 result set minus profiles that match only outside their
-/// names; the existing `search_tsv` index stays the access path.
+/// name fields only. For kind:0 these are `name` and `display_name`; other
+/// profile fields, such as `picture` data URLs, `about` and `nip05`, cannot
+/// satisfy a word, and the existing `search_tsv` index stays the access path.
+/// With `verified_by`, a current kind:30382 event signed by that key matches
+/// on its `display_name`, `username` and `full_name` tags; its `d` tag names
+/// the person.
 ///
-/// Order: a name equal to the query, then a name that starts with it, then a
-/// name with a word that starts with it, then any other match. The query and
-/// names are compared lower-cased with whitespace collapsed, both normalized
-/// by the same SQL. Ties go by relevance of the query to the two names
-/// (`ts_rank_cd` over the names alone, not the whole profile), then newest
-/// first, then event id, so pages are stable. Pages are 1-based, like
-/// [`SearchQuery::page`].
+/// Order is per person, by their best match: a name equal to the query, then
+/// a name that starts with it, then a name with a word that starts with it,
+/// then any other match. The query and names are compared lower-cased with
+/// whitespace collapsed, both normalized by the same SQL. Ties go by
+/// relevance of the query to the names (`ts_rank_cd` over the names alone,
+/// not the whole event), then newest first, then pubkey, so pages are stable.
+/// Pages are 1-based, like [`SearchQuery::page`], and count people.
+///
+/// Each person yields their current kind:0, when they have one, then, with
+/// `verified_by`, their current verified profile, when they have one,
+/// whichever of the two matched.
 #[datastore_span(name = "search_profile_names", system = "postgresql")]
 pub async fn search_profile_names(
     pool: &PgPool,
     community: CommunityId,
     q: &str,
+    verified_by: Option<[u8; 32]>,
     page: u32,
     per_page: u32,
 ) -> Result<SearchResult, SearchError> {
@@ -475,54 +483,104 @@ pub async fn search_profile_names(
     };
     let per_page = per_page.clamp(1, PROFILE_NAMES_PER_PAGE_MAX);
     let offset = ((page - 1) as i64) * (per_page as i64);
-    // Tiers compare the query and each name after the same SQL normalization
-    // ([`TIER_TEXT`]), so the two sides agree by construction.
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT id, kind, pubkey, channel_id, created_at_s, rank FROM (\
-         SELECT e.id, e.kind, e.pubkey, e.channel_id, \
-         EXTRACT(EPOCH FROM e.created_at)::bigint AS created_at_s, e.created_at, \
-         ts_rank_cd(names.tsv, search_query.query) AS rank, \
-         LEAST(",
-    );
-    for field in ["names.name", "names.display_name"] {
-        qb.push(format!(
-            "CASE WHEN {field} = search_query.typed THEN 0 \
-             WHEN starts_with({field}, search_query.typed) THEN 1 \
-             WHEN strpos({field}, ' ' || search_query.typed) > 0 THEN 2 ELSE 3 END"
-        ));
-        if field == "names.name" {
-            qb.push(", ");
-        }
-    }
-    qb.push(
-        ") AS tier \
-         FROM events e CROSS JOIN LATERAL (SELECT ",
-    );
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("WITH search_query AS (SELECT ");
     push_tsquery(&mut qb, SearchMode::Prefix, &search_text, 0);
     qb.push(" AS query, ");
+    // Every verified match is ranked before `LIMIT`, so verified names need
+    // the NIP-50 minimum prefix; kind:0 keeps one-character typeahead.
+    push_tsquery(&mut qb, SearchMode::Prefix, &search_text, PREFIX_MIN_CHARS);
+    qb.push(" AS verified_query, ");
     qb.push(TIER_TEXT[0]);
     qb.push_bind(search_text.clone());
     qb.push(TIER_TEXT[1]);
-    qb.push(format!(
-        " AS typed) AS search_query \
-         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields \
-         CROSS JOIN LATERAL (SELECT \
-           to_tsvector('simple', concat_ws(' ', fields.name, fields.display_name)) AS tsv, \
-           {} AS name, {} AS display_name) AS names \
-         WHERE e.community_id = ",
-        tier_name("fields.name"),
-        tier_name("fields.display_name"),
-    ));
+    qb.push(" AS typed), matches AS (SELECT e.pubkey AS person, ");
+    push_name_match(&mut qb, &["name", "display_name"], "e.created_at");
+    qb.push(
+        " FROM events e CROSS JOIN search_query \
+         CROSS JOIN LATERAL profile_name_fields(e.content) AS fields",
+    );
+    push_name_columns(&mut qb, &["name", "display_name"]);
+    qb.push(" WHERE e.community_id = ");
     qb.push_bind(*community.as_uuid());
     qb.push(
         " AND e.kind = 0 AND e.channel_id IS NULL AND e.deleted_at IS NULL \
          AND e.search_tsv @@ search_query.query \
-         AND names.tsv @@ search_query.query\
-         ) AS matched ORDER BY tier, rank DESC, created_at DESC, id LIMIT ",
+         AND names.tsv @@ search_query.query",
+    );
+    if let Some(author) = verified_by {
+        qb.push(" UNION ALL SELECT decode(pubkey, 'hex'), ");
+        push_name_match(
+            &mut qb,
+            &VERIFIED_NAME_TAGS,
+            "to_timestamp((event ->> 'created_at')::bigint)",
+        );
+        qb.push(" FROM nip_fi_profile_heads CROSS JOIN search_query CROSS JOIN LATERAL (SELECT ");
+        for (i, tag) in VERIFIED_NAME_TAGS.iter().enumerate() {
+            if i > 0 {
+                qb.push(", ");
+            }
+            qb.push(format!("{} AS {tag}", verified_name(tag)));
+        }
+        qb.push(") AS fields");
+        push_name_columns(&mut qb, &VERIFIED_NAME_TAGS);
+        qb.push(" WHERE community_id = ");
+        qb.push_bind(*community.as_uuid());
+        qb.push(format!(
+            " AND pubkey ~ '^[0-9a-f]{{64}}$' AND {} @@ search_query.verified_query",
+            verified_names_tsv()
+        ));
+        // The head counts only while its event is live and signed by `author`.
+        qb.push(" AND EXISTS (SELECT 1 FROM events e WHERE e.community_id = ");
+        qb.push_bind(*community.as_uuid());
+        // `created_at` lets Postgres prune `events` to the head's partition.
+        qb.push(
+            " AND e.id = decode(event ->> 'id', 'hex') \
+             AND e.created_at = to_timestamp((event ->> 'created_at')::bigint) \
+             AND e.kind = 30382 AND e.pubkey = ",
+        );
+        qb.push_bind(author.to_vec());
+        qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
+    }
+    qb.push(
+        // Each person ranks by their single best match, not by mixing sources.
+        "), people AS (SELECT * FROM (SELECT DISTINCT ON (person) person, tier, \
+         rank, created_at FROM matches \
+         ORDER BY person, tier, rank DESC, created_at DESC) AS best \
+         ORDER BY tier, rank DESC, created_at DESC, person LIMIT ",
     );
     qb.push_bind(per_page as i64);
     qb.push(" OFFSET ");
     qb.push_bind(offset);
+    qb.push(
+        ") SELECT ev.id, ev.kind, ev.pubkey, ev.channel_id, \
+         EXTRACT(EPOCH FROM ev.created_at)::bigint AS created_at_s, people.rank \
+         FROM people CROSS JOIN LATERAL (\
+           (SELECT id, kind, pubkey, channel_id, created_at FROM events \
+            WHERE community_id = ",
+    );
+    qb.push_bind(*community.as_uuid());
+    qb.push(
+        " AND pubkey = people.person AND kind = 0 \
+         AND channel_id IS NULL AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id LIMIT 1)",
+    );
+    if let Some(author) = verified_by {
+        qb.push(
+            " UNION ALL (SELECT e.id, e.kind, e.pubkey, e.channel_id, e.created_at \
+             FROM nip_fi_profile_heads h JOIN events e ON e.community_id = h.community_id \
+             AND e.id = decode(h.event ->> 'id', 'hex') \
+             AND e.created_at = to_timestamp((h.event ->> 'created_at')::bigint) \
+             WHERE h.community_id = ",
+        );
+        qb.push_bind(*community.as_uuid());
+        qb.push(" AND h.pubkey = encode(people.person, 'hex') AND e.kind = 30382 AND e.pubkey = ");
+        qb.push_bind(author.to_vec());
+        qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
+    }
+    qb.push(
+        ") AS ev ORDER BY people.tier, people.rank DESC, people.created_at DESC, \
+         people.person, ev.kind",
+    );
 
     let rows = crate::cancel::fetch_all(pool, pool.acquire().await?, qb.build()).await?;
     let mut hits = Vec::with_capacity(rows.len());
@@ -545,6 +603,70 @@ pub async fn search_profile_names(
         });
     }
     Ok(SearchResult { hits, page })
+}
+
+/// Name tags of a relay-signed kind:30382 verified profile.
+const VERIFIED_NAME_TAGS: [&str; 3] = ["display_name", "username", "full_name"];
+
+/// The first value of `tag` in `nip_fi_profile_heads.event`. The relay
+/// writes each name tag at most once. Strict mode keeps a tag's array
+/// shape (lax mode unwraps it), and `silent` makes malformed tags no match.
+fn verified_name(tag: &str) -> String {
+    format!(
+        "(jsonb_path_query_first(event, 'strict $.tags[*] ? (@[0] == \"{tag}\")[1]', '{{}}', true) \
+         #>> '{{}}')"
+    )
+}
+
+/// The expression `idx_nip_fi_profile_heads_names` indexes
+/// (migrations/0081_nip_fi_profile_head_names.sql).
+fn verified_names_tsv() -> String {
+    let names = VERIFIED_NAME_TAGS
+        .iter()
+        .map(|tag| format!("COALESCE({}, '')", verified_name(tag)))
+        .collect::<Vec<_>>()
+        .join(" || ' ' || ");
+    format!("to_tsvector('simple', {names})")
+}
+
+/// Pushes `rank, created_at, tier` for one match over the `names` columns
+/// built by [`push_name_columns`] from the same `fields`.
+fn push_name_match(qb: &mut QueryBuilder<sqlx::Postgres>, fields: &[&str], created_at: &str) {
+    qb.push(format!(
+        "ts_rank_cd(names.tsv, search_query.query) AS rank, {created_at} AS created_at, LEAST("
+    ));
+    for (i, field) in fields.iter().enumerate() {
+        if i > 0 {
+            qb.push(", ");
+        }
+        let column = format!("names.{field}");
+        qb.push(format!(
+            "CASE WHEN {column} = search_query.typed THEN 0 \
+             WHEN starts_with({column}, search_query.typed) THEN 1 \
+             WHEN strpos({column}, ' ' || search_query.typed) > 0 THEN 2 ELSE 3 END"
+        ));
+    }
+    qb.push(") AS tier");
+}
+
+/// Pushes the `names` lateral: the `simple` tsvector of `fields` and each
+/// field normalized for tiers ([`TIER_TEXT`]).
+fn push_name_columns(qb: &mut QueryBuilder<sqlx::Postgres>, fields: &[&str]) {
+    let joined = fields
+        .iter()
+        .map(|field| format!("fields.{field}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    qb.push(format!(
+        " CROSS JOIN LATERAL (SELECT to_tsvector('simple', concat_ws(' ', {joined})) AS tsv"
+    ));
+    for field in fields {
+        qb.push(format!(
+            ", {} AS {field}",
+            tier_name(&format!("fields.{field}"))
+        ));
+    }
+    qb.push(") AS names");
 }
 
 #[cfg(test)]
