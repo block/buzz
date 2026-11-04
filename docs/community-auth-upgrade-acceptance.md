@@ -242,7 +242,11 @@ It follows the [owner's mode decision](buzz://message?channel=51940054-5a7a-4773
 Off preserves the stored policy and durable receipt but cannot establish active
 FI enforcement, even if an earlier drain acknowledgement exists. Returning to
 Shadow restores the stored requirement; do not infer completion from a receipt
-alone. In modes that evaluate FI, repair `deny_protected` retains 503 precedence.
+alone. `deny_protected` is a separate repair mode, not a modifier of Off,
+Shadow or Enforce. It denies protected admission with 503 before evidence
+parsing or verification; exercise it only within the dedicated staging scope.
+Confirm its discovery behavior against the exact reviewed BUZZ-511 contract;
+do not infer it from the three admission/discovery rows above.
 Nostr authentication, tenant resolution and membership remain required in every
 mode; Off bypasses FI checks, not these independent access controls.
 The operator enable/status API retains its separate signature, ownership,
@@ -278,8 +282,8 @@ guidance remain blocked.
 Before each injection, record its target boot, affected connection, operation and
 generation, the exact injector command, its scope and its inverse. Use isolated
 test infrastructure for shared DB/Redis faults unless staging has a reviewed way
-to constrain the fault. Deployment-wide setting changes are confined to the dedicated staging scope
-above; do not change shared-fleet policy or drain unrelated communities as a
+to constrain the fault. Deployment-wide setting changes are confined to the
+dedicated staging scope above; do not change shared-fleet policy or drain unrelated communities as a
 fallback. If an injector cannot preserve these boundaries,
 record the scenario blocked and use a deterministic local integration fixture.
 The local fixture supplies supplemental evidence only. Every matrix row is
@@ -312,8 +316,8 @@ Stop issuing upgrades or starting new injections immediately if a free/enforced
 control deviates from its authorized mode-specific baseline, a community outside
 the dedicated allowlist drains, scope no longer matches the allowlist, or evidence
 shows a false active result. Only the explicitly predicted fixture effects of an
-authorized mode transition are exempt; shared staging regressions never are. Apply the recorded inverse
-of each reversible fault, stop the fixture traffic and record the run as failed.
+authorized mode transition are exempt; shared staging regressions never are.
+Apply the recorded inverse of each reversible fault, stop the fixture traffic and record the run as failed.
 Notify the operator and reviewer with affected scope, operation/generation and
 the current recovery status. Recovery does not erase the failed observation.
 If the inverse fails, preserve its error and escalate the unresolved fault;
