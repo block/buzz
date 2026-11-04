@@ -238,6 +238,18 @@ enum ReadOutcome {
     Error(&'static str),
 }
 
+impl ReadOutcome {
+    /// The `outcome` and `reason` this read logs and is measured under.
+    fn parts(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            Self::Aborted => ("aborted", None),
+            Self::Served => ("served", None),
+            Self::Denied(r) => ("denied", Some(r)),
+            Self::Error(r) => ("error", Some(r)),
+        }
+    }
+}
+
 /// One access line per WebSocket REQ, COUNT or sync, written when the handler
 /// finishes (a sync's initial set completes), including when its future is
 /// dropped mid-read.
@@ -254,6 +266,8 @@ pub(crate) struct ReadLog {
     results: u64,
     /// Charged if the read ends denied; `None` once already charged.
     budget: Option<Arc<RefusalBudget>>,
+    /// When the handler took the frame; the read's duration ends at drop.
+    started: std::time::Instant,
 }
 
 impl ReadLog {
@@ -318,6 +332,9 @@ impl ReadLog {
             let mut log = Self::new(event, conn, sub_id, filters);
             log.budget = None;
             log.deny(reason);
+        } else {
+            // Over budget the line is suppressed, but the read still counts.
+            crate::metrics::record_ws_read_finished(event, "denied", Some(reason), 0.0);
         }
     }
 
@@ -362,6 +379,7 @@ impl ReadLog {
             outcome: ReadOutcome::Aborted,
             results: 0,
             budget: Some(Arc::clone(&conn.refusal_budget)),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -404,17 +422,19 @@ impl ReadLog {
 
 impl Drop for ReadLog {
     fn drop(&mut self) {
+        let (outcome, reason) = self.outcome.parts();
+        // Measured before the refusal budget, which only suppresses the line.
+        crate::metrics::record_ws_read_finished(
+            self.event,
+            outcome,
+            reason,
+            self.started.elapsed().as_secs_f64(),
+        );
         if let (ReadOutcome::Denied(_), Some(budget)) = (self.outcome, &self.budget) {
             if !budget.read() {
                 return;
             }
         }
-        let (outcome, reason) = match self.outcome {
-            ReadOutcome::Aborted => ("aborted", None),
-            ReadOutcome::Served => ("served", None),
-            ReadOutcome::Denied(r) => ("denied", Some(r)),
-            ReadOutcome::Error(r) => ("error", Some(r)),
-        };
         let s = &self.summary;
         let (events_queued, count) = match (self.event, self.outcome) {
             ("count", ReadOutcome::Served) => (None, Some(self.results)),
@@ -1569,6 +1589,7 @@ pub(crate) mod tests {
             outcome,
             results: 0,
             budget: None,
+            started: std::time::Instant::now(),
         };
         let (_, out) = capture(|| {
             drop(read(ReadOutcome::Error("database_error")));
@@ -1710,6 +1731,7 @@ pub(crate) mod tests {
                 outcome: ReadOutcome::Aborted,
                 results: 0,
                 budget: None,
+                started: std::time::Instant::now(),
             };
             for _ in 0..3 {
                 log.queued_one();
@@ -1744,6 +1766,7 @@ pub(crate) mod tests {
                 outcome: ReadOutcome::Aborted,
                 results: 0,
                 budget: None,
+                started: std::time::Instant::now(),
             };
         });
         let line = &out.lines()[0];
@@ -1756,6 +1779,65 @@ pub(crate) mod tests {
             "an uncounted COUNT has no count"
         );
         assert!(line.get("pubkey").is_none());
+    }
+
+    /// Every read is measured under its type, outcome and reason, including
+    /// the refusals whose lines the budget suppresses.
+    /// Mutation: record after the budget check in `Drop`, or drop the
+    /// over-budget branch of `refused_read` → RED.
+    #[test]
+    fn every_read_is_measured_even_when_its_line_is_suppressed() {
+        let (conn, _rx) =
+            crate::connection::tests::test_conn_with_auth(crate::connection::AuthState::Failed);
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            // More refusals than the budget logs: the rest are only counted.
+            for _ in 0..REFUSAL_LINES + 4 {
+                ReadLog::refused_read("req", &conn, "r", &[], "not_admitted");
+            }
+            // A handler denial past the budget: `Drop` suppresses its line.
+            ReadLog::req(&conn, "d", &[]).deny("auth_required");
+            ReadLog::count(&conn, "c", &[]).error("database_error");
+            ReadLog::sync(&conn, "s", &[]).served();
+            drop(ReadLog::req(&conn, "a", &[]));
+        });
+        let mut measured: Vec<(String, String, String, usize)> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_ws_read_seconds")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Histogram(samples) = value else {
+                    panic!("buzz_ws_read_seconds must be a histogram");
+                };
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default()
+                };
+                (
+                    label("type"),
+                    label("outcome"),
+                    label("reason"),
+                    samples.len(),
+                )
+            })
+            .collect();
+        measured.sort();
+        let row = |t: &str, o: &str, r: &str, n| (t.to_owned(), o.to_owned(), r.to_owned(), n);
+        assert_eq!(
+            measured,
+            [
+                row("count", "error", "database_error", 1),
+                row("req", "aborted", "none", 1),
+                row("req", "denied", "auth_required", 1),
+                row("req", "denied", "not_admitted", REFUSAL_LINES as usize + 4),
+                row("sync", "served", "none", 1),
+            ]
+        );
     }
 
     #[test]

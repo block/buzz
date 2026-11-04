@@ -134,7 +134,7 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
-  testWidgets('Retry capsule stays inset and invokes the action once', (
+  testWidgets('large-text Retry card stacks its action and invokes it once', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(320, 700);
@@ -192,9 +192,15 @@ void main() {
           .first;
       final outer = tester.getRect(shape);
       final inner = tester.getRect(button);
-      expect(inner.top - outer.top, 6);
-      expect(outer.right - inner.right, 6);
-      expect(outer.bottom - inner.bottom, 6);
+      expect(
+        inner.top,
+        greaterThanOrEqualTo(
+          tester.getRect(find.text('Couldn’t save changes')).bottom,
+        ),
+      );
+      expect(inner.left - outer.left, 12);
+      expect(outer.right - inner.right, 12);
+      expect(outer.bottom - inner.bottom, 12);
       final style = tester.widget<FilledButton>(button).style!;
       expect(style.backgroundColor!.resolve({}), Colors.white);
       expect(style.foregroundColor!.resolve({}), Colors.black);

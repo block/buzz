@@ -552,6 +552,11 @@ fn describe_ws_read_metrics() {
         "buzz_ws_reads_total",
         "WebSocket REQ (including NIP-AR sync) and COUNT frames received, by type, whatever the log level"
     );
+    metrics::describe_histogram!(
+        "buzz_ws_read_seconds",
+        metrics::Unit::Seconds,
+        "WebSocket REQ, sync and COUNT reads from handler start to their end (REQ: EOSE queued; sync: initial set; COUNT: total sent), by type, outcome and reason, whatever the log level"
+    );
 }
 
 /// Export every WebSocket read series at zero.
@@ -564,6 +569,24 @@ fn initialize_ws_read_metric_series() {
 /// Count one parsed WebSocket REQ, sync or COUNT frame, before admission.
 pub(crate) fn record_ws_read(kind: &'static str) {
     metrics::counter!("buzz_ws_reads_total", "type" => kind).increment(1);
+}
+
+/// Record how one WebSocket read ended and how long it took. `outcome` is
+/// `served`, `denied`, `error` or `aborted`; `reason` is the fixed denial or
+/// error code, or `none`.
+pub(crate) fn record_ws_read_finished(
+    kind: &'static str,
+    outcome: &'static str,
+    reason: Option<&'static str>,
+    seconds: f64,
+) {
+    metrics::histogram!(
+        "buzz_ws_read_seconds",
+        "type" => kind,
+        "outcome" => outcome,
+        "reason" => reason.unwrap_or("none"),
+    )
+    .record(seconds);
 }
 
 /// Export the partition audit counters at zero before the first audit, so
