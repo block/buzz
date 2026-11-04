@@ -67,6 +67,21 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
 
   @override
   void didChangeMetrics() {
+    // iOS drops the keyboard inset while the app is inactive (Control Center,
+    // the app switcher) and restores the keyboard natively on return. Treating
+    // that drop as a dismissal collapsed the composer and left the restored
+    // keyboard attached to no field, so reconcile only once the app resumes.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    _reconcile();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _reconcile();
+  }
+
+  void _reconcile() {
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();

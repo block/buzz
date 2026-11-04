@@ -1144,6 +1144,33 @@ void main() {
       addTearDown(tester.view.reset);
       await tester.pump();
 
+      // iOS drops the inset while Control Center or the app switcher covers
+      // the app, then restores the keyboard natively. That is not a dismissal.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+
+      // A keyboard that stayed down across the inactive spell is reconciled
+      // when the app resumes.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
+
+      await tester.tap(find.text('Message…'));
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+
       tester.view.viewInsets = FakeViewPadding.zero;
       await tester.pumpAndSettle();
 
