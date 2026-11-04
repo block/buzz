@@ -173,9 +173,12 @@ Apply a timeout separately. Content and ephemeral writes are denied until
 expiry or untimeout. Read access and already-admitted root/audio sessions remain
 available. Reports (kind 1984), unban (9041), untimeout (9043), personal read-state
 updates and Git operations remain permitted subject to their normal permissions;
-do not count these as timeout failures. Cross-pod ephemeral denial may take up
-to the documented 30-second cache interval. A timeout is not a blanket ban. Repeat a same-key action in B to establish
-that an A restriction did not cross the community boundary.
+do not count these as timeout failures. Measure cross-pod ephemeral denial
+against the deployed `RESTRICTION_CACHE_MAX_AGE` (1 second at this revision),
+plus request and measurement latency. Record those latencies separately so
+they cannot hide a cache propagation regression. A timeout is not a blanket
+ban. Repeat a same-key action in B to establish that an A restriction did not
+cross the community boundary.
 
 ## Existing sessions and cross-pod evidence
 
