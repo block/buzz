@@ -58,9 +58,9 @@ configuration.
 ## Usage history feed
 
 The same transaction that replaces the snapshot appends one
-`storage_usage_history` row per community: every community in the snapshot,
-plus an explicit zero for each serving community (not archived, not being
-deleted) the snapshot omits, so a consumer keeping the latest value per
+`storage_usage_history` row per community: every community in the snapshot
+that is not yet fenced for deletion, plus an explicit zero for each serving
+community (not archived, not being deleted) the snapshot omits, so a consumer keeping the latest value per
 community never keeps a stale nonzero one. Each run also prunes rows older
 than 400 days. A worker whose lock session died writes neither the snapshot
 nor history.
@@ -95,11 +95,14 @@ GET /operator/storage-usage?after=<cursor>&limit=<1..1000, default 500>
   page means the consumer has caught up; `next_cursor` then echoes `after`.
 - Cursors grow in commit order because runs serialize on the worker lock, so
   a consumer never skips a row that commits later with a smaller cursor.
-- Archived or deleting communities that still hold bytes are included.
-  `community_host` is the community's current host. Rows for a community with
-  no community row, or whose community was deleted (deletion severs their
-  provenance), are skipped before `limit` applies, so a page shorter than
-  `limit` means the consumer has caught up.
+- Archived and quiescing communities that still hold bytes are included.
+  Once deletion fences a community, later runs write no rows for it, even
+  from a scan that started before the fence: the run holds each community row
+  it writes for until commit, and the fence waits for it. Purge then severs
+  the community's earlier rows. `community_host` is the community's current
+  host. Severed rows and rows for a deleted community are skipped before
+  `limit` applies, so a page shorter than `limit` means the consumer has
+  caught up.
 - The relay keeps no delivery state and never calls out. A consumer that
   falls behind catches up on its next poll, as long as it polls within the
   retention window.

@@ -8641,18 +8641,20 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .to_owned();
         seed_relay_admin_rows(&db, bystander).await;
         // Storage usage history is provenance-only: purge severs the purged
-        // community's rows and leaves the bystander's attributed.
-        for owner in [community, bystander] {
-            sqlx::query(
-                "INSERT INTO storage_usage_history \
-                 (measured_at, usage_community_id, storage_bytes, storage_objects) \
-                 VALUES (now(), $1, 7, 1)",
-            )
-            .bind(owner)
-            .execute(&db.pool)
+        // community's rows and leaves the bystander's attributed. The scan
+        // below is captured before deletion starts and saved both before the
+        // fence and again after purge, like a slow scan racing deletion.
+        let mut accounting = db
+            .try_lock_storage_accounting()
             .await
-            .expect("seed storage usage history");
-        }
+            .expect("storage accounting lock")
+            .expect("storage accounting leader");
+        let captured_scan = serde_json::json!({
+            "per_community": {
+                community.to_string(): {"bytes": 7, "objects": 1},
+                bystander.to_string(): {"bytes": 3, "objects": 1},
+            },
+        });
         // Operator workflow history is retained even when its provenance
         // community is purged; it is not a tenant-owned serving table.
         let entity = db
@@ -8701,6 +8703,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("claim")
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        accounting
+            .save_snapshot(&captured_scan, 1, 1, "before-fence")
+            .await
+            .expect("save scan before fence");
         let generation = store.fence(&claim.lease).await.expect("fence");
         let token = LeaseToken {
             fence_generation: Some(generation),
@@ -8716,6 +8722,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        accounting
+            .save_snapshot(&captured_scan, 1, 1, "after-purge")
+            .await
+            .expect("save stale scan after purge");
 
         let retained: Uuid = sqlx::query_scalar(
             "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",
@@ -8747,8 +8757,10 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .bind(owner)
             .fetch_one(&db.pool)
         };
+        // The pre-fence row was severed, and the stale scan saved after purge
+        // attributed nothing to the purged community.
         assert_eq!(usage_rows(community).await.expect("count purged"), 0);
-        assert_eq!(usage_rows(bystander).await.expect("count bystander"), 1);
+        assert_eq!(usage_rows(bystander).await.expect("count bystander"), 2);
         let severed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM storage_usage_history \
              WHERE usage_community_id IS NULL AND storage_bytes = 7",
@@ -8757,6 +8769,14 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         .await
         .expect("count severed");
         assert_eq!(severed, 1, "purge severs provenance instead of deleting");
+        let purged_host: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community)
+            .fetch_one(&db.pool)
+            .await
+            .expect("tombstone keeps its host");
+        let feed = db.list_storage_usage(0, 1000).await.expect("read feed");
+        assert!(feed.iter().all(|row| row.community_host != purged_host));
+        assert_eq!(feed.iter().filter(|row| row.storage_bytes == 3).count(), 2);
 
         // Logical verification must prove these tables empty too: a straggler
         // direct action (not write-fenced, no report FK) fails the proof.

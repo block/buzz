@@ -58,6 +58,14 @@ impl StorageAccountingLeader {
     /// so a consumer keeping the latest value per community never keeps a
     /// stale nonzero one. Rows past the retention window are pruned in the
     /// same transaction. A worker whose lock session died can write neither.
+    ///
+    /// Only communities that are not yet fenced for deletion get rows, and
+    /// their community rows are held `FOR KEY SHARE` until commit. Fencing
+    /// takes `FOR UPDATE` on the community row before purge can run, so a
+    /// fence either waits for this commit (and purge later severs the rows)
+    /// or commits first (and the re-checked row is skipped). A scan that
+    /// captured a community before it was deleted therefore cannot attribute
+    /// usage to it after purge severed its history.
     /// Runs serialize on the worker lock, so history ids grow in commit order
     /// and are safe to page with an `id > cursor` feed.
     #[datastore_span(name = "save_storage_accounting_snapshot", system = "postgresql")]
@@ -92,15 +100,20 @@ impl StorageAccountingLeader {
                       (entry.value->>'bytes')::bigint AS bytes, \
                       (entry.value->>'objects')::bigint AS objects \
                FROM jsonb_each(COALESCE($1->'per_community', '{}'::jsonb)) AS entry \
+             ), \
+             eligible AS ( \
+               SELECT c.id FROM communities c \
+               WHERE c.deletion_state IN ('active', 'quiescing') \
+                 AND (c.id IN (SELECT community_id FROM measured) \
+                      OR (c.archived_at IS NULL AND c.deleted_at IS NULL \
+                          AND c.deletion_state = 'active')) \
+               FOR KEY SHARE OF c \
              ) \
              INSERT INTO storage_usage_history \
                (measured_at, usage_community_id, storage_bytes, storage_objects) \
-             SELECT transaction_timestamp(), community_id, bytes, objects FROM measured \
-             UNION ALL \
-             SELECT transaction_timestamp(), c.id, 0, 0 FROM communities c \
-             WHERE c.archived_at IS NULL AND c.deleted_at IS NULL \
-               AND c.deletion_state = 'active' \
-               AND NOT EXISTS (SELECT 1 FROM measured m WHERE m.community_id = c.id)",
+             SELECT transaction_timestamp(), e.id, \
+                    COALESCE(m.bytes, 0), COALESCE(m.objects, 0) \
+             FROM eligible e LEFT JOIN measured m ON m.community_id = e.id",
         )
         .bind(snapshot)
         .execute(&mut *tx)
@@ -158,10 +171,10 @@ impl Db {
         ))
     }
 
-    /// Page the usage history after `after`, oldest first, for communities
-    /// that still have a community row. Rows whose community was deleted
-    /// (provenance severed) or never had a row are skipped before `limit`
-    /// applies, so a page shorter than `limit` means the feed is caught up.
+    /// Page the usage history after `after`, oldest first. Rows whose
+    /// community was deleted (provenance severed, or a tombstone) are skipped
+    /// before `limit` applies, so a page shorter than `limit` means the feed
+    /// is caught up.
     #[datastore_span(name = "list_storage_usage", system = "postgresql")]
     pub async fn list_storage_usage(
         &self,
@@ -175,7 +188,8 @@ impl Db {
             "SELECT h.id, h.measured_at, c.host, h.storage_bytes, h.storage_objects \
              FROM storage_usage_history h \
              JOIN communities c ON c.id = h.usage_community_id \
-             WHERE h.id > $1 ORDER BY h.id LIMIT $2",
+             WHERE h.id > $1 AND c.deletion_state <> 'tombstone' \
+             ORDER BY h.id LIMIT $2",
         )
         .bind(after)
         .bind(limit)
@@ -424,5 +438,127 @@ mod postgres_tests {
         }
         let total = db.list_storage_usage(0, 1000).await.expect("all").len();
         assert_eq!(walked, total);
+    }
+
+    /// A fence that holds its community row while a scan saves makes the save
+    /// wait, and the save then re-checks the row and skips the now-fenced
+    /// community, so purge can never miss a row the save was still writing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn usage_history_waits_for_a_concurrent_fence_and_skips_its_community() {
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
+        let db = Db::from_pool(pool.clone());
+        let mut ids = Vec::new();
+        for host in ["fencing.example", "bystander.example"] {
+            let id = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO communities (host, deletion_state) \
+                 VALUES ($1, 'quiescing') RETURNING id",
+            )
+            .bind(host)
+            .fetch_one(&pool)
+            .await
+            .expect("insert community");
+            ids.push(id);
+        }
+        let (fencing, bystander) = (ids[0], ids[1]);
+
+        // The same row lock and transition the deletion fence takes.
+        let mut fence = pool.begin().await.expect("begin fence");
+        sqlx::query("SELECT deletion_fence_generation FROM communities WHERE id = $1 FOR UPDATE")
+            .bind(fencing)
+            .execute(&mut *fence)
+            .await
+            .expect("lock community for fence");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'fenced', \
+                    deletion_fence_generation = deletion_fence_generation + 1 \
+             WHERE id = $1",
+        )
+        .bind(fencing)
+        .execute(&mut *fence)
+        .await
+        .expect("fence community");
+
+        let mut leader = db
+            .try_lock_storage_accounting()
+            .await
+            .expect("lock")
+            .expect("worker owns lock");
+        let scan = serde_json::json!({
+            "per_community": {
+                fencing.to_string(): {"bytes": 7, "objects": 1},
+                bystander.to_string(): {"bytes": 3, "objects": 1},
+            },
+        });
+        let save = tokio::spawn(async move {
+            leader
+                .save_snapshot(&scan, 1, 1, "racing-fence")
+                .await
+                .expect("save snapshot")
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                       AND query LIKE '%INSERT INTO storage_usage_history%')",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("read lock waits");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("save waits on the fenced community row");
+        assert!(!save.is_finished(), "save must not commit past the fence");
+
+        fence.commit().await.expect("commit fence");
+        save.await.expect("save task");
+
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            "SELECT usage_community_id, storage_bytes FROM storage_usage_history \
+             WHERE usage_community_id = ANY($1) ORDER BY storage_bytes",
+        )
+        .bind(vec![fencing, bystander])
+        .fetch_all(&pool)
+        .await
+        .expect("read history");
+        assert_eq!(rows, vec![(bystander, 3)]);
+    }
+
+    /// A tombstone keeps its host, so the feed must not serve rows still
+    /// attributed to it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn usage_feed_hides_rows_attributed_to_a_tombstone() {
+        let (pool, _scratch) =
+            ScratchDb::migrated(&crate::test_support::database_url(), "storage_accounting").await;
+        let db = Db::from_pool(pool.clone());
+        let tombstone = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO communities (host, deleted_at, archived_at, deletion_state) \
+             VALUES ('tombstone.example', now(), now(), 'tombstone') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert tombstone");
+        sqlx::query(
+            "INSERT INTO storage_usage_history \
+             (measured_at, usage_community_id, storage_bytes, storage_objects) \
+             VALUES (now(), $1, 7, 1)",
+        )
+        .bind(tombstone)
+        .execute(&pool)
+        .await
+        .expect("insert attributed row");
+
+        let feed = db.list_storage_usage(0, 1000).await.expect("read feed");
+        assert!(feed
+            .iter()
+            .all(|row| row.community_host != "tombstone.example"));
     }
 }

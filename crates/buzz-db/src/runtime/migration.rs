@@ -2897,6 +2897,7 @@ mod postgres_tests {
             "channel_members",
             "communities",
             "entity_deletion_stage_history",
+            "storage_usage_history",
             "user_deletion_fences",
         ] {
             assert_eq!(
@@ -2936,6 +2937,7 @@ mod postgres_tests {
             "entity_deletion_stage_history",
             "user_deletion_fences",
             "entity_deletion_approvals",
+            "storage_usage_history",
         ] {
             assert_eq!(
                 constraints(&desired, table).await,
