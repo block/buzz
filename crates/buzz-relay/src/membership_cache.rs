@@ -134,16 +134,6 @@ mod tests {
         }
     }
 
-    async fn enrolled(entry: &Entry, count: usize) {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while Arc::strong_count(entry) < count {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("all readers enrolled on the same entry");
-    }
-
     #[tokio::test]
     async fn concurrent_channels_share_one_membership_read() {
         let cache = Arc::new(MembershipCache::new(Duration::from_secs(5)));
@@ -166,25 +156,23 @@ mod tests {
             })
         };
         started.await.unwrap();
-        let entry = cache.entries.get(&key).unwrap();
-        let baseline = Arc::strong_count(&entry);
-        let waiters = channels
+        let mut waiters = channels
             .into_iter()
             .map(|channel| {
-                let cache = cache.clone();
-                let key = key.clone();
-                tokio::spawn(async move {
-                    cache
-                        .contains(key, channel, async { panic!("duplicate database read") })
-                        .await
-                })
+                Box::pin(cache.contains(key.clone(), channel, async {
+                    panic!("duplicate database read")
+                }))
             })
             .collect::<Vec<_>>();
-        enrolled(&entry, baseline + waiters.len()).await;
+        // Poll each future into the held gate before releasing the leader.
+        // This does not depend on scheduling or moka's internal Arc clones.
+        for waiter in &mut waiters {
+            assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        }
         release.send(()).unwrap();
         assert!(leader.await.unwrap().unwrap());
         for waiter in waiters {
-            assert!(waiter.await.unwrap().unwrap());
+            assert!(waiter.await.unwrap());
         }
         assert!(!cache
             .contains(key, Uuid::from_u128(281), async {
@@ -294,23 +282,13 @@ mod tests {
             })
         };
         started.await.unwrap();
-        let entry = cache.entries.get(&key).unwrap();
-        let baseline = Arc::strong_count(&entry);
-        let waiter = {
-            let cache = cache.clone();
-            let key = key.clone();
-            tokio::spawn(async move {
-                cache
-                    .contains(key, channel, async { Ok(snapshot(vec![channel])) })
-                    .await
-            })
-        };
-        enrolled(&entry, baseline + 1).await;
+        let waiter = cache.contains(key, channel, async { Ok(snapshot(vec![channel])) });
+        tokio::pin!(waiter);
+        assert!(futures_util::poll!(&mut waiter).is_pending());
         leader.abort();
         assert!(leader.await.unwrap_err().is_cancelled());
         assert!(tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
-            .unwrap()
             .unwrap()
             .unwrap());
     }
@@ -393,33 +371,17 @@ mod postgres_tests {
 
         // Hold the only connection until every channel check reaches the cache.
         let held = pool.acquire().await.unwrap();
-        let reads = channels
+        let mut reads = channels
             .iter()
-            .map(|&channel| {
-                let state = state.clone();
-                let user = user.clone();
-                tokio::spawn(async move { state.is_member_cached(community, channel, &user).await })
-            })
+            .map(|&channel| Box::pin(state.is_member_cached(community, channel, &user)))
             .collect::<Vec<_>>();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if state
-                    .membership_cache
-                    .entries
-                    .get(&(community, user.clone()))
-                    .is_some_and(|entry| Arc::strong_count(&entry) >= reads.len() + 2)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("every check reached the same cache entry");
+        for read in &mut reads {
+            assert!(futures_util::poll!(read.as_mut()).is_pending());
+        }
         assert_eq!(misses(), 1, "only one query may wait for the pool");
         drop(held);
         for read in reads {
-            assert!(read.await.unwrap().unwrap());
+            assert!(read.await.unwrap());
         }
         assert_eq!(misses(), 1, "280 channel checks share one database query");
 

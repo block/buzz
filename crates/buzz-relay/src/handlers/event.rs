@@ -3457,6 +3457,8 @@ mod tests {
                 "visibility lookup"
             );
 
+            // Drop the known user's whole snapshot so this must read the DB.
+            state.membership_cache.invalidate(community_id, &pk);
             // The membership lookup fails (Redis fan-out).
             let channel_id = Uuid::new_v4();
             private(channel_id);
