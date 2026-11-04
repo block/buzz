@@ -440,25 +440,17 @@ class ComposeBar extends HookConsumerWidget {
           }
           mentionQuery.value = open.query;
           mentionStartIdx.value = open.start;
-          channelQuery.value = null;
         } else {
           mentionQuery.value = null;
         }
 
-        // Channel autocomplete detection — only when no @mention is active.
-        if (mentionQuery.value == null) {
-          final hashPos = findTrigger(text, cursor, '#');
-          if (hashPos != null) {
-            channelQuery.value = text
-                .substring(hashPos + 1, cursor)
-                .toLowerCase();
-            channelStartIdx.value = hashPos;
-          } else {
-            channelQuery.value = null;
-          }
-        } else {
-          channelQuery.value = null;
-        }
+        // Channel autocomplete detection. It shows only while no mention
+        // query takes the caret (see `channelQueryShown`).
+        final hashPos = findTrigger(text, cursor, '#');
+        channelQuery.value = hashPos == null
+            ? null
+            : text.substring(hashPos + 1, cursor).toLowerCase();
+        if (hashPos != null) channelStartIdx.value = hashPos;
       }
 
       controller.addListener(listener);
@@ -474,6 +466,13 @@ class ComposeBar extends HookConsumerWidget {
     );
     shownMentions.value = mentionRows;
     final suggestions = mentionRows.rows;
+    // A settled query that names no one is prose: `#` after it opens
+    // channel suggestions. Derived each build, so it follows the rows.
+    final channelQueryShown =
+        mentionQuery.value == null ||
+            _mentionIsProse(mentionQuery.value!, mentionRows)
+        ? channelQuery.value
+        : null;
 
     // Resolve owner names for the visible "managed by …" subtitles.
     useEffect(() {
@@ -486,7 +485,7 @@ class ComposeBar extends HookConsumerWidget {
 
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
-    final channelSuggestions = filterChannels(channels, channelQuery.value);
+    final channelSuggestions = filterChannels(channels, channelQueryShown);
 
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {

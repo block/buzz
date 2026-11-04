@@ -295,8 +295,26 @@ void main() {
       const longer = (channelId: _channelId, query: 'ali', opening: 1);
       open(longer);
       expect(shownFor(longer), [_alice]);
-      // Its own search can still add people, so it is pending.
+      // The complete page answers it, so it runs no search of its own.
+      expect(container.read(mentionSearchPendingProvider(longer)), isFalse);
+      await passTypingPause();
+      expect(session.searches, hasLength(1));
+    });
+
+    test('a truncated page does not answer a longer query', () async {
+      await passTypingPause();
+      session.searches.first.complete([
+        for (var i = 0; i < mentionSearchPageLimit; i++)
+          _profile(i.toRadixString(16).padLeft(64, 'c'), 'Al $i'),
+      ]);
+      await container.pump();
+
+      const longer = (channelId: _channelId, query: 'al 1', opening: 1);
+      open(longer);
+      // The relay may have more people, so the longer query searches.
       expect(container.read(mentionSearchPendingProvider(longer)), isTrue);
+      await passTypingPause();
+      expect(session.searches, hasLength(2));
     });
   });
 }

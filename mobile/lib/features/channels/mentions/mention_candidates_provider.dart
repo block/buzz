@@ -45,7 +45,10 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       if (disposed) return const [];
 
       final session = ref.read(relaySessionProvider.notifier);
-      final events = await session.searchProfiles(trimmed);
+      final events = await session.searchProfiles(
+        trimmed,
+        limit: mentionSearchPageLimit,
+      );
 
       // Keep only the latest kind:0 event per pubkey (the bridge does not
       // honor the `kinds` filter under search, and may return several
@@ -63,10 +66,31 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       final people = [
         for (final event in latestByPubkey.values) _profileFromEvent(event),
       ];
-      // A search that outlived its query or community is not kept.
-      if (!disposed) ref.read(mentionSearchCacheProvider).put(trimmed, people);
+      // A search that outlived its query or community is not kept. A page
+      // short of the limit holds every match (portable mention rules,
+      // section 6).
+      if (!disposed) {
+        ref
+            .read(mentionSearchCacheProvider)
+            .put(
+              trimmed,
+              people,
+              complete: events.length < mentionSearchPageLimit,
+            );
+      }
       return people;
     });
+
+/// Results one directory search asks the relay for.
+const mentionSearchPageLimit = 50;
+
+/// The directory search for [query], or null when a finished, complete
+/// search for a shorter prefix already answers it, so no request is made
+/// (portable mention rules, section 6). Watching it runs the search.
+AsyncValue<List<UserProfile>>? watchMentionSearch(Ref ref, String query) =>
+    ref.read(mentionSearchCacheProvider).answers(query)
+    ? null
+    : ref.watch(mentionUserSearchProvider(query));
 
 UserProfile _profileFromEvent(NostrEvent event) {
   final data = ProfileData.fromEvent(event);
@@ -91,6 +115,7 @@ typedef MentionChooserArgs = ({String channelId, String query, int opening});
 class MentionSearchCache {
   static const limit = 64;
   final _pages = <String, List<UserProfile>>{};
+  final _complete = <String>{};
 
   static String _key(String query) => query.trim().toLowerCase();
 
@@ -109,17 +134,39 @@ class MentionSearchCache {
     return null;
   }
 
-  /// Keeps [people] as the latest search for [query], newest last.
-  void put(String query, List<UserProfile> people) {
+  /// Whether a complete search for a shorter prefix of [query] holds every
+  /// match for it. The relay matches names by prefix, so a longer query
+  /// needs no search of its own; one that prefix refuted finds no one. An
+  /// exact key is an author lookup that no name prefix answers.
+  bool answers(String query) {
+    final key = _key(query);
+    if (_hexKey.hasMatch(key)) return false;
+    for (var end = key.length - 1; end > 0; end--) {
+      if (_complete.contains(key.substring(0, end))) return true;
+    }
+    return false;
+  }
+
+  /// Keeps [people] as the latest search for [query], newest last. A
+  /// [complete] page holds every match: the relay had no more.
+  void put(String query, List<UserProfile> people, {bool complete = false}) {
     final key = _key(query);
     if (key.isEmpty) return;
     _pages.remove(key);
     _pages[key] = people;
+    if (complete) {
+      _complete.add(key);
+    } else {
+      _complete.remove(key);
+    }
     while (_pages.length > limit) {
+      _complete.remove(_pages.keys.first);
       _pages.remove(_pages.keys.first);
     }
   }
 }
+
+final _hexKey = RegExp(r'^[0-9a-f]{64}$');
 
 /// Nothing in the search cache outlives the community or the signer.
 final mentionSearchCacheProvider = Provider<MentionSearchCache>((ref) {
@@ -237,14 +284,14 @@ final recipientSearchPendingProvider = Provider.family
     .autoDispose<bool, String>(
       (ref, query) =>
           query.trim().isNotEmpty &&
-          ref.watch(mentionUserSearchProvider(query)).isLoading,
+          (watchMentionSearch(ref, query)?.isLoading ?? false),
     );
 
 /// Whether a recipient picker's directory search for [query] failed.
 final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
   (ref, query) {
-    final search = ref.watch(mentionUserSearchProvider(query));
-    return search.hasError && !search.isLoading;
+    final search = watchMentionSearch(ref, query);
+    return search != null && search.hasError && !search.isLoading;
   },
 );
 
@@ -308,8 +355,7 @@ List<MentionCandidate> _chooserCandidates(
         : const <UserProfile>[],
   );
   if (directory) {
-    final search = ref.watch(mentionUserSearchProvider(query));
-    final page = search.asData?.value;
+    final page = watchMentionSearch(ref, query)?.asData?.value;
     if (page != null) candidates = build(page);
   }
   // A verified name replaces the self-declared one for matching, ranking
@@ -404,8 +450,8 @@ final mentionSearchFailedProvider = Provider.family
           !channel.mentionsOutsidePeople) {
         return false;
       }
-      final search = ref.watch(mentionUserSearchProvider(args.query));
-      return search.hasError && !search.isLoading;
+      final search = watchMentionSearch(ref, args.query);
+      return search != null && search.hasError && !search.isLoading;
     });
 
 /// Whether this chooser's directory search is still running, so people may
@@ -420,5 +466,5 @@ final mentionSearchPendingProvider = Provider.family
           args.query.trim().isEmpty) {
         return false;
       }
-      return ref.watch(mentionUserSearchProvider(args.query)).isLoading;
+      return watchMentionSearch(ref, args.query)?.isLoading ?? false;
     });

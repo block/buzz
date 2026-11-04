@@ -3224,7 +3224,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      // A longer query keeps the shown rows while its own search runs.
+      // The complete page for `b` answers a longer query: no search of its
+      // own (portable mention rules, section 6).
       await tester.enterText(find.byKey(const Key('new-dm-search')), 'bo');
       await tester.pump();
       expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
@@ -3234,7 +3235,7 @@ void main() {
       await tester.enterText(find.byKey(const Key('new-dm-search')), 'b');
       await tester.pump();
       expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
-      expect(session.searches, ['b', 'bo']);
+      expect(session.searches, ['b']);
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pumpAndSettle();
 
