@@ -4038,10 +4038,7 @@ mod tests {
                 })
                 .collect();
             timed.sort();
-            assert_eq!(
-                timed,
-                [("accepted".to_owned(), 1), ("invalid".to_owned(), 1)]
-            );
+            assert_eq!(timed, [("accepted".to_owned(), 1), ("auth".to_owned(), 1)]);
         }
 
         /// Stored writes skip the cached serving state: a cached "fenced"
