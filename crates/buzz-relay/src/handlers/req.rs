@@ -123,10 +123,14 @@ pub async fn handle_req(
     // confirmed below; bound that set before any membership I/O.
     let named_channels = super::system_channels::channels_named_by_filters(&filters);
     if named_channels.len() > MAX_EXPLICIT_CHANNEL_VALUES {
-        conn.send(RelayMessage::closed(
+        super::close::refuse(
             &sub_id,
             "restricted: too many explicit channels",
-        ));
+            &conn,
+            &state,
+        )
+        .await;
+        access.deny("too_many_channels");
         return;
     }
 

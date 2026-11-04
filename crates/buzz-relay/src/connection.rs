@@ -2608,7 +2608,8 @@ pub(crate) mod tests {
     /// An ordinary REQ that `handle_req` itself refuses, before it claims its
     /// ID, still replaces the old holder (NIP-01): a live subscription or an
     /// artifact sync must not keep using an ID the client was told is closed.
-    /// Covers the auth, scope, channel-count and database-error refusals.
+    /// Covers the auth, scope, channel-count (by `#h` and by group-state `#d`)
+    /// and database-error refusals.
     /// Mutation: send any of them as a bare `CLOSED` → RED.
     #[tokio::test]
     async fn in_handler_req_refusal_retires_the_old_holder() {
@@ -2633,6 +2634,11 @@ pub(crate) mod tests {
             (
                 authenticated_state(),
                 serde_json::json!({"kinds": [1], "#h": too_many}),
+                "restricted: too many explicit channels",
+            ),
+            (
+                authenticated_state(),
+                serde_json::json!({"kinds": [39000], "#d": too_many}),
                 "restricted: too many explicit channels",
             ),
             (
