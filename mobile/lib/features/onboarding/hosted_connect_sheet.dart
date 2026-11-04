@@ -279,7 +279,10 @@ class HostedConnectSheet extends HookConsumerWidget {
         flow.addingCommunityName == null
             ? 'Getting ready…'
             : 'Joining your community',
-      HostedFlowStage.blocked => 'Let’s try that again',
+      HostedFlowStage.blocked =>
+        flow.failedCommunityName == null
+            ? 'Let’s try that again'
+            : 'Couldn’t open ${flow.failedCommunityName}',
       HostedFlowStage.communityConflict => 'Keep your saved identity',
       HostedFlowStage.browserReturned => 'Continue in your browser',
       _ => 'Connect to Builderlab',

@@ -143,6 +143,18 @@ class HostedFlow extends ChangeNotifier {
   String? _batchSubject;
   String? _conflictingRelay;
   String? _failedRelay;
+  String? get failedCommunityName {
+    final relay = _failedRelay;
+    if (relay == null) return null;
+    final community = communities
+        .where((item) => item.relayUrl == relay)
+        .firstOrNull;
+    return HostedEnvironment.communityDisplayName(
+      community?.name ?? Uri.parse(relay).host,
+      relay,
+    );
+  }
+
   bool get canSkipFailedCommunity =>
       canChangeCommunities &&
       stage == HostedFlowStage.blocked &&
@@ -714,7 +726,7 @@ class HostedFlow extends ChangeNotifier {
     }
     _returnToAddedCommunity = false;
     _openAddedCommunity = null;
-    selectedRelays = Set.unmodifiable({...selectedRelays, relay});
+    selectedRelays = Set.unmodifiable({relay});
     landingRelay = relay;
     notifyListeners();
   }
@@ -823,7 +835,7 @@ class HostedFlow extends ChangeNotifier {
         return;
       }
       landingRelay = listed.first.relayUrl;
-      // Choose where to land; every membership is restored.
+      // A picker tap narrows admission to the chosen community.
       _set(HostedFlowStage.chooseCommunities);
       return;
     }

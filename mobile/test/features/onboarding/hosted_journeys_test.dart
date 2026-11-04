@@ -110,6 +110,7 @@ void main() {
           await f.tap(tester, 'Accept and join');
         }
         expect(f.flow.stage, HostedFlowStage.blocked);
+        expect(find.text('Couldn’t open two'), findsOneWidget);
         expect(find.text('Try again').hitTestable(), findsOneWidget);
         expect(find.text('Community home').hitTestable(), findsNothing);
         final newRelay = selfHosted
@@ -1040,7 +1041,7 @@ void main() {
   }
 
   journey(
-    'choose second cloud identity, dismiss profile, retry remaining batch without losing keys',
+    'choose second cloud identity, dismiss profile, and enter only the selected community',
     (tester, f) async {
       await f.initialize(localIdentity: false, cloudChoice: true);
       f.cloudKeys.addAll([f.keys, f.secondKeys]);
@@ -1103,14 +1104,12 @@ void main() {
       ).pop();
       await f.settle(tester);
       expect(f.profileWrites, isEmpty);
-      expect(find.text('Try again').hitTestable(), findsOneWidget);
       expect(
         (await f.storage.loadAll()).map((c) => c.id),
         containsAll([legacy.id, firstSaved.id]),
       );
-      await f.tap(tester, 'Try again');
       final saved = await f.storage.loadAll();
-      expect(saved, hasLength(3));
+      expect(saved, hasLength(2));
       expect(saved.singleWhere((c) => c.id == legacy.id).nsec, f.keys.nsec);
       expect(
         saved
@@ -1131,7 +1130,7 @@ void main() {
       );
       expect(
         f.probes.where((c) => c.relayUrl == 'wss://two.communities.buzz.xyz'),
-        hasLength(2),
+        isEmpty,
       );
       expect(find.byType(OnboardingAppEntry), findsNothing);
     },
@@ -1177,20 +1176,17 @@ void main() {
         expect(f.probes, isEmpty);
         await tester.tap(find.byType(CommunityGridOption).last);
         await f.settle(tester);
-        // All memberships are restored; the second is the chosen destination.
+        // Only the tapped community is admitted.
         expect(f.profileWrites, isEmpty);
         expect(
           find.byType(ProfileSetupPage, skipOffstage: false),
           findsNothing,
         );
         final communities = await f.storage.loadAll();
-        expect(communities, hasLength(2));
+        expect(communities, hasLength(1));
         expect(
           communities.map((c) => c.relayUrl),
-          containsAll([
-            'wss://one.communities.buzz.xyz',
-            'wss://two.communities.buzz.xyz',
-          ]),
+          equals(['wss://two.communities.buzz.xyz']),
         );
         final saved = communities.singleWhere(
           (c) => c.relayUrl == 'wss://two.communities.buzz.xyz',
@@ -1204,6 +1200,19 @@ void main() {
         expect(f.sent('/enrollment'), isEmpty);
         expect(await f.storage.loadActiveId(), saved.id);
         expect(find.byType(OnboardingAppEntry), findsNothing);
+        expect(f.probes.map((c) => c.relayUrl), [
+          'wss://two.communities.buzz.xyz',
+        ]);
+        await f.tap(tester, 'Community home');
+        await f.tap(tester, 'Find my communities');
+        expect(find.byType(CommunityGridOption), findsNWidgets(2));
+        await tester.tap(find.byType(CommunityGridOption).first);
+        await f.settle(tester);
+        expect((await f.storage.loadAll()), hasLength(2));
+        expect(f.probes.map((c) => c.relayUrl), [
+          'wss://two.communities.buzz.xyz',
+          'wss://one.communities.buzz.xyz',
+        ]);
       },
     );
   }

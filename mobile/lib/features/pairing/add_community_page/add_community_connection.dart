@@ -215,7 +215,7 @@ class _AddCommunityConnection extends HookWidget {
                 ),
               ),
             ),
-            if (onboarding && !enteringLink) ...[
+            if (!enteringLink) ...[
               if (onFindCommunities != null)
                 FilledButton(
                   style: FilledButton.styleFrom(
@@ -225,7 +225,7 @@ class _AddCommunityConnection extends HookWidget {
                   onPressed: busy ? null : onFindCommunities,
                   child: const Text('Find my communities'),
                 ),
-              if (onCreateCommunity != null)
+              if (onboarding && onCreateCommunity != null)
                 FilledButton(
                   style: FilledButton.styleFrom(
                     backgroundColor: context.controlSurface,
