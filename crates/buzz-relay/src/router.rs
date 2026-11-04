@@ -444,6 +444,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::community_nip_fi_binding),
         )
         .route(
+            "/operator/communities/nip-fi-upgrade",
+            get(api::operator::community_nip_fi_upgrade_status)
+                .post(api::operator::enable_community_nip_fi),
+        )
+        .route(
             "/operator/communities/transfer",
             post(api::operator::transfer_community),
         )
@@ -559,6 +564,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+        // Outside all rejection-producing layers, including the API body limit.
+        .layer(middleware::from_fn(
+            api::operator::no_store_upgrade_response,
+        ))
 }
 
 type MakeHttpSpan = fn(&Request<Body>) -> tracing::Span;
