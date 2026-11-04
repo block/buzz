@@ -3207,15 +3207,15 @@ mod postgres_tests {
             .expect("second post-apply reconciliation");
     }
 
-    /// Migrations 0076, 0078 and 0081 refuse a populated table whose index was
-    /// not prebuilt concurrently. A relay that auto-migrated through earlier
-    /// releases and holds data must still boot through every migration. When a
+    /// Migrations 0076 and 0078 refuse a populated table whose index was not
+    /// prebuilt concurrently. A relay that auto-migrated through earlier
+    /// releases and holds artifact data must still boot through every migration. When a
     /// bounded inline build cannot take its lock it must fail closed without
     /// recording that migration, keeping earlier migrations and each index
     /// already built in its own transaction.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn populated_database_auto_migrates_through_every_migration() {
+    async fn populated_artifact_tables_auto_migrate_through_every_migration() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -3326,16 +3326,43 @@ mod postgres_tests {
         );
         holder.rollback().await.expect("release third writer lock");
 
-        // Seed a verified profile head before 0081, as on any relay that has
-        // published NIP-FI verified profiles.
-        run_migrations_through(&pool, 80)
+        run_migrations(&pool)
             .await
-            .expect("apply migrations through 80");
+            .expect("populated small database auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(
+                &pool,
+                &[
+                    "idx_artifact_revisions_artifact",
+                    "artifact_heads_modified",
+                    "artifact_heads_channel",
+                    "channel_members_sync",
+                    "artifact_revisions_moves",
+                ]
+            )
+            .await,
+            5
+        );
+    }
+
+    /// Migration 0081 refuses a populated `nip_fi_profile_heads`. A relay that
+    /// has published NIP-FI verified profiles must still boot through every
+    /// migration.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_verified_profiles_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(80, &pool)
+            .await
+            .expect("apply migrations 1-80");
         sqlx::query(
             "INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event) \
              VALUES ($1, $2, $3, 1, $4)",
         )
-        .bind(community_id)
+        .bind(uuid::Uuid::new_v4())
         .bind("a".repeat(64))
         .bind("b".repeat(64))
         .bind(serde_json::json!({"tags": [["display_name", "Wes Johnson"]]}))
@@ -3345,24 +3372,32 @@ mod postgres_tests {
 
         run_migrations(&pool)
             .await
-            .expect("populated small database auto-migrates");
-        let versions = applied_versions(&pool).await;
+            .expect("database with verified profiles auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(&pool, &["idx_nip_fi_profile_heads_names"]).await,
+            1
+        );
+    }
+
+    async fn assert_boots_through_every_migration(pool: &PgPool) {
         let embedded: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
         assert_eq!(
-            versions, embedded,
+            applied_versions(pool).await,
+            embedded,
             "a populated database must boot through every embedded migration"
         );
-        let valid: i64 = sqlx::query_scalar(
+    }
+
+    async fn valid_indexes(pool: &PgPool, names: &[&str]) -> i64 {
+        sqlx::query_scalar(
             "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
-             WHERE c.relname IN ('idx_artifact_revisions_artifact', 'artifact_heads_modified', \
-                 'artifact_heads_channel', 'channel_members_sync', 'artifact_revisions_moves', \
-                 'idx_nip_fi_profile_heads_names') \
-               AND i.indisvalid AND i.indisready AND i.indislive",
+             WHERE c.relname = ANY($1) AND i.indisvalid AND i.indisready AND i.indislive",
         )
-        .fetch_one(&pool)
+        .bind(names)
+        .fetch_one(pool)
         .await
-        .expect("read index flags");
-        assert_eq!(valid, 6);
+        .expect("read index flags")
     }
 
     /// A migration that refuses a populated table crash-loops every
@@ -3378,7 +3413,8 @@ mod postgres_tests {
                 let name = path.file_name()?.to_str()?.to_owned();
                 let version: i64 = name.split('_').next()?.parse().ok()?;
                 let sql = std::fs::read_to_string(&path).expect("read migration");
-                sql.contains("RAISE EXCEPTION 'prebuild ").then_some(version)
+                sql.contains("RAISE EXCEPTION 'prebuild ")
+                    .then_some(version)
             })
             .collect();
         guarded.sort_unstable();
