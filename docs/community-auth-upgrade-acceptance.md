@@ -16,7 +16,7 @@ An open PR or a source configuration pin is not running-artifact evidence.
 
 | Gate | Owning work | Evidence needed |
 | --- | --- | --- |
-| Durable enable and status | BUZZ-510 | Reviewed request/response contract; atomic identity, owner, lifecycle and issuer validation; idempotency and recovery tests |
+| Durable enable and status | BUZZ-510, merged as #8985 | Current-main [operator contract](community-auth-upgrades.md); atomic identity, owner, lifecycle and issuer validation; idempotency and recovery tests |
 | Admission and discovery | BUZZ-511 | Host-specific requirement; protected route inventory; mixed free/required and global-enforce tests |
 | Existing sessions and activation | BUZZ-512 | Serving-incarnation inventory; real drain and effect barriers; generation-bound acknowledgements; documented retirement proof |
 | Authenticated module | BUZZ-513 | Module authorization, response validation, fresh request signatures, retry and status tests |
@@ -39,6 +39,7 @@ Existing FI regressions to retain include:
 | `crates/buzz-relay/src/nip_fi_gate.rs` | Cancellation and effect quiescence |
 | `crates/buzz-relay/src/nip_fi_resolver/tests/router_tests.rs` | Router-level host binding and stale-result regressions; some successes only reach the next failing dependency |
 | `crates/buzz-db/src/store/nip_fi_binding.rs` | Issuer binding transactions and lifecycle races |
+| `crates/buzz-db/src/store/community_auth/postgres_tests.rs` | Durable acceptance, retries, conflicts and transaction-lock races from merged BUZZ-510 |
 
 These files are a source inventory, not a claim that any test passed. Follow
 [TESTING.md](../TESTING.md) for infrastructure and isolated local relay setup.
@@ -92,6 +93,8 @@ Before mutations, capture:
    Record running image digests and source commits for every relay and harness
    artifact, schema version, nonsecret effective configuration and secret version
    references. Compare actual runtime state with the reviewed rollout plan.
+   Include effective `BUZZ_NIP_FI_MODE`, stored requirement/generation and the
+   separate `BUZZ_NIP_FI_UPGRADES_ENABLED` admission switch in each scenario.
 2. Every serving process's deployment identity, pod UID, boot/incarnation ID,
    image and admission state. Include processes with established sockets even
    after readiness removal. Prove old binaries that ignore policy cannot serve.
@@ -148,6 +151,9 @@ Before mutations, capture:
    validation and execution gates remain unverified here. Do not infer a pass
    from a template or desired config. Neither dry run nor Job creation is
    authorized by this procedure.
+   The immutable source link identifies the receipt contract, not a deployable
+   candidate. Record the actual candidate head/image and verify that it retains
+   this contract after any rebase or revision.
 
 Do not infer process coverage from repeated requests through a load balancer.
 Do not treat unavailable audio or Git fixtures as successful denials. Each
@@ -160,15 +166,18 @@ Run one scenario at a time. Use a new isolated target for independent upgrade
 experiments because the requirement is monotonic. Retry/recovery scenarios reuse
 the original operation ID and target. Recheck free and enforced controls before,
 during and after every injected failure, including traffic on existing sockets.
+FI-denial, drain and activation expectations in A–D assume an evaluating mode
+with the target required. E covers Off and mode changes; do not apply those
+FI-enforcement expectations to Off.
 
 | ID | Stimulus | Required observation |
 | --- | --- | --- |
 | A1 | Invoke the authenticated module through the normal BUZZ-515 graph with the owner fixture | Durable tuple identifies the requested community, actor, operation and generation; saved policy is distinct from active |
 | A2 | Rediscover and reconnect with valid FI using the original Nostr key | Root and `/info` agree on requirement/capability/descriptor, are `no-store`, and authenticated access works; keys and membership match the baseline |
-| A3 | Omit FI; then use invalid signature, issuer, audience, expired assertion and wrong key | Expected 401/403 refusals across protected HTTP, bridge, root/audio WS, Git and applicable V1/media routes; no admitted effect or delivery |
+| A3 | In Shadow for a stored-required target, and in Enforce for every target, omit FI; then use invalid signature, issuer, audience, expired assertion and wrong key | Expected 401/403 refusals across protected HTTP, bridge, root/audio WS, Git and applicable V1/media routes; no admitted effect or delivery |
 | A4 | Reconnect, rediscover and renew assertions twice | Three distinct admission/renewal observations with issue/expiry times and unchanged public key; prove traffic after each renewal |
 | A5 | Attempt wrong-key identity binding, then use the original key | `binding_mismatch`; original binding unchanged and original identity still works |
-| A6 | Exercise both free controls and already-enforced control | Their pre-upgrade admission, delivery and membership behavior remains unchanged, including free access with and without FI |
+| A6 | Exercise both free controls and already-enforced control in each mode | Admission, delivery and membership match that mode's baseline: free access with and without FI in Off and for optional Shadow controls; Enforce requires FI on every community |
 | B1 | Nonowner, unauthorized capability/standing, missing or expired session, unusable/unregistered actor key | Refused before policy mutation; durable state and membership unchanged |
 | B2 | Wrong immutable ID/host pair; missing, inactive or mismatched issuer; unreadable trust | Refused or unavailable, with no implicit trust provisioning and no upgrade side effect |
 | B3 | Race enable against ownership transfer, archive and deletion separately | Linearized valid outcome; losing request cannot mutate the wrong owner/lifecycle; readback matches durable state |
@@ -183,15 +192,38 @@ during and after every injected failure, including traffic on existing sockets.
 | D6 | Hold HTTP effects, output queues, subscriptions, audio and pending handshakes across enable | Completion waits for actual target teardown/effect barriers, not queued cancellation; valid FI reconnect remains possible |
 | D7 | Crash before/after drain and before/after acknowledgement persistence | Durable recovery accounts for each boot; replacement/readiness/heartbeat expiry alone never retires the old obligation |
 | D8 | Attempt completion with an absent/invalid serving baseline; register before enable but open the listener afterward | No false active from an empty registry; startup, participant capture and serving transition share an ordering |
+| E1 | Run protected admission/discovery in Off against both optional and stored-required targets, including missing verifier/config and unavailable FI policy dependencies | No NIP-FI gate, verifier or FI policy lookup is required; discovery reports no effective FI requirement; ordinary Nostr and membership checks still apply |
+| E2 | Run Shadow against optional and stored-required targets, including missing FI dependencies | Only stored-required targets enforce FI and fail closed; optional controls retain shadow behavior |
+| E3 | Run Enforce against optional and stored-required targets | Every community requires FI, including controls whose stored requirement is false |
+| E4 | After durable acceptance, switch to Off, retry/read status, then return to Shadow | Policy/generation/receipt persist; Off never reports active FI enforcement; restored Shadow enforces the stored requirement and needs valid drain/completion evidence before active |
+| E5 | Disable the upgrade-admission switch before a fresh request and after a committed acceptance | New calls return 503 `upgrades_disabled` without a receipt; authorized status and identical receipt recovery remain available, subject to mode-aware completion |
 
 The following is the **expected BUZZ-511 contract**, pending its published and
 reviewed implementation. Confirm it against that exact head before a live run.
 For A3, record the exact request/route and denial body from that contract.
-Unavailable verification/policy dependencies must fail closed on required hosts;
-repair `deny_protected` retains 503 precedence. Repeat relevant cases in off,
-shadow and enforce configurations using isolated fixtures. Off/shadow must not
-disable a stored requirement, and global enforce remains an enforcement floor.
-Discovery for unknown/non-serving hosts is generic 404; unreadable policy is 503.
+The admission/discovery mode decision is:
+
+| Effective relay mode | Stored optional | Stored required | FI dependency failure |
+| --- | --- | --- | --- |
+| Off | No FI enforcement | No FI enforcement | Must not introduce an FI denial or require FI policy/verifier dependencies |
+| Shadow | Observe without FI enforcement | Enforce FI | Fail closed where FI is required |
+| Enforce | Enforce FI | Enforce FI | Fail closed for every community |
+
+This replaces the earlier expectation that stored requirements overrode Off.
+It follows the [owner's mode decision](buzz://message?channel=51940054-5a7a-4773-a337-8004496630fa&id=fbafeb399947af3f8840ec9c5789bab29ae2d080567d474c13a7b619c9502ca0).
+Off preserves the stored policy and durable receipt but cannot establish active
+FI enforcement, even if an earlier drain acknowledgement exists. Returning to
+Shadow restores the stored requirement; do not infer completion from a receipt
+alone. In modes that evaluate FI, repair `deny_protected` retains 503 precedence.
+Nostr authentication, tenant resolution and membership remain required in every
+mode; Off bypasses FI checks, not these independent access controls.
+The operator enable/status API retains its separate signature, ownership,
+issuer-trust, lifecycle and durable-receipt preconditions in every mode.
+
+Root NIP-11 and `/info` must agree on the mode's effective requirement: false in
+Off, the stored requirement in Shadow, and true in Enforce. Unknown/non-serving
+hosts remain generic 404. Unreadable required FI policy is 503 in evaluating
+modes; an unavailable FI dependency must not turn Off into FI enforcement.
 
 ## Failure injection and recovery
 
