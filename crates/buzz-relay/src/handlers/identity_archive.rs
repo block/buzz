@@ -437,7 +437,7 @@ mod tests {
 
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test-only credentials
         sqlx::PgPool::connect(&url).await.ok()
     }
 
@@ -766,5 +766,91 @@ mod tests {
             err.contains("live kind:0 no longer attests"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn rotated_archive_publishes_replacement_once_successor_exists() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+        let old_keys = Keys::generate();
+        let old_hex = old_keys.public_key().to_hex();
+        let successor_hex = Keys::generate().public_key().to_hex();
+        let request = |replaced_by: Option<&str>| {
+            let mut tags = vec![
+                Tag::parse(["-"]).expect("protected tag"),
+                Tag::parse(["p", old_hex.as_str()]).expect("p tag"),
+                Tag::parse(["reason", "rotated"]).expect("reason tag"),
+            ];
+            if let Some(successor) = replaced_by {
+                tags.push(Tag::parse(["replaced-by", successor]).expect("replaced-by tag"));
+            }
+            EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+                .tags(tags)
+                .allow_self_tagging()
+                .sign_with_keys(&old_keys)
+                .expect("sign archive request")
+        };
+        let deltas = || async {
+            state
+                .db
+                .query_events(&EventQuery {
+                    kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED as i32]),
+                    pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                    global_only: true,
+                    ..EventQuery::for_community(tenant.community())
+                })
+                .await
+                .expect("query archive deltas")
+        };
+        let replacement = |event: &Event| {
+            event.tags.iter().find_map(|tag| {
+                let fields = tag.as_slice();
+                (fields.first().map(String::as_str) == Some("replaced-by"))
+                    .then(|| fields.get(1).cloned())
+                    .flatten()
+            })
+        };
+
+        for replaced_by in [
+            None,
+            None,
+            Some(successor_hex.as_str()),
+            Some(successor_hex.as_str()),
+        ] {
+            handle_identity_archive_event(&tenant, &state, &request(replaced_by))
+                .await
+                .expect("self archive accepted");
+        }
+
+        let published = deltas().await;
+        assert_eq!(
+            published.len(),
+            2,
+            "one delta for the archive and one for the added replacement; repeats publish nothing"
+        );
+        let mut replacements: Vec<_> = published.iter().map(|e| replacement(&e.event)).collect();
+        replacements.sort();
+        assert_eq!(replacements, vec![None, Some(successor_hex.clone())]);
+        let row = state
+            .db
+            .list_archived(tenant.community())
+            .await
+            .expect("list archived")
+            .into_iter()
+            .find(|row| row.pubkey == old_hex)
+            .expect("archived row");
+        assert_eq!(row.replaced_by.as_deref(), Some(successor_hex.as_str()));
     }
 }

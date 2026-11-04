@@ -50,9 +50,11 @@ pub async fn is_archived(pool: &PgPool, community_id: CommunityId, pubkey: &str)
 
 /// Archives an identity in `community_id`.
 ///
-/// Returns `true` if the row was inserted, `false` if the identity was already
-/// archived in that community. Re-archiving is idempotent and does not mutate
-/// the existing row.
+/// Returns `true` if the archive state changed: the row was inserted, or an
+/// archive with no replacement gained `replaced_by` (a key rotated before its
+/// successor existed). The request that adds the replacement also supplies the
+/// row's consent, actor, reason and request id, so the row matches its delta.
+/// Any other re-archive is idempotent, returns `false` and leaves the row as is.
 #[allow(clippy::too_many_arguments)]
 pub async fn archive(
     pool: &PgPool,
@@ -74,7 +76,14 @@ pub async fn archive(
         "INSERT INTO archived_identities \
          (community_id, pubkey, consent_path, actor, reason, replaced_by, request_event_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) \
-         ON CONFLICT (community_id, pubkey) DO NOTHING",
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET \
+             consent_path = EXCLUDED.consent_path, \
+             actor = EXCLUDED.actor, \
+             reason = EXCLUDED.reason, \
+             replaced_by = EXCLUDED.replaced_by, \
+             request_event_id = EXCLUDED.request_event_id \
+         WHERE archived_identities.replaced_by IS NULL \
+           AND EXCLUDED.replaced_by IS NOT NULL",
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
@@ -155,8 +164,8 @@ impl Db {
         is_archived(&self.pool, community_id, pubkey).await
     }
 
-    /// Archives an identity in `community_id`. Returns `true` if inserted,
-    /// `false` if already archived.
+    /// Archives an identity in `community_id`, or adds a replacement to an
+    /// archive that has none. Returns `true` if the archive state changed.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "archive", system = "postgresql")]
     pub async fn archive(
@@ -288,5 +297,86 @@ mod postgres_tests {
         assert!(is_archived(&pool, community_b, pubkey)
             .await
             .expect("A unarchive must not affect B"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn archive_adds_a_missing_replacement_once() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let pubkey = "1".repeat(64);
+        let admin = "2".repeat(64);
+        let successor = "3".repeat(64);
+        let other = "4".repeat(64);
+        let row = |pool: PgPool| async move {
+            list_archived(&pool, community)
+                .await
+                .expect("list")
+                .into_iter()
+                .next()
+                .expect("archived row")
+        };
+
+        assert!(archive(
+            &pool,
+            community,
+            &pubkey,
+            "admin",
+            &admin,
+            Some("rotated"),
+            None,
+            &"a".repeat(64)
+        )
+        .await
+        .expect("archive without replacement"));
+        assert!(!archive(
+            &pool,
+            community,
+            &pubkey,
+            "admin",
+            &admin,
+            Some("rotated"),
+            None,
+            &"b".repeat(64)
+        )
+        .await
+        .expect("repeat archive without replacement"));
+        assert_eq!(row(pool.clone()).await.request_event_id, "a".repeat(64));
+
+        assert!(archive(
+            &pool,
+            community,
+            &pubkey,
+            "self",
+            &pubkey,
+            Some("rotated"),
+            Some(&successor),
+            &"c".repeat(64)
+        )
+        .await
+        .expect("add replacement"));
+        let added = row(pool.clone()).await;
+        assert_eq!(added.replaced_by.as_deref(), Some(successor.as_str()));
+        assert_eq!(added.consent_path, "self");
+        assert_eq!(added.actor, pubkey);
+        assert_eq!(added.request_event_id, "c".repeat(64));
+
+        for (replaced_by, request) in [(Some(other.as_str()), "d"), (None, "e")] {
+            assert!(!archive(
+                &pool,
+                community,
+                &pubkey,
+                "admin",
+                &admin,
+                None,
+                replaced_by,
+                &request.repeat(64)
+            )
+            .await
+            .expect("re-archive over a replacement"));
+        }
+        let kept = row(pool.clone()).await;
+        assert_eq!(kept.replaced_by.as_deref(), Some(successor.as_str()));
+        assert_eq!(kept.request_event_id, "c".repeat(64));
     }
 }

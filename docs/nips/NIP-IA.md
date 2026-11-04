@@ -290,6 +290,7 @@ When a relay receives a `kind:9035` or `kind:9036` request, it MUST execute the 
 6. Enforce a relay-defined freshness window for request events. A ±120-second window is RECOMMENDED.
 7. Determine the consent path under local policy. If no policy path accepts the request, reject.
 8. Apply the state change idempotently. Archiving an already archived target and unarchiving a non-archived target SHOULD be treated as success, but relays MUST NOT emit a duplicate delta or new snapshot when no state changed.
+   An archive request that carries `replaced-by` for a target that is archived without a replacement is a state change: the relay records the replacement, with the request's consent path, actor, and reason, and publishes a delta for it. This covers key rotation where the new key does not exist yet when the old key is archived. A request that would change or remove an existing replacement is treated as archiving an already archived target; to correct a replacement, unarchive and archive again.
 9. If state changed, publish the corresponding `kind:8002` or `kind:8003` delta and a fresh `kind:13535` list.
 
 When a relay rejects a request received via `EVENT`, it MUST respond with an `OK` message. Syntax and signature failures SHOULD use the `invalid:` prefix. Authorization failures SHOULD use the `restricted:` prefix. Relays MAY store rejected requests for audit, but rejected requests MUST NOT change archive state and MUST NOT produce `kind:8002`, `kind:8003`, or `kind:13535` updates.
