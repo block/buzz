@@ -341,6 +341,22 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       pending: searching,
     );
     final availableResults = shown.rows;
+    // Shown and chosen recipients are named together on every build, so a
+    // pick stays told apart from a same-name result of a later search, and
+    // loading their profiles tracks them for verified names.
+    final recipients = [...availableResults, ...selectedUsers.value];
+    final names = watchIdentityNames(
+      ref,
+      [for (final user in recipients) user.pubkey],
+      agentPubkeys: {
+        for (final user in recipients)
+          if (user.isAgent) user.pubkey,
+      },
+      fallbackNames: {
+        for (final user in recipients) user.pubkey: user.pickerLabel,
+      },
+    );
+    String labelFor(MentionCandidate user) => names.labelFor(user.pubkey);
     final userCache = ref.watch(userCacheProvider);
     String? detail(MentionCandidate user) =>
         recipientRowDetail(user, currentPubkey, userCache);
@@ -398,7 +414,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       ]);
       Map<String, Object?> row(MentionCandidate user) => {
         'pubkey': user.pubkey,
-        'name': user.pickerLabel,
+        'name': labelFor(user),
         'detail': detail(user),
         'agent': user.isAgent,
         'unavailable': shown.unavailable.contains(user.pubkey),
@@ -543,7 +559,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                   for (final user in selectedUsers.value)
                                     _SelectedDmRecipientChip(
                                       user: user,
-                                      label: user.pickerLabel,
+                                      label: labelFor(user),
                                       enabled: !isSubmitting.value,
                                       onDeleted: () {
                                         selectedUsers.value = [
@@ -702,7 +718,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                             isAgent: user.isAgent,
                           ),
                           title: Text(
-                            user.pickerLabel,
+                            labelFor(user),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),

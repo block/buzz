@@ -69,6 +69,7 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 
 import '../../helpers/recipient_directory_session.dart';
 import '../../helpers/thread_ids.dart';
