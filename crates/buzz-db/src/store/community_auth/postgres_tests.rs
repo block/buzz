@@ -85,6 +85,51 @@ async fn response_loss_recovery_and_payload_binding() {
         );
     }
     assert_eq!(policy(&db, &request).await.policy_generation, 1);
+    let community = CommunityId::from_uuid(request.community_id);
+    for allow_last in [true, false] {
+        assert_eq!(
+            db.unbind_nip_fi_issuer(community, ISSUER, allow_last)
+                .await
+                .unwrap(),
+            crate::NipFiUnbind::RequiredIssuer
+        );
+    }
+    assert_eq!(accepted(&db, &request).await, first);
+    // Rotation can remove the accepted issuer only after a replacement is bound.
+    db.bind_nip_fi_issuers(community, &["https://replacement.example".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(
+        db.unbind_nip_fi_issuer(community, ISSUER, true)
+            .await
+            .unwrap(),
+        crate::NipFiUnbind::Removed
+    );
+    assert_eq!(accepted(&db, &request).await.state, "unavailable");
+    assert_eq!(
+        db.unbind_nip_fi_issuer(community, "https://replacement.example", true)
+            .await
+            .unwrap(),
+        crate::NipFiUnbind::RequiredIssuer
+    );
+    assert!(policy(&db, &request).await.requires_nip_fi);
+    // Out-of-band trust loss requires an explicit repair, never a bulk rebind.
+    sqlx::query("DELETE FROM community_nip_fi_issuers WHERE community_id = $1")
+        .bind(request.community_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.bind_nip_fi_issuers_to_active(&[community], &[ISSUER.to_owned()])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(accepted(&db, &request).await.state, "unavailable");
+    db.bind_nip_fi_issuers(community, &[ISSUER.to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(accepted(&db, &request).await, first);
 }
 
 #[tokio::test]

@@ -3433,9 +3433,19 @@ mod postgres_tests {
         Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
             original_policy;
 
-        state
-            .db
-            .unbind_nip_fi_issuer(community.id, NIP_FI_ISSUER, true)
+        assert_eq!(
+            state
+                .db
+                .unbind_nip_fi_issuer(community.id, NIP_FI_ISSUER, true)
+                .await
+                .unwrap(),
+            buzz_db::NipFiUnbind::RequiredIssuer
+        );
+        // Simulate out-of-band trust loss to exercise receipt recovery and
+        // configured-trust refusal independently of the operator removal guard.
+        sqlx::query("DELETE FROM community_nip_fi_issuers WHERE community_id = $1")
+            .bind(community.id.as_uuid())
+            .execute(state.db.pool())
             .await
             .unwrap();
         let missing_id = Uuid::new_v4();

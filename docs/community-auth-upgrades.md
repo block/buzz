@@ -177,3 +177,11 @@ clear-policy API or routine SQL reset, and neither a timeout nor a mistaken call
 is permission to return the community to free admission. Recovery must retain
 the accepted requirement and operation evidence. No fleet-wide drain or deployment
 is an automatic fallback.
+
+Last-issuer removal is refused once the community requires NIP-FI, including
+when the operator binding path requests `allow_last`. Bind a replacement before
+removing an issuer, or use archive/lifecycle controls for containment. Removing
+the issuer recorded by a receipt while another remains makes that receipt
+`unavailable`; it never clears the requirement or destroys the receipt.
+Bulk backfill does not recreate missing bindings for required communities;
+its unbound report still exposes them for explicit operator repair.
