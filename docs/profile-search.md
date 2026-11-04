@@ -65,10 +65,12 @@ never matches and never makes the search fail
 
 ## Deployment
 
-Verified-name matching reads `idx_nip_fi_profile_heads_names`. Migration
-`0081` builds it only while `nip_fi_profile_heads` is empty; on a populated
-database it fails until the index exists. Build it first, outside a
-transaction:
+Verified-name matching reads `idx_nip_fi_profile_heads_names`. Relay startup
+migration and `buzz-admin migrate` build it before migration `0081` under a
+one-second lock and five-second statement budget, which is enough for a small
+database. Applied directly, `0081` builds it only while `nip_fi_profile_heads`
+is empty. For a database too large for the budget, or before applying `0081`
+directly, build it first, outside a transaction:
 
 ```sql
 CREATE INDEX CONCURRENTLY idx_nip_fi_profile_heads_names

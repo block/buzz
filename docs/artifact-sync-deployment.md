@@ -13,8 +13,10 @@ New application writers stamp every head change, grant, rejoin, removal,
 redaction, and move source. Changes to channel listing also require recovery. Old application updates do not maintain all these
 stamps, so mixed-version serving cannot advertise incremental correctness.
 
-For a populated database, first build the revision lookup index outside a
-transaction, before migration `0076`:
+Relay startup migration and `buzz-admin migrate` build the indexes below
+themselves within the migrations' budgets, which is enough for a small
+database. For a database too large for that, first build the revision lookup
+index outside a transaction, before migration `0076`:
 
 ```sql
 CREATE INDEX CONCURRENTLY idx_artifact_revisions_artifact

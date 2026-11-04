@@ -17,8 +17,10 @@ Before planning or reviewing a non-trivial change:
 4. For any change to `migrations/`, `schema/`, or schema-dependent `buzz-db`
    queries, read [docs/database.md](docs/database.md): no new triggers,
    functions, or foreign keys; no data backfills in migrations; update every
-   schema location; and keep every migration compatible with the relay that
-   is currently deployed.
+   schema location; keep every migration compatible with the relay that
+   is currently deployed; never make a migration refuse a populated table;
+   and test it against a populated database that auto-migrated through the
+   earlier migrations, not only a fresh one.
 5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 

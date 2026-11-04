@@ -53,9 +53,9 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
-    for (version, indexes) in INLINE_INDEX_BUILDS {
+    for (version, doc, indexes) in INLINE_INDEX_BUILDS {
         MIGRATOR.run_to(version - 1, &mut *conn).await?;
-        build_indexes_before_migration(conn, *version, indexes).await?;
+        build_indexes_before_migration(conn, *version, doc, indexes).await?;
     }
     MIGRATOR.run(&mut *conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
@@ -70,18 +70,24 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
 }
 
 /// Indexes that a migration verifies but refuses to build on a populated
-/// table, keyed by that migration's version, as `(name, definition)`.
+/// table, keyed by that migration's version, with the document that describes
+/// its concurrent prebuild, as `(name, definition)`.
 ///
-/// Migrations 0076 and 0078 are checksum-frozen and expect every populated
-/// database to prebuild these indexes with `CREATE INDEX CONCURRENTLY`
-/// (`docs/artifact-sync-deployment.md`). Startup migration builds a missing
-/// index here instead, under the same bounded budgets 0049 uses, so a small
-/// populated database upgrades like an empty one and a large one still fails
-/// closed. `CONCURRENTLY` is not used: a replica blocked on the migration lock
-/// holds a snapshot that a concurrent build would wait for.
-const INLINE_INDEX_BUILDS: &[(i64, &[(&str, &str)])] = &[
+/// Migrations 0076, 0078 and 0081 are checksum-frozen and expect every
+/// populated database to prebuild these indexes with `CREATE INDEX
+/// CONCURRENTLY`. Startup migration builds a missing index here instead, under
+/// the same bounded budgets 0049 uses, so a small populated database upgrades
+/// like an empty one and a large one still fails closed. `CONCURRENTLY` is not
+/// used: a replica blocked on the migration lock holds a snapshot that a
+/// concurrent build would wait for. New migrations build their own indexes
+/// inline (docs/database.md Rule 6); the `frozen_prebuild_guards_have_inline_builds`
+/// test keeps this list equal to the migrations that refuse populated tables.
+type InlineIndexBuilds = &'static [(&'static str, &'static str)];
+
+const INLINE_INDEX_BUILDS: &[(i64, &str, InlineIndexBuilds)] = &[
     (
         76,
+        "docs/artifact-sync-deployment.md",
         &[(
             "idx_artifact_revisions_artifact",
             "CREATE INDEX idx_artifact_revisions_artifact \
@@ -90,6 +96,7 @@ const INLINE_INDEX_BUILDS: &[(i64, &[(&str, &str)])] = &[
     ),
     (
         78,
+        "docs/artifact-sync-deployment.md",
         &[
             (
                 "artifact_heads_modified",
@@ -114,6 +121,15 @@ const INLINE_INDEX_BUILDS: &[(i64, &[(&str, &str)])] = &[
             ),
         ],
     ),
+    (
+        81,
+        "docs/profile-search.md",
+        &[(
+            "idx_nip_fi_profile_heads_names",
+            // The exact pg_get_indexdef form migration 0081 verifies.
+            r#"CREATE INDEX idx_nip_fi_profile_heads_names ON public.nip_fi_profile_heads USING gin (to_tsvector('simple'::regconfig, ((((COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "display_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "username")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text)) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "full_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text))))"#,
+        )],
+    ),
 ];
 
 /// Build each missing index in `indexes` in its own bounded transaction
@@ -124,7 +140,8 @@ const INLINE_INDEX_BUILDS: &[(i64, &[(&str, &str)])] = &[
 async fn build_indexes_before_migration(
     conn: &mut PgConnection,
     version: i64,
-    indexes: &[(&'static str, &'static str)],
+    doc: &str,
+    indexes: InlineIndexBuilds,
 ) -> Result<()> {
     let applied: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1)")
@@ -152,10 +169,18 @@ async fn build_indexes_before_migration(
         Ok::<(), sqlx::Error>(())
     };
     build.await.map_err(|error| {
+        // Only a lock or statement timeout means the table is too large or
+        // too busy for the startup budget; pass any other failure through.
+        let over_budget = error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code == "55P03" || code == "57014");
+        if !over_budget {
+            return error.into();
+        }
         crate::DbError::InvalidData(format!(
             "migration {version} blocked: building its indexes within the startup budget failed \
-             ({error}); prebuild them concurrently as described in \
-             docs/artifact-sync-deployment.md, then retry"
+             ({error}); prebuild them concurrently as described in {doc}, then retry"
         ))
     })
 }
@@ -3182,14 +3207,15 @@ mod postgres_tests {
             .expect("second post-apply reconciliation");
     }
 
-    /// Migrations 0076 and 0078 refuse a populated table whose index was not
-    /// prebuilt concurrently. Startup auto-migration must still upgrade a small
-    /// populated database. When a bounded inline build cannot take its lock it
-    /// must fail closed without recording that migration, keeping earlier
-    /// migrations and each index already built in its own transaction.
+    /// Migrations 0076, 0078 and 0081 refuse a populated table whose index was
+    /// not prebuilt concurrently. A relay that auto-migrated through earlier
+    /// releases and holds data must still boot through every migration. When a
+    /// bounded inline build cannot take its lock it must fail closed without
+    /// recording that migration, keeping earlier migrations and each index
+    /// already built in its own transaction.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn populated_artifact_tables_auto_migrate_through_inline_index_builds() {
+    async fn populated_database_auto_migrates_through_every_migration() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -3300,26 +3326,69 @@ mod postgres_tests {
         );
         holder.rollback().await.expect("release third writer lock");
 
+        // Seed a verified profile head before 0081, as on any relay that has
+        // published NIP-FI verified profiles.
+        run_migrations_through(&pool, 80)
+            .await
+            .expect("apply migrations through 80");
+        sqlx::query(
+            "INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event) \
+             VALUES ($1, $2, $3, 1, $4)",
+        )
+        .bind(community_id)
+        .bind("a".repeat(64))
+        .bind("b".repeat(64))
+        .bind(serde_json::json!({"tags": [["display_name", "Wes Johnson"]]}))
+        .execute(&pool)
+        .await
+        .expect("insert verified profile head");
+
         run_migrations(&pool)
             .await
             .expect("populated small database auto-migrates");
         let versions = applied_versions(&pool).await;
-        assert!(
-            [76, 77, 78]
-                .iter()
-                .all(|version| versions.contains(version)),
-            "artifact sync migrations not recorded: {versions:?}"
+        let embedded: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        assert_eq!(
+            versions, embedded,
+            "a populated database must boot through every embedded migration"
         );
         let valid: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
              WHERE c.relname IN ('idx_artifact_revisions_artifact', 'artifact_heads_modified', \
-                 'artifact_heads_channel', 'channel_members_sync', 'artifact_revisions_moves') \
+                 'artifact_heads_channel', 'channel_members_sync', 'artifact_revisions_moves', \
+                 'idx_nip_fi_profile_heads_names') \
                AND i.indisvalid AND i.indisready AND i.indislive",
         )
         .fetch_one(&pool)
         .await
         .expect("read index flags");
-        assert_eq!(valid, 5);
+        assert_eq!(valid, 6);
+    }
+
+    /// A migration that refuses a populated table crash-loops every
+    /// auto-migrating relay with data. Only the frozen ones may, and each must
+    /// have an inline build the startup runner applies first.
+    #[test]
+    fn frozen_prebuild_guards_have_inline_builds() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut guarded: Vec<i64> = std::fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .filter_map(|entry| {
+                let path = entry.expect("read migration entry").path();
+                let name = path.file_name()?.to_str()?.to_owned();
+                let version: i64 = name.split('_').next()?.parse().ok()?;
+                let sql = std::fs::read_to_string(&path).expect("read migration");
+                sql.contains("RAISE EXCEPTION 'prebuild ").then_some(version)
+            })
+            .collect();
+        guarded.sort_unstable();
+        let inline: Vec<i64> = INLINE_INDEX_BUILDS.iter().map(|(v, _, _)| *v).collect();
+        assert_eq!(
+            guarded, inline,
+            "a migration must build its own index instead of refusing a populated table \
+             (docs/database.md Rule 6); only frozen guards listed in INLINE_INDEX_BUILDS may remain"
+        );
+        assert_eq!(inline, [76, 78, 81], "do not add new prebuild guards");
     }
 
     #[tokio::test]
