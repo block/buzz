@@ -525,6 +525,7 @@ async fn insert_event_on(
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
+            created_at,
             kind_i32,
             channel_id,
         )
@@ -1646,344 +1647,11 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     qb
 }
 
-/// SQL predicate over an `events` row for coordinates that carry no
-/// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
-/// deletion is physical, including the mention index, so soft-deleted payloads
-/// never accumulate. This is exactly the classification used by the migration
-/// 0011 / 0019 purge triggers this path replaces.
-macro_rules! retention_free_event_predicate {
-    () => {
-        "((kind = 30078 \
-           AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
-           AND (SELECT count(*) \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
-           AND EXISTS (SELECT 1 \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE jsonb_typeof(tag) = 'array' AND jsonb_array_length(tag) >= 2 \
-                  AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
-           AND (SELECT count(*) \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1) \
-          OR (kind = 30003 \
-              AND d_tag LIKE 'buzz-mesh-member-status:%' \
-              AND tags @> '[[\"k\", \"buzz-mesh-status\"]]'::jsonb))"
-    };
-}
-
-/// Kinds that can hold a retention-free coordinate. Cheap Rust gate so
-/// ordinary deletions skip the purge statement entirely.
-fn may_be_retention_free(kind: i32) -> bool {
-    kind == 30078 || kind == 30003
-}
-
-/// Soft-delete the live row for an addressable coordinate
-/// `(kind, pubkey, d_tag)` — the NIP-33 replacement key — provided it is not
-/// newer than the deletion request.
-///
-/// Used by `handle_a_tag_deletion` to honour NIP-09 a-tag deletions for any
-/// parameterized-replaceable kind. The WHERE clause mirrors
-/// `replace_parameterized_event` so the coordinate semantics stay consistent:
-/// `channel_id` is intentionally NOT in the key (NIP-33 replacement is global
-/// per the spec — `channel_id` is stored for query scoping, not identity).
-///
-/// `deletion_created_at_secs` is the deletion event's own `created_at`. NIP-09
-/// scopes an `a`-tag deletion to versions at or before that instant, so a
-/// delayed or replayed tombstone signed between two versions must not erase the
-/// newer replacement. `events.created_at` is immutable per row, so the predicate
-/// guarantees a tombstone can never erase a version newer than itself — the UPDATE
-/// re-evaluates its WHERE clause after any lock wait, so a replacement that races
-/// the deletion and lands with a later `created_at` is always spared.
-///
-/// This does NOT guarantee deletion completeness when a same-coordinate
-/// replacement races the deletion: the deletion may evaluate its predicate before
-/// the replacement arrives, miss the incoming head, and return `Ok(false)`. That
-/// outcome is state-identical to the deletion having arrived first (old head
-/// gone, new head present), which is a valid Nostr ordering — Nostr never fixes
-/// the order of concurrent writes from different signers, and even same-signer
-/// ordering is advisory. The return value feeds only a debug log, not a
-/// correctness gate.
-///
-/// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
-/// (already deleted, never existed, or strictly newer than the deletion).
-pub async fn soft_delete_by_coordinate(
-    pool: &PgPool,
-    community_id: CommunityId,
-    kind: i32,
-    pubkey: &[u8],
-    d_tag: &str,
-    deletion_created_at_secs: i64,
-) -> Result<bool> {
-    let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
-        .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
-    let mut tx = crate::begin_community_event_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    let purged = if may_be_retention_free(kind) {
-        purge_retention_free_events(
-            &mut tx,
-            RetentionFreeTarget::Coordinate {
-                kind,
-                pubkey,
-                d_tag,
-                created_at_or_before: deletion_created_at,
-            },
-        )
-        .await?
-    } else {
-        0
-    };
-    // `AND NOT COALESCE(<predicate>, false)` holds the invariant in SQL rather than through
-    // statement order: under READ COMMITTED this UPDATE takes a fresh snapshot,
-    // so a retention-free head committed by a racing replacement after the
-    // purge ran is spared instead of soft-deleted (the "deletion arrived
-    // first" outcome documented above). COALESCE keeps a NULL predicate
-    // (e.g. NULL `d_tag`) on the ordinary soft-delete path, as the triggers do.
-    let result = sqlx::query(concat!(
-        "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-         AND created_at <= $5 AND NOT COALESCE(",
-        retention_free_event_predicate!(),
-        ", false)"
-    ))
-    .bind(community_id.as_uuid())
-    .bind(kind)
-    .bind(pubkey)
-    .bind(d_tag)
-    .bind(deletion_created_at)
-    .execute(tx.conn())
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(purged > 0 || result.rows_affected() > 0)
-}
-
-/// Purge live retention-free rows matching `$target`, plus their mention rows,
-/// and return the number of events removed.
-macro_rules! purge_retention_free_sql {
-    ($target:literal) => {
-        concat!(
-            "WITH purged AS ( \
-                 DELETE FROM events \
-                 WHERE community_id = $1 AND ",
-            $target,
-            " AND deleted_at IS NULL AND ",
-            retention_free_event_predicate!(),
-            " RETURNING id \
-             ), purged_mentions AS ( \
-                 DELETE FROM event_mentions mention USING purged \
-                 WHERE mention.community_id = $1 AND mention.event_id = purged.id \
-             ) \
-             SELECT count(*) FROM purged"
-        )
-    };
-}
-
-/// Which live rows a deletion targets.
-enum RetentionFreeTarget<'a> {
-    Id(&'a [u8]),
-    Coordinate {
-        kind: i32,
-        pubkey: &'a [u8],
-        d_tag: &'a str,
-        created_at_or_before: DateTime<Utc>,
-    },
-}
-
-/// Physically delete live retention-free rows matched by `target`, plus their
-/// mention rows, in the caller's transaction. The generic soft delete that
-/// follows excludes the same predicate, so a retention-free row is either
-/// purged here or left live, never soft-deleted. Returns the number of events
-/// removed.
-async fn purge_retention_free_events(
-    tx: &mut AdmittedTx,
-    target: RetentionFreeTarget<'_>,
-) -> Result<u64> {
-    let community_id = tx.community();
-    // Migration 0011 fences NIP-RS hard deletes behind a transaction-local
-    // opt-in. The fence and this opt-in are removed together once the
-    // migration-only triggers are dropped.
-    sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-        .execute(tx.conn())
-        .await?;
-
-    let purged: i64 = match target {
-        RetentionFreeTarget::Id(event_id) => {
-            sqlx::query_scalar(purge_retention_free_sql!("id = $2"))
-                .bind(community_id.as_uuid())
-                .bind(event_id)
-                .fetch_one(tx.conn())
-                .await?
-        }
-        RetentionFreeTarget::Coordinate {
-            kind,
-            pubkey,
-            d_tag,
-            created_at_or_before,
-        } => {
-            sqlx::query_scalar(purge_retention_free_sql!(
-                "kind = $2 AND pubkey = $3 AND d_tag = $4 AND created_at <= $5"
-            ))
-            .bind(community_id.as_uuid())
-            .bind(kind)
-            .bind(pubkey)
-            .bind(d_tag)
-            .bind(created_at_or_before)
-            .fetch_one(tx.conn())
-            .await?
-        }
-    };
-
-    Ok(purged as u64)
-}
-
-/// An event a NIP-09 (kind 5) or NIP-29 (kind 9005) deletion soft-deletes in
-/// the deletion's own insert transaction, with the thread it belongs to.
-#[derive(Clone, Copy, Debug)]
-pub struct DeletionTarget<'a> {
-    /// The event to soft-delete.
-    pub event_id: &'a [u8],
-    /// Its direct parent, whose `reply_count` drops when it is deleted.
-    pub parent_event_id: Option<&'a [u8]>,
-    /// Its thread root, whose `descendant_count` drops when it is deleted.
-    pub root_event_id: Option<&'a [u8]>,
-}
-
-/// Atomically soft-delete an event and decrement thread reply counters.
-///
-/// Wraps the delete + counter update in a single transaction so a crash between
-/// them cannot leave counters permanently inflated. Returns `Ok(true)` if the
-/// event was deleted this call.
-///
-/// When the target event is a kind-40100 (canvas) event, this function derives
-/// the target's `kind` and `channel_id` from the database inside the same
-/// transaction and acquires the same `(community, kind, channel)` advisory lock
-/// used by [`insert_canvas_head_checked`] before the UPDATE. This prevents a
-/// concurrent tagged write from observing a head that is simultaneously being
-/// removed. The serialization invariant is owned entirely by this function;
-/// callers do not classify the target kind.
-pub async fn soft_delete_event_and_update_thread(
-    pool: &PgPool,
-    community_id: CommunityId,
-    event_id: &[u8],
-    parent_event_id: Option<&[u8]>,
-    root_event_id: Option<&[u8]>,
-) -> Result<bool> {
-    let mut tx = crate::begin_community_event_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    let deleted = soft_delete_event_and_update_thread_in_tx(
-        &mut tx,
-        event_id,
-        parent_event_id,
-        root_event_id,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(deleted)
-}
-
-/// Transaction-scoped body of [`soft_delete_event_and_update_thread`].
-///
-/// Callers that must fence the delete with their own writes (e.g. the admin
-/// action lease/marker) run this inside their transaction; the caller commits.
-pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
-    tx: &mut AdmittedTx,
-    event_id: &[u8],
-    parent_event_id: Option<&[u8]>,
-    root_event_id: Option<&[u8]>,
-) -> Result<bool> {
-    let community_id = tx.community();
-    use crate::store::replaceable::event_replacement_lock_key;
-
-    // Derive the target event's kind and channel_id inside the transaction so
-    // that the serialization decision cannot be bypassed by any caller.
-    let target: Option<(i32, Option<Uuid>)> = sqlx::query_as(
-        "SELECT kind, channel_id FROM events \
-         WHERE community_id = $1 AND id = $2",
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .fetch_optional(tx.conn())
-    .await?;
-
-    // Relay-signed move removals are the source channel's only replay record.
-    if target.is_some_and(|(kind, _)| kind == 45011) {
-        return Err(DbError::InvalidData(
-            "artifact removal markers cannot be deleted".into(),
-        ));
-    }
-
-    if let Some((kind, Some(channel_id))) = target {
-        if kind == KIND_CANVAS as i32 {
-            let lock_key = event_replacement_lock_key(
-                community_id,
-                kind,
-                &[],
-                Some(channel_id.as_bytes().as_slice()),
-            );
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .execute(tx.conn())
-                .await?;
-        }
-    }
-
-    let purged = if target.is_some_and(|(kind, _)| may_be_retention_free(kind)) {
-        purge_retention_free_events(tx, RetentionFreeTarget::Id(event_id)).await?
-    } else {
-        0
-    };
-    let result = sqlx::query(concat!(
-        "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND NOT COALESCE(",
-        retention_free_event_predicate!(),
-        ", false)"
-    ))
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .execute(tx.conn())
-    .await?;
-
-    let deleted = purged > 0 || result.rows_affected() > 0;
-
-    if deleted {
-        sqlx::query("UPDATE artifact_heads SET modified_at=clock_timestamp() WHERE community_id=$1 AND artifact_id=(SELECT artifact_id FROM artifact_revisions WHERE community_id=$1 AND event_id=$2) AND event_id=$2")
-            .bind(community_id.as_uuid()).bind(event_id).execute(tx.conn()).await?;
-        if let Some(pid) = parent_event_id {
-            sqlx::query(
-                "UPDATE thread_metadata \
-                 SET reply_count = GREATEST(reply_count - 1, 0) \
-                 WHERE community_id = $1 AND event_id = $2",
-            )
-            .bind(community_id.as_uuid())
-            .bind(pid)
-            .execute(tx.conn())
-            .await?;
-
-            if let Some(root_id) = root_event_id {
-                sqlx::query(
-                    "UPDATE thread_metadata \
-                     SET descendant_count = GREATEST(descendant_count - 1, 0) \
-                     WHERE community_id = $1 AND event_id = $2",
-                )
-                .bind(community_id.as_uuid())
-                .bind(root_id)
-                .execute(tx.conn())
-                .await?;
-            }
-        }
-    }
-
-    Ok(deleted)
-}
+// Preserve the public event-store deletion API after the focused extraction.
+pub(crate) use super::event_deletion::soft_delete_event_and_update_thread_in_tx;
+pub use super::event_deletion::{
+    soft_delete_by_coordinate, soft_delete_event_and_update_thread, DeletionTarget,
+};
 
 /// Returns the `created_at` timestamp of the most recent non-deleted event in a channel.
 pub async fn get_last_message_at(
@@ -2202,9 +1870,7 @@ pub(crate) async fn get_events_by_ids_with_operation(
     get_events_by_ids_on(&mut conn, community_id, ids).await
 }
 
-/// [`get_events_by_ids`] on a specific session — the replica-routing path
-/// runs the query on the exact reader connection whose heartbeat
-/// observation proved its predicate.
+/// [`get_events_by_ids`] on a specific session.
 pub(crate) async fn get_events_by_ids_on(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
@@ -2321,6 +1987,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
+            created_at,
             kind_i32,
             channel_id,
         )
@@ -3155,68 +2822,6 @@ impl Db {
         .await
     }
 
-    /// [`Db::get_events_by_ids`] with replica routing — same contract and
-    /// classification-table requirement as [`Db::query_events_routed`].
-    ///
-    /// By-id fetches route on the BOUNDED arm only: an id list carries no
-    /// channel pin, so no fence floor can prove insert-completeness — the
-    /// covered arm is structurally unavailable. Used for FTS hit hydration,
-    /// where a missing row degrades to a skipped search hit downstream.
-    #[datastore_span(name = "get_events_by_ids_routed", system = "postgresql")]
-    pub async fn get_events_by_ids_routed(
-        &self,
-        path: &'static str,
-        community_id: CommunityId,
-        ids: &[&[u8]],
-    ) -> Result<Vec<StoredEvent>> {
-        match self
-            .route_read(
-                path,
-                crate::RoutePredicate::Bounded,
-                crate::observability::ReaderOperation::SubscriptionHistory,
-            )
-            .await?
-        {
-            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
-                    Ok(events) => {
-                        Self::record_route(path, "replica", reason);
-                        Ok(events)
-                    }
-                    // Surface a cancel instead of re-running it on the writer; see
-                    // `DbError::is_statement_cancelled` for the trade-off.
-                    Err(e) if e.is_statement_cancelled() => {
-                        Self::record_route(path, "replica", "statement_cancelled");
-                        Err(e)
-                    }
-                    Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
-                        Self::record_route(path, "writer", "replica_error");
-                        // Release the reader and its history permit before the
-                        // writer re-run, so a replica-error burst can't fill the cap.
-                        drop(tx);
-                        crate::event::get_events_by_ids_with_operation(
-                            &self.pool,
-                            community_id,
-                            ids,
-                            crate::observability::WriterOperation::SubscriptionHistory,
-                        )
-                        .await
-                    }
-                }
-            }
-            crate::RouteDecision::Writer => {
-                crate::event::get_events_by_ids_with_operation(
-                    &self.pool,
-                    community_id,
-                    ids,
-                    crate::observability::WriterOperation::SubscriptionHistory,
-                )
-                .await
-            }
-        }
-    }
-
     /// Atomically insert an event AND its thread metadata in a single transaction.
     #[datastore_span(name = "insert_event_with_thread_metadata", system = "postgresql")]
     pub async fn insert_event_with_thread_metadata(
@@ -3289,6 +2894,7 @@ impl Db {
                 crate::event::soft_delete_event_and_update_thread_in_tx(
                     &mut tx,
                     target.event_id,
+                    Some(target.created_at),
                     target.parent_event_id,
                     target.root_event_id,
                 )
@@ -6982,6 +6588,8 @@ mod postgres_tests {
         let deletion = deletion_of(&reaction);
         let targets = [DeletionTarget {
             event_id: reaction.id.as_bytes(),
+            created_at: DateTime::from_timestamp(reaction.created_at.as_secs() as i64, 0)
+                .expect("target timestamp"),
             parent_event_id: None,
             root_event_id: None,
         }];
@@ -7060,6 +6668,8 @@ mod postgres_tests {
             .expect("insert torn deletion");
         let targets = [DeletionTarget {
             event_id: reaction.id.as_bytes(),
+            created_at: DateTime::from_timestamp(reaction.created_at.as_secs() as i64, 0)
+                .expect("target timestamp"),
             parent_event_id: None,
             root_event_id: None,
         }];

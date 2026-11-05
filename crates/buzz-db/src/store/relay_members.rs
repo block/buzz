@@ -1155,6 +1155,7 @@ pub(crate) async fn write_nip43_membership_snapshot(
     crate::store::event_follow_up::after_admitted_insert(
         tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         kind_i32,
         None,
     )
