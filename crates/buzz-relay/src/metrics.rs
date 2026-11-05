@@ -768,6 +768,47 @@ mod contract_tests {
 
     const OUTCOMES: [&str; 4] = ["success", "timeout", "error", "cancelled"];
 
+    #[test]
+    fn redis_ping_probe_exports_bucketed_round_trips_and_failures() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        metrics::with_local_recorder(&recorder, || {
+            super::describe_redis_metrics();
+            super::record_redis_ping(Some(Duration::from_millis(3)));
+            super::record_redis_ping(None);
+        });
+        let scrape = handle.render();
+        assert!(
+            scrape.contains("buzz_redis_ping_seconds_bucket{le=\"0.005\"} 1"),
+            "{scrape}"
+        );
+        assert!(
+            scrape.contains("buzz_redis_ping_seconds_count 1"),
+            "{scrape}"
+        );
+        assert!(
+            scrape.contains("buzz_redis_ping_failures_total 1"),
+            "{scrape}"
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_ping_probe_counts_an_unreachable_connection_as_a_failure() {
+        let (recorder, handle) = super::readiness_test_recorder();
+        let connection =
+            buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("lazy connection");
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        super::probe_redis_command_connection(&connection).await;
+        let scrape = handle.render();
+        assert!(
+            scrape.contains("buzz_redis_ping_failures_total 1"),
+            "{scrape}"
+        );
+        assert!(
+            !scrape.contains("buzz_redis_ping_seconds_count"),
+            "{scrape}"
+        );
+    }
+
     fn label_keys(line: &str) -> BTreeSet<&str> {
         line.split_once('{')
             .and_then(|(_, rest)| rest.split_once('}'))
@@ -1281,47 +1322,6 @@ mod contract_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn redis_ping_probe_exports_bucketed_round_trips_and_failures() {
-        let (recorder, handle) = readiness_test_recorder();
-        metrics::with_local_recorder(&recorder, || {
-            describe_redis_metrics();
-            record_redis_ping(Some(Duration::from_millis(3)));
-            record_redis_ping(None);
-        });
-        let scrape = handle.render();
-        assert!(
-            scrape.contains("buzz_redis_ping_seconds_bucket{le=\"0.005\"} 1"),
-            "{scrape}"
-        );
-        assert!(
-            scrape.contains("buzz_redis_ping_seconds_count 1"),
-            "{scrape}"
-        );
-        assert!(
-            scrape.contains("buzz_redis_ping_failures_total 1"),
-            "{scrape}"
-        );
-    }
-
-    #[tokio::test]
-    async fn redis_ping_probe_counts_an_unreachable_connection_as_a_failure() {
-        let (recorder, handle) = readiness_test_recorder();
-        let connection =
-            buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("lazy connection");
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        probe_redis_command_connection(&connection).await;
-        let scrape = handle.render();
-        assert!(
-            scrape.contains("buzz_redis_ping_failures_total 1"),
-            "{scrape}"
-        );
-        assert!(
-            !scrape.contains("buzz_redis_ping_seconds_count"),
-            "{scrape}"
-        );
-    }
 
     #[tokio::test]
     async fn occupied_listener_is_classified_as_bind() {

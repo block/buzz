@@ -375,15 +375,31 @@ async fn refresh_from_registry(inner: &Arc<Inner>, read: RegistryRead) {
     }
 }
 
-async fn reconcile_loop(inner: Arc<Inner>) {
-    // `reconcile_now` scans at boot, so the clock starts with the loop.
-    let mut last_scan = Instant::now();
-    loop {
-        let read = RegistryRead::due(last_scan.elapsed());
+/// When the reconcile loop last ran the legacy scan.
+struct LegacyScanClock {
+    last_scan: Instant,
+}
+
+impl LegacyScanClock {
+    /// `reconcile_now` scans at boot, so the clock starts with the loop.
+    fn starting_at(now: Instant) -> Self {
+        Self { last_scan: now }
+    }
+
+    /// The read for a pass starting at `now`; a due scan restarts the clock.
+    fn next_read(&mut self, now: Instant) -> RegistryRead {
+        let read = RegistryRead::due(now.saturating_duration_since(self.last_scan));
         if read == RegistryRead::LegacyScan {
-            last_scan = Instant::now();
+            self.last_scan = now;
         }
-        reconcile_once(&inner, read).await;
+        read
+    }
+}
+
+async fn reconcile_loop(inner: Arc<Inner>) {
+    let mut clock = LegacyScanClock::starting_at(Instant::now());
+    loop {
+        reconcile_once(&inner, clock.next_read(Instant::now())).await;
         tokio::time::sleep(inner.reconcile_interval).await;
     }
 }
@@ -734,6 +750,19 @@ mod tests {
         // A legacy scan per interval keeps pre-index peers fresher than the
         // membership peer-record TTL.
         assert!(LEGACY_SCAN_INTERVAL < crate::membership::DEFAULT_PEER_RECORD_TTL);
+    }
+
+    #[test]
+    fn a_legacy_scan_restarts_the_clock() {
+        let start = Instant::now();
+        let mut clock = LegacyScanClock::starting_at(start);
+        let at = |secs| start + Duration::from_secs(secs);
+        assert_eq!(clock.next_read(at(5)), RegistryRead::Index);
+        assert_eq!(clock.next_read(at(60)), RegistryRead::LegacyScan);
+        // The next passes read the index until another interval elapses.
+        assert_eq!(clock.next_read(at(65)), RegistryRead::Index);
+        assert_eq!(clock.next_read(at(119)), RegistryRead::Index);
+        assert_eq!(clock.next_read(at(120)), RegistryRead::LegacyScan);
     }
 
     const RECONCILE_INTERVAL: Duration = Duration::from_millis(200);
