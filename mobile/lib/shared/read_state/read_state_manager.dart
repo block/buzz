@@ -147,6 +147,9 @@ class ReadStateManager {
   Future<void> _saved = Future.value();
   bool _saveScheduled = false;
   Object? syncError;
+  // Whether the latest snapshot read succeeded. A publish that skips its own
+  // snapshot clears [syncError] only on this evidence.
+  bool _lastSnapshotSucceeded = false;
   final int Function() _now;
   // Override keys already in this device's own slot, carried unchanged.
   // See [isOverrideContext].
@@ -376,11 +379,13 @@ class ReadStateManager {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
+      _lastSnapshotSucceeded = true;
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
       return true;
     } catch (error) {
+      _lastSnapshotSucceeded = false;
       syncError = error;
       debugPrint('[ReadStateManager] snapshot failed: $error');
       return false;
@@ -589,11 +594,17 @@ class ReadStateManager {
       // The snapshot below is the whole read state (megabytes on a busy
       // account), so skip it when there is nothing to send. Each resume
       // schedules a publish after its re-sync whether or not anything changed.
-      if (!_hasUnpublishedState()) return;
+      if (!_hasUnpublishedState()) {
+        // Nothing pending and every slot published, so after a good snapshot
+        // this device is in sync, as a full publish would have concluded.
+        if (_lastSnapshotSucceeded) syncError = null;
+        return;
+      }
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
         final events = await _relaySession.fetchReadStateSnapshot();
+        _lastSnapshotSucceeded = true;
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {

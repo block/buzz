@@ -410,6 +410,43 @@ void main() {
   });
 
   test(
+    'a skipped publish clears an error a later snapshot recovered',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession()..failNextFetch = true;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      await manager.initialize();
+      expect(manager.syncError, isNotNull);
+      // A publish with nothing to send keeps the error without new evidence.
+      await manager.flush();
+      expect(manager.syncError, isNotNull);
+
+      await manager.reinitializeRemote();
+      await manager.flush();
+      expect(manager.syncError, isNull);
+      expect(relay.fetchCount, 2);
+
+      manager.dispose(flushPending: false);
+    },
+  );
+
+  test(
     'retains recent frontiers without a count eviction across restart',
     () async {
       SharedPreferences.setMockInitialValues({});
