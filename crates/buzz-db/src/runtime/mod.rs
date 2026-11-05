@@ -1863,13 +1863,14 @@ impl Db {
     /// they never fill the reader pool, and they are never moved to the
     /// writer merely because the reader is busy: a history read that waits
     /// out its permit ([`history_reads::HistoryReadGate::PERMIT_WAIT`]) or
-    /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) is rejected with
+    /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) on a saturated
+    /// reader pool ([`Db::reader_saturated`]) is rejected with
     /// [`sqlx::Error::PoolTimedOut`], which the relay answers with its
     /// retryable `CLOSED`. Spilling that load onto the writer starved the
     /// authentication, tenant and moderation reads only the writer serves.
-    /// A reader that is wrong rather than busy (validation failure, proof
-    /// timeout, stale token) still falls back to the writer, as do
-    /// prechecks that never reach the reader. Recorded as
+    /// A reader that is wrong rather than busy (unreachable, validation
+    /// failure, proof timeout, stale token) still falls back to the writer,
+    /// as do prechecks that never reach the reader. Recorded as
     /// `decision="rejected"` with `reason="history_read_cap"` or
     /// `"reader_acquire_timeout"`.
     pub(crate) async fn route_read(
@@ -1966,7 +1967,9 @@ impl Db {
                     }
                 }
             }
-            Err(reason @ "reader_acquire_timeout") if history => {
+            Err(reason @ "reader_acquire_timeout")
+                if history && Self::reader_saturated(read_pool) =>
+            {
                 Err(Self::reject_history_read(path, reason))
             }
             Err(reason) => {
@@ -1974,6 +1977,19 @@ impl Db {
                 Ok(RouteDecision::Writer)
             }
         }
+    }
+
+    /// Whether a reader acquire timeout means the reader is busy rather than
+    /// unreachable: every connection the pool may hold exists and none is
+    /// idle. `PoolTimedOut` alone cannot tell them apart, because sqlx keeps
+    /// retrying a refused or failing dial until the acquire budget runs out.
+    /// A reader that refuses or drops dials leaves the pool below its ceiling,
+    /// so its history reads still fall back to the writer. A reader that
+    /// accepts no TCP at all can fill the ceiling with in-flight dials and
+    /// read as busy; those reads are rejected as retryable, the same outcome
+    /// as a full gate.
+    fn reader_saturated(read_pool: &PgPool) -> bool {
+        read_pool.size() >= read_pool.options().get_max_connections() && read_pool.num_idle() == 0
     }
 
     /// Record a rejected history read (see [`Db::route_read`]) and build its
