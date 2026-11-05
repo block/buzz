@@ -155,20 +155,69 @@ impl Store {
         Ok(())
     }
 
-    fn lock(&self) -> Result<std::fs::File, CliError> {
+    fn open_lock(&self, name: &str) -> Result<std::fs::File, CliError> {
         self.ensure_dir()?;
-        let path = self.dir.join("federated-identity.lock");
+        let path = self.dir.join(name);
         if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
             return Err(self.refuse());
         }
-        let file = private_options()
+        private_options()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
-            .map_err(|e| self.io(e))?;
+            .map_err(|e| self.io(e))
+    }
+
+    /// The store lock. Held only for a read or a read-modify-write, never
+    /// across a network call.
+    fn lock(&self) -> Result<std::fs::File, CliError> {
+        let file = self.open_lock("federated-identity.lock")?;
         fs2::FileExt::lock_exclusive(&file).map_err(|e| self.io(e))?;
         Ok(file)
+    }
+
+    /// One agent's enrollment lock, held from the grant request through its
+    /// installation so grants are installed in the order they were issued.
+    /// Waits at most `ENROLL_WAIT` for another enrollment of the same agent.
+    async fn lock_agent(&self, agent: &str) -> Result<std::fs::File, CliError> {
+        let file = self.open_lock(&format!("enroll-{agent}.lock"))?;
+        let deadline = tokio::time::Instant::now() + ENROLL_WAIT;
+        loop {
+            match fs2::FileExt::try_lock_exclusive(&file) {
+                Ok(()) => return Ok(file),
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => {
+                    return Err(CliError::Other(
+                        "another enrollment of this agent is in progress; try again".into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn epoch_file(&self) -> PathBuf {
+        self.dir.join("federated-identity.epoch")
+    }
+
+    /// Changes on every logout, so a login that started before one cannot
+    /// save its session after it. Call with the store lock held.
+    fn epoch_locked(&self) -> Result<String, CliError> {
+        let path = self.epoch_file();
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(e) => return Err(self.io(e)),
+            Ok(m) if !m.is_file() || m.len() > 64 => return Err(self.refuse()),
+            Ok(_) => {}
+        }
+        std::fs::read_to_string(&path).map_err(|e| self.io(e))
+    }
+
+    fn epoch(&self) -> Result<String, CliError> {
+        let _lock = self.lock()?;
+        self.epoch_locked()
     }
 
     fn read_locked(&self) -> Result<State, CliError> {
@@ -188,31 +237,40 @@ impl Store {
         })
     }
 
-    /// Replace the file atomically: a fresh 0600 temporary file, then rename.
-    /// An empty state removes the file.
-    fn write_locked(&self, state: &State) -> Result<(), CliError> {
-        let path = self.file();
-        if state.session.is_none() && state.grants.is_empty() {
-            return match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(self.io(e)),
-                _ => Ok(()),
-            };
+    /// Remove the store file, whatever it holds. A symlink is removed, never
+    /// followed.
+    fn remove_locked(&self) -> Result<(), CliError> {
+        match std::fs::remove_file(self.file()) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(self.io(e)),
+            _ => Ok(()),
         }
-        let bytes = serde_json::to_vec(state).map_err(|e| CliError::Other(e.to_string()))?;
+    }
+
+    /// Replace `path` atomically: a fresh 0600 temporary file, then rename.
+    fn replace_locked(&self, path: &std::path::Path, bytes: &[u8]) -> Result<(), CliError> {
         let tmp = self
             .dir
             .join(format!(".{STORE_FILE}.{}.tmp", uuid::Uuid::new_v4()));
         let written = (|| {
             use std::io::Write;
             let mut file = private_options().create_new(true).write(true).open(&tmp)?;
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
-            std::fs::rename(&tmp, &path)
+            std::fs::rename(&tmp, path)
         })();
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
         written.map_err(|e| self.io(e))
+    }
+
+    /// Write the state; an empty state removes the file.
+    fn write_locked(&self, state: &State) -> Result<(), CliError> {
+        if state.session.is_none() && state.grants.is_empty() {
+            return self.remove_locked();
+        }
+        let bytes = serde_json::to_vec(state).map_err(|e| CliError::Other(e.to_string()))?;
+        self.replace_locked(&self.file(), &bytes)
     }
 
     fn read(&self) -> Result<State, CliError> {
@@ -245,12 +303,13 @@ impl Store {
         })
     }
 
-    /// Delete everything on this device. Enrollments stay on the adapter.
+    /// Delete everything on this device, without reading it, so it also
+    /// recovers a corrupt store. Enrollments stay on the adapter.
     pub fn logout(&self) -> Result<(), CliError> {
-        self.update(|state| {
-            *state = State::default();
-            Ok(((), true))
-        })
+        let _lock = self.lock()?;
+        self.remove_locked()?;
+        let epoch = uuid::Uuid::new_v4().to_string();
+        self.replace_locked(&self.epoch_file(), epoch.as_bytes())
     }
 }
 
@@ -270,7 +329,7 @@ const RETRY_ATTEMPTS: u32 = 3;
 /// How an adapter call ended, when it did not succeed.
 #[derive(Debug)]
 enum Denied {
-    /// 401 `session_required` / `session_expired`: the session is gone.
+    /// 401 `session_required` / `session_expired` on the assertion route.
     SessionEnded,
     /// 401 `invalid_grant` on the agent-assertion route: the grant is gone.
     GrantEnded,
@@ -320,20 +379,53 @@ fn denial_code(body: &[u8]) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-async fn bounded_body(mut response: reqwest::Response) -> Option<Vec<u8>> {
+enum Body {
+    Complete(Vec<u8>),
+    TooLarge,
+    /// The transfer broke before the end; nothing in it is trusted.
+    Broken,
+}
+
+async fn bounded_body(mut response: reqwest::Response) -> Body {
     let mut body = Vec::new();
-    while let Ok(Some(chunk)) = response.chunk().await {
-        if chunk.len() > MAX_ADAPTER_BODY - body.len() {
-            return None;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if chunk.len() > MAX_ADAPTER_BODY - body.len() => {
+                return Body::TooLarge
+            }
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            Ok(None) => return Body::Complete(body),
+            Err(_) => return Body::Broken,
         }
-        body.extend_from_slice(&chunk);
     }
-    Some(body)
+}
+
+/// Which NIP-FA route answered: a denial means only what that route defines.
+#[derive(Clone, Copy)]
+enum Route {
+    /// `/v1/login/exchange` and `/v1/session` during login: nothing stored yet.
+    Login,
+    /// `/v1/identity/assertions`.
+    Assertion,
+    /// `/v1/nip-fi/agent-grant`: defines no 401, so it never ends the session.
+    Grant,
+    /// `/v1/nip-fi/agent-assertion`.
+    AgentAssertion,
+}
+
+fn classify(route: Route, status: u16, code: String) -> Denied {
+    match (route, status, code.as_str()) {
+        (Route::Assertion, 401, "session_required" | "session_expired") => Denied::SessionEnded,
+        (Route::AgentAssertion, 401, "invalid_grant") => Denied::GrantEnded,
+        _ => Denied::Refused(code),
+    }
 }
 
 /// Send one adapter request, built afresh (with a fresh proof) per attempt.
-/// Network failures, 429 and 5xx retry with backoff up to `attempts` times.
+/// Network failures (including a broken response body), 429 and 5xx retry
+/// with backoff up to `attempts` times.
 async fn adapter_json<T: DeserializeOwned>(
+    route: Route,
     attempts: u32,
     request: impl Fn() -> Result<reqwest::RequestBuilder, CliError>,
 ) -> Result<T, Denied> {
@@ -352,19 +444,16 @@ async fn adapter_json<T: DeserializeOwned>(
         if status.is_redirection() {
             return Err(Denied::Refused("redirect".into()));
         }
-        let Some(body) = bounded_body(response).await else {
-            return Err(Denied::Refused("response_too_large".into()));
+        let body = match bounded_body(response).await {
+            Body::Complete(body) => body,
+            Body::TooLarge => return Err(Denied::Refused("response_too_large".into())),
+            Body::Broken => continue,
         };
         if status.is_success() {
             return serde_json::from_slice(&body)
                 .map_err(|_| Denied::Refused("invalid_response".into()));
         }
-        let code = denial_code(&body);
-        return Err(match (status.as_u16(), code.as_str()) {
-            (401, "session_required" | "session_expired") => Denied::SessionEnded,
-            (401, "invalid_grant") => Denied::GrantEnded,
-            _ => Denied::Refused(code),
-        });
+        return Err(classify(route, status.as_u16(), denial_code(&body)));
     }
     Err(Denied::Unavailable)
 }
@@ -411,7 +500,14 @@ fn canonical_relay(relay_url: &str) -> Result<String, CliError> {
     {
         return Err(bad());
     }
-    let host = url.host_str().ok_or_else(bad)?;
+    let host = match url.host().ok_or_else(bad)? {
+        // NIP-FA: a DNS host carries no trailing dot.
+        url::Host::Domain(name) => name.strip_suffix('.').unwrap_or(name).to_owned(),
+        _ => url.host_str().ok_or_else(bad)?.to_owned(),
+    };
+    if host.is_empty() || host.ends_with('.') {
+        return Err(bad());
+    }
     Ok(match url.port() {
         Some(port) => format!("wss://{host}:{port}"),
         None => format!("wss://{host}"),
@@ -510,7 +606,7 @@ pub async fn mint(
             }
             let url = format!("{}/v1/nip-fi/agent-assertion", grant.adapter);
             let body = json_body(&pubkey, &relay);
-            let issued: Issued = match adapter_json(RETRY_ATTEMPTS, || {
+            let issued: Issued = match adapter_json(Route::AgentAssertion, RETRY_ATTEMPTS, || {
                 Ok(client
                     .post(&url)
                     .bearer_auth(&grant.token)
@@ -564,7 +660,7 @@ pub async fn mint(
             }
             let url = format!("{}/v1/identity/assertions", session.adapter);
             let body = json_body(&pubkey, &relay);
-            let issued: Issued = match adapter_json(RETRY_ATTEMPTS, || {
+            let issued: Issued = match adapter_json(Route::Assertion, RETRY_ATTEMPTS, || {
                 Ok(client
                     .post(&url)
                     .bearer_auth(&session.token)
@@ -607,6 +703,10 @@ pub async fn mint(
 // ── Login ────────────────────────────────────────────────────────────────────
 
 const LOGIN_WAIT: Duration = Duration::from_secs(300);
+/// How long an enrollment waits for another enrollment of the same agent:
+/// longer than one enrollment's bounded adapter calls, retries included.
+const ENROLL_WAIT: Duration =
+    Duration::from_secs(ADAPTER_DEADLINE.as_secs() * RETRY_ATTEMPTS as u64 + 15);
 
 #[derive(Deserialize)]
 struct Exchanged {
@@ -619,9 +719,8 @@ struct Checked {
     expires_at: String,
 }
 
-fn instant(rfc3339: &str) -> Result<i64, CliError> {
+fn instant(rfc3339: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, CliError> {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
-        .map(|t| t.timestamp())
         .map_err(|_| CliError::Auth("the identity service returned an invalid expiry".into()))
 }
 
@@ -686,6 +785,7 @@ pub async fn login(
     open: impl FnOnce(&str),
 ) -> Result<serde_json::Value, CliError> {
     let adapter = adapter_base(adapter)?;
+    let epoch = store.epoch()?;
     let secret = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -724,7 +824,7 @@ pub async fn login(
     let body = serde_json::json!({ "code": code, "handoff_secret": secret }).to_string();
     let exchange_url = format!("{adapter}/v1/login/exchange");
     // The code is single-use: one attempt only.
-    let exchanged: Exchanged = adapter_json(1, || {
+    let exchanged: Exchanged = adapter_json(Route::Login, 1, || {
         Ok(client
             .post(&exchange_url)
             .header("Content-Type", "application/json")
@@ -736,16 +836,17 @@ pub async fn login(
     if token.is_empty() || token.len() > 4096 || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Denied::Refused("invalid_response".into()).into_error("sign-in"));
     }
-    let expires_at = instant(&exchanged.expires_at)?;
 
     let session_url = format!("{adapter}/v1/session");
-    let checked: Checked = adapter_json(RETRY_ATTEMPTS, || {
+    let checked: Checked = adapter_json(Route::Login, RETRY_ATTEMPTS, || {
         Ok(client.get(&session_url).bearer_auth(&token))
     })
     .await
     .map_err(|d| d.into_error("sign-in"))?;
-    // NIP-FA: the exchange and the session check must describe one session.
-    if instant(&checked.expires_at)? != expires_at || expires_at <= now() {
+    // NIP-FA: the exchange and the session check must describe one session,
+    // compared as instants at full precision.
+    let expires_at = instant(&exchanged.expires_at)?;
+    if instant(&checked.expires_at)? != expires_at || expires_at.timestamp() <= now() {
         return Err(CliError::Auth(
             "the identity service described two different sessions; sign-in not saved".into(),
         ));
@@ -755,9 +856,15 @@ pub async fn login(
         adapter: adapter.clone(),
         protocol,
         token,
-        expires_at,
+        // Whole seconds, rounded down: never later than the real expiry.
+        expires_at: expires_at.timestamp(),
     };
     store.update(|state| {
+        if store.epoch_locked()? != epoch {
+            return Err(CliError::Auth(
+                "signed out while this sign-in was in progress; sign-in not saved".into(),
+            ));
+        }
         state.session = Some(session);
         Ok(((), true))
     })?;
@@ -787,13 +894,16 @@ pub async fn enroll_agent(
     owner: &str,
     auth_tag_json: &str,
 ) -> Result<serde_json::Value, CliError> {
+    let agent = keys.public_key().to_hex();
+    // A later grant replaces an earlier one at the adapter, so grants for one
+    // agent are requested and installed one at a time, in order.
+    let _enrolling = store.lock_agent(&agent).await?;
     let session = store.read()?.session.ok_or_else(|| {
         CliError::Auth("the owner must sign in first; run `buzz identity login`".into())
     })?;
     if session.expires_at <= now() {
         return Err(Denied::SessionEnded.into_error("enrollment"));
     }
-    let agent = keys.public_key().to_hex();
     let protocol = session.protocol;
     let mut form = url::form_urlencoded::Serializer::new(String::new());
     form.append_pair(
@@ -816,7 +926,7 @@ pub async fn enroll_agent(
     }
     let url = format!("{}/v1/nip-fi/agent-grant", session.adapter);
     let client = adapter_client()?;
-    let enrolled: Enrolled = match adapter_json(RETRY_ATTEMPTS, || {
+    let enrolled: Enrolled = match adapter_json(Route::Grant, RETRY_ATTEMPTS, || {
         Ok(client
             .post(&url)
             .header(
@@ -829,10 +939,6 @@ pub async fn enroll_agent(
     .await
     {
         Ok(enrolled) => enrolled,
-        Err(Denied::SessionEnded) => {
-            store.clear_session(&session)?;
-            return Err(Denied::SessionEnded.into_error("enrollment"));
-        }
         Err(denied) => return Err(denied.into_error("enrollment")),
     };
     let token = &enrolled.access_token;
@@ -909,6 +1015,12 @@ mod tests {
         answers: BTreeMap<&'static str, (u16, String)>,
         /// Session-check expiry, when it should differ from the exchange's.
         session_expiry: Option<String>,
+        /// Exchange expiry, when it should differ from `EXPIRY`.
+        exchange_expiry: Option<String>,
+        /// Grants issued so far; grant N's token is `grant-N`.
+        grants_issued: u32,
+        /// Hold the first grant response this long, so a later one overtakes it.
+        first_grant_delay: Option<Duration>,
         seen: Vec<(String, HeaderMap, String)>,
         /// Owner the adapter binds; the grant response echoes it.
         owner: String,
@@ -946,8 +1058,24 @@ mod tests {
     ) -> Response {
         let path = uri.path().to_owned();
         let body = String::from_utf8_lossy(&body).into_owned();
+        // Grants are numbered in arrival order; the first may answer last.
+        let mut grant_n = 0;
+        if path == "/v1/nip-fi/agent-grant" {
+            let delay = {
+                let mut f = fake.lock().unwrap();
+                f.grants_issued += 1;
+                grant_n = f.grants_issued;
+                f.seen.push((path.clone(), headers.clone(), body.clone()));
+                f.first_grant_delay.filter(|_| grant_n == 1)
+            };
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+        }
         let mut f = fake.lock().unwrap();
-        f.seen.push((path.clone(), headers.clone(), body.clone()));
+        if path != "/v1/nip-fi/agent-grant" {
+            f.seen.push((path.clone(), headers.clone(), body.clone()));
+        }
         if let Some((status, answer)) = f.answers.get(path.as_str()) {
             return (StatusCode::from_u16(*status).unwrap(), answer.clone()).into_response();
         }
@@ -959,14 +1087,14 @@ mod tests {
                 .to_owned()
         };
         match path.as_str() {
-            "/v1/login/exchange" => ok(serde_json::json!({"session_token":"sess-1","expires_at":EXPIRY}).to_string()),
+            "/v1/login/exchange" => ok(serde_json::json!({"session_token":"sess-1","expires_at": f.exchange_expiry.clone().unwrap_or(EXPIRY.into())}).to_string()),
             "/v1/session" => ok(serde_json::json!({"expires_at": f.session_expiry.clone().unwrap_or(EXPIRY.into())}).to_string()),
             "/v1/identity/assertions" => ok(issued("nip-fi+jwt", &pubkey(), None)),
             "/v1/nip-fi/agent-grant" => {
                 let form: BTreeMap<String, String> =
                     url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
                 ok(serde_json::json!({
-                    "access_token": "grant-1",
+                    "access_token": format!("grant-{grant_n}"),
                     "issued_token_type": form["requested_token_type"],
                     "token_type": "N_A",
                     "expires_in": 3600,
@@ -1080,8 +1208,19 @@ mod tests {
         assert!(matches!(err, CliError::Auth(_)), "{err:?}");
         assert!(!store.has_credentials());
 
+        // Same second, different fraction: two sessions.
+        {
+            let mut f = fake.lock().unwrap();
+            f.exchange_expiry = Some("2099-01-01T00:00:00.100Z".into());
+            f.session_expiry = Some("2099-01-01T00:00:00.900Z".into());
+        }
+        assert!(login(&store, &base, Protocol::NipFa, browser("c"))
+            .await
+            .is_err());
+        assert!(!store.has_credentials());
+
         // The same instant in another notation is the same session.
-        fake.lock().unwrap().session_expiry = Some("2098-12-31T19:00:00-05:00".into());
+        fake.lock().unwrap().session_expiry = Some("2098-12-31T19:00:00.100-05:00".into());
         login(&store, &base, Protocol::NipFa, browser("c"))
             .await
             .unwrap();
@@ -1334,12 +1473,240 @@ mod tests {
         assert_eq!(seen(&fake, "/v1/nip-fi/agent-assertion").len(), 1);
     }
 
+    /// A raw HTTP/1.1 server that answers every connection with `head` and
+    /// `body`, then hangs up before the `Content-Length` it promised.
+    async fn breaking(head: &'static str, body: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let proofs = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = proofs.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 16 * 1024];
+                let n = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]).to_lowercase();
+                let proof = request
+                    .lines()
+                    .find_map(|l| l.strip_prefix("nostr-authorization: "))
+                    .unwrap_or_default()
+                    .to_owned();
+                seen.lock().unwrap().push(proof);
+                let promised = body.len() + 100;
+                let reply = format!("{head}\r\ncontent-length: {promised}\r\n\r\n{body}");
+                socket.write_all(reply.as_bytes()).await.unwrap();
+                // Dropped here: the transfer ends short.
+            }
+        });
+        (base, proofs)
+    }
+
+    #[tokio::test]
+    async fn a_broken_response_body_is_a_network_failure_never_an_answer() {
+        let (_dir, store, fake, owner, _) = setup();
+        let base = adapter(fake.clone()).await;
+        login(&store, &base, Protocol::NipFa, browser("c"))
+            .await
+            .unwrap();
+        let point_at = |adapter: String| {
+            store
+                .update(|s| {
+                    s.session.as_mut().unwrap().adapter = adapter;
+                    Ok(((), true))
+                })
+                .unwrap()
+        };
+
+        // A complete, valid assertion followed by a broken transfer is not accepted.
+        let valid = issued("nip-fi+jwt", &owner.public_key().to_hex(), None);
+        let (broken, proofs) = breaking("HTTP/1.1 200 OK", valid).await;
+        point_at(broken);
+        let err = mint(&store, &owner, None, RELAY).await.unwrap_err();
+        assert!(err.to_string().contains("unavailable"), "{err}");
+        // Retried as a network failure, each attempt with a fresh proof.
+        let proofs = proofs.lock().unwrap().clone();
+        assert_eq!(proofs.len(), RETRY_ATTEMPTS as usize);
+        assert!(proofs[0] != proofs[1] && proofs[1] != proofs[2]);
+
+        // A truncated denial that would end the session ends nothing.
+        let (broken, _) = breaking(
+            "HTTP/1.1 401 Unauthorized",
+            r#"{"error":"session_expired"}"#.into(),
+        )
+        .await;
+        point_at(broken);
+        let err = mint(&store, &owner, None, RELAY).await.unwrap_err();
+        assert!(err.to_string().contains("unavailable"), "{err}");
+        assert!(store.read().unwrap().session.is_some());
+
+        // Garbage cut short is the same.
+        let (broken, _) = breaking("HTTP/1.1 200 OK", "{\"assert".into()).await;
+        point_at(broken);
+        let err = mint(&store, &owner, None, RELAY).await.unwrap_err();
+        assert!(err.to_string().contains("unavailable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_denial_means_only_what_its_route_defines() {
+        let (_dir, store, fake, owner, agent) = setup();
+        let base = adapter(fake.clone()).await;
+        let owner_hex = owner.public_key().to_hex();
+        login(&store, &base, Protocol::NipFa, browser("c"))
+            .await
+            .unwrap();
+        enroll_agent(&store, &agent, &owner_hex, "[]")
+            .await
+            .unwrap();
+        let answer = |path: &'static str, code: &str| {
+            let mut f = fake.lock().unwrap();
+            f.answers.clear();
+            f.answers
+                .insert(path, (401, format!(r#"{{"error":"{code}"}}"#)));
+        };
+        let kept = |session: bool, grant: bool| {
+            let state = store.read().unwrap();
+            assert_eq!(state.session.is_some(), session);
+            assert_eq!(state.grants.len() == 1, grant);
+        };
+
+        // An undefined denial is reported as a refusal of that code.
+        let refused = |err: CliError, code: &str| {
+            assert!(
+                err.to_string().ends_with(&format!("refused ({code})")),
+                "{err}"
+            );
+        };
+        for code in ["session_expired", "session_required", "invalid_grant"] {
+            // The agent-grant route defines no 401: nothing ends.
+            answer("/v1/nip-fi/agent-grant", code);
+            refused(
+                enroll_agent(&store, &agent, &owner_hex, "[]")
+                    .await
+                    .unwrap_err(),
+                code,
+            );
+            kept(true, true);
+        }
+        for code in ["session_expired", "session_required"] {
+            // A session code on the agent-assertion route ends nothing either.
+            answer("/v1/nip-fi/agent-assertion", code);
+            refused(
+                mint(&store, &agent, Some(&owner_hex), RELAY)
+                    .await
+                    .unwrap_err(),
+                code,
+            );
+            kept(true, true);
+        }
+        // invalid_grant on the human route ends nothing.
+        answer("/v1/identity/assertions", "invalid_grant");
+        refused(
+            mint(&store, &owner, None, RELAY).await.unwrap_err(),
+            "invalid_grant",
+        );
+        kept(true, true);
+
+        // The defined pairs end exactly their credential.
+        answer("/v1/nip-fi/agent-assertion", "invalid_grant");
+        mint(&store, &agent, Some(&owner_hex), RELAY)
+            .await
+            .unwrap_err();
+        kept(true, false);
+        answer("/v1/identity/assertions", "session_required");
+        mint(&store, &owner, None, RELAY).await.unwrap_err();
+        kept(false, false);
+    }
+
+    #[tokio::test]
+    async fn overlapping_enrollments_install_the_grant_issued_last() {
+        let (dir, store, fake, owner, agent) = setup();
+        let base = adapter(fake.clone()).await;
+        let owner_hex = owner.public_key().to_hex();
+        login(&store, &base, Protocol::NipFa, browser("c"))
+            .await
+            .unwrap();
+        // The adapter answers the first grant last.
+        fake.lock().unwrap().first_grant_delay = Some(Duration::from_millis(500));
+
+        // Two CLI runs: separate handles on the same store.
+        let other = Store::at(dir.path().join("buzz-cli"));
+        let first = enroll_agent(&store, &agent, &owner_hex, "[]");
+        let second = async {
+            while fake.lock().unwrap().grants_issued == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            enroll_agent(&other, &agent, &owner_hex, "[]").await
+        };
+        let (a, b) = tokio::join!(first, second);
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(fake.lock().unwrap().grants_issued, 2);
+        // The adapter's live grant is the one it issued last.
+        assert_eq!(
+            store.read().unwrap().grants[&agent.public_key().to_hex()].token,
+            "grant-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_that_outlives_a_logout_is_not_saved() {
+        let (dir, store, fake, ..) = setup();
+        let base = adapter(fake.clone()).await;
+        let other = Store::at(dir.path().join("buzz-cli"));
+        let complete = browser("c");
+        let err = login(&store, &base, Protocol::NipFa, |url: &str| {
+            // Another run signs out while the browser is open.
+            other.logout().unwrap();
+            complete(url);
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("signed out"), "{err}");
+        assert!(!store.has_credentials());
+
+        // A sign-in after it is saved.
+        login(&store, &base, Protocol::NipFa, browser("c"))
+            .await
+            .unwrap();
+        assert!(store.has_credentials());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logout_recovers_a_corrupt_store_and_removes_a_symlink_without_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("buzz-cli"));
+        store.ensure_dir().unwrap();
+        for bytes in [
+            b"{not json".to_vec(),
+            vec![b' '; MAX_STORE_BYTES as usize + 1],
+        ] {
+            std::fs::write(store.file(), &bytes).unwrap();
+            assert!(store.read().is_err());
+            store.logout().unwrap();
+            assert!(!store.has_credentials());
+        }
+
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, "{}").unwrap();
+        std::os::unix::fs::symlink(&target, store.file()).unwrap();
+        store.logout().unwrap();
+        assert!(!store.has_credentials());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+    }
+
     #[test]
     fn relay_url_is_canonical_and_secure() {
         for (input, want) in [
             ("https://Relay.Example/", "wss://relay.example"),
             ("wss://relay.example:8443", "wss://relay.example:8443"),
             ("https://relay.example:443", "wss://relay.example"),
+            ("wss://relay.example:443", "wss://relay.example"),
+            ("https://relay.example./", "wss://relay.example"),
+            ("wss://relay.example.:8443", "wss://relay.example:8443"),
+            ("wss://[::1]:8443", "wss://[::1]:8443"),
+            ("wss://[::1]", "wss://[::1]"),
         ] {
             assert_eq!(canonical_relay(input).unwrap(), want);
         }
@@ -1348,6 +1715,7 @@ mod tests {
             "https://relay.example/path",
             "https://relay.example:80",
             "https://relay.example/?q",
+            "wss://relay.example..",
         ] {
             assert!(canonical_relay(bad).is_err(), "{bad}");
         }

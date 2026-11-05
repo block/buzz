@@ -2256,9 +2256,18 @@ async fn relay_requires_nip_fi(client: &BuzzClient) -> Result<bool, CliError> {
     Ok(info.get("requires_nip_fi") == Some(&serde_json::Value::Bool(true)))
 }
 
+/// `identity login`, `status` and `logout` touch only this device's sign-in,
+/// so they run without a key or auth tag (and recover from a stale one).
+async fn run_local_identity(sub: &IdentityCmd) -> Option<Result<(), CliError>> {
+    if matches!(sub, IdentityCmd::EnrollAgent) {
+        return None;
+    }
+    Some(run_identity(sub, None, None).await)
+}
+
 async fn run_identity(
-    sub: IdentityCmd,
-    keys: &Keys,
+    sub: &IdentityCmd,
+    keys: Option<&Keys>,
     auth_tag_json: Option<&str>,
 ) -> Result<(), CliError> {
     let store = federated::Store::default_location()?;
@@ -2268,7 +2277,7 @@ async fn run_identity(
             protocol,
             no_browser,
         } => {
-            federated::login(&store, &adapter, protocol, |url| {
+            federated::login(&store, adapter, *protocol, |url| {
                 eprintln!("Sign in at: {url}");
                 if !no_browser {
                     let _ = std::process::Command::new(if cfg!(target_os = "macos") {
@@ -2292,6 +2301,7 @@ async fn run_identity(
                 .ok()
                 .and_then(|t| t.as_slice().get(1).cloned())
                 .ok_or_else(|| CliError::Auth("BUZZ_AUTH_TAG has no owner".into()))?;
+            let keys = keys.ok_or_else(|| CliError::Auth("BUZZ_PRIVATE_KEY is required".into()))?;
             federated::enroll_agent(&store, keys, &owner, auth_tag_json).await?
         }
         IdentityCmd::Status => federated::status(&store)?,
@@ -2313,6 +2323,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+    if let Cmd::Identity(ref sub) = cli.command {
+        if let Some(result) = run_local_identity(sub).await {
+            return result;
+        }
     }
 
     // Auth: private key is required for all relay operations.
@@ -2350,8 +2365,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
-    if let Cmd::Identity(sub) = cli.command {
-        return run_identity(sub, &keys, auth_tag_json.as_deref()).await;
+    if let Cmd::Identity(ref sub) = cli.command {
+        return run_identity(sub, Some(&keys), auth_tag_json.as_deref()).await;
     }
 
     let owner = auth_tag.as_ref().and_then(|t| t.as_slice().get(1).cloned());
