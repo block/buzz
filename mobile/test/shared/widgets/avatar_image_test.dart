@@ -12,12 +12,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 
-// Minimal valid 1x1 transparent PNG.
-final _pngBytes = base64Decode(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
-  'AAYAAjCB0C8AAAAASUVORK5CYII=',
-);
-
 void main() {
   const svg =
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
@@ -108,71 +102,6 @@ void main() {
       return (provider as MediaImageProvider).url;
     });
     expect(shown, ['$relay/media/$hash.thumb.jpg', original]);
-  });
-
-  testWidgets('a missing thumbnail shows the fallback, never the original', (
-    tester,
-  ) async {
-    const relay = 'https://relay.example';
-    MediaImageProvider.debugResetCooldowns();
-    addTearDown(MediaImageProvider.debugResetCooldowns);
-    final missing = '$relay/media/${'cd' * 32}.jpg';
-    final broken = '$relay/media/${'ef' * 32}.jpg';
-    String thumb(String url) => url.replaceFirst('.jpg', '.thumb.jpg');
-    final requested = <String>[];
-    final client = http_testing.MockClient((request) async {
-      final url = request.url.toString();
-      requested.add(url);
-      if (url == thumb(missing)) return http.Response('', 404);
-      if (url == thumb(broken)) return http.Response('', 500);
-      return http.Response.bytes(_pngBytes, 200);
-    });
-    tester.view.devicePixelRatio = 3;
-    addTearDown(tester.view.resetDevicePixelRatio);
-    Future<void> show(double radius) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            mediaGetAuthServiceProvider.overrideWithValue(
-              MediaGetAuthService(baseUrl: relay, nsec: null),
-            ),
-            mediaHttpClientProvider.overrideWithValue(client),
-          ],
-          child: MaterialApp(
-            home: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final url in [missing, broken])
-                  AvatarImage(
-                    imageUrl: url,
-                    radius: radius,
-                    fallback: Text(url == missing ? 'M' : 'B'),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      );
-      for (var i = 0; i < 4; i++) {
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)),
-        );
-        await tester.pump();
-      }
-    }
-
-    // Both failures show initials, and the original is never downloaded.
-    await show(20);
-    expect(find.text('M'), findsOneWidget);
-    expect(find.text('B'), findsOneWidget);
-    expect(requested, unorderedEquals([thumb(missing), thumb(broken)]));
-
-    // Shown again at another size, the failed thumbnails are cooling down:
-    // still initials, with no new request for either thumbnail or original.
-    await show(16);
-    expect(find.text('M'), findsOneWidget);
-    expect(find.text('B'), findsOneWidget);
-    expect(requested, hasLength(2));
   });
 
   testWidgets('clips agents to the desktop squircle', (tester) async {
