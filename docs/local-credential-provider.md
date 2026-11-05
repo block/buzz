@@ -167,6 +167,8 @@ never leave the machine. That lets both sides reuse existing NIP-46 types.
   JSON-encoded into the string.
 - On failure, `error` is a machine code from [Errors](#errors). `message` is
   optional text for a person. `retry_after` is present only for `rate_limited`.
+- A response is at most 4,160 KiB (status line, headers and body); larger ones
+  are refused.
 - Both sides MUST ignore fields they do not recognize.
 
 ## Methods

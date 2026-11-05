@@ -30,11 +30,14 @@ pub(crate) const HELD_TIMEOUT: Duration = Duration::from_secs(150);
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
 /// `lsof` can take seconds on a busy Mac.
 const SAME_USER_TIMEOUT: Duration = Duration::from_secs(5);
-/// The largest event the desktop signs, a 512 KiB relay frame (a Canvas),
-/// doubled for escaping its JSON as a string (`"` and `\` each become two
-/// bytes), plus 64 KiB for the envelope and headers.
-const MAX_EVENT_BYTES: usize = 512 * 1024;
-const MAX_RESPONSE_BYTES: usize = 2 * MAX_EVENT_BYTES + 64 * 1024;
+/// Every result is built from a request's params, and the desktop reads at
+/// most 2 MiB of request body, so no signed event (or other result) is
+/// larger. Escaping a result's JSON as a string at most doubles it (`"` and
+/// `\` each become two bytes; event JSON has no raw control characters, and a
+/// NIP-44 plaintext is at most 64 KiB). The 64 KiB on top covers the added
+/// `id`, `pubkey` and `sig`, the envelope and the headers.
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 2 * MAX_REQUEST_BYTES + 64 * 1024;
 
 /// `rate_limited` refuses before acting, so the same envelope is re-sent:
 /// up to this many times, each after `retry_after` capped at the wait below.
@@ -1291,22 +1294,35 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn the_largest_signed_event_fits_and_more_is_refused() {
+        const CANVAS_BYTES: usize = 512 * 1024;
         // An event at the desktop's limit whose content is all quotes, so
         // every content byte doubles again when the event is the result string.
         let shell =
             r#"{"id":"","pubkey":"","created_at":0,"kind":40100,"tags":[],"content":"","sig":""}"#;
-        let content = "\"".repeat((MAX_EVENT_BYTES - shell.len()) / 2);
+        let content = "\"".repeat((CANVAS_BYTES - shell.len()) / 2);
         let event = serde_json::json!({
             "id": "", "pubkey": "", "created_at": 0, "kind": 40100, "tags": [],
             "content": content, "sig": "",
         })
         .to_string();
-        assert!(event.len() <= MAX_EVENT_BYTES && event.len() > MAX_EVENT_BYTES - 16);
-        let body = serde_json::json!({ "id": "1", "result": event })
-            .to_string()
-            .into_bytes();
-        let (status, parsed) = exchanged(body.clone()).await.unwrap();
-        assert_eq!((status, parsed), (200, body));
+        assert!(event.len() <= CANVAS_BYTES && event.len() > CANVAS_BYTES - 16);
+        // An agent note isn't bound by the relay frame: 64 KiB of content and
+        // 99 quote-filled 4 KiB tags, over the old Canvas-based cap once escaped.
+        let tags: Vec<_> = (0..99)
+            .map(|i| serde_json::json!(["t", format!("{i}{}", "\"".repeat(4000))]))
+            .collect();
+        let note = serde_json::json!({
+            "id": "", "pubkey": "", "created_at": 0, "kind": 30023, "tags": tags,
+            "content": "\"".repeat(64 * 1024), "sig": "",
+        })
+        .to_string();
+        for event in [event, note] {
+            let body = serde_json::json!({ "id": "1", "result": event })
+                .to_string()
+                .into_bytes();
+            let (status, parsed) = exchanged(body.clone()).await.unwrap();
+            assert_eq!((status, parsed), (200, body));
+        }
         let runaway = vec![b'x'; MAX_RESPONSE_BYTES];
         assert!(matches!(
             exchanged(runaway).await,
