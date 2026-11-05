@@ -560,6 +560,7 @@ async fn concurrent_fills_share_one_read_and_a_drop_fences_publication_only() {
             tokio::spawn(async move { cached_lookup(&state, host).await })
         };
         source.read.notified().await;
+        let observed_source = std::time::Instant::now();
         let mut waiters = Vec::new();
         for _ in 0..8 {
             let mut waiter = Box::pin(cached_lookup(&state, host));
@@ -577,6 +578,16 @@ async fn concurrent_fills_share_one_read_and_a_drop_fences_publication_only() {
         source.resume.notify_one();
         let result = leader.await.unwrap().unwrap();
         assert_eq!(result.is_none(), host == "unknown.example");
+        if !invalidate && result.is_some() {
+            assert!(
+                state
+                    .tenant_host_cache
+                    .policy_read_started_at(host)
+                    .unwrap()
+                    <= observed_source,
+                "lease anchor must precede the paused source read"
+            );
+        }
         assert_eq!(
             state.tenant_host_cache.policy(host).is_none(),
             invalidate || result.is_none()

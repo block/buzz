@@ -238,25 +238,36 @@ its single plain serving-row query and a routing-only snapshot in the same
 bounded host cache. That snapshot cannot supply FI policy. A routing refresh
 preserves a fresh policy for the same tenant without extending its lease.
 
-Acceptance takes the corresponding exclusive host lock and waits 1.1 seconds
-before locking and checking lifecycle, host, owner and issuer. This drains every
-optional one-second lease across all pods BEFORE commit, without relying on
-Redis delivery or synchronized wall clocks. The extra 100 ms is a clock-rate
-margin. Lease duration and acceptance wait are compile-time fleet protocol
-constants; increasing the lease requires a coordinated writer rollout first.
-Existing receipt recovery skips this wait. Already-required targets need no
-lease drain. A host remapped during the wait fails the subsequent exact host
-precondition; the transaction cannot accept under a different lock key.
+Acceptance takes the shared deletion lock and locks the target community row
+`FOR NO KEY UPDATE`. It checks the row's host against `expected_host`, then takes
+the exclusive advisory lock derived from that locked host. An optional row waits
+1.1 seconds before the remaining owner/issuer checks and commit. The row stays
+locked throughout, preventing single or double host remaps during the drain.
+This also expires leases issued under any former host before row-lock acquisition.
+An initially wrong host precondition is refused before waiting.
+
+This drains every optional one-second lease across all pods BEFORE commit,
+without relying on Redis delivery or synchronized wall clocks. The extra 100 ms
+is a clock-rate margin. Lease duration and acceptance wait are compile-time fleet
+protocol constants; increasing the lease requires a coordinated writer rollout
+first. Existing receipt recovery skips this wait. Already-required targets need
+no lease drain. Fills take only a shared advisory host lock and never lock the
+community row, preserving the deletion-shared → row → host-lock ordering.
 
 Policy resolutions that start after acceptance commits therefore cannot use an
 optional lease for that community, even on a pod that missed invalidation.
 Admissions that resolved policy before commit can still be in flight, exactly
 as with primary reads; their completion and cancellation belong to BUZZ-512's
 generation-registration and drain fence. Cache expiry is not activation evidence.
-The acceptance wait blocks only new policy fills and competing acceptance for
-the host. Ordinary routing, archive and remap writers remain unblocked during
-the wait. Cold policy requests during that transition may return 503; upgrade
-acceptance is rare and this avoids allowing stale optional leases after commit.
+The acceptance drain blocks new policy fills and other acceptances for the
+host. Its community row lock also blocks archive/unarchive, deletion admission
+and fences, ownership transfer/convergence and issuer-binding writers for that
+community during the 1.1-second wait. These are operator actions; ordinary
+serving reads and writes do not take a conflicting row lock. Foreign-key
+`FOR KEY SHARE` locks do not conflict with `FOR NO KEY UPDATE`, and the shared
+deletion lock remains compatible with ordinary tenant writers. Cold policy
+requests during the transition may return 503; acceptance is rare and this
+avoids allowing stale optional leases after commit.
 
 Relay acceptance, provisioning and archive/unarchive writes drop the local host
 snapshot and publish a best-effort Redis invalidation to other pods. An epoch
@@ -332,6 +343,10 @@ in-flight acceptance has finished. Disabling new calls does not undo existing
 requirements. Existing required-community enforcement and BUZZ-512 activation
 and revocation prerequisites still apply. Never enable an older acceptance path
 while any caching pod serves optional communities.
+Older pods may log an unknown `CommunityHost` cache-invalidation message during
+the mixed-version rollout. They keep serving through their existing uncached
+policy reads; missing that best-effort notification does not weaken the lease
+protocol. The acceptance-writer gate above still applies.
 
 Keep `BUZZ_NIP_FI_UPGRADES_ENABLED=false` during the initial staging rollout.
 Start with zero required rows and record a 30-minute baseline using representative

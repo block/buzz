@@ -79,6 +79,14 @@ impl HostCache {
         *self.lock()
     }
 
+    #[cfg(test)]
+    pub(crate) fn policy_read_started_at(&self, host: &str) -> Option<Instant> {
+        self.entries
+            .get(host)
+            .and_then(|entry| entry.policy)
+            .map(|(_, read_at)| read_at)
+    }
+
     pub(crate) fn publish(
         &self,
         host: String,

@@ -287,25 +287,6 @@ impl Db {
         if let Err(code) = configured_trust {
             return Ok(UpgradeOutcome::Refused(code));
         }
-        // Lease protocol: stop new fills before waiting out every existing
-        // optional lease on every pod. Only the advisory/idempotency locks are
-        // held during the wait; lifecycle, host, owner and issuer are validated
-        // afterwards under their existing locks. A remap during this wait must
-        // still fail the exact host precondition below.
-        let lease_host = buzz_core::tenant::normalize_host(&request.expected_host);
-        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
-            .bind(POLICY_LEASE_NAMESPACE)
-            .bind(&lease_host)
-            .execute(&mut *tx)
-            .await?;
-        let was_required: Option<bool> =
-            sqlx::query_scalar("SELECT requires_nip_fi FROM communities WHERE id = $1")
-                .bind(request.community_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if was_required == Some(false) {
-            tokio::time::sleep(POLICY_LEASE_DRAIN).await;
-        }
         let community = CommunityId::from_uuid(request.community_id);
         crate::deletion::lock_community_deletion_shared(&mut tx, community).await?;
         // Same order and lock strength as ownership transfer; archive/delete
@@ -323,6 +304,21 @@ impl Db {
         };
         if row.try_get::<String, _>("host")? != request.expected_host {
             return Ok(UpgradeOutcome::Refused("host_conflict"));
+        }
+        // Lock order: deletion-shared, community row, host lease. Fills take
+        // only the shared host lease and never a community row lock. Derive
+        // the key from the locked, validated row, not an earlier host snapshot.
+        let lease_host = buzz_core::tenant::normalize_host(&row.try_get::<String, _>("host")?);
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(POLICY_LEASE_NAMESPACE)
+            .bind(&lease_host)
+            .execute(&mut *tx)
+            .await?;
+        // Keep the row stable while ALL optional leases expire, including
+        // leases under former host keys. No remap (single or double) can
+        // refill another host's optional cache while this drain is running.
+        if !row.try_get::<bool, _>("requires_nip_fi")? {
+            tokio::time::sleep(POLICY_LEASE_DRAIN).await;
         }
         let deletion_pending: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM
