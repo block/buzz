@@ -41,11 +41,19 @@ public final class BuzzNotificationAvatarLoader {
       completion(.failure(BuzzNotificationCacheError.invalidRecord))
       return
     }
-    let thumbnail = Self.thumbnailURL(original, scope: scope)
-    fetch(thumbnail ?? original, scope: scope) { result in
-      if thumbnail != nil, case .failure(BuzzNotificationDownload.Failure.status(404)) = result {
-        // Older or externally populated media may not have a generated thumbnail.
-        self.fetch(original, scope: scope, completion: completion)
+    fetchFirst(
+      Self.thumbnailURLs(original, scope: scope) + [original], scope: scope, completion: completion)
+  }
+
+  /// Fetches the first of `urls` the relay has: older relays, and media uploaded before WebP
+  /// thumbnails, have only the JPEG one, and externally populated media may have neither.
+  private func fetchFirst(
+    _ urls: [URL], scope: BuzzNotificationCacheScope,
+    completion: @escaping (Result<Data, Error>) -> Void
+  ) {
+    fetch(urls[0], scope: scope) { result in
+      if urls.count > 1, case .failure(BuzzNotificationDownload.Failure.status(404)) = result {
+        self.fetchFirst(Array(urls.dropFirst()), scope: scope, completion: completion)
       } else {
         completion(result)
       }
@@ -126,14 +134,17 @@ public final class BuzzNotificationAvatarLoader {
     return components.url
   }
 
-  static func thumbnailURL(_ url: URL, scope: BuzzNotificationCacheScope) -> URL? {
-    guard isRelayMedia(url, scope: scope) else { return nil }
+  /// The relay's thumbnails, best first: the WebP keeps transparency; every relay writes the JPEG.
+  static func thumbnailURLs(_ url: URL, scope: BuzzNotificationCacheScope) -> [URL] {
+    guard isRelayMedia(url, scope: scope) else { return [] }
     let parts = url.lastPathComponent.split(separator: ".")
     guard let hash = parts.first, hash.count == 64,
       VerifiedNostrEvent.hexBytes(String(hash))?.count == 32,
       parts.count <= 2
-    else { return nil }
-    return url.deletingLastPathComponent().appendingPathComponent("\(hash).thumb.jpg")
+    else { return [] }
+    return ["webp", "jpg"].map {
+      url.deletingLastPathComponent().appendingPathComponent("\(hash).thumb.\($0)")
+    }
   }
 
   private static func isRelayMedia(_ url: URL, scope: BuzzNotificationCacheScope) -> Bool {
