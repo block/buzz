@@ -111,32 +111,23 @@ class _MarkdownEditingController extends TextEditingController {
     return span;
   }
 
-  /// Widens a user deletion that removes part of a chip's hidden source so
-  /// it removes the whole chip. Each chip draws its whole URL or `@label`
-  /// as one glyph, so backspace right after it would otherwise remove one
-  /// invisible character of the source and leave a broken token behind.
+  /// Widens a user edit that removes part of a chip's hidden source so it
+  /// removes the whole chip. Each chip draws its whole URL or `@label` as one
+  /// glyph, so backspace right after it would otherwise remove one invisible
+  /// character of the source and leave a broken token behind. Text typed or
+  /// pasted over a selection is kept.
   TextEditingValue expandChipDeletion(
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
-    if (_chipRanges.isEmpty || _chipRangesText != oldValue.text) {
+    if (_chipRanges.isEmpty ||
+        _chipRangesText != oldValue.text ||
+        (oldValue.composing.isValid && !oldValue.composing.isCollapsed)) {
       return newValue;
     }
-    final oldText = oldValue.text;
-    final newText = newValue.text;
-    final removed = oldText.length - newText.length;
-    final selection = newValue.selection;
-    if (removed <= 0 || !selection.isValid || !selection.isCollapsed) {
-      return newValue;
-    }
-    // A pure deletion leaves the caret where the removed run started.
-    final start = selection.baseOffset;
-    final end = start + removed;
-    if (end > oldText.length ||
-        !oldText.startsWith(newText.substring(0, start)) ||
-        oldText.substring(end) != newText.substring(start)) {
-      return newValue;
-    }
+    final edit = _removalEdit(oldValue, newValue);
+    if (edit == null) return newValue;
+    final (start, end, inserted) = edit;
     var expandedStart = start;
     var expandedEnd = end;
     for (final chip in _chipRanges) {
@@ -147,9 +138,50 @@ class _MarkdownEditingController extends TextEditingController {
     }
     if (expandedStart == start && expandedEnd == end) return newValue;
     return TextEditingValue(
-      text: oldText.replaceRange(expandedStart, expandedEnd, ''),
-      selection: TextSelection.collapsed(offset: expandedStart),
+      text: oldValue.text.replaceRange(expandedStart, expandedEnd, inserted),
+      selection: TextSelection.collapsed(
+        offset: expandedStart + inserted.length,
+      ),
     );
+  }
+
+  /// The old-text range an edit removed and the text it put there, or null
+  /// when the edit removed nothing or doesn't fit the old selection.
+  static (int, int, String)? _removalEdit(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final oldText = oldValue.text;
+    final newText = newValue.text;
+    final oldSelection = oldValue.selection;
+    if (!oldSelection.isValid) return null;
+
+    bool keeps(int start, int end, int insertedLength) =>
+        start >= 0 &&
+        end <= oldText.length &&
+        newText.length == oldText.length - (end - start) + insertedLength &&
+        newText.startsWith(oldText.substring(0, start)) &&
+        newText.endsWith(oldText.substring(end));
+
+    if (!oldSelection.isCollapsed) {
+      // Typing, pasting or deleting over a selection replaces exactly it.
+      final start = oldSelection.start;
+      final end = oldSelection.end;
+      final insertedLength = newText.length - (oldText.length - (end - start));
+      if (insertedLength < 0 || !keeps(start, end, insertedLength)) {
+        return null;
+      }
+      return (start, end, newText.substring(start, start + insertedLength));
+    }
+
+    // A collapsed caret deletes a run that ends at it (backspace) or starts
+    // at it (forward delete).
+    final removed = oldText.length - newText.length;
+    final caret = oldSelection.baseOffset;
+    if (removed <= 0) return null;
+    if (keeps(caret - removed, caret, 0)) return (caret - removed, caret, '');
+    if (keeps(caret, caret + removed, 0)) return (caret, caret + removed, '');
+    return null;
   }
 
   List<InlineSpan> _buildMarkdownSpans(

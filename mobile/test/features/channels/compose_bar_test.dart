@@ -4959,6 +4959,11 @@ void main() {
         );
 
         // Backspace right after the chip removes the whole `@label`.
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot typing',
+          selection: TextSelection.collapsed(offset: 11),
+        );
+        await tester.pump();
         tester.testTextInput.updateEditingValue(
           const TextEditingValue(
             text: '@Helper Bo typing',
@@ -4972,6 +4977,50 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsNothing,
         );
+
+        // Typing over a selection keeps the typed text: over the whole chip
+        // it replaces only the selection, and over part of the chip it
+        // replaces the whole chip.
+        Future<void> typeOver(TextSelection selection, String typed) async {
+          await tester.enterText(find.byType(TextField), '@hel');
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Helper Bot'));
+          await tester.pumpAndSettle();
+          textField.controller!.value = TextEditingValue(
+            text: '@Helper Bot typing',
+            selection: selection,
+          );
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('composer-agent-mention-chip')),
+            findsOneWidget,
+          );
+          tester.testTextInput.updateEditingValue(
+            TextEditingValue(
+              text: '@Helper Bot typing'.replaceRange(
+                selection.start,
+                selection.end,
+                typed,
+              ),
+              selection: TextSelection.collapsed(
+                offset: selection.start + typed.length,
+              ),
+            ),
+          );
+          await tester.pump();
+        }
+
+        await typeOver(
+          const TextSelection(baseOffset: 0, extentOffset: 18),
+          '@',
+        );
+        expect(textField.controller!.text, '@');
+        await typeOver(
+          const TextSelection(baseOffset: 5, extentOffset: 13),
+          'x',
+        );
+        expect(textField.controller!.text, 'xyping');
+        expect(textField.controller!.selection.baseOffset, 1);
 
         // Text that is not drawn as a chip still deletes one character.
         await tester.enterText(find.byType(TextField), '`@Helper Bot`');
