@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -131,6 +132,37 @@ void main() {
     );
     final events = await h.session.fetchReadStateSnapshot();
     expect(events.single.id, event()['id']);
+  });
+
+  test('rejects a gzip body that inflates past the snapshot cap', () async {
+    // Transport caps see only compressed bytes; a few KB of gzip can expand
+    // to many megabytes.
+    final padded = utf8.encode(
+      '${jsonEncode(envelope())}${' ' * 2 * readStateSnapshotMaxBytes}',
+    );
+    final h = harness(
+      _StreamClient(
+        (request) async => http.StreamedResponse(
+          Stream.value(
+            gzip.encode(
+              request.method == 'GET' ? utf8.encode(discovery) : padded,
+            ),
+          ),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+      ),
+    );
+    await expectLater(
+      h.session.fetchReadStateSnapshot(),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('after inflating'),
+        ),
+      ),
+    );
   });
 
   test(
