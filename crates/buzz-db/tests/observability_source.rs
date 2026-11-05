@@ -264,7 +264,9 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("channel lookup helper must precede canvas reads")
         .0;
     assert!(get_channel.contains("acquire_writer(pool, operation)"));
-    assert!(get_channel.contains("fetch_optional(&mut *connection)"));
+    assert!(get_channel.contains("select_channel(&mut connection, community_id, channel_id)"));
+    assert!(get_channel.contains("conn: &mut sqlx::PgConnection"));
+    assert!(get_channel.contains("fetch_optional(conn)"));
     assert!(!get_channel.contains("fetch_optional(pool)"));
     assert!(channel.contains("pub async fn get_channel_for_event_write("));
     let list_channels = channel

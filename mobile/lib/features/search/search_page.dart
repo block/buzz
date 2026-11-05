@@ -101,6 +101,16 @@ class SearchPage extends HookConsumerWidget {
 
     void activateSearch() => focusNode.requestFocus();
 
+    // Opening search as its own route means the user wants to type, so raise
+    // the keyboard right away instead of waiting for a tap on the field.
+    useEffect(() {
+      if (embedded) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) focusNode.requestFocus();
+      });
+      return null;
+    }, const []);
+
     useEffect(() {
       final reselection = tabReselection;
       if (reselection == null) return null;

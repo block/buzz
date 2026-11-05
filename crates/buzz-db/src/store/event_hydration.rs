@@ -105,7 +105,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match lookup_on(&mut tx, community, &keys).await {
@@ -120,6 +120,9 @@ impl Db {
                     Err(error) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {error}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                     }
                 }
             }

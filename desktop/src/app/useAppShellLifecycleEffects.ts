@@ -4,7 +4,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { startBootWarm } from "@/features/agents/acpRuntimesQuery";
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { useForegroundQueryRefresh } from "@/features/workflows/hooks";
-import { relayClient } from "@/shared/api/relayClient";
 import { useRelayResumeTriggers } from "@/shared/api/useRelayResumeTriggers";
 
 type AppShellLifecycleEffectsOptions = {
@@ -55,18 +54,6 @@ export function useAppShellLifecycleEffects({
     return () => {
       window.removeEventListener("dragover", preventNavigation);
       window.removeEventListener("drop", preventNavigation);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    let isCancelled = false;
-    void relayClient.preconnect().catch((error) => {
-      if (!isCancelled) {
-        console.error("Failed to preconnect to relay", error);
-      }
-    });
-    return () => {
-      isCancelled = true;
     };
   }, []);
 
