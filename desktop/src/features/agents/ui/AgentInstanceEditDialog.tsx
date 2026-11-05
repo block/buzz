@@ -20,6 +20,7 @@ import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlA
 import type {
   ManagedAgent,
   RespondToMode,
+  SelfUpdateField,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
@@ -28,7 +29,10 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import {
+  setManagedAgentAutoRestart,
+  setManagedAgentSelfUpdateFields,
+} from "@/shared/api/tauriManagedAgents";
 import { effortChoices, isSavableEffort, ownEffortLevel } from "./effortPicker";
 import { EffortPickerField } from "./EffortPickerField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
@@ -154,6 +158,9 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const [selfUpdateFields, setSelfUpdateFields] = React.useState<
+    SelfUpdateField[]
+  >(agent.selfUpdateFields);
   // Save-gated effort (PR #4625); untouched Saves write nothing.
   // `undefined` means untouched; `null` means cleared to the adapter default.
   const [effortLevel, setEffortLevel] = React.useState<string | null>();
@@ -215,6 +222,7 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      setSelfUpdateFields(agent.selfUpdateFields);
       setEffortLevel(undefined);
       setSetterError(null);
       setRespondTo(agent.respondTo);
@@ -773,6 +781,9 @@ export function AgentInstanceEditDialog({
             autoRestartOnConfigChange,
           );
         }
+        if (!sameSelfUpdateFields(selfUpdateFields, agent.selfUpdateFields)) {
+          await setManagedAgentSelfUpdateFields(agent.pubkey, selfUpdateFields);
+        }
         if (effortTouched && effortSubmission.persist) {
           await queryClient.invalidateQueries({
             queryKey: agentConfigSurfaceQueryKey(agent.pubkey),
@@ -1175,6 +1186,7 @@ export function AgentInstanceEditDialog({
                       acpCommandCandidates={acpCommandsQuery.data ?? []}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
+                      selfUpdateFields={selfUpdateFields}
                       disabled={isSaving}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
@@ -1203,6 +1215,7 @@ export function AgentInstanceEditDialog({
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
+                      onSelfUpdateFieldsChange={setSelfUpdateFields}
                       onSystemPromptChange={setSystemPrompt}
                     />
                   </motion.div>
@@ -1220,5 +1233,14 @@ export function AgentInstanceEditDialog({
         </div>
       </ChooserDialogContent>
     </Dialog>
+  );
+}
+
+function sameSelfUpdateFields(
+  left: readonly SelfUpdateField[],
+  right: readonly SelfUpdateField[],
+): boolean {
+  return (
+    left.length === right.length && left.every((field) => right.includes(field))
   );
 }

@@ -1796,6 +1796,40 @@ describe("observer → active-turns bridge sync", () => {
     assert.equal(observerNotifications, 1);
   });
 
+  it("hands management listeners the envelope timestamp for self-update freshness", () => {
+    const seen = [];
+    const unsubscribe = subscribeAgentManagementRequests(
+      (agentPubkey, request, issuedAt) => {
+        seen.push({ agentPubkey, action: request.action, issuedAt });
+      },
+    );
+    _testProcessLiveObserverEvents(AGENT, [
+      makeEvent({
+        seq: 7,
+        kind: "acp_message",
+        timestamp: "2026-10-08T12:00:00Z",
+        payload: {
+          type: "agent_management_request",
+          action: "update",
+          requestId: "request-update-1",
+          request: {
+            channelId: "chan-1",
+            agentName: "Scout",
+            systemPrompt: "Be terse.",
+          },
+        },
+      }),
+    ]);
+    unsubscribe();
+    assert.deepEqual(seen, [
+      {
+        agentPubkey: AGENT,
+        action: "update",
+        issuedAt: "2026-10-08T12:00:00Z",
+      },
+    ]);
+  });
+
   it("does not publish when a replay batch is entirely duplicate", () => {
     const events = [makeEvent({ seq: 1, kind: "turn_started" })];
     injectObserverEventsForE2E(AGENT, events);

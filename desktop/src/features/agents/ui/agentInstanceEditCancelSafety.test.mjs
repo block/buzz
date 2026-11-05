@@ -55,6 +55,7 @@ let QueryClient;
 let QueryClientProvider;
 let ThemeProvider;
 let AgentInstanceEditDialog;
+let AgentDefinitionDialog;
 
 // Records every Tauri command invocation the mounted dialog issues; unmocked
 // commands reject so a new IPC dependency surfaces as a loud failure.
@@ -226,6 +227,11 @@ function installIpc() {
     ipcCalls.push({ cmd: "set_managed_agent_auto_restart", args });
     return Promise.resolve();
   });
+  // Same shape for the self-update policy setter (#6287).
+  set("set_managed_agent_self_update_fields", (args) => {
+    ipcCalls.push({ cmd: "set_managed_agent_self_update_fields", args });
+    return Promise.resolve();
+  });
 }
 
 // An effort-capable local config surface: the picker renders only when the
@@ -339,6 +345,7 @@ function toCamelAgent(raw) {
     logPath: raw.log_path,
     startOnAppLaunch: raw.start_on_app_launch,
     autoRestartOnConfigChange: raw.auto_restart_on_config_change,
+    selfUpdateFields: raw.self_update_fields ?? [],
     backend: raw.backend,
     backendAgentId: raw.backend_agent_id,
     respondTo: raw.respond_to,
@@ -431,6 +438,7 @@ before(async () => {
   ));
   ({ ThemeProvider } = await import("@/shared/theme/ThemeProvider"));
   ({ AgentInstanceEditDialog } = await import("./AgentInstanceEditDialog.tsx"));
+  ({ AgentDefinitionDialog } = await import("./AgentDefinitionDialog.tsx"));
 });
 
 afterEach(() => {
@@ -530,6 +538,136 @@ function effortCalls() {
       c.args.input?.effortLevel !== undefined,
   );
 }
+
+// ── Self-update policy (#6287) ──────────────────────────────────────────────
+
+async function expandAdvancedAndCheckSelfUpdate(field) {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Advanced/ }));
+  });
+  const checkbox = dom.window.document.getElementById(
+    `edit-agent-self-update-${field}`,
+  );
+  assert.ok(
+    checkbox,
+    "self-update checkboxes must render for a persona-linked agent inside Advanced",
+  );
+  assert.equal(checkbox.checked, false, "the policy defaults to empty");
+  await act(async () => {
+    fireEvent.click(checkbox);
+  });
+  assert.equal(checkbox.checked, true, "the checkbox must flip to checked");
+}
+
+test("self-update checkbox then Save dispatches set_managed_agent_self_update_fields", async () => {
+  installIpc();
+  await act(async () => {
+    renderDialog(() => {});
+  });
+
+  await expandAdvancedAndCheckSelfUpdate("system_prompt");
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  });
+
+  const sets = ipcCalls.filter(
+    (c) => c.cmd === "set_managed_agent_self_update_fields",
+  );
+  assert.equal(sets.length, 1, "Save must dispatch the policy setter once");
+  assert.deepEqual(sets[0].args.selfUpdateFields, ["system_prompt"]);
+  assert.equal(sets[0].args.pubkey, rawAgent().pubkey);
+});
+
+test("self-update checkbox then Cancel dispatches no policy setter", async () => {
+  installIpc();
+  await act(async () => {
+    renderDialog(() => {});
+  });
+
+  await expandAdvancedAndCheckSelfUpdate("model");
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  });
+
+  assert.equal(
+    ipcCalls.filter((c) => c.cmd === "set_managed_agent_self_update_fields")
+      .length,
+    0,
+    "Cancel must not persist a self-update policy",
+  );
+});
+
+test("untouched self-update policy dispatches no policy setter on Save", async () => {
+  installIpc();
+  await act(async () => {
+    renderDialog(() => {});
+  });
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  });
+
+  assert.equal(
+    ipcCalls.filter((c) => c.cmd === "set_managed_agent_self_update_fields")
+      .length,
+    0,
+    "an unchanged policy must not be rewritten",
+  );
+});
+
+// The review form an agent's draft-update opens when its self-update policy
+// did not fire: the reason must be visible, not stderr-only.
+test("review form shows why a self-update policy did not fire", async () => {
+  installIpc();
+  const client = new QueryClient({
+    defaultOptions: {
+      mutations: { gcTime: 0 },
+      queries: { gcTime: 0, retry: false },
+    },
+  });
+  clients.push(client);
+  const notice =
+    "Not applied automatically: sibling instance bb22 does not allow system_prompt. Review and save to apply it.";
+  await act(async () => {
+    render(
+      createElement(
+        ThemeProvider,
+        { defaultTheme: "buzz" },
+        createElement(
+          QueryClientProvider,
+          { client },
+          createElement(AgentDefinitionDialog, {
+            description: "",
+            embedded: true,
+            error: null,
+            initialValues: {
+              id: rawPersona().id,
+              displayName: rawPersona().display_name,
+              systemPrompt: "Be terse.",
+            },
+            isPending: false,
+            notice,
+            onOpenChange: () => {},
+            onSubmit: async () => {},
+            open: true,
+            runtimes: [],
+            submitLabel: "Save changes",
+            title: "Edit agent",
+          }),
+        ),
+      ),
+    );
+  });
+  const note = screen.getByTestId("persona-dialog-notice");
+  assert.equal(note.textContent, notice);
+  assert.equal(
+    dom.window.document.querySelectorAll(".text-destructive").length,
+    0,
+    "the note is informational, not an error",
+  );
+});
 
 test("effort selection alone dispatches no effort in update_managed_agent", async () => {
   installEffortIpc();

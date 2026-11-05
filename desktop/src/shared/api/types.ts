@@ -360,6 +360,11 @@ export type ManagedAgent = {
   logPath: string;
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;
+  /**
+   * Definition fields this agent may change on its own `draft-update` without
+   * owner review. Empty (the default) keeps every draft on the review path.
+   */
+  selfUpdateFields: SelfUpdateField[];
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
@@ -373,6 +378,9 @@ export type ManagedAgent = {
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
+
+/** A definition field an agent may self-update; mirrors Rust `SelfUpdateField`. */
+export type SelfUpdateField = "system_prompt" | "model" | "display_name";
 
 export type BackendProviderCandidate = {
   id: string;

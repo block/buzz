@@ -41,6 +41,7 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod self_update;
 mod session_policy;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
@@ -109,6 +110,7 @@ pub use restore::*;
 pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
+pub use self_update::*;
 pub(crate) use session_policy::{
     apply_acp_session_policy_env, effective_acp_session_policy, insert_acp_session_policy_env,
     AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,

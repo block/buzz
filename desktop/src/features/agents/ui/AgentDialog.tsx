@@ -72,6 +72,8 @@ type AgentDialogDefinitionEditProps = {
   submitLabel: string;
   initialValues: CreatePersonaInput | UpdatePersonaInput | null;
   error: Error | null;
+  /** Neutral one-line note above the form's error slot (e.g. why an agent's self-update was not applied). */
+  notice?: string | null;
   isPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimeCatalogStatus?: "loading" | "ready" | "error";

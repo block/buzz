@@ -31,6 +31,8 @@ import {
 
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import { acpCommandPickerState } from "./acpCommandPicker";
+import { SelfUpdatePolicyFields } from "./SelfUpdatePolicyFields";
+import type { SelfUpdateField } from "@/shared/api/types";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -52,6 +54,7 @@ export function EditAgentAdvancedFields({
   requiredEnvKeys,
   catalogStatus = "ready",
   selectedRuntime,
+  selfUpdateFields,
   systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
@@ -59,6 +62,7 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange,
   onParallelismChange,
   onAutoRestartChange,
+  onSelfUpdateFieldsChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
@@ -104,6 +108,8 @@ export function EditAgentAdvancedFields({
    * When undefined after the catalog has settled, no numeric controls render.
    */
   selectedRuntime?: AcpRuntimeCatalogEntry;
+  /** Self-update allowlist (#6287); rendered only for linked instances. */
+  selfUpdateFields: readonly SelfUpdateField[];
   systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
@@ -111,6 +117,7 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
+  onSelfUpdateFieldsChange: (value: SelfUpdateField[]) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
   const acpCommandPicker = React.useMemo(
@@ -206,6 +213,16 @@ export function EditAgentAdvancedFields({
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
       </div>
+
+      {/* Self-update policy (#6287). A draft-update edits the linked
+          definition, so a definition-less instance has nothing to self-update. */}
+      {linkedPersona ? (
+        <SelfUpdatePolicyFields
+          disabled={disabled}
+          onChange={onSelfUpdateFieldsChange}
+          value={selfUpdateFields}
+        />
+      ) : null}
 
       {/* Agent runtime args */}
       <div className="space-y-1.5">
