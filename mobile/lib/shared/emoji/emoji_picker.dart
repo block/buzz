@@ -23,6 +23,7 @@ import 'recent_emoji_provider.dart';
 
 part 'emoji_picker/search_field.dart';
 part 'emoji_picker/category_rail.dart';
+part 'emoji_picker/custom_emoji_retry_banner.dart';
 part 'emoji_picker/emoji_grid.dart';
 part 'emoji_picker/ios_native_picker.dart';
 
@@ -120,6 +121,10 @@ class _EmojiPickerContent extends HookConsumerWidget {
     final customEmoji = nativeEmojiOnly
         ? const <CustomEmoji>[]
         : ref.watch(customEmojiListProvider);
+    final customEmojiFailed =
+        !nativeEmojiOnly &&
+        (ref.watch(customEmojiRefreshFailedProvider) ||
+            ref.watch(customEmojiPaletteProvider).hasError);
     final recent = ref.watch(recentEmojiProvider);
     final prefs = ref.read(savedPrefsProvider);
     final skinTone = useState(
@@ -258,6 +263,7 @@ class _EmojiPickerContent extends HookConsumerWidget {
               ),
             ),
           Divider(height: 1, color: context.colors.outlineVariant),
+          if (customEmojiFailed) const _CustomEmojiRetryBanner(),
           Expanded(
             child: dataset.isEmpty && customEmoji.isEmpty
                 ? const Center(child: CircularProgressIndicator())
