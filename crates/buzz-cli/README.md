@@ -20,6 +20,19 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+### Which credentials are used
+
+The CLI uses the first of these that is configured:
+
+1. **An explicit key** (`--private-key` or `BUZZ_PRIVATE_KEY`), with the
+   headless NIP-FI settings below when they are set.
+2. **The Buzz desktop** (macOS and Linux), through a token it gave this
+   process or one saved by `buzz auth desktop pair`. The desktop signs and
+   supplies NIP-FI evidence itself; headless NIP-FI settings are ignored, with
+   a warning naming them.
+
+With neither, commands fail with an `auth_error`.
+
 ### Federated identity (NIP-FI)
 
 A relay that enforces federated identity also needs an identity assertion on

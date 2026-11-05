@@ -81,6 +81,9 @@ pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials,
     }
     #[cfg(unix)]
     if let Some(provider) = crate::desktop_provider::discover(relay_url).await? {
+        if let Some(warning) = ignored_headless_settings(&settings) {
+            eprintln!("{warning}");
+        }
         return Credentials::from_desktop(provider).await;
     }
     #[cfg(not(unix))]
@@ -92,10 +95,39 @@ pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials,
     ))
 }
 
-/// The explicit-key link, with its headless evidence source.
+/// The explicit-key link, with its headless evidence source. Without an
+/// explicit key the evidence settings are not read: they belong to that key.
 fn resolve_explicit(settings: &Settings) -> Result<Option<Credentials>, CliError> {
+    if settings.private_key.is_none() {
+        return Ok(None);
+    }
     let evidence = evidence_source(settings)?;
     explicit_key(settings, evidence)
+}
+
+/// The warning for headless evidence settings a desktop link leaves unused.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn ignored_headless_settings(settings: &Settings) -> Option<String> {
+    let ignored: Vec<&str> = [
+        (
+            settings.federated_identity_token.is_some(),
+            FEDERATED_IDENTITY_TOKEN_ENV,
+        ),
+        (
+            settings.federated_identity_adapter.is_some(),
+            FEDERATED_IDENTITY_ADAPTER_ENV,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(set, name)| set.then_some(name))
+    .collect();
+    (!ignored.is_empty()).then(|| {
+        format!(
+            "warning: the Buzz desktop link supplies this identity's evidence; ignoring {} \
+             (set BUZZ_PRIVATE_KEY to use them)",
+            ignored.join(" and ")
+        )
+    })
 }
 
 /// Link 1: an explicit key from `--private-key` or `BUZZ_PRIVATE_KEY`.
@@ -593,6 +625,24 @@ mod tests {
         assert!(resolve_explicit(&settings(None, None, None))
             .unwrap()
             .is_none());
+    }
+
+    /// Headless evidence settings belong to the explicit key: without one
+    /// they are passed over (and named in a warning), not an error.
+    #[test]
+    fn headless_settings_without_a_key_are_passed_over_and_named() {
+        for (token, adapter) in [(Some("t"), None), (Some("t"), Some("https://a.example"))] {
+            let unused = settings(None, token, adapter);
+            assert!(resolve_explicit(&unused).unwrap().is_none());
+            let warning = ignored_headless_settings(&unused).unwrap();
+            assert!(warning.contains(FEDERATED_IDENTITY_TOKEN_ENV), "{warning}");
+            assert_eq!(
+                warning.contains(FEDERATED_IDENTITY_ADAPTER_ENV),
+                adapter.is_some(),
+                "{warning}"
+            );
+        }
+        assert!(ignored_headless_settings(&settings(None, None, None)).is_none());
     }
 
     #[test]
