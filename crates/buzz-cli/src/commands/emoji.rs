@@ -1,3 +1,5 @@
+pub mod migrate;
+
 use std::io::Read;
 
 use crate::client::{normalize_write_response, BuzzClient};
@@ -660,6 +662,7 @@ pub async fn dispatch(cmd: crate::EmojiCmd, client: &BuzzClient) -> Result<(), C
         EmojiCmd::List => cmd_list(client).await,
         EmojiCmd::Search { prefix, limit } => cmd_search(client, &prefix, limit).await,
         EmojiCmd::Resolve { names } => cmd_resolve(client, &names).await,
+        EmojiCmd::Migrate(sub) => migrate::dispatch(sub, client).await,
         EmojiCmd::Set { shortcode, url } => cmd_set(client, &shortcode, &url).await,
         EmojiCmd::Rm { shortcode } => cmd_rm(client, &shortcode).await,
         EmojiCmd::Export { file, scope } => cmd_export(client, file.as_deref(), &scope).await,
