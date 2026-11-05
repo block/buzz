@@ -72,6 +72,58 @@ class RouteScannerFixtures(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, message):
             self.scan(router, admin)
 
+    def test_unclassified_method_chains_are_rejected(self):
+        for expression in (
+            "get(read).on(MethodFilter::PATCH, write)",
+            "get(read).on_service(MethodFilter::PATCH, svc)",
+            "get(read).post_service(svc)",
+            "on(MethodFilter::PATCH, write)",
+            "on_service(MethodFilter::PATCH, svc)",
+            "get_service(svc)",
+            "get(read).custom(write)",
+            "wrap(get(read))",
+            "opaque.get(read)",
+        ):
+            with self.subTest(expression=expression):
+                self.assert_rejected(
+                    "unclassified route method expression",
+                    build_router(f'.route("/mixed", {expression})'),
+                )
+
+    def test_supported_method_chains_are_preserved(self):
+        for expression in (
+            "get(read).post(write).head(headers)",
+            "axum::routing::get(read).post(write).head(headers)",
+            "get(read).with_state(state.clone()).post(write).head(headers)",
+            "get(read).layer(middleware(layer_arg())).post(write).route_layer(layer).head(headers)",
+            "get(read) /* .on(MethodFilter::PATCH, write) */ .post(write).head(headers)",
+        ):
+            with self.subTest(expression=expression):
+                routes = self.scan(build_router(f'.route("/mixed", {expression},)'))
+                self.assertEqual(
+                    {method for listener, method, path in routes if path == "/mixed"},
+                    {"GET", "POST", "HEAD"},
+                )
+
+    def test_all_known_http_helpers_are_classified(self):
+        for helper, method in scanner.HTTP_METHODS.items():
+            with self.subTest(helper=helper):
+                routes = self.scan(build_router(f'.route("/method", {helper}(handler))'))
+                self.assertEqual(
+                    {verb for listener, verb, path in routes if path == "/method"},
+                    {method},
+                )
+
+    def test_calls_inside_handler_and_layer_arguments_are_not_methods(self):
+        routes = self.scan(build_router(
+            '.route("/args", get(|| async { post(payload); "patch(fake)" })'
+            '.layer(make_layer(options(config))))'
+        ))
+        self.assertEqual(
+            {method for listener, method, path in routes if path == "/args"},
+            {"GET"},
+        )
+
     def test_nested_builder_merge_is_rejected(self):
         self.assert_rejected(
             r"\.merge registration is not classified",

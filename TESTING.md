@@ -46,8 +46,13 @@ registrations, each pinned to its builder and exact argument and allowed once),
 `.nest` outside `build_router`, a nest target that does not resolve to exactly
 one router builder, or a builder nested more than once. New or repeated
 `.merge(...)` registrations also fail; existing root aliases and the Git
-settings merge are pinned to their exact builder and argument. `scripts/check-community-ban-route-inventory.test.py`
-pins each of those shapes with a fixture. Run both directly with:
+settings merge are pinned to their exact builder and argument.
+`scripts/check-community-ban-route-inventory.test.py` pins each of those shapes
+with a fixture. Route method expressions must start with a known HTTP helper
+and contain only known method helpers or `.with_state`, `.layer`, and
+`.route_layer` modifiers. Unclassified chains, including `on`, `on_service`,
+and `*_service` helpers, fail even when mixed with a known method.
+Run both directly with:
 
 ```bash
 python3 scripts/check-community-ban-route-inventory.py
@@ -103,9 +108,9 @@ This scanner is a source-level guard, not a Rust router interpreter. It reads
 direct `.route(...)` calls inside production functions named `router` or ending
 in `_router`; a `.route(...)` elsewhere is a scanner error. It resolves a
 `.nest(...)` prefix only when the relay's `build_router` passes a literal
-or a resolved string constant and a direct call to another recognized router function. It does not
-expand macros or interpret dynamic paths, prefixes or arbitrary router
-composition. Service-style calls and unsupported nesting or merging are errors,
+or a resolved string constant and a direct call to another recognized router
+function. It does not expand macros or interpret dynamic paths, prefixes or
+arbitrary router composition. Service-style calls and unsupported nesting or merging are errors,
 rather than silently omitted registrations. The existing root merge aliases and
 Git settings merge are explicit, single-use exceptions; their builders' direct
 routes remain inventoried. It also does not derive auth or
