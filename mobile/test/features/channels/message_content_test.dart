@@ -745,6 +745,16 @@ void main() {
         await tester.pumpAndSettle();
         expect(opened, [url, url]);
         expect(messageMenus, 1);
+
+        // A short landscape sheet still reaches every action.
+        _setSurfaceSize(tester, const Size(640, 260));
+        addTearDown(tester.view.reset);
+        await tester.pumpAndSettle();
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Share link'));
+        await tester.pumpAndSettle();
+        expect(find.text('Share link').hitTestable(), findsOneWidget);
         debugDefaultTargetPlatformOverride = null;
       });
     }

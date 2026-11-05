@@ -59,75 +59,82 @@ void _showLinkActions(
       showDragHandle: true,
       title: 'Link',
       builder: (sheetContext) => SafeArea(
-        child: IconTheme.merge(
-          data: const IconThemeData(size: 22),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              0,
-              Grid.gutter,
-              Grid.xs,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Grid.xs),
-                  child: Text(
-                    url,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: sheetContext.textTheme.bodySmall?.copyWith(
-                      color: sheetContext.colors.onSurfaceVariant,
+        // A long URL and large text can outgrow a short landscape sheet.
+        child: SingleChildScrollView(
+          child: IconTheme.merge(
+            data: const IconThemeData(size: 22),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                Grid.gutter,
+                0,
+                Grid.gutter,
+                Grid.xs,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: Grid.xs),
+                    child: Text(
+                      url,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: sheetContext.textTheme.bodySmall?.copyWith(
+                        color: sheetContext.colors.onSurfaceVariant,
+                      ),
                     ),
                   ),
-                ),
-                SheetActionSection(
-                  children: [
-                    ListTile(
-                      leading: const Icon(BuzzIcons.externalLink),
-                      title: const Text('Open link'),
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        onOpen();
-                      },
-                    ),
-                    ListTile(
-                      leading: const Icon(BuzzIcons.copy),
-                      title: const Text('Copy link'),
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        unawaited(
-                          copyToClipboard(context, url, message: 'Link copied'),
-                        );
-                      },
-                    ),
-                    if (shareable)
+                  SheetActionSection(
+                    children: [
                       ListTile(
-                        leading: const Icon(BuzzIcons.share2),
-                        title: const Text('Share link'),
+                        leading: const Icon(BuzzIcons.externalLink),
+                        title: const Text('Open link'),
                         onTap: () {
-                          final renderBox =
-                              context.findRenderObject() as RenderBox?;
-                          final shareOrigin = renderBox == null
-                              ? null
-                              : renderBox.localToGlobal(Offset.zero) &
-                                    renderBox.size;
+                          Navigator.of(sheetContext).pop();
+                          onOpen();
+                        },
+                      ),
+                      ListTile(
+                        leading: const Icon(BuzzIcons.copy),
+                        title: const Text('Copy link'),
+                        onTap: () {
                           Navigator.of(sheetContext).pop();
                           unawaited(
-                            SharePlus.instance.share(
-                              ShareParams(
-                                uri: uri,
-                                sharePositionOrigin: shareOrigin,
-                              ),
+                            copyToClipboard(
+                              context,
+                              url,
+                              message: 'Link copied',
                             ),
                           );
                         },
                       ),
-                  ],
-                ),
-              ],
+                      if (shareable)
+                        ListTile(
+                          leading: const Icon(BuzzIcons.share2),
+                          title: const Text('Share link'),
+                          onTap: () {
+                            final renderBox =
+                                context.findRenderObject() as RenderBox?;
+                            final shareOrigin = renderBox == null
+                                ? null
+                                : renderBox.localToGlobal(Offset.zero) &
+                                      renderBox.size;
+                            Navigator.of(sheetContext).pop();
+                            unawaited(
+                              SharePlus.instance.share(
+                                ShareParams(
+                                  uri: uri,
+                                  sharePositionOrigin: shareOrigin,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
