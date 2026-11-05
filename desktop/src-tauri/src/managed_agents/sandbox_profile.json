@@ -1,0 +1,45 @@
+{
+  "meta": {
+    "name": "buzz-agent",
+    "version": "1",
+    "description": "Buzz-managed base sandbox for desktop agents"
+  },
+  "extends": "default",
+  "groups": {
+    "include": [
+      "user_caches_macos",
+      "git_config",
+      "node_runtime",
+      "bun_runtime",
+      "python_runtime",
+      "rust_runtime",
+      "go_runtime",
+      "go_runtime_macos",
+      "nix_runtime",
+      "mise_manager",
+      "claude_code_macos",
+      "codex_macos"
+    ]
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "allow": [
+      "$HOME/.claude",
+      "$HOME/.local/state/claude",
+      "$HOME/.codex",
+      "$HOME/.config/goose",
+      "$HOME/.local/share/goose",
+      "$HOME/.local/state/goose"
+    ],
+    "allow_file": [
+      "$HOME/.claude.json",
+      "$HOME/.claude.json.lock",
+      "$HOME/.claude.lock"
+    ]
+  },
+  "network": {
+    "block": false
+  }
+}

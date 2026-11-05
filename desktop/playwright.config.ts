@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/agent-sandbox-settings.spec.ts",
         "**/mock-subscription-readiness.spec.ts",
         "**/owned-agent-discovery.spec.ts",
         "**/thread-head-stale-edit.spec.ts",

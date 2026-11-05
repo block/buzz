@@ -64,6 +64,39 @@ pub async fn set_global_agent_config(
     config: GlobalAgentConfig,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
+    // The agent sandbox setting has its own command; a defaults-editor save
+    // carrying a stale copy of it must not flip it back.
+    save_global_config_and_restart(app, move |old| GlobalAgentConfig {
+        disable_agent_sandbox: old.disable_agent_sandbox,
+        ..config
+    })
+    .await
+}
+
+/// Turn the agent sandbox on or off, then restart running local agents so
+/// they relaunch with (or without) it. Only this command writes the setting.
+#[tauri::command]
+pub async fn set_agent_sandbox_enabled(
+    enabled: bool,
+    app: AppHandle,
+) -> Result<GlobalAgentConfigSaveResult, String> {
+    save_global_config_and_restart(app, move |old| GlobalAgentConfig {
+        disable_agent_sandbox: !enabled,
+        ..old.clone()
+    })
+    .await
+}
+
+/// Serializes global-config read-modify-write so the two save commands cannot
+/// interleave between reading the old config and writing the new one.
+static GLOBAL_CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Derive the new global config from the on-disk one, persist it, and restart
+/// running local agents whose launch changes under it.
+async fn save_global_config_and_restart(
+    app: AppHandle,
+    derive: impl FnOnce(&GlobalAgentConfig) -> GlobalAgentConfig + Send + 'static,
+) -> Result<GlobalAgentConfigSaveResult, String> {
     // ── Phase 1: disk write (sync, spawn_blocking) ────────────────────────
     //
     // Validate, snapshot old config, write new config, collect pre-filter
@@ -72,9 +105,12 @@ pub async fn set_global_agent_config(
     // lock in Phase 2 after sync_managed_agent_processes.
     let app_for_write = app.clone();
     let phase1 = tokio::task::spawn_blocking(move || {
-        validate_global_config(&config)?;
-
+        let _write = GLOBAL_CONFIG_WRITE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let old_global = load_global_agent_config(&app_for_write).unwrap_or_default();
+        let config = derive(&old_global);
+        validate_global_config(&config)?;
 
         save_global_agent_config(&app_for_write, &config)?;
 
@@ -211,7 +247,11 @@ fn collect_restart_candidates(
             // restart for a process that already exited between the pre-filter
             // scan and Phase 2.  NotReady→Ready bypasses the alive check
             // because Phase 2 will stop-then-start unconditionally.
-            let env_changed = old_ready && old_effective.env != new_effective.env;
+            // Toggling the agent sandbox changes how the process is launched,
+            // which, like env, only takes effect on a restart.
+            let env_changed = old_ready
+                && (old_effective.env != new_effective.env
+                    || sandbox_setting_changed(old_global, new_global));
 
             should_restart_on_config_change(old_ready, new_ready, env_changed)
         })
@@ -318,7 +358,9 @@ async fn restart_local_agent_on_config_change(
         let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
         let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
         // Under lock, the alive check was already done above via process_is_running.
-        let env_changed = old_ready && old_effective.env != new_effective.env;
+        let env_changed = old_ready
+            && (old_effective.env != new_effective.env
+                || sandbox_setting_changed(&old_global_clone, &new_global_clone));
         if !should_restart_on_config_change(old_ready, new_ready, env_changed) {
             return Err(format!(
                 "agent {pubkey_owned} restart condition no longer valid under lock"
@@ -421,6 +463,13 @@ fn persist_last_error(app: &AppHandle, pubkey: &str, error: &str) -> Result<(), 
 /// scan would have excluded it.
 fn should_restart_on_config_change(old_ready: bool, new_ready: bool, env_changed: bool) -> bool {
     (!old_ready && new_ready) || (old_ready && env_changed)
+}
+
+/// Whether the save flipped the agent sandbox on or off. The sandbox is
+/// applied at launch, so a running agent needs a restart to pick it up.
+fn sandbox_setting_changed(old_global: &GlobalAgentConfig, new_global: &GlobalAgentConfig) -> bool {
+    crate::managed_agents::sandbox::sandbox_requested(old_global)
+        != crate::managed_agents::sandbox::sandbox_requested(new_global)
 }
 
 #[cfg(test)]

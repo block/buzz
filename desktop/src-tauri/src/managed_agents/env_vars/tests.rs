@@ -250,6 +250,24 @@ fn git_config_reservation_does_not_catch_unrelated_names() {
     }
 }
 
+#[test]
+fn reserved_keys_include_nono_family() {
+    // Sandboxed agents launch through `nono wrap`, which reads NONO_* env vars
+    // as flags: a persona-supplied NONO_ALLOW=/ would widen the sandbox.
+    for key in ["NONO_ALLOW", "NONO_PROFILE", "NONO_BLOCK_NET", "nono_allow"] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        assert!(
+            merged_user_env(&BTreeMap::new(), &map(&[(key, "/")])).is_empty(),
+            "{key} should be stripped from overrides"
+        );
+        assert!(
+            validate_user_env_keys(&map(&[(key, "/")])).is_err(),
+            "{key} should be rejected at save time"
+        );
+    }
+    assert!(!is_reserved_env_key("MY_NONO_ALLOW"));
+}
+
 // ── validate_user_env_keys ─────────────────────────────────────────
 
 #[test]

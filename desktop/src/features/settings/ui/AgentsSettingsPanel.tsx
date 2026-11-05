@@ -1,4 +1,5 @@
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { AgentSandboxSettingsCard } from "./AgentSandboxSettingsCard";
 import {
   setKeepMentionedAgentsPinned,
   useKeepMentionedAgentsPinned,
@@ -49,6 +50,7 @@ export function AgentsSettingsPanel() {
           </SettingsOptionRow>
         </SettingsOptionGroup>
         <PreventSleepSettingsCard />
+        <AgentSandboxSettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
       </SettingsOptionGroupList>

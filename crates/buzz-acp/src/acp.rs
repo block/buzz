@@ -595,6 +595,16 @@ impl AcpClient {
                 _ => None,
             };
         cmd.envs(launch_env.iter().cloned());
+        // Last word on these keys: an inherited or persona value (e.g. a saved
+        // INITIAL_AGENT_MODE) must not re-enable a nested sandbox that fails.
+        let outer_sandbox = std::env::var(crate::config::OUTER_SANDBOX_ENV).ok();
+        if let Some((key, value)) = crate::config::outer_sandbox_agent_env(
+            command,
+            outer_sandbox.as_deref(),
+            cfg!(target_os = "macos"),
+        ) {
+            cmd.env(key, value);
+        }
         cmd.env_remove(launch::PREFIX_ENV);
         let claude_thinking_summaries = standard_adapter == Some(StandardAdapterKind::Claude)
             && !launch_prefixed

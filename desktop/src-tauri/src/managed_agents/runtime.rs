@@ -541,6 +541,11 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
+    // Resolve the agent sandbox before any side effect: when it is on but
+    // cannot be applied, the spawn is refused rather than run unsandboxed.
+    let sandbox = super::sandbox::prepare_agent_sandbox(&global)
+        .map_err(|e| format!("cannot start agent {} in the sandbox: {e}", record.name))?;
+
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -599,7 +604,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         nvm_bin,
     );
 
-    let mut command = std::process::Command::new(&resolved_acp_command);
+    let mut command = super::sandbox::agent_command(sandbox.as_ref(), &resolved_acp_command);
     if let Some(home) = super::default_agent_workdir() {
         command.current_dir(home);
     }
@@ -835,6 +840,7 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
             provider: effective_provider.as_deref(),
             enforced_owner_only: super::owner_only_access_build(),
             session_policy: acp_session_policy,
+            sandboxed: sandbox.is_some(),
         },
     );
 
@@ -852,6 +858,35 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    // Last change to the command: everything after `--` is the harness argv.
+    if let Some(sandbox) = &sandbox {
+        let demo_config_home = crate::build_identity::demo_config_home()?;
+        let data_reads = super::sandbox::buzz_data_reads();
+        let binaries: Vec<&std::path::Path> = [
+            Some(resolved_acp_command.as_path()),
+            Some(std::path::Path::new(&resolved_agent_command)),
+            resolved_mcp_command.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let grants = super::sandbox::spawn_grants(&super::sandbox::GrantInputs {
+            binaries: &binaries,
+            path_env: augmented_path.as_deref().map(std::ffi::OsStr::new),
+            home: dirs::home_dir().as_deref(),
+            nest: super::nest_dir().as_deref(),
+            demo_config_home: demo_config_home.as_deref(),
+            data_reads: &data_reads,
+            log_file: Some(&log_path),
+        });
+        super::sandbox::finish_sandboxed_command(
+            &mut command,
+            sandbox,
+            &grants,
+            &resolved_acp_command,
+        );
     }
 
     let child = spawn_with_effort_proof(&mut command, effort).map_err(|error| {

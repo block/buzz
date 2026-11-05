@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -11,7 +11,8 @@ use serde_json::Value;
 use serde::{Deserialize, Serialize};
 
 use crate::managed_agents::{
-    default_agent_workdir, known_acp_runtime_exact, normalize_agent_args, resolve_command,
+    default_agent_workdir, is_executable_file, known_acp_runtime_exact, normalize_agent_args,
+    resolve_command,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,9 +121,8 @@ fn run_buzz_acp_auth_command<const N: usize>(
         .ok_or_else(|| format!("{} ACP adapter is not installed", runtime.label))?;
 
     let acp_path = std::env::current_exe()
-        .map(|path| path.with_file_name(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX)))
         .ok()
-        .filter(|path| path.exists())
+        .and_then(|exe| bundled_acp_helper(&exe))
         .or_else(|| resolve_command("buzz-acp"))
         .ok_or_else(|| "buzz-acp helper not found".to_string())?;
 
@@ -134,6 +134,12 @@ fn run_buzz_acp_auth_command<const N: usize>(
         args,
         augmented_path.as_deref(),
     )
+}
+
+/// The `buzz-acp` shipped next to the app, unless it is a dev-build stub.
+fn bundled_acp_helper(exe: &Path) -> Option<PathBuf> {
+    let path = exe.with_file_name(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX));
+    is_executable_file(&path).then_some(path)
 }
 
 /// PATH for the buzz-acp auth helper child process.
@@ -461,9 +467,9 @@ fn shell_escape(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, append_inherited_path, bundled_acp_helper,
+        is_claude_subscription_login, run_buzz_acp_auth_command_with_paths, shell_escape,
+        shell_join, uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -497,6 +503,25 @@ mod tests {
             append_inherited_path(Some("only-augmented".into()), None),
             Some("only-augmented".into())
         );
+    }
+
+    /// Dev builds leave an empty, non-executable `buzz-acp` stub next to the
+    /// app; running it failed sign-in with "Permission denied (os error 13)".
+    #[cfg(unix)]
+    #[test]
+    fn bundled_acp_helper_skips_dev_stub() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let exe = temp.path().join("buzz-desktop");
+        let helper = temp.path().join("buzz-acp");
+        fs::write(&helper, "").expect("stub");
+        assert_eq!(bundled_acp_helper(&exe), None);
+
+        fs::write(&helper, "#!/bin/sh\n").expect("helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(bundled_acp_helper(&exe), Some(helper));
     }
 
     #[cfg(unix)]
