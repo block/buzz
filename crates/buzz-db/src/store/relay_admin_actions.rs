@@ -736,6 +736,7 @@ pub async fn execute_kick_with_marker(
         tx.rollback().await?;
         return Ok(KickWithMarkerResult::AlreadyGone);
     }
+    crate::dm::release_dm_identity(tx.conn(), community_id, channel_id).await?;
 
     let marker = sqlx::query(
         r#"
@@ -1742,6 +1743,9 @@ pub async fn deploy_kick_member(
     .bind(target_pubkey)
     .execute(tx.conn())
     .await?;
+    if result.rows_affected() > 0 {
+        crate::dm::release_dm_identity(tx.conn(), community_id, channel_id).await?;
+    }
     tx.commit().await?;
 
     if result.rows_affected() > 0 {

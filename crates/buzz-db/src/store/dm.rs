@@ -653,6 +653,29 @@ pub async fn grow_dm(
     })
 }
 
+/// Stop `channel_id`, if it is a DM, from being any set of people's DM, after
+/// a member was removed from it. Its fingerprint would otherwise name someone
+/// no longer in it, so neither they nor the rest could reach that group again.
+/// The DM keeps its history for those still in it; opening that group again
+/// starts a new DM. The caller holds the channel's membership lock, as every
+/// membership writer does, so this cannot race [`grow_dm`].
+pub(crate) async fn release_dm_identity<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE channels SET participant_hash = NULL \
+         WHERE community_id = $1 AND id = $2 AND channel_type = 'dm' \
+           AND participant_hash IS NOT NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 /// [`DmGrowth::Existing`] for `actor`, who must be an active member of that
 /// DM: growing a DM must not reveal a DM the actor is not in.
 async fn existing_for(
