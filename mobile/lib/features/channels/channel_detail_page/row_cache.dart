@@ -33,9 +33,8 @@ class _RowCache {
       list.welcomeAgent,
       list.notifier.reachedOldest,
       TypingMotionPreview.enabled,
-      DateUtils.dateOnly(DateTime.now()), // Today and Yesterday dividers
     ];
-    if (_sameInputs(_shared, shared) && _rows.length <= _limit) return;
+    if (_sameInputs(_shared, shared)) return;
     _rows.clear();
     _shared = shared;
   }
@@ -48,6 +47,8 @@ class _RowCache {
   }
 
   Widget keep(TimelineMessage message, List<Object?> inputs, Widget widget) {
+    // Scrolling builds rows without a list rebuild, so bound the cache here.
+    if (_rows.length >= _limit) _rows.clear();
     _rows[message.id] = (message: message, inputs: inputs, widget: widget);
     return widget;
   }
@@ -77,6 +78,7 @@ List<Object?> _rowInputs(
     summary?.lastReplyAt,
     ...?summary?.participantPubkeys,
     entryGroup.length,
+    DateUtils.dateOnly(DateTime.now()), // Today and Yesterday dividers
     for (final grouped in entryGroup) grouped.message,
   ];
 }
