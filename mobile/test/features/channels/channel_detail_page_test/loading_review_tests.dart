@@ -446,29 +446,46 @@ void _loadingReviewTests() {
     );
   }
 
-  testWidgets('loaded page rebuild formats the timeline once', (tester) async {
+  testWidgets('loaded page formats the timeline only when its events change', (
+    tester,
+  ) async {
     var transforms = 0;
     debugOnFormatTimeline = () => transforms++;
     addTearDown(() => debugOnFormatTimeline = null);
+    final first = _textMsg(
+      id: 'one',
+      pubkey: 'alice',
+      content: 'Loaded message',
+    );
+    final messages = _FakeMessagesNotifier([first]);
     await tester.pumpWidget(
-      _buildTestable(
-        messages: [
-          _textMsg(id: 'one', pubkey: 'alice', content: 'Loaded message'),
-        ],
-      ),
+      _buildTestable(messages: [first], messagesNotifier: messages),
     );
     await tester.pumpAndSettle();
+    // Read state, presence and layout changes rebuild the page; formatting
+    // every event again for each of them stalls large channels.
     for (var i = 0; i < 3; i++) {
       transforms = 0;
       tester.element(find.byType(ChannelDetailPage)).markNeedsBuild();
       await tester.pump();
-      expect(transforms, 1);
+      expect(transforms, 0);
     }
+    transforms = 0;
+    messages.setMessages([
+      first,
+      _textMsg(
+        id: 'two',
+        pubkey: 'alice',
+        createdAt: first.createdAt + 1,
+        content: 'Live message',
+      ),
+    ]);
+    await tester.pump();
+    expect(transforms, 1);
+    expect(find.text('Live message', findRichText: true), findsOneWidget);
   });
 
-  testWidgets('reconnect snapshot puts newest cached media at the bottom', (
-    tester,
-  ) async {
+  testWidgets('reconnect keeps cached media in place', (tester) async {
     final relay = _ReconnectingRelaySession(
       initialStatus: SessionStatus.connected,
     );
@@ -505,26 +522,24 @@ void _loadingReviewTests() {
       tester.getCenter(olderPreview).dy,
       lessThan(tester.getCenter(newerPreview).dy),
     );
+    final newerCenter = tester.getCenter(newerPreview);
     relay.setReconnecting();
     await tester.pump();
     await tester.pump(const Duration(seconds: 3));
-    final olderShape = find.byKey(
-      const ValueKey('message-skeleton-image:https://example.com/0.jpg'),
-    );
-    final newerShape = find.byKey(
-      const ValueKey('message-skeleton-image:https://example.com/1.jpg'),
+    expect(
+      tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+      isFalse,
     );
     expect(
-      tester.getCenter(olderShape).dy,
-      lessThan(tester.getCenter(newerShape).dy),
+      tester
+          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
+          .opacity,
+      0,
     );
-    final list = find
-        .ancestor(of: newerShape, matching: find.byType(ListView))
-        .first;
-    expect(tester.widget<ListView>(list).reverse, isTrue);
+    expect(tester.getCenter(newerPreview), newerCenter);
     expect(
-      tester.getCenter(newerShape).dy,
-      greaterThan(tester.getSize(find.byType(Scaffold).first).height / 2),
+      tester.getCenter(olderPreview).dy,
+      lessThan(tester.getCenter(newerPreview).dy),
     );
     relay.connect();
     await tester.pumpAndSettle();

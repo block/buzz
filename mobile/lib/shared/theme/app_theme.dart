@@ -343,11 +343,24 @@ class AppTheme {
         space: 1,
       ),
 
-      // Snackbar
+      // Shared feedback surface for success, errors, and clipboard notices.
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
+        backgroundColor: scheme.inverseSurface,
+        contentTextStyle: textTheme.bodyMedium?.copyWith(
+          color: scheme.onInverseSurface,
+        ),
+        actionTextColor: scheme.inversePrimary,
+        closeIconColor: scheme.onInverseSurface,
+        elevation: 6,
+        insetPadding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          Grid.xxs,
+          Grid.gutter,
+          Grid.xs,
+        ),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(Radii.md),
+          borderRadius: BorderRadius.circular(Radii.lg),
         ),
       ),
     );

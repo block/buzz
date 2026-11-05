@@ -45,6 +45,27 @@ impl AssertionRejection {
             Self::Verifier(err) => err.denial_class(),
         }
     }
+
+    /// A fixed code for access logs; never token contents.
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Transport(DenialClass::MissingEvidence) => "assertion_missing",
+            Self::Transport(_) => "assertion_malformed",
+            Self::VerifierUnavailable => "verifier_unavailable",
+            Self::Verifier(err) => err.code(),
+        }
+    }
+
+    /// The access-log result: an unavailable verifier is a refusal, every
+    /// other rejection is a failed proof.
+    pub(crate) const fn auth_result(self) -> crate::access::AuthResult {
+        match self {
+            Self::VerifierUnavailable => {
+                crate::access::AuthResult::Denied(crate::access::AuthReason::VerifierUnavailable)
+            }
+            _ => crate::access::AuthResult::Failed(self.code()),
+        }
+    }
 }
 
 /// The request `Host`, if present and readable.
@@ -147,6 +168,19 @@ impl Communities<'_> {
                 })
             }
             Self::Unavailable => Err(DenialClass::AuthorizationUnavailable),
+        }
+    }
+
+    /// Whether a failed [`Communities::resolve`] for `headers` is a
+    /// confirmed unmapped Host rather than an unavailable dependency. The
+    /// static map has no dependency, so every failure there is unmapped.
+    fn confirms_unmapped(self, headers: &HeaderMap) -> bool {
+        match self {
+            Self::Env(_) => true,
+            Self::Database(resolver) => {
+                request_host(headers).is_none_or(|host| resolver.confirms_unmapped(host))
+            }
+            Self::Unavailable => false,
         }
     }
 }
@@ -292,6 +326,27 @@ pub(crate) fn http_denial(class: DenialClass) -> Response<Body> {
     builder
         .body(Body::from(class.http_body()))
         .unwrap_or_else(|_| status.into_response())
+}
+
+/// Response extension on an enforce denial for a request Host confirmed to
+/// map to no community. The HTTP trace layer reads it to treat the denial as
+/// an expected rejection, not a server failure. It never reaches the wire.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UnresolvedHost;
+
+/// [`http_denial`] for a failed community resolution: the same wire
+/// response, marked with [`UnresolvedHost`] only when `communities` confirms
+/// the Host is unmapped. A resolver outage stays an unmarked server failure.
+pub(crate) fn community_denial(
+    communities: Communities<'_>,
+    headers: &HeaderMap,
+    class: DenialClass,
+) -> Response<Body> {
+    let mut response = http_denial(class);
+    if communities.confirms_unmapped(headers) {
+        response.extensions_mut().insert(UnresolvedHost);
+    }
+    response
 }
 
 /// Fixtures for tests that drive an enforce-mode adapter against one mapped

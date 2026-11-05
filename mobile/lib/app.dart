@@ -1,6 +1,9 @@
+import 'features/activity/activity_provider.dart';
 import 'features/channels/default_agent_launcher.dart';
 import 'features/agents/agents_page.dart';
+
 import 'dart:async';
+
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
@@ -16,9 +19,6 @@ import 'package:uuid/uuid.dart';
 
 import 'features/age_gate/age_restriction_page.dart';
 import 'features/age_gate/age_signal_provider.dart';
-import 'features/activity/activity_provider.dart';
-import 'features/activity/inbox_local_state_provider.dart';
-import 'features/activity/inbox_read_state.dart';
 import 'features/channels/channel.dart';
 import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
@@ -45,9 +45,10 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
-import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+import 'shared/widgets/buzz_toast_host.dart';
+import 'shared/widgets/covered_route_keyboard_insets.dart';
 
 const _starterChannelNamespace = '3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0';
 
@@ -59,33 +60,31 @@ const _starterChannels = [
   ),
 ];
 
-final _inviteRelayConnectedProvider = FutureProvider.family<void, String>((
-  ref,
-  expectedRelayUrl,
-) async {
-  final currentConfig = ref.read(relayConfigProvider);
-  if (currentConfig.baseUrl != expectedRelayUrl) {
-    throw StateError('Active community changed before invite recovery');
-  }
-  if (ref.read(relaySessionProvider).status == SessionStatus.connected) return;
-
+/// Waits for this attempt's community to hold an authenticated connection.
+///
+/// Each attempt observes the live session, so a retry never reuses an earlier
+/// attempt's failure or a connection that has since been lost.
+Future<void> _waitForInviteRelay(Ref ref, bool Function() isScopeCurrent) {
   final connected = Completer<void>();
-  ref.listen(relaySessionProvider, (_, next) {
+  final sub = ref.listen(relaySessionProvider, (_, next) {
     if (connected.isCompleted) return;
-    if (ref.read(relayConfigProvider).baseUrl != expectedRelayUrl) {
+    if (!isScopeCurrent()) {
       connected.completeError(
         StateError('Active community changed during invite recovery'),
       );
     } else if (next.status == SessionStatus.connected) {
       connected.complete();
     }
-  });
-  await connected.future;
-});
+  }, fireImmediately: true);
+  return connected.future
+      .timeout(const Duration(seconds: 15))
+      .whenComplete(sub.close);
+}
 
 /// App-level bridge from invite joining to the channels feature.
 class MobileInviteJoinRecovery implements InviteJoinRecovery {
   final Future<List<Channel>> Function() _loadChannels;
+  final Future<Channel?> Function(String channelId) _fetchChannel;
   final Future<Channel> Function({
     required String channelId,
     required String name,
@@ -99,9 +98,11 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   final String _relayHttpOrigin;
   final bool Function() _isScopeCurrent;
 
-  /// Creates recovery from channel-loading, creation, and join operations.
+  /// Creates recovery from channel-loading, single-channel lookup, creation,
+  /// and join operations.
   MobileInviteJoinRecovery({
     required Future<List<Channel>> Function() loadChannels,
+    required Future<Channel?> Function(String channelId) fetchChannel,
     required Future<Channel> Function({
       required String channelId,
       required String name,
@@ -115,6 +116,7 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
     required String relayHttpOrigin,
     bool Function()? isScopeCurrent,
   }) : _loadChannels = loadChannels,
+       _fetchChannel = fetchChannel,
        _createChannel = createChannel,
        _joinChannel = joinChannel,
        _relayHttpOrigin = relayHttpOrigin,
@@ -124,7 +126,11 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   ///
   /// All starter work is fenced to the community and identity that started it.
   /// A partial setup remains recoverable, so a failed operation deliberately
-  /// propagates to the invite flow instead of being reported as success.
+  /// propagates to the invite flow instead of being reported as success. The
+  /// one exception is a starter whose name or id the relay reports as taken
+  /// by a channel the directory shows cannot serve as the starter, or an
+  /// archived channel at the starter's own id: both
+  /// are permanent, so the starter is skipped instead of blocking the join.
   @override
   Future<String?> ensureStarterChannels() async {
     _ensureScopeCurrent();
@@ -150,16 +156,43 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
           );
           _ensureScopeCurrent();
         } catch (error) {
-          if (!_isDuplicateChannelError(error)) rethrow;
+          final nameTaken = _isChannelNameTakenError(error);
+          final archivedAtId = _isArchivedChannelError(error);
+          if (!nameTaken && !archivedAtId && !_isDuplicateChannelError(error)) {
+            rethrow;
+          }
           _ensureScopeCurrent();
           channels = await _loadChannels();
           _ensureScopeCurrent();
-          channel =
+          final holder =
               _findStarterChannel(channels, starter.slug) ??
               channels
                   .where((candidate) => candidate.id == channelId)
-                  .firstOrNull;
-          if (channel == null) rethrow;
+                  .firstOrNull ??
+              (nameTaken ? _findListedNamesake(channels, starter.slug) : null);
+          if (holder == null) {
+            // The relay refuses a create at an archived channel's id before
+            // its duplicate check, and keeps that id, so the starter can never
+            // be created there.
+            if (archivedAtId) continue;
+            // The relay keeps the id (desktop uses the same one), so a
+            // duplicate with no match in the reload may be an archived
+            // starter whose metadata the reload did not return. Read that id
+            // directly.
+            if (!nameTaken && _isDuplicateChannelError(error)) {
+              final atId = await _fetchChannel(channelId);
+              _ensureScopeCurrent();
+              if (atId != null && atId.isArchived) continue;
+            }
+            // A holder not visible yet may still be usable, so keep the setup
+            // recoverable.
+            rethrow;
+          }
+          // The relay keeps a channel's id and a listed channel's name, archived
+          // ones included, so an unusable holder never frees the starter. Skip
+          // it rather than strand the invite in permanent recovery.
+          if (!_isUsableStarter(holder)) continue;
+          channel = holder;
         }
       }
 
@@ -185,21 +218,44 @@ class MobileInviteJoinRecovery implements InviteJoinRecovery {
   }
 }
 
-Channel? _findStarterChannel(List<Channel> channels, String name) {
-  final normalizedName = name.trim().toLowerCase();
-  return channels
-      .where(
-        (channel) =>
-            channel.name.trim().toLowerCase() == normalizedName &&
-            channel.isStream &&
-            channel.visibility == 'open' &&
-            !channel.isArchived,
-      )
-      .firstOrNull;
-}
+Channel? _findStarterChannel(List<Channel> channels, String name) => channels
+    .where((channel) => _hasName(channel, name) && _isUsableStarter(channel))
+    .firstOrNull;
+
+/// The channel that holds [name] in the relay's listed-name rule: an open,
+/// not unlisted stream or forum (`LISTED_CHANNEL_SQL` in buzz-db).
+Channel? _findListedNamesake(List<Channel> channels, String name) => channels
+    .where(
+      (channel) =>
+          _hasName(channel, name) &&
+          channel.visibility == 'open' &&
+          !channel.isUnlisted &&
+          (channel.isStream || channel.isForum),
+    )
+    .firstOrNull;
+
+bool _hasName(Channel channel, String name) =>
+    channel.name.trim().toLowerCase() == name.trim().toLowerCase();
+
+bool _isUsableStarter(Channel channel) =>
+    channel.isStream && channel.visibility == 'open' && !channel.isArchived;
 
 bool _isDuplicateChannelError(Object error) =>
     error.toString().contains('duplicate: channel already exists');
+
+/// The relay refuses any channel event whose `h` is an archived channel,
+/// a create at that id included: `invalid: channel is archived`.
+bool _isArchivedChannelError(Object error) =>
+    error.toString().contains('invalid: channel is archived');
+
+/// The relay refuses creating an open channel whose name another listed
+/// channel already holds, ignoring case:
+/// `invalid: an open channel named "general" already exists`.
+bool _isChannelNameTakenError(Object error) {
+  final message = error.toString().toLowerCase();
+  return message.contains('invalid: an open channel named') &&
+      message.contains('already exists');
+}
 
 /// Returns desktop's deterministic per-relay UUID for a public starter.
 @visibleForTesting
@@ -243,15 +299,21 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
       ensureScopeCurrent();
       await ref.read(activeCommunityProvider.future);
       ensureScopeCurrent();
-      await ref
-          .read(_inviteRelayConnectedProvider(scope.relayHttpOrigin).future)
-          .timeout(const Duration(seconds: 15));
+      await _waitForInviteRelay(ref, isScopeCurrent);
       ensureScopeCurrent();
       final channels = await ref
           .read(channelsProvider.notifier)
           .fetchFresh(fetchDirectory: true);
       ensureScopeCurrent();
       return channels;
+    },
+    fetchChannel: (channelId) async {
+      ensureScopeCurrent();
+      final channel = await ref
+          .read(channelsProvider.notifier)
+          .fetchOpenChannel(channelId);
+      ensureScopeCurrent();
+      return channel;
     },
     createChannel:
         ({
@@ -274,28 +336,6 @@ InviteJoinRecovery buildMobileInviteJoinRecovery(
     isScopeCurrent: isScopeCurrent,
   );
 }
-
-/// App-shell projection that joins Activity state for the Home navigation.
-///
-/// This belongs at the composition root because it deliberately aggregates
-/// Activity feature providers for a sibling navigation surface.
-final _unreadInboxItemCountProvider = Provider<int>((ref) {
-  final readState = ref.watch(readStateProvider);
-  if (!readState.isReady) return 0;
-
-  final localState = ref.watch(inboxLocalStateProvider);
-  final items = ref.watch(inboxItemsProvider);
-  return items
-      .where(
-        (item) => !isInboxItemDone(
-          item,
-          markerOf: readState.effectiveTimestamp,
-          localUnreadOverrides: localState.unreadIds,
-          localDoneSet: localState.doneIds,
-        ),
-      )
-      .length;
-});
 
 final _mobileRootNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -326,8 +366,6 @@ class App extends HookConsumerWidget {
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
-    var hasUnreadInbox = false;
-    var hasUnreadSolo = false;
     if (ageSignalState != AgeSignalState.restricted &&
         authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
@@ -336,10 +374,10 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
-      hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
-      hasUnreadSolo = ref.watch(
-        meUnreadChannelIdsProvider.select((ids) => ids.isNotEmpty),
-      );
+      // Activity owns hidden-DM recovery even when Inbox is never opened.
+      ref.listen(activityProvider, (_, _) {});
+      // Preserve initial read seeding even while Solo is hidden.
+      ref.listen(meUnreadChannelIdsProvider, (_, _) {});
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a
@@ -374,6 +412,7 @@ class App extends HookConsumerWidget {
       navigatorKey: _mobileRootNavigatorKey,
       navigatorObservers: [appRouteObserver],
       title: 'Buzz',
+      debugShowCheckedModeBanner: false,
       theme: mobileAppearanceTheme(Brightness.light, communityTheme.accent),
       darkTheme: mobileAppearanceTheme(Brightness.dark, communityTheme.accent),
       themeMode: themeMode,
@@ -381,29 +420,31 @@ class App extends HookConsumerWidget {
       // route that was pushed while the store signal request was in flight.
       builder: (context, child) => switch (ageSignalState) {
         AgeSignalState.restricted => const AgeRestrictionPage(),
-        _ => IosNavigationMetricsHost(
-          child: AppMarkdownTheme(
-            child: MobileHuddleShell(
-              navigatorKey: _mobileRootNavigatorKey,
-              child: EmojiBurstOverlay(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ExcludeSemantics(
-                      excluding: pairedCommunity != null,
-                      child: AbsorbPointer(
-                        absorbing: pairedCommunity != null,
-                        child: child ?? const SizedBox.shrink(),
+        _ => BuzzToastHost(
+          child: IosNavigationMetricsHost(
+            child: AppMarkdownTheme(
+              child: MobileHuddleShell(
+                navigatorKey: _mobileRootNavigatorKey,
+                child: EmojiBurstOverlay(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ExcludeSemantics(
+                        excluding: pairedCommunity != null,
+                        child: AbsorbPointer(
+                          absorbing: pairedCommunity != null,
+                          child: child ?? const SizedBox.shrink(),
+                        ),
                       ),
-                    ),
-                    // Cover the navigator while onboarding is removed and the
-                    // destination installs the matching avatar-flight route.
-                    if (pairedCommunity != null)
-                      CommunityLoadingSurface(
-                        name: pairedCommunity.name,
-                        relayUrl: pairedCommunity.relayUrl,
-                      ),
-                  ],
+                      // Cover the navigator while onboarding is removed and the
+                      // destination installs the matching avatar-flight route.
+                      if (pairedCommunity != null)
+                        CommunityLoadingSurface(
+                          name: pairedCommunity.name,
+                          relayUrl: pairedCommunity.relayUrl,
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -416,23 +457,21 @@ class App extends HookConsumerWidget {
         data: (state) => switch (state.status) {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,
-            child: HomePage(
-              onAgents: showAgents,
-              defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                onChooseAgent: () => showAgents(context),
+            child: CoveredRouteKeyboardInsets(
+              child: HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context, createOnOpen: true),
+                ),
+                mePageBuilder: (_, chat, workspace) => MePage(
+                  sliver: true,
+                  newChatAction: chat,
+                  newWorkspaceAction: workspace,
+                ),
+                settingsPageBuilder: _buildSettingsPage,
+                communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+                communityAppearancePageBuilder: (_) => const ThemePickerPage(),
               ),
-              mePageBuilder: (_, chat, workspace) => MePage(
-                sliver: true,
-                newChatAction: chat,
-                newWorkspaceAction: workspace,
-              ),
-              settingsPageBuilder: _buildSettingsPage,
-              profilePageBuilder: (_) =>
-                  const _SettingsPageContent(embedded: true),
-              communityInvitePageBuilder: (_) => const CommunityInvitePage(),
-              communityAppearancePageBuilder: (_) => const ThemePickerPage(),
-              hasUnreadInbox: hasUnreadInbox,
-              hasUnreadSolo: hasUnreadSolo,
             ),
           ),
           _ => const HostedAppGate(
@@ -448,13 +487,11 @@ class App extends HookConsumerWidget {
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
 
 class _SettingsPageContent extends ConsumerWidget {
-  const _SettingsPageContent({this.embedded = false});
-  final bool embedded;
+  const _SettingsPageContent();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
-      embedded: embedded,
       profileHeader: const SettingsProfileHeader(),
       profileEditPageBuilder: (_) =>
           const ProfileEditPage(startInPhotoEditor: true),

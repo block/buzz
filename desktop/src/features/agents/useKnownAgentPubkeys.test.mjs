@@ -61,6 +61,7 @@ test("provenance context follows exact local inventory and rejects failed cached
       [{ pubkey: remote, status: "deployed" }],
     ),
   );
+  // Query observers notify on a scheduled task; act alone need not flush it.
   await waitFor(() => assert.deepEqual(result.current, [false, true, true]));
   await act(async () => {
     client

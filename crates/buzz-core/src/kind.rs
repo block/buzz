@@ -885,12 +885,16 @@ pub const fn is_command_kind(kind: u32) -> bool {
     )
 }
 
+/// NIP-85 relay-signed NIP-FI verified profile (output only).
+pub const KIND_VERIFIED_PROFILE: u32 = 30382;
+
 /// Returns `true` if `kind` may only be authored by the relay.
 /// Client submission of these kinds must be rejected.
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_ARTIFACT_REMOVAL
+        KIND_VERIFIED_PROFILE
+            | KIND_ARTIFACT_REMOVAL
             | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
