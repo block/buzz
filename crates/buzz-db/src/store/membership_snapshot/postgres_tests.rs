@@ -145,8 +145,8 @@ async fn membership_snapshot_scope_roles_types_archive_hidden_and_overflow() {
         .unwrap()
         .channels
         .is_empty());
-    // Same UUID in another tenant is legal. Insert that tenant's row FIRST,
-    // so dropping the lateral community predicate returns its different fields.
+    // Same UUID in another tenant is legal. A lost tenant predicate must
+    // produce a duplicate that fails closed, independently of physical order.
     let shared_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO channels (community_id,id,name,created_by,channel_type,visibility,archived_at)

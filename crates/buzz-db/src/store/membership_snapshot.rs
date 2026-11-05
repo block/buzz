@@ -42,9 +42,10 @@ pub struct MembershipSnapshot {
 
 // No events, rosters, profiles, other-member aggregates or replica routing.
 // Probe one additional row; never silently certify a capped set as complete.
-// Keep the lookup dependent on the viewer row. LIMIT 1 is valid because the
-// channel key is unique, and prevents flattening this into a scan of every
-// channel in the community. The outer probe counts AFTER type/deletion filters.
+// Keep the lookup dependent on the viewer row to avoid a community-wide scan.
+// Probe two rows so an accidental loss of the tenant/key predicate cannot hide
+// a duplicate behind LIMIT 1: strict ID validation below then fails closed.
+// The outer probe counts AFTER type/deletion filters.
 const SNAPSHOT_SQL: &str = "SELECT cm.channel_id AS id, cm.role::text AS role,
     c.channel_type, c.visibility, c.archived
     FROM channel_members cm
@@ -54,7 +55,7 @@ const SNAPSHOT_SQL: &str = "SELECT cm.channel_id AS id, cm.role::text AS role,
         FROM channels c
         WHERE c.community_id = cm.community_id AND c.id = cm.channel_id
           AND c.deleted_at IS NULL AND c.channel_type = ANY($3::text[]::channel_type[])
-        LIMIT 1
+        LIMIT 2
     ) c
     WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
     ORDER BY cm.channel_id LIMIT $4";
@@ -121,6 +122,11 @@ impl Db {
                 Ok(entry)
             })
             .collect::<Result<Vec<_>>>()?;
+        if channels.windows(2).any(|pair| pair[0].id >= pair[1].id) {
+            return Err(DbError::InvalidData(
+                "membership projection IDs are not unique and ordered".into(),
+            ));
+        }
         let identity = serde_json::to_vec(&(
             "nip-cl-membership-state-v1",
             community.as_uuid(),
