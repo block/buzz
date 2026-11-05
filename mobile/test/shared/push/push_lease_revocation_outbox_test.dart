@@ -81,6 +81,8 @@ void main() {
     expect(headers.value('nostr-federated-identity'), 'Bearer hosted-token');
     expect(auth.configs.single.baseUrl, 'http://127.0.0.1:${server.port}');
     expect(auth.configs.single.nsec, keys.nsec);
+    // A removed community's failure must not hide the active one's recovery.
+    expect(auth.backgrounds.single, isTrue);
   });
 
   test('community removal journals one precise lease address', () async {
@@ -434,10 +436,15 @@ class _AssertingRelayAuth extends HostedRelayAuth {
   _AssertingRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
 
   final configs = <RelayConfig>[];
+  final backgrounds = <bool>[];
 
   @override
-  Future<Map<String, String>> headers(RelayConfig config) async {
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+  }) async {
     configs.add(config);
+    backgrounds.add(background);
     return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
   }
 }

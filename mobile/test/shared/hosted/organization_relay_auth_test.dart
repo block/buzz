@@ -246,6 +246,16 @@ void main() {
         auth.rejected(other, 'Bearer token-for-$otherRelayHost');
         expect(auth.cachedHeaders(other), isNull);
         expect(auth.cachedHeaders(relay), isNotNull);
+        // After the active relay's terminal refusal, a failed background
+        // issuance for the other community leaves the active recovery intact.
+        auth.rejected(relay, 'Bearer token-for-$relayHost', terminal: true);
+        boundIdentity = {'pubkey_hex': 'f' * 64};
+        await expectLater(
+          auth.headers(other, background: true),
+          throwsA(AccountFailure.denied),
+        );
+        expect(auth.failedRelay, relay.baseUrl);
+        expect(auth.failure, AccountFailure.denied);
       },
     );
 

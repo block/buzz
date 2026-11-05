@@ -179,7 +179,7 @@ Future<void> _deactivateCommunityPushLease(
         ({required kind, required content, required tags, createdAt}) async =>
             submitSignedEventOnce(
               wsUrl: wsUrl,
-              headers: await relayAuth.headers(relayConfig),
+              headers: await relayAuth.headers(relayConfig, background: true),
               nsec: nsec,
               kind: kind,
               content: content,

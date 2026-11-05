@@ -552,6 +552,7 @@ Future<void> publishBuzzPushLeaseRevocation(
               // A hosted relay refuses the socket upgrade without an assertion.
               headers: await relayAuth.headers(
                 RelayConfig(baseUrl: record.relayUrl, nsec: record.nsec),
+                background: true,
               ),
               nsec: record.nsec,
               kind: kind,

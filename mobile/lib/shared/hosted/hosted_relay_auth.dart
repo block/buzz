@@ -162,11 +162,17 @@ class HostedRelayAuth extends ChangeNotifier {
       url.host.isNotEmpty &&
       url.origin == Uri.parse(config.baseUrl).origin;
 
-  Future<Map<String, String>> headers(RelayConfig config) async {
+  /// The assertion for [config]'s relay and key. A [background] caller (such
+  /// as a push revocation for a removed community) never records its failure
+  /// or success, so it cannot hide or clear the active session's recovery.
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+  }) async {
     final client = _accountFor(config);
     if (client == null) return const {};
     try {
-      return await _headers(config, client);
+      return await _headers(config, client, background);
     } on AccountFailure catch (failure) {
       // Without an organization session, connect as before and let the relay
       // decide: an enforcing relay refuses, and sign-in is offered.
@@ -181,6 +187,7 @@ class HostedRelayAuth extends ChangeNotifier {
   Future<Map<String, String>> _headers(
     RelayConfig config,
     BuilderlabAccountClient client,
+    bool background,
   ) async {
     final relay = Uri.parse(config.wsUrl).replace(path: '').toString();
     final pubkey = pubkeyFromNsec(config.nsec);
@@ -202,7 +209,7 @@ class HostedRelayAuth extends ChangeNotifier {
         }
         continue;
       }
-      final operation = _issue(config, client, relay, pubkey);
+      final operation = _issue(config, client, relay, pubkey, background);
       _pending[client] = operation;
       try {
         await operation;
@@ -218,6 +225,7 @@ class HostedRelayAuth extends ChangeNotifier {
     BuilderlabAccountClient account,
     String relay,
     String pubkey,
+    bool background,
   ) async {
     final started = ++_sequence;
     try {
@@ -289,7 +297,7 @@ class HostedRelayAuth extends ChangeNotifier {
         account: session,
       );
       // Issuance alone cannot prove admission after a relay refusal.
-      if (failure != AccountFailure.denied) connected(config);
+      if (!background && failure != AccountFailure.denied) connected(config);
       if (identical(account, organization)) {
         unawaited(organizationBackup?.afterAssertion(config.nsec!, pubkey));
       }
@@ -299,7 +307,9 @@ class HostedRelayAuth extends ChangeNotifier {
       final otherScope =
           failure != null &&
           (failedRelay != config.baseUrl || failedPubkey != pubkey);
-      if (!_disposed && !(otherScope && _failureSequence > started)) {
+      if (!background &&
+          !_disposed &&
+          !(otherScope && _failureSequence > started)) {
         _record(config.baseUrl, pubkey, error, started);
       }
       rethrow;
