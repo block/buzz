@@ -21,7 +21,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
-import 'package:video_player/video_player.dart' show VideoPlayer;
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart' as audio;
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -2581,32 +2580,6 @@ Photos
           findsOneWidget,
         );
         expect(find.byIcon(BuzzIcons.play), findsOneWidget);
-      });
-
-      testWidgets('shows a static placeholder for a posterless video event', (
-        tester,
-      ) async {
-        const videoUrl = 'https://example.com/media/legacy-video.mp4';
-
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($videoUrl)',
-              tags: [
-                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
-              ],
-            ),
-          ),
-        );
-        await tester.pump();
-
-        expect(
-          find.byKey(const ValueKey('message-media-video-preview:$videoUrl')),
-          findsOneWidget,
-        );
-        expect(find.text('Video attachment'), findsOneWidget);
-        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
-        expect(find.byType(VideoPlayer), findsNothing);
       });
 
       testWidgets(

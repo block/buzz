@@ -30,7 +30,6 @@ import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart'
     show
-        MatrixUtils,
         RenderParagraph,
         RenderRepaintBoundary,
         ScrollDirection,
