@@ -41,37 +41,32 @@ class LocalSendStatusDecoration extends ConsumerWidget {
     final status = ref.watch(
       localSendStatusForProvider((channelId: channelId, eventId: eventId)),
     );
-    if (status == null) return child;
     final failed = status == LocalSendStatus.failed;
     final error = context.colors.error;
-    final labelStyle = context.textTheme.labelSmall?.copyWith(
-      fontSize: 11,
-      height: 15 / 11,
-      color: failed ? error : context.tertiaryTextColor,
-      fontWeight: failed ? FontWeight.w600 : FontWeight.w500,
-    );
     final label = switch (status) {
       LocalSendStatus.sending => 'Sending…',
       LocalSendStatus.sent => 'Sent',
       LocalSendStatus.failed => 'Not Delivered',
+      null => null,
     };
     void openActions() => unawaited(_showFailedActions(context, ref));
-    final bubble = AnimatedOpacity(
-      opacity: status == LocalSendStatus.sending ? 0.6 : 1,
-      duration: const Duration(milliseconds: 150),
-      child: child,
-    );
+    // One structure for every own message, so status changes never remount
+    // the bubble (media, scroll and selection state live under it).
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (failed)
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Flexible(child: bubble),
-              const SizedBox(width: Grid.half),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: AnimatedOpacity(
+                opacity: status == LocalSendStatus.sending ? 0.6 : 1,
+                duration: const Duration(milliseconds: 150),
+                child: child,
+              ),
+            ),
+            if (failed)
               Semantics(
                 button: true,
                 label: 'Message not delivered. Show options',
@@ -81,35 +76,44 @@ class LocalSendStatusDecoration extends ConsumerWidget {
                   key: ValueKey('local-send-retry-$eventId'),
                   behavior: HitTestBehavior.opaque,
                   onTap: openActions,
-                  child: Padding(
-                    padding: const EdgeInsets.all(Grid.quarter),
-                    child: Icon(BuzzIcons.circleAlert, size: 22, color: error),
+                  child: SizedBox.square(
+                    dimension: _alertTarget,
+                    child: Center(
+                      child: Icon(
+                        BuzzIcons.circleAlert,
+                        size: 22,
+                        color: error,
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ],
-          )
-        else
-          bubble,
-        Padding(
-          padding: EdgeInsets.only(
-            top: Grid.quarter,
-            right: failed ? 22 + Grid.half + Grid.half + Grid.xs : Grid.xs,
-          ),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: failed ? openActions : null,
+          ],
+        ),
+        if (label != null)
+          Padding(
+            padding: EdgeInsets.only(
+              top: Grid.quarter,
+              right: failed ? _alertTarget + Grid.xs : Grid.xs,
+            ),
             child: Semantics(
-              liveRegion: true,
-              excludeSemantics: failed,
-              child: Text(
-                label,
-                key: ValueKey('local-send-status-$eventId'),
-                style: labelStyle,
+              liveRegion: failed,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: failed ? openActions : null,
+                child: Text(
+                  label,
+                  key: ValueKey('local-send-status-$eventId'),
+                  style: context.textTheme.labelSmall?.copyWith(
+                    fontSize: 11,
+                    height: 15 / 11,
+                    color: failed ? error : context.tertiaryTextColor,
+                    fontWeight: failed ? FontWeight.w600 : FontWeight.w500,
+                  ),
+                ),
               ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -156,3 +160,6 @@ class LocalSendStatusDecoration extends ConsumerWidget {
 }
 
 enum _FailedAction { retry, delete }
+
+/// Minimum touch target for the failed-message alert.
+const _alertTarget = 44.0;

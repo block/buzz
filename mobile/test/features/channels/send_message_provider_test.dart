@@ -123,12 +123,36 @@ void main() {
       expect(completedIds, [id]);
       expect(pending, isEmpty);
 
+      // An old failure is past the relay's clock window, so it is signed
+      // again as a new message that replaces the failed bubble.
+      session.outcomes.add(StateError('Relay session is not connected'));
+      await send(channelId: _channelId, content: 'stale');
+      final staleId = session.published.last.id;
+      final staleEvent = pending[staleId]!;
+      pending[staleId] = NostrEvent.fromJson({
+        ...staleEvent.toJson(),
+        'created_at': staleEvent.createdAt - 3600,
+      });
+      session.outcomes.add(null);
+      await send.retry(channelId: _channelId, eventId: staleId);
+      final resent = session.published.last;
+      expect(resent.createdAt, staleEvent.createdAt, reason: 'signed now');
+      expect(resent.content, 'stale');
+      expect(resent.tags, staleEvent.tags);
+      expect(removedIds, [staleId]);
+      expect(completedIds.last, resent.id);
+      expect(pending, isEmpty);
+
+      // Retrying a message that was delivered meanwhile does nothing.
+      await send.retry(channelId: _channelId, eventId: resent.id);
+      expect(session.published.last.id, resent.id);
+
       // Delete discards a failed message instead.
       session.outcomes.add(StateError('Relay session is not connected'));
       await send(channelId: _channelId, content: 'second');
       final second = session.published.last.id;
       send.discard(channelId: _channelId, eventId: second);
-      expect(removedIds, [second]);
+      expect(removedIds, [staleId, second]);
       expect(pending, isEmpty);
     },
   );

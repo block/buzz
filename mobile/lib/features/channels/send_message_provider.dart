@@ -13,6 +13,9 @@ import 'local_message_send_animation_provider.dart';
 import 'local_send_status_provider.dart';
 import 'pending_local_messages_provider.dart';
 
+/// Relays reject events dated more than 15 minutes from their clock.
+const _republishWindowSeconds = 10 * 60;
+
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
 class SendMessage {
@@ -135,6 +138,14 @@ class SendMessage {
         if (!isReference(tag)) tag,
     ];
 
+    await _sendSigned(channelId, content, tags);
+  }
+
+  Future<void> _sendSigned(
+    String channelId,
+    String content,
+    List<List<String>> tags,
+  ) async {
     _ensureDeliveryValid();
     NostrEvent? localMessage;
     try {
@@ -165,21 +176,30 @@ class SendMessage {
     }
   }
 
-  /// Republishes a failed message's exact signed event.
+  /// Resends a failed message.
   ///
-  /// The event id is unchanged, so a publish the relay already accepted
-  /// (an acknowledgement lost to a timeout) deduplicates instead of repeating.
+  /// A recent failure republishes the exact signed event, so a publish the
+  /// relay already accepted (an acknowledgement lost to a timeout)
+  /// deduplicates instead of repeating. The relay rejects events dated far
+  /// from its clock, so an older failure is signed again as a new message at
+  /// the end of the conversation, replacing the failed bubble.
   Future<void> retry({
     required String channelId,
     required String eventId,
   }) async {
     final event = _readPendingLocalMessage(channelId, eventId);
+    // Delivered meanwhile (a relay echo arrived), or already deleted.
+    if (event == null) return;
     final publish = _publishSigned;
     if (publish == null) {
       throw StateError('This sender cannot republish signed messages.');
     }
-    if (event == null) {
-      throw StateError('Message $eventId is no longer waiting to send.');
+    final ageSeconds =
+        DateTime.now().millisecondsSinceEpoch ~/ 1000 - event.createdAt;
+    if (ageSeconds > _republishWindowSeconds) {
+      discard(channelId: channelId, eventId: eventId);
+      await _sendSigned(channelId, event.content, event.tags);
+      return;
     }
     _retryLocalMessage(channelId, eventId);
     try {
