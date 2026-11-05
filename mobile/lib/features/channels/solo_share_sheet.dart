@@ -3,11 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/crypto/nip_oa.dart';
 import '../../shared/me/me_chat_share.dart';
-import '../../shared/me/me_archived_agents.dart';
 import '../../shared/me/me_sync.dart';
-import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -15,7 +12,7 @@ import 'channel.dart';
 import 'channel_access_provider.dart';
 import 'channels_provider.dart';
 
-/// Sharing grants access and posts one chat link; it never converts the chat.
+/// Sharing opens community reading and posts one link without enrolling anyone.
 Future<void> showSoloShareSheet(BuildContext context, Channel channel) =>
     showBuzzModalBottomSheet<void>(
       context: context,
@@ -25,7 +22,7 @@ Future<void> showSoloShareSheet(BuildContext context, Channel channel) =>
       builder: (_) => SoloShareSheet(channel: channel),
     );
 
-/// Reviews a fixed channel audience before granting access and sharing a link.
+/// Confirms community reading before posting a link; individual roles stay intact.
 class SoloShareSheet extends HookConsumerWidget {
   const SoloShareSheet({super.key, required this.channel});
   final Channel channel;
@@ -34,7 +31,6 @@ class SoloShareSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final sync = ref.watch(meSyncProvider);
     final controller = ref.watch(channelAccessProvider.notifier);
-    final container = ProviderScope.containerOf(context, listen: false);
     final pending = useState(MeChatShare.pending(sync, channel.id));
     final query = useTextEditingController();
     useListenable(query);
@@ -67,57 +63,56 @@ class SoloShareSheet extends HookConsumerWidget {
       busy.value = true;
       error.value = null;
       try {
-        var intent = pending.value;
-        if (intent == null) {
-          if (destination == null) return;
-          final snapshots = await Future.wait([
-            controller.load(channel.id),
-            controller.load(destination.id),
-          ]);
-          check();
-          final source = snapshots[0];
-          final target = snapshots[1];
-          if (!source.data.labels.contains('buzz.solo') ||
-              !channelRoleCanContribute(source.role(sync.pubkey)) ||
-              source.data.isArchived) {
-            throw StateError('This chat is no longer available for sharing.');
-          }
-          await controller.requireContribution(destination.id);
-          final archived = await container.read(
-            meArchivedAgentsProvider.future,
-          );
-          check();
-          final recipients = membersFromEvent(target.roster)
-              .where(
-                (member) =>
-                    !source.contains(member.pubkey) &&
-                    !archived.contains(member.pubkey),
-              )
-              .toList();
-          if (recipients.length > 100) {
+        final previous = pending.value;
+        final destinationId = previous?.destination ?? destination?.id;
+        if (destinationId == null) return;
+        final unfinished = ref.read(channelAccessProvider)[channel.id];
+        if (unfinished != null) {
+          if (previous == null ||
+              unfinished.target != null ||
+              unfinished.visibility != 'open' ||
+              unfinished.joinRole != 'guest' ||
+              unfinished.labels != null) {
             throw StateError(
-              'Share with at most 100 people or agents at a time.',
+              'Finish the existing General access change first.',
             );
           }
-          final profiles = recipients.isEmpty
-              ? const <NostrEvent>[]
-              : await sync.session.fetchHistory(
-                  NostrFilters.profilesBatch(
-                    recipients.map((member) => member.pubkey).toList(),
-                  ),
-                );
+          // Readback only: never replay an uncertain access write.
+          await controller.checkSave(channel.id);
           check();
-          final agents = {
-            for (final event in profiles)
-              if (verifiedProfileOaOwnerPubkey(event) != null) event.pubkey,
-          };
-          if (!context.mounted) return;
+        }
+        final source = await controller.load(channel.id);
+        await controller.requireContribution(destinationId);
+        check();
+        void requireSource(ChannelAccessSnapshot snapshot) {
+          if (!snapshot.data.labels.contains('buzz.solo') ||
+              snapshot.data.channelType != 'stream' ||
+              !channelRoleCanContribute(snapshot.role(sync.pubkey)) ||
+              snapshot.data.isArchived) {
+            throw StateError('This chat is no longer available for sharing.');
+          }
+          if (snapshot.data.visibility == 'private' &&
+              (!snapshot.canEdit(sync.pubkey) ||
+                  snapshot.data.creator != sync.pubkey)) {
+            throw StateError(
+              'Only the chat creator with owner or admin access can open this chat for community reading.',
+            );
+          }
+        }
+
+        requireSource(source);
+        final destinationName = previous?.destinationName ?? destination!.name;
+        if (!context.mounted) return;
+        if (source.data.visibility == 'private' ||
+            source.data.joinRole == 'guest') {
           final confirmed = await showBuzzDialog<bool>(
             context: context,
             builder: (dialogContext) => AlertDialog(
-              title: Text('Share in #${destination.name}?'),
+              title: Text('Share in #$destinationName?'),
               content: Text(
-                '${recipients.length} people or agents can read and post in this chat, including to your agents. One link will be posted in the channel. Future joins and departures will not change access to this chat.',
+                '${source.data.visibility == 'private' ? 'This chat will change to View only. ' : ''}'
+                'Everyone in this community can read its full history, Canvas, workspace folders, and agent instructions. '
+                'One link will be posted in the channel. No one is added to the chat, and existing members keep their roles.',
               ),
               actions: [
                 TextButton(
@@ -133,46 +128,50 @@ class SoloShareSheet extends HookConsumerWidget {
             ),
           );
           if (confirmed != true || !context.mounted) return;
-          intent = MeChatShare.create(
-            sync,
-            source: channel.id,
-            name: source.data.name,
-            destination: destination.id,
-            destinationName: destination.name,
-            forum: destination.isForum,
-            audience: {
-              for (final member in recipients)
-                member.pubkey:
-                    member.role == 'bot' || agents.contains(member.pubkey)
-                    ? 'bot'
-                    : 'member',
-            },
-          );
-          pending.value = intent;
         }
-        final selected = intent;
+        final selected =
+            previous ??
+            MeChatShare.create(
+              sync,
+              source: channel.id,
+              name: source.data.name,
+              destination: destinationId,
+              destinationName: destinationName,
+              forum: destination!.isForum,
+            );
+        pending.value = selected;
         await selected.complete(
           sync,
-          ensureRecipient: (recipient, role) async {
-            check();
-            final destinationNow = await controller.load(selected.destination);
-            check();
-            // Frozen consent may shrink when people leave; it never grows.
-            if (!destinationNow.contains(recipient)) return;
-            final sourceNow = await controller.load(selected.source);
-            if (!sourceNow.data.labels.contains('buzz.solo')) {
-              throw StateError('The chat was converted. Review sharing again.');
+          prepare: (checkPending) async {
+            void active() {
+              check();
+              checkPending();
             }
-            await controller.addMember(
-              selected.source,
-              recipient,
-              role,
-              beforeDispatch: check,
-            );
+
+            active();
+            await controller.requireContribution(selected.destination);
+            active();
+            final current = await controller.load(selected.source);
+            active();
+            requireSource(current);
+            if (current.data.visibility == 'private') {
+              if (source.data.visibility != 'private' ||
+                  current.metadata.id != source.metadata.id) {
+                throw StateError('Chat access changed. Review sharing again.');
+              }
+              await controller.setAccess(
+                selected.source,
+                current,
+                'view-only',
+                beforeDispatch: active,
+              );
+              active();
+            }
+            // Already-open policies, including Public, remain untouched.
+            await controller.requireContribution(selected.destination);
+            active();
           },
           send: (message) async {
-            check();
-            await controller.requireContribution(selected.destination);
             check();
             await sync.session.publish(message);
           },
@@ -198,7 +197,7 @@ class SoloShareSheet extends HookConsumerWidget {
           builder: (dialogContext) => AlertDialog(
             title: const Text('Cancel this share?'),
             content: const Text(
-              'Access already granted and a possibly-posted link may remain. This only forgets the pending share; nothing will be resent or revoked.',
+              'Any saved General access change and a possibly-posted link may remain. This only forgets the pending share; nothing will be resent and access will not change.',
             ),
             actions: [
               TextButton(
@@ -244,7 +243,7 @@ class SoloShareSheet extends HookConsumerWidget {
             children: [
               if (pending.value case final intent?) ...[
                 Text(
-                  'Finish sharing in #${intent.destinationName}. Granted access stays in place. Uncertain retries reuse the link; a rejected link is refreshed before the next retry.',
+                  'Finish sharing in #${intent.destinationName}. Any saved General access change stays in place. Uncertain retries reuse the link; a rejected link is refreshed before the next retry.',
                 ),
                 FilledButton(
                   onPressed: busy.value ? null : () => share(),

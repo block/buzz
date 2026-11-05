@@ -7,13 +7,12 @@ import '../relay/relay_session_types.dart';
 import 'me_journal.dart';
 import 'me_sync.dart';
 
-/// A reviewed fixed audience. Uncertain retries reuse the signed link; only a
+/// A reviewed channel link. Uncertain retries reuse the signed link; only a
 /// definitive rejection permits a freshly signed replacement.
 class MeChatShare {
   final String source;
   final String destination;
   final String destinationName;
-  final Map<String, String> audience;
   final NostrEvent message;
   final String _scope;
   final String _record;
@@ -22,7 +21,6 @@ class MeChatShare {
     this.source,
     this.destination,
     this.destinationName,
-    this.audience,
     this.message,
     this._scope,
     this._record,
@@ -36,12 +34,8 @@ class MeChatShare {
     required String name,
     required String destination,
     required String destinationName,
-    required Map<String, String> audience,
     bool forum = false,
   }) {
-    if (audience.length > 100) {
-      throw StateError('Share with at most 100 people or agents at a time.');
-    }
     final label = name
         .replaceAll(RegExp(r'\s+'), ' ')
         .replaceAllMapped(
@@ -65,7 +59,6 @@ class MeChatShare {
         'source': source,
         'destination': destination,
         'destinationName': destinationName,
-        'audience': audience,
         'message': message.toJson(),
       }),
     );
@@ -73,14 +66,14 @@ class MeChatShare {
       source,
       destination,
       destinationName,
-      Map.unmodifiable(audience),
       message,
       _key(sync, source),
       record,
     );
   }
 
-  /// Restore without issuing invitations or sending a message.
+  /// Restore without changing access or sending a message. Legacy recipient
+  /// lists are ignored: resuming a share must never enroll those identities.
   static MeChatShare? pending(MeSync sync, String source) {
     final record = sync.prefs?.getString(_key(sync, source));
     if (record == null) return null;
@@ -90,19 +83,15 @@ class MeChatShare {
     );
     verifiedNostrEventFromJson(jsonEncode(message.toJson()));
     final destination = data['destination'] as String;
-    final audience = Map<String, String>.from(data['audience'] as Map);
     if (data['source'] != source ||
         message.pubkey != sync.pubkey ||
-        message.channelId != destination ||
-        audience.length > 100 ||
-        audience.values.any((role) => role != 'member' && role != 'bot')) {
+        message.channelId != destination) {
       throw const FormatException('The unfinished share is invalid.');
     }
     return MeChatShare._(
       source,
       destination,
       data['destinationName'] as String,
-      Map.unmodifiable(audience),
       message,
       _key(sync, source),
       record,
@@ -151,7 +140,6 @@ class MeChatShare {
         'source': source,
         'destination': destination,
         'destinationName': destinationName,
-        'audience': audience,
         'message': fresh.toJson(),
       }),
     );
@@ -166,11 +154,11 @@ class MeChatShare {
     _check(sync);
   }
 
-  /// Persist before the first grant, then retain this exact message through a
+  /// Persist before opening community reading, then retain this message through a
   /// lost OK response. Relay deduplication makes an explicit retry idempotent.
   Future<void> complete(
     MeSync sync, {
-    required Future<void> Function(String, String) ensureRecipient,
+    required Future<void> Function(void Function() checkPending) prepare,
     required Future<void> Function(NostrEvent) send,
   }) async {
     _check(sync);
@@ -193,10 +181,7 @@ class MeChatShare {
       }
     }
 
-    for (final recipient in audience.entries) {
-      await ensureRecipient(recipient.key, recipient.value);
-      checkPending();
-    }
+    await prepare(checkPending);
     checkPending();
     try {
       await send(message);

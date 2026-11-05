@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:buzz/shared/me/me_archived_agents.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/features/channels/solo_share_sheet.dart';
 import 'package:buzz/features/channels/member_access_controls.dart';
@@ -192,7 +191,6 @@ ProviderContainer _container(
     channelsProvider.overrideWith(
       shareChoices ? _ShareChannels.new : _Channels.new,
     ),
-    if (shareChoices) meArchivedAgentsProvider.overrideWith((ref) async => {}),
   ],
 );
 
@@ -948,48 +946,6 @@ void main() {
     }
   });
 
-  test(
-    'a share preserves the frozen audience and reuses one signed message after a lost response',
-    () async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final sync = MeSync(
-        _Relay(),
-        RelayConfig(baseUrl: 'https://access.example', nsec: _keys.nsec),
-        prefs: prefs,
-      );
-      final intent = MeChatShare.create(
-        sync,
-        source: _id,
-        name: 'Research [chat]',
-        destination: 'destination',
-        destinationName: 'team',
-        audience: {_target: 'bot'},
-      );
-      final messages = <String>[];
-      var lose = true;
-      final members = <String, String>{};
-      Future<void> attempt(MeChatShare value) => value.complete(
-        sync,
-        ensureRecipient: (key, role) async {
-          members.putIfAbsent(key, () => role);
-        },
-        send: (event) async {
-          messages.add(event.id);
-          if (lose) throw TimeoutException('Lost response');
-        },
-      );
-      await expectLater(attempt(intent), throwsA(isA<TimeoutException>()));
-      final restored = MeChatShare.pending(sync, _id)!;
-      expect(restored.audience, {_target: 'bot'});
-      expect(restored.message.id, intent.message.id);
-      lose = false;
-      await attempt(restored);
-      expect(messages, [intent.message.id, intent.message.id]);
-      expect(members, {_target: 'bot'});
-      expect(MeChatShare.pending(sync, _id), isNull);
-    },
-  );
   test(
     'access rejects forged metadata and rechecks a Guest owner’s agent removal',
     () async {

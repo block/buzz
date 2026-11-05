@@ -267,8 +267,9 @@ class ChannelAccessController
   Future<ChannelAccessSnapshot> setAccess(
     String id,
     ChannelAccessSnapshot base,
-    String choice,
-  ) async {
+    String choice, {
+    void Function()? beforeDispatch,
+  }) async {
     final data = base.data;
     if (!const {'private', 'public', 'view-only'}.contains(choice) ||
         (data.labels.contains('buzz.solo') && choice == 'public')) {
@@ -297,6 +298,7 @@ class ChannelAccessController
         visibility: visibility,
         joinRole: role,
       ),
+      beforeDispatch: beforeDispatch,
     );
   }
 

@@ -1,6 +1,49 @@
 part of 'channel_access_test.dart';
 
 class _SharingRelay extends _Relay {
+  String destinationRole = 'owner';
+  String creator = _keys.public;
+  bool archived = false;
+  bool loseAccessOnce = false;
+  bool loseLinkOnce = false;
+
+  @override
+  NostrEvent event(int kind) {
+    final original = super.event(kind);
+    if (kind != 39000) return original;
+    return NostrEvent.fromJson(
+      signNostrEvent(
+        secretKey: _relayKeys.secret,
+        createdAt: revision,
+        kind: kind,
+        content: '',
+        tags: [
+          for (final tag in original.tags)
+            if (tag.first != 'P') tag,
+          ['P', creator],
+          if (archived) ['archived', 'true'],
+        ],
+      ).toMap(),
+    );
+  }
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final result = await super.publish(event, timeout: timeout);
+    if (event.kind == 9002 && loseAccessOnce) {
+      loseAccessOnce = false;
+      throw TimeoutException('Access response lost');
+    }
+    if (event.kind == 9 && loseLinkOnce) {
+      loseLinkOnce = false;
+      throw TimeoutException('Link response lost');
+    }
+    return result;
+  }
+
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
@@ -23,8 +66,11 @@ class _SharingRelay extends _Relay {
                 ['P', _keys.public],
               ],
               if (kind == 39002) ...[
-                ['p', _keys.public, '', 'owner'],
-                ['p', '3' * 64, '', 'guest'],
+                if (destinationRole.isNotEmpty)
+                  ['p', _keys.public, '', destinationRole],
+                // Sharing a large audience never enrolls anyone or reads profiles.
+                for (var i = 0; i < 102; i++)
+                  ['p', i.toRadixString(16).padLeft(64, '0'), '', 'guest'],
               ],
             ],
           ).toMap(),
@@ -94,9 +140,11 @@ void soloAccessRecoveryCases() {
   );
 
   testWidgets(
-    'sharing discloses posting and cancelling confirmation grants nothing',
+    'sharing confirms community reading, recovers access and links without enrolling anyone',
     (tester) async {
-      final relay = _SharingRelay();
+      final relay = _SharingRelay()
+        ..loseAccessOnce = true
+        ..loseLinkOnce = true;
       final sync = await _recoverySync(relay);
       final container = _container(relay, sync: sync, shareChoices: true);
       addTearDown(container.dispose);
@@ -110,18 +158,173 @@ void soloAccessRecoveryCases() {
       await tester.tap(find.text('#team'));
       await _settleRecovery(tester);
       expect(
+        find.textContaining('This chat will change to View only.'),
+        findsOneWidget,
+      );
+      expect(
         find.textContaining(
-          'can read and post in this chat, including to your agents.',
+          'Everyone in this community can read its full history, Canvas, workspace folders, and agent instructions.',
         ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('No one is added to the chat'),
         findsOneWidget,
       );
       await tester.tap(find.text('Cancel'));
       await _settleRecovery(tester);
       expect(MeChatShare.pending(sync, _id), isNull);
       expect(relay.published, isEmpty);
+
+      await tester.tap(find.text('#team'));
+      await _settleRecovery(tester);
+      await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+      await _settleRecovery(tester);
+      final messageId = MeChatShare.pending(sync, _id)!.message.id;
+      expect(relay.visibility, 'open');
+      expect(relay.joinRole, 'guest');
+      expect(relay.published.map((e) => e.kind), [9002]);
+      // The lost access response is checked on retry, never republished.
+      await tester.tap(find.text('Retry share'));
+      await _settleRecovery(tester);
+      expect(find.textContaining('This chat will change'), findsNothing);
+      await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+      await _settleRecovery(tester);
+      expect(relay.published.map((e) => e.kind), [9002, 9]);
+      expect(MeChatShare.pending(sync, _id)!.message.id, messageId);
+
+      // A chat made Private while View-only consent is visible cannot be reopened.
+      await tester.tap(find.text('Retry share'));
+      await _settleRecovery(tester);
+      relay.visibility = 'private';
+      relay.revision++;
+      await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+      await _settleRecovery(tester);
+      expect(
+        find.text('Chat access changed. Review sharing again.'),
+        findsOneWidget,
+      );
+      expect(relay.visibility, 'private');
+      expect(relay.published.map((e) => e.kind), [9002, 9]);
+      // Fresh Private consent allows opening again; uncertain link ID is retained.
+      await tester.tap(find.text('Retry share'));
+      await _settleRecovery(tester);
+      expect(
+        find.textContaining('This chat will change to View only.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+      await _settleRecovery(tester);
+      expect(MeChatShare.pending(sync, _id), isNull);
+      expect(relay.published.map((e) => e.kind), [9002, 9, 9002, 9]);
+      expect(relay.published.where((e) => e.kind == 9).map((e) => e.id), [
+        messageId,
+        messageId,
+      ]);
+      expect(relay.published.last.content, contains('buzz://channel/$_id'));
+      expect(relay.published.last.channelId, 'destination');
+      expect(relay.labels, ['buzz.solo', 'project.work']);
+      expect(relay.actorRole, 'owner');
+      expect(relay.targetRole, 'bot');
+      expect(relay.destinationRole, 'owner');
+      expect(relay.profileReads, 0);
+      final edits = relay.published.where((e) => e.kind == 9002).toList();
+      expect(edits.first.tags, [
+        ['h', _id],
+        ['visibility', 'open'],
+        ['join_role', 'guest'],
+      ]);
+      expect(edits.last.tags, [
+        ['h', _id],
+        ['visibility', 'open'],
+      ]);
       await tester.pumpWidget(const SizedBox());
     },
   );
+  testWidgets(
+    'sharing uses current source and destination permissions and preserves open policy',
+    (tester) async {
+      for (final row in <(String, String, bool, bool, String, bool)>[
+        // visibility, source role, creator, archived, destination role, allowed
+        ('private', 'owner', true, false, 'member', true),
+        ('private', 'admin', true, false, 'member', true),
+        ('private', 'admin', false, false, 'member', false),
+        ('private', 'member', true, false, 'member', false),
+        ('open', 'member', false, false, 'member', true),
+        ('open', 'bot', false, false, 'member', true),
+        ('open', 'guest', true, false, 'member', false),
+        ('open', '', true, false, 'member', false),
+        ('open', 'owner', true, true, 'member', false),
+        ('private', 'owner', true, false, 'guest', false),
+        ('private', 'owner', true, false, '', false),
+      ]) {
+        for (final policy in ['member', 'guest']) {
+          final relay = _SharingRelay()
+            ..visibility = row.$1
+            ..joinRole = policy
+            ..actorRole = row.$2
+            ..creator = row.$3 ? _keys.public : _target
+            ..archived = row.$4
+            ..destinationRole = row.$5;
+          final sync = await _recoverySync(relay);
+          final container = _container(relay, sync: sync, shareChoices: true);
+          await _showRecoveryWidget(
+            tester,
+            container,
+            SoloShareSheet(channel: _soloChannel()),
+          );
+          await tester.enterText(find.byType(TextField), 'team');
+          await _settleRecovery(tester);
+          await tester.tap(find.text('#team'));
+          await _settleRecovery(tester);
+          if (row.$6 && (row.$1 == 'private' || policy == 'guest')) {
+            await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+            await _settleRecovery(tester);
+          }
+          expect(
+            relay.published.map((e) => e.kind),
+            row.$6 ? (row.$1 == 'private' ? [9002, 9] : [9]) : [],
+            reason: '$row / $policy',
+          );
+          expect(
+            relay.joinRole,
+            row.$6 && row.$1 == 'private' ? 'guest' : policy,
+          );
+          expect(relay.actorRole, row.$2);
+          expect(relay.targetRole, 'bot');
+          await tester.pumpWidget(const SizedBox());
+          container.dispose();
+        }
+      }
+    },
+  );
+  testWidgets('sharing rechecks demotions and metadata after confirmation', (
+    tester,
+  ) async {
+    for (final change in ['source', 'destination', 'metadata']) {
+      final relay = _SharingRelay();
+      final sync = await _recoverySync(relay);
+      final container = _container(relay, sync: sync, shareChoices: true);
+      await _showRecoveryWidget(
+        tester,
+        container,
+        SoloShareSheet(channel: _soloChannel()),
+      );
+      await tester.enterText(find.byType(TextField), 'team');
+      await _settleRecovery(tester);
+      await tester.tap(find.text('#team'));
+      await _settleRecovery(tester);
+      if (change == 'source') relay.actorRole = 'guest';
+      if (change == 'destination') relay.destinationRole = 'guest';
+      relay.revision++;
+      await tester.tap(find.widgetWithText(FilledButton, 'Share'));
+      await _settleRecovery(tester);
+      expect(relay.visibility, 'private');
+      expect(relay.published, isEmpty, reason: change);
+      await tester.pumpWidget(const SizedBox());
+      container.dispose();
+    }
+  });
   testWidgets(
     'an interrupted share can be kept or cancelled without another grant or post',
     (tester) async {
@@ -133,13 +336,11 @@ void soloAccessRecoveryCases() {
         name: 'Research',
         destination: 'gone',
         destinationName: 'deleted channel',
-        audience: {_target: 'member'},
       );
       await expectLater(
         intent.complete(
           sync,
-          ensureRecipient: (_, _) async =>
-              throw StateError('Destination deleted'),
+          prepare: (_) async => throw StateError('Destination deleted'),
           send: (_) async => fail('No link may be sent'),
         ),
         throwsStateError,

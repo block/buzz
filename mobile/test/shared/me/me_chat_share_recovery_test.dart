@@ -65,12 +65,11 @@ void main() {
         name: 'Chat',
         destination: 'team',
         destinationName: 'team',
-        audience: {},
       );
       await expectLater(
         original.complete(
           sync,
-          ensureRecipient: (_, _) async {},
+          prepare: (_) async {},
           send: (_) async => throw TimeoutException('offline'),
         ),
         throwsA(isA<TimeoutException>()),
@@ -91,12 +90,14 @@ void main() {
         ).toMap(),
       );
       data['message'] = old.toJson();
+      // Old builds stored recipients; new builds retain only the link, never grants.
+      data['audience'] = {for (var i = 0; i < 102; i++) '$i': 'member'};
       await prefs.setString(key, nip44Encrypt(sync.key, jsonEncode(data)));
       final stale = MeChatShare.pending(sync, 'solo')!;
       final rejected = expectLater(
         stale.complete(
           sync,
-          ensureRecipient: (_, _) async {},
+          prepare: (_) async {},
           send: (event) async {
             await relay.session.publish(event);
           },
@@ -108,12 +109,17 @@ void main() {
       final fresh = MeChatShare.pending(sync, 'solo')!;
       expect(fresh.message.id, isNot(old.id));
       expect(fresh.message.content, old.content);
-      expect(fresh.audience, stale.audience);
+      expect(fresh.destination, stale.destination);
+      expect(
+        (jsonDecode(nip44Decrypt(sync.key, prefs.getString(key)!)) as Map)
+            .containsKey('audience'),
+        isFalse,
+      );
       await expectLater(stale.discard(sync), throwsStateError);
       final hold = relay.holdOk();
       final interrupted = fresh.complete(
         sync,
-        ensureRecipient: (_, _) async {},
+        prepare: (_) async {},
         send: (event) async {
           await relay.session.publish(event);
         },
@@ -182,14 +188,13 @@ void main() {
         name: 'Chat',
         destination: 'team',
         destinationName: 'team',
-        audience: {'person': 'member'},
       );
       final started = Completer<void>(), release = Completer<void>();
       var posts = 0;
       final attempt = expectLater(
         intent.complete(
           sync,
-          ensureRecipient: (_, _) async {
+          prepare: (_) async {
             started.complete();
             await release.future;
           },

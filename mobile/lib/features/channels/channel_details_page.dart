@@ -488,7 +488,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
             ),
           if (hasSigningKey &&
               resolvedChannel.isSolo &&
-              resolvedChannel.canContribute)
+              canAddMembers &&
+              currentMember != null)
             AppListCard(
               verticalPadding: _channelDetailsSectionPadding,
               children: [
