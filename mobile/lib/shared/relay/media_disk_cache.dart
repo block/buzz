@@ -126,6 +126,11 @@ class MediaDiskCache {
     }
   }
 
+  /// Removes [url]'s saved bytes, for example when they no longer decode.
+  /// Failures are logged; a later read finds the same bad bytes.
+  Future<void> remove(String url) =>
+      _manager.removeFile(url).catchError(_logFailure);
+
   /// [url]'s saved bytes, or null when they are not on disk.
   Future<MediaDiskCacheHit?> read(String url) async {
     final FileInfo? info;
@@ -137,7 +142,7 @@ class MediaDiskCache {
     } on FileSystemException {
       // The OS may purge cache files under the index. Drop the entry and
       // load from the network.
-      unawaited(_manager.removeFile(url).catchError(_logFailure));
+      unawaited(remove(url));
       return null;
     }
     if (bytes.isEmpty) return null;

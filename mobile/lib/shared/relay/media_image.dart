@@ -131,11 +131,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       ),
       scale: key.scale,
       debugLabel: url,
-      // Save only bytes this load decoded a frame from: a codec can open
-      // from bytes whose frames then fail to decode. Then drop the fetch:
-      // the cached completer must not keep the encoded bytes alive.
-      onFirstFrame: () {
-        fetched?.saveOnce();
+      // Save only bytes this load decoded a frame from (a codec can open
+      // from bytes whose frames then fail to decode), and drop saved bytes
+      // that no longer decode. Then drop the fetch: the cached completer
+      // must not keep the encoded bytes alive.
+      onSettled: (decoded) {
+        fetched?.settle(decoded: decoded);
         fetched = null;
       },
     )..addOnLastListenerRemovedCallback(() {
@@ -210,6 +211,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     final hit = await cache.read(url);
     if (hit != null) {
       if (hit.isStale) _scheduleRefresh(cache);
+      fetch.discard = () => unawaited(cache.remove(url));
       return hit.bytes;
     }
     final bytes = await _fetchBytes(fetch.aborted);
@@ -253,16 +255,22 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // Nothing displays these bytes yet, so check they decode before they
       // replace the saved copy. A tiny target keeps the check from
       // allocating a full-resolution frame.
-      final codec = await ui.instantiateImageCodec(
-        bytes,
-        targetWidth: 1,
-        targetHeight: 1,
-        allowUpscaling: false,
-      );
       try {
-        (await codec.getNextFrame()).image.dispose();
-      } finally {
-        codec.dispose();
+        final codec = await ui.instantiateImageCodec(
+          bytes,
+          targetWidth: 1,
+          targetHeight: 1,
+          allowUpscaling: false,
+        );
+        try {
+          (await codec.getNextFrame()).image.dispose();
+        } finally {
+          codec.dispose();
+        }
+      } on Object {
+        // A body that never decodes is a failed fetch: back off.
+        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+        rethrow;
       }
       await cache.write(url, bytes, immutable: _isContentAddressed);
     } on Object catch (error) {
@@ -391,22 +399,45 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
   _MediaImageStreamCompleter({
     required super.codec,
     required super.scale,
-    required this.onFirstFrame,
+    required this.onSettled,
     super.debugLabel,
   });
 
-  /// Called once, when the first frame has decoded. A codec can be created
-  /// from bytes whose frames then fail to decode.
-  VoidCallback? onFirstFrame;
+  /// Called once: with true when the first frame has decoded, or with false
+  /// when the load fails before it. A codec can be created from bytes whose
+  /// frames then fail to decode.
+  void Function(bool decoded)? onSettled;
+
+  void _settle({required bool decoded}) {
+    final settled = onSettled;
+    onSettled = null;
+    settled?.call(decoded);
+  }
 
   final _listeners = <ImageStreamListener>[];
 
   @override
   void setImage(ImageInfo image) {
-    final firstFrame = onFirstFrame;
-    onFirstFrame = null;
-    firstFrame?.call();
+    _settle(decoded: true);
     super.setImage(image);
+  }
+
+  @override
+  void reportError({
+    DiagnosticsNode? context,
+    required Object exception,
+    StackTrace? stack,
+    InformationCollector? informationCollector,
+    bool silent = false,
+  }) {
+    _settle(decoded: false);
+    super.reportError(
+      context: context,
+      exception: exception,
+      stack: stack,
+      informationCollector: informationCollector,
+      silent: silent,
+    );
   }
 
   @override
@@ -447,13 +478,19 @@ class _SharedFetch {
   /// Completes when every load waiting for this download was abandoned.
   Future<void> get aborted => _abort.future;
 
-  /// Saves the downloaded bytes to disk, when they are not there yet. Set by
-  /// the download, and run by the first load that decodes a frame.
+  /// Saves downloaded bytes to disk. Set by a download, and run by the
+  /// first load that decodes a frame.
   VoidCallback? save;
 
-  void saveOnce() {
-    final pending = save;
+  /// Removes saved bytes from disk. Set by a disk hit, and run when a load
+  /// fails before decoding a frame from them.
+  VoidCallback? discard;
+
+  /// Runs [save] or [discard] once, by whether a load decoded a frame.
+  void settle({required bool decoded}) {
+    final pending = decoded ? save : discard;
     save = null;
+    discard = null;
     pending?.call();
   }
 

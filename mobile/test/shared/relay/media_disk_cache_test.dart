@@ -61,6 +61,8 @@ void main() {
     // While set, external images answer once it completes, with an image
     // too large to save.
     Completer<void>? replaceExternal;
+    // While set, external images answer with a body that never decodes.
+    var malformedExternal = false;
     // Trailing bytes after IEND still decode, so this is a 5 MiB+ image.
     final hugeBytes = [..._pngBytes, ...Uint8List(MediaDiskCache.maxFileBytes)];
     final client = http_testing.MockClient((request) async {
@@ -68,6 +70,9 @@ void main() {
       fetched.add(url);
       if (!online) throw const SocketException('offline');
       if (url == _hugeUrl) return http.Response.bytes(hugeBytes, 200);
+      if (malformedExternal && _externalUrls.contains(url)) {
+        return http.Response('not an image', 200);
+      }
       if (replaceExternal != null && _externalUrls.contains(url)) {
         await replaceExternal.future;
         return http.Response.bytes(hugeBytes, 200);
@@ -177,6 +182,38 @@ void main() {
       }
     });
     expect(fetched, _externalUrls);
+
+    // A saved copy that no longer decodes is dropped and fetched again.
+    fetched.clear();
+    online = true;
+    await launch((cache) async {
+      await cache.write(
+        _relayUrl,
+        Uint8List.fromList(utf8.encode('not an image')),
+        immutable: true,
+      );
+      expect(await show(cache, _relayUrl), isNotNull);
+      await _settle();
+      expect(await show(cache, _relayUrl), isNull);
+      await cache.write(_externalUrls.first, _pngBytes, immutable: false);
+    });
+    expect(fetched, [_relayUrl]);
+
+    // A refresh whose body never decodes backs off rather than refetching
+    // on every load.
+    fetched.clear();
+    malformedExternal = true;
+    // Forget the failures of the offline launch.
+    MediaImageProvider.debugResetCooldowns();
+    now = now.add(const Duration(days: 8));
+    await launch((cache) async {
+      for (var i = 0; i < 2; i++) {
+        expect(await show(cache, _externalUrls.first), isNull);
+        await _settle();
+        PaintingBinding.instance.imageCache.clear();
+      }
+    });
+    expect(fetched, [_externalUrls.first]);
 
     // A replaced account's directory goes, including writes that land after
     // its delete; removing the community deletes its directory.
