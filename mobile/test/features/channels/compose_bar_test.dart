@@ -1,6 +1,9 @@
 import 'package:flutter/scheduler.dart';
+
 import 'dart:async';
+
 import 'package:buzz/features/channels/composer_send_origin.dart';
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -1366,6 +1369,57 @@ void main() {
         'new draft',
       );
     });
+
+    for (final (name, error, message) in [
+      (
+        'a disconnected relay',
+        RelayNotConnectedError(),
+        'Not sent. No connection.',
+      ),
+      (
+        'an unacknowledged publish',
+        TimeoutException('not acknowledged'),
+        "Not sent. The relay didn't respond.",
+      ),
+      (
+        'a relay rejection',
+        Exception('restricted: not a member'),
+        'Not sent: restricted: not a member',
+      ),
+      (
+        'any other state error',
+        StateError('Relay session is disposed'),
+        'Not sent: Relay session is disposed',
+      ),
+    ]) {
+      testWidgets('reports $name as itself, not a community switch', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) => Future.error(error),
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'hello',
+        );
+      });
+    }
 
     testWidgets('smoothly resizes the text field when a new line is added', (
       tester,
