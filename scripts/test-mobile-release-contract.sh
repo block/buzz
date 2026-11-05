@@ -43,6 +43,9 @@ case "${1:-}:${2:-}" in
       *) exit 2 ;;
     esac
     ;;
+  api:repos/block/buzz/git/ref/tags/*)
+    git --git-dir="$GH_REMOTE" rev-parse --verify --quiet "refs/tags/${2#repos/block/buzz/git/ref/tags/}" || exit 1
+    ;;
   api:repos/block/buzz/compare/*)
     [[ "${GH_COMPARE_FAIL:-}" != 1 ]] || exit 1
     pair="${2##*/}"
@@ -313,6 +316,16 @@ fi
 git -C "$operator" config --unset "url.file://$fork_remote.pushInsteadOf"
 assert_no_candidate_tag 2.0.1
 [[ "$(git --git-dir="$fork_remote" for-each-ref refs/tags)" == "$fork_tags_before" ]]
+# An insteadOf rewrite sends both fetch and push to the fork. GitHub then has
+# no tag, so publication fails loudly and cleans up the local tag.
+git -C "$operator" config --unset "url.file://$remote.insteadOf"
+git -C "$operator" config "url.file://$fork_remote.insteadOf" "$canonical_origin"
+if (cd "$operator" && "$script" candidate 2.0.1 > "$tmp/insteadof-output" 2>&1); then
+  fail "candidate reported success after publishing into a fork"
+fi
+git -C "$operator" config --unset "url.file://$fork_remote.insteadOf"
+grep -Fq 'push did not publish mobile-v2.0.1-rc.1 to canonical block/buzz' "$tmp/insteadof-output"
+assert_no_candidate_tag 2.0.1
 
 # A shallow operator clone can still pin a verified ancestor outside its
 # local history.

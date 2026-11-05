@@ -174,6 +174,15 @@ case "$command" in
       fail "could not push $tag; you must be a bypass actor of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (currently the mobile release managers). The local tag was removed so a retry starts clean"
     fi
 
+    # git URL rewriting (insteadOf) can send even a canonical-looking origin
+    # to a fork, so confirm with GitHub itself that block/buzz now has this
+    # exact annotated tag object.
+    local_tag_oid="$(git rev-parse --verify "refs/tags/$tag")" || fail "local tag $tag disappeared"
+    if ! canonical_tag_oid="$(gh api "repos/block/buzz/git/ref/tags/$tag" --jq .object.sha)" || \
+        [[ "$canonical_tag_oid" != "$local_tag_oid" ]]; then
+      git tag -d "$tag" >/dev/null
+      fail "push did not publish $tag to canonical block/buzz; check git url.*.insteadOf rewrites for origin. The local tag was removed so a retry starts clean"
+    fi
     published_sha="$(remote_tag_commit_sha "refs/tags/$tag")" || \
       fail "push completed without exact annotated candidate tag $tag on origin"
     [[ "$published_sha" == "$source_sha" ]] || \
