@@ -464,6 +464,7 @@ class ReadStateManager {
     try {
       final generation = ++_liveGeneration;
       var returned = false;
+      var live = false;
       final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
@@ -480,9 +481,16 @@ class ReadStateManager {
         // went live, unless it goes live later: after the 500 ms fallback
         // (slow AUTH on a cold start) or after a transient CLOSED's retry.
         // With limit 0 nothing replays the gap, so read the snapshot then.
+        // A repeated ready while already live (a reconnect can send the
+        // same REQ twice) leaves no gap, so it reads nothing.
         onStatusChanged: (status) {
-          if (status == RelaySubscriptionStatus.ready && returned) {
-            unawaited(_catchUpAfterLateReady(generation));
+          if (status == RelaySubscriptionStatus.ready) {
+            if (!live && returned) {
+              unawaited(_catchUpAfterLateReady(generation));
+            }
+            live = true;
+          } else {
+            live = false;
           }
         },
       );
@@ -508,7 +516,9 @@ class ReadStateManager {
     if (pass != null) await pass;
     if (_disposed || !_servesThisCommunity) return;
     if (generation != _liveGeneration) return;
-    await _fetchAndMerge();
+    // A failed read is retried by the next publish, which reads the
+    // snapshot in full after a failure.
+    if (!await _fetchAndMerge()) _schedulePublish();
   }
 
   void _handleIncomingEvent(NostrEvent event) {

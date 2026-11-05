@@ -944,6 +944,16 @@ void main() {
       expect(relay.subscribeCount, 2);
       expect(relay.liveSubscriptions, 1);
 
+      // Like the relay, a subscription reports ready before subscribe
+      // returns, and a reconnect can send the same REQ again. Its second
+      // ready finds the subscription already live and reads nothing more.
+      relay.readyOnSubscribe = true;
+      await manager.reinitializeRemote();
+      expect(relay.fetchCount, 3);
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+      expect(relay.fetchCount, 3);
+
       manager.dispose();
       expect(relay.liveSubscriptions, 0);
     },
@@ -1175,6 +1185,54 @@ void main() {
     },
   );
 
+  test('a failed late-ready read is retried by the next publish', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    fakeAsync((async) {
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 1);
+
+      // The REQ goes live late and its catch-up read fails.
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'desktop',
+          slotId: 'desktop-slot',
+          contexts: {'channel-1': 100},
+          createdAt: 100,
+        ),
+      ];
+      relay.failNextFetch = true;
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), isNot(100));
+
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.fetchCount, 3);
+      expect(manager.getEffectiveTimestamp('channel-1'), 100);
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1401,8 +1459,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
   }) {
     statusListeners.add(onStatusChanged);
-    return subscribe(filter, onEvent, onClosed: onClosed);
+    final unsubscribe = subscribe(filter, onEvent, onClosed: onClosed);
+    if (readyOnSubscribe) onStatusChanged(RelaySubscriptionStatus.ready);
+    return unsubscribe;
   }
+
+  /// Reports ready before subscribe returns, as the relay's EOSE does.
+  bool readyOnSubscribe = false;
 
   @override
   Future<void Function()> subscribe(
