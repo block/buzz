@@ -1596,7 +1596,7 @@ mod postgres_tests {
         let tenant = buzz_core::TenantContext::resolved(community, &host);
         let joiner = Keys::generate();
         let joiner_hex = joiner.public_key().to_hex();
-        state
+        let _ = state
             .db
             .add_relay_member(
                 community,
@@ -1607,7 +1607,7 @@ mod postgres_tests {
             )
             .await
             .expect("seed relay owner");
-        state
+        let _ = state
             .db
             .add_relay_member_with_default_channels(
                 community,
