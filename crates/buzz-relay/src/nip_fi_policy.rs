@@ -69,6 +69,13 @@ pub(crate) fn request_tenant(raw_host: &str) -> Option<Option<buzz_core::TenantC
         .ok()
 }
 
+/// Effective mode already resolved for this request, without another lookup.
+pub(crate) fn request_mode(global: NipFiMode) -> NipFiMode {
+    REQUEST_POLICY
+        .try_with(|policy| policy.mode)
+        .unwrap_or(global)
+}
+
 pub(crate) async fn with_policy<F: std::future::Future>(policy: Policy, next: F) -> F::Output {
     REQUEST_POLICY.scope(policy, next).await
 }

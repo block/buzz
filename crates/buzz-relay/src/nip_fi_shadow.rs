@@ -524,7 +524,7 @@ pub(crate) async fn observe_strict_proof<E>(
 /// Enforce's strict proof on a route: records the outcome of the proof check
 /// that decides admission, once, where it runs. Nothing is verified twice,
 /// and a request refused before its proof (duplicate Authorization) records
-/// no proof. Inert outside enforce.
+/// no proof. Inert when this request does not enforce FI.
 pub(crate) struct EnforcedProof(Option<(&'static str, SharedString)>);
 
 impl EnforcedProof {
@@ -533,19 +533,17 @@ impl EnforcedProof {
         headers: &HeaderMap,
         route: &'static str,
     ) -> Self {
-        Self(state.config.nip_fi.mode.enforces().then(|| {
-            let host = headers
-                .get(axum::http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            (route, enforce_label(state, host))
-        }))
-    }
-
-    /// An enforcing observation of `route`, without a state.
-    #[cfg(test)]
-    pub(crate) fn for_test(route: &'static str) -> Self {
-        Self(Some((route, SharedString::const_str(BOUND))))
+        Self(
+            crate::nip_fi_policy::request_mode(state.config.nip_fi.mode)
+                .enforces()
+                .then(|| {
+                    let host = headers
+                        .get(axum::http::header::HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    (route, enforce_label(state, host))
+                }),
+        )
     }
 
     /// Passes the deciding check's `result` through, counting it.

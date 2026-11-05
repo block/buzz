@@ -1632,52 +1632,80 @@ mod tests {
     /// outcome and pass the result through unchanged, and a request refused
     /// at cardinality, before its proof, records none. Mutation: recording
     /// in `EnforcedProof::new` instead (a side check) counts the duplicate.
-    #[test]
-    fn enforce_strict_proof_records_the_deciding_check_once() {
+    #[tokio::test]
+    async fn enforce_strict_proof_records_the_deciding_check_once() {
         use crate::nip_fi_shadow::EnforcedProof;
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        metrics::with_local_recorder(&recorder, || {
-            let proof = EnforcedProof::for_test("bridge");
-            assert_eq!(proof.record(Ok::<_, ()>(7)), Ok(7));
-            assert_eq!(proof.record(Err::<(), _>("bad")), Err("bad"));
-            let mut headers = host_headers();
-            for token in ["Nostr first.token", "Nostr second.token"] {
-                headers.append(
-                    axum::http::header::AUTHORIZATION,
-                    HeaderValue::from_static(token),
-                );
+        let mut state = (*crate::state::tests::test_state().await).clone();
+        for global in [NipFiMode::Off, NipFiMode::Shadow, NipFiMode::Enforce] {
+            for stored_required in [false, true] {
+                std::sync::Arc::make_mut(&mut state.config).nip_fi.mode = global;
+                let mode = global.with_requirement(stored_required);
+                let policy = crate::nip_fi_policy::Policy {
+                    community_id: uuid::Uuid::new_v4(),
+                    mode,
+                    required: mode.enforces(),
+                    stored_required,
+                    mapped: true,
+                };
+                let recorder = metrics_util::debugging::DebuggingRecorder::new();
+                metrics::with_local_recorder(&recorder, || {
+                    crate::nip_fi_policy::with_policy(policy, async {
+                        let proof = EnforcedProof::new(&state, &host_headers(), "bridge");
+                        assert_eq!(proof.record(Ok::<_, ()>(7)), Ok(7));
+                        assert_eq!(proof.record(Err::<(), _>("bad")), Err("bad"));
+                        let mut headers = host_headers();
+                        for token in ["Nostr first.token", "Nostr second.token"] {
+                            headers.append(
+                                axum::http::header::AUTHORIZATION,
+                                HeaderValue::from_static(token),
+                            );
+                        }
+                        let pubkey = any_pubkey();
+                        let outcome = admit_stateless::<_, (), _>(
+                            &headers,
+                            || proof.record(Ok(Nip98Proof::new(pubkey, ()))),
+                            &communities(),
+                            None::<&dyn VerifyAssertion>,
+                            NipFiMode::Enforce,
+                            &AlwaysAdmitStubDenyMap,
+                        )
+                        .now_or_never()
+                        .expect("env resolution never waits");
+                        // This Enforce probe refuses cardinality before proof.
+                        assert!(outcome.is_err(), "invalid evidence is refused");
+                    })
+                    .now_or_never()
+                    .expect("scoped proof check never waits");
+                });
+                let mut strict: Vec<String> = recorder
+                    .snapshotter()
+                    .snapshot()
+                    .into_vec()
+                    .into_iter()
+                    .filter(|(key, ..)| {
+                        key.key().name() == "buzz_nip_fi_enforce_strict_proof_total"
+                    })
+                    .map(|(key, _, _, value)| {
+                        let outcome = key
+                            .key()
+                            .labels()
+                            .find(|l| l.key() == "outcome")
+                            .map(|l| l.value().to_owned())
+                            .unwrap_or_default();
+                        format!("{outcome}={value:?}")
+                    })
+                    .collect();
+                strict.sort();
+                if mode.enforces() {
+                    assert_eq!(strict, ["pass=Counter(1)", "rejected=Counter(1)"]);
+                } else {
+                    assert!(
+                        strict.is_empty(),
+                        "{global:?} stored={stored_required}: {strict:?}"
+                    );
+                }
             }
-            let pubkey = any_pubkey();
-            let outcome = admit_stateless::<_, (), _>(
-                &headers,
-                || proof.record(Ok(Nip98Proof::new(pubkey, ()))),
-                &communities(),
-                None::<&dyn VerifyAssertion>,
-                NipFiMode::Enforce,
-                &AlwaysAdmitStubDenyMap,
-            )
-            .now_or_never()
-            .expect("env resolution never waits");
-            assert!(outcome.is_err(), "cardinality refuses");
-        });
-        let mut strict: Vec<String> = recorder
-            .snapshotter()
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(key, ..)| key.key().name() == "buzz_nip_fi_enforce_strict_proof_total")
-            .map(|(key, _, _, value)| {
-                let outcome = key
-                    .key()
-                    .labels()
-                    .find(|l| l.key() == "outcome")
-                    .map(|l| l.value().to_owned())
-                    .unwrap_or_default();
-                format!("{outcome}={value:?}")
-            })
-            .collect();
-        strict.sort();
-        assert_eq!(strict, ["pass=Counter(1)", "rejected=Counter(1)"]);
+        }
     }
 
     #[test]
