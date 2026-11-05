@@ -33,7 +33,11 @@ const _corruptUrl =
 const _truncatedUrl =
     '$_relayBase/media/'
     'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.png';
-const _externalUrl = 'https://images.example.org/avatar.png';
+const _externalUrls = [
+  'https://images.example.org/a.png',
+  'https://images.example.org/b.png',
+  'https://images.example.org/c.png',
+];
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -54,15 +58,19 @@ void main() {
       'ones are refetched', () async {
     final fetched = <String>[];
     var online = true;
+    // While set, external images answer once it completes, with an image
+    // too large to save.
+    Completer<void>? replaceExternal;
+    // Trailing bytes after IEND still decode, so this is a 5 MiB+ image.
+    final hugeBytes = [..._pngBytes, ...Uint8List(MediaDiskCache.maxFileBytes)];
     final client = http_testing.MockClient((request) async {
-      fetched.add(request.url.toString());
+      final url = request.url.toString();
+      fetched.add(url);
       if (!online) throw const SocketException('offline');
-      // Trailing bytes after IEND still decode, so this is a 5 MiB+ image.
-      if (request.url.toString() == _hugeUrl) {
-        return http.Response.bytes([
-          ..._pngBytes,
-          ...Uint8List(MediaDiskCache.maxFileBytes),
-        ], 200);
+      if (url == _hugeUrl) return http.Response.bytes(hugeBytes, 200);
+      if (replaceExternal != null && _externalUrls.contains(url)) {
+        await replaceExternal.future;
+        return http.Response.bytes(hugeBytes, 200);
       }
       if (request.url.toString() == _corruptUrl) {
         return http.Response('not an image', 200);
@@ -103,7 +111,8 @@ void main() {
       ).resolve(ImageConfiguration.empty),
     );
 
-    const urls = [_relayUrl, _thumbnailUrl, _externalUrl, _hugeUrl];
+    const saved = [_relayUrl, _thumbnailUrl, ..._externalUrls];
+    const urls = [...saved, _hugeUrl];
 
     // First launch downloads everything and saves what fits.
     await launch((cache) async {
@@ -122,7 +131,16 @@ void main() {
     fetched.clear();
     online = false;
     await launch((cache) async {
-      for (final url in [_relayUrl, _thumbnailUrl, _externalUrl]) {
+      // An image shown before the cache is ready restarts once it is.
+      MediaImageProvider provider(MediaDiskCache? diskCache) =>
+          MediaImageProvider(
+            url: _relayUrl,
+            auth: auth,
+            client: client,
+            diskCache: diskCache,
+          );
+      expect(provider(null), isNot(provider(cache)));
+      for (final url in saved) {
         expect(await show(cache, url), isNull, reason: url);
       }
       expect(await show(cache, _hugeUrl), isNotNull);
@@ -131,18 +149,36 @@ void main() {
     });
     expect(fetched, [_hugeUrl, _corruptUrl, _truncatedUrl]);
 
-    // A week on, the external image shows from disk at once and refreshes
-    // in the background. Relay media never goes stale.
+    // A week on, external images show from disk at once and refresh in the
+    // background, two at a time. Relay media never goes stale.
     fetched.clear();
     online = true;
     now = now.add(const Duration(days: 8));
+    final replacement = replaceExternal = Completer<void>();
     await launch((cache) async {
-      for (final url in [_relayUrl, _thumbnailUrl, _externalUrl]) {
+      for (final url in saved) {
         expect(await show(cache, url), isNull, reason: url);
       }
       await _settle();
+      expect(fetched, _externalUrls.take(2));
+      // The replacements are too large to save, so the old copies go
+      // rather than showing in their place.
+      replacement.complete();
+      await _settle();
     });
-    expect(fetched, [_externalUrl]);
+    replaceExternal = null;
+
+    fetched.clear();
+    online = false;
+    await launch((cache) async {
+      for (final url in _externalUrls.take(2)) {
+        expect(await show(cache, url), isNotNull, reason: url);
+      }
+      expect(await show(cache, _externalUrls.last), isNull);
+      await _settle();
+    });
+    // The third, skipped before, retries its refresh.
+    expect(fetched, _externalUrls);
 
     // Removing the community deletes its directory.
     expect(await directory.exists(), isTrue);

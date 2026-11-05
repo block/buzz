@@ -132,8 +132,9 @@ class MediaDiskCache {
 
   /// Saves [bytes] for [url]. [immutable] bytes (relay media) are never
   /// refetched; others are refetched after [externalRefreshAge]. Bytes over
-  /// [maxFileBytes] are not saved. Failures are logged, never thrown: a
-  /// missing entry only costs a later download.
+  /// [maxFileBytes] are not saved, and drop any older copy so it is not
+  /// shown in their place. Failures are logged, never thrown: a missing
+  /// entry only costs a later download.
   Future<void> write(
     String url,
     Uint8List bytes, {
@@ -141,8 +142,12 @@ class MediaDiskCache {
   }) async {
     // A download that finishes after its account or community was retired
     // must not repopulate the cache.
-    if (_closed || bytes.isEmpty || bytes.length > maxFileBytes) return;
+    if (_closed || bytes.isEmpty) return;
     try {
+      if (bytes.length > maxFileBytes) {
+        await _manager.removeFile(url);
+        return;
+      }
       await _manager.putFile(
         url,
         bytes,

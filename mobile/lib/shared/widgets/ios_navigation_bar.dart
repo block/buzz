@@ -241,6 +241,7 @@ class IosNavigationBar extends HookConsumerWidget {
         avatarKey,
         auth,
         client,
+        diskCache,
         colors.primaryContainer,
         colors.onPrimaryContainer,
       ],

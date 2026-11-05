@@ -85,6 +85,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Background refreshes of stale disk bytes under way, per cache and URL.
   static final Set<(MediaDiskCache, String)> _refreshing = {};
 
+  /// Most background refreshes at once. A stale image skipped here keeps its
+  /// saved bytes and refreshes on a later load.
+  static const _maxRefreshes = 2;
+
   /// Injectable clock for cooldown tests.
   @visibleForTesting
   static DateTime Function() debugNow = DateTime.now;
@@ -121,8 +125,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       scale: key.scale,
       debugLabel: url,
       // Save only bytes this load decoded a frame from: a codec can open
-      // from bytes whose frames then fail to decode.
-      onFirstFrame: () => fetched?.saveOnce(),
+      // from bytes whose frames then fail to decode. Then drop the fetch:
+      // the cached completer must not keep the encoded bytes alive.
+      onFirstFrame: () {
+        fetched?.saveOnce();
+        fetched = null;
+      },
     )..addOnLastListenerRemovedCallback(() {
       if (!abandoned.isCompleted) abandoned.complete();
     });
@@ -205,13 +213,21 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
   Future<void> _refresh(MediaDiskCache cache) async {
     final refresh = (cache, url);
-    if (!_refreshing.add(refresh)) return;
+    if (_refreshing.length >= _maxRefreshes || !_refreshing.add(refresh)) {
+      return;
+    }
     try {
       // Never aborted: nobody is waiting on it.
       final bytes = await _fetchBytes(Completer<void>().future);
       // Nothing displays these bytes yet, so check they decode before they
-      // replace the saved copy.
-      final codec = await ui.instantiateImageCodec(bytes);
+      // replace the saved copy. A tiny target keeps the check from
+      // allocating a full-resolution frame.
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 1,
+        targetHeight: 1,
+        allowUpscaling: false,
+      );
       try {
         (await codec.getNextFrame()).image.dispose();
       } finally {
@@ -295,11 +311,14 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     return other is MediaImageProvider &&
         other.url == url &&
         other.scale == scale &&
-        other.auth == auth;
+        other.auth == auth &&
+        // A load started before the cache was ready must restart once it
+        // is, so the image can come from disk.
+        (other.diskCache == null) == (diskCache == null);
   }
 
   @override
-  int get hashCode => Object.hash(url, scale, auth);
+  int get hashCode => Object.hash(url, scale, auth, diskCache == null);
 
   @override
   String toString() =>
@@ -349,17 +368,15 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
 
   /// Called once, when the first frame has decoded. A codec can be created
   /// from bytes whose frames then fail to decode.
-  final VoidCallback onFirstFrame;
-  var _hasFrame = false;
+  VoidCallback? onFirstFrame;
 
   final _listeners = <ImageStreamListener>[];
 
   @override
   void setImage(ImageInfo image) {
-    if (!_hasFrame) {
-      _hasFrame = true;
-      onFirstFrame();
-    }
+    final firstFrame = onFirstFrame;
+    onFirstFrame = null;
+    firstFrame?.call();
     super.setImage(image);
   }
 
