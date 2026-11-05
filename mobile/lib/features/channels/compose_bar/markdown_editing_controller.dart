@@ -24,6 +24,12 @@ class _MarkdownEditingController extends TextEditingController {
   Color? _cachedSurface;
   Map<String, String> _channelNames = const {};
 
+  /// Source ranges rendered as atomic chips in [_chipRangesText], recorded
+  /// while building the text span so deletion matches what is on screen.
+  String? _chipRangesText;
+  List<TextRange> _chipRanges = const [];
+  final List<TextRange> _pendingChipRanges = [];
+
   void setChannelNames(Map<String, String> names) {
     if (mapEquals(_channelNames, names)) return;
     _channelNames = Map.unmodifiable(names);
@@ -83,6 +89,7 @@ class _MarkdownEditingController extends TextEditingController {
             _cachedSurface == colors.surface) {
       return cached;
     }
+    _pendingChipRanges.clear();
     final span = TextSpan(
       style: baseStyle,
       children: _buildMarkdownSpans(
@@ -99,7 +106,50 @@ class _MarkdownEditingController extends TextEditingController {
     _cachedOnSurface = colors.onSurface;
     _cachedSurface = colors.surface;
     _cachedTextSpan = span;
+    _chipRangesText = text;
+    _chipRanges = List.unmodifiable(_pendingChipRanges);
     return span;
+  }
+
+  /// Widens a user deletion that removes part of a chip's hidden source so
+  /// it removes the whole chip. Each chip draws its whole URL or `@label`
+  /// as one glyph, so backspace right after it would otherwise remove one
+  /// invisible character of the source and leave a broken token behind.
+  TextEditingValue expandChipDeletion(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    if (_chipRanges.isEmpty || _chipRangesText != oldValue.text) {
+      return newValue;
+    }
+    final oldText = oldValue.text;
+    final newText = newValue.text;
+    final removed = oldText.length - newText.length;
+    final selection = newValue.selection;
+    if (removed <= 0 || !selection.isValid || !selection.isCollapsed) {
+      return newValue;
+    }
+    // A pure deletion leaves the caret where the removed run started.
+    final start = selection.baseOffset;
+    final end = start + removed;
+    if (end > oldText.length ||
+        !oldText.startsWith(newText.substring(0, start)) ||
+        oldText.substring(end) != newText.substring(start)) {
+      return newValue;
+    }
+    var expandedStart = start;
+    var expandedEnd = end;
+    for (final chip in _chipRanges) {
+      if (chip.start < end && start < chip.end) {
+        expandedStart = math.min(expandedStart, chip.start);
+        expandedEnd = math.max(expandedEnd, chip.end);
+      }
+    }
+    if (expandedStart == start && expandedEnd == end) return newValue;
+    return TextEditingValue(
+      text: oldText.replaceRange(expandedStart, expandedEnd, ''),
+      selection: TextSelection.collapsed(offset: expandedStart),
+    );
   }
 
   List<InlineSpan> _buildMarkdownSpans(
@@ -209,9 +259,17 @@ class _MarkdownEditingController extends TextEditingController {
     TextRange composingRange, {
     bool renderAgentMentions = true,
   }) {
-    List<InlineSpan> buildTextSegment(String text, TextStyle segmentStyle) =>
-        renderAgentMentions
-        ? _buildAgentMentionSpans(context, text, segmentStyle)
+    List<InlineSpan> buildTextSegment(
+      String text,
+      TextStyle segmentStyle,
+      int segmentOffset,
+    ) => renderAgentMentions
+        ? _buildAgentMentionSpans(
+            context,
+            text,
+            segmentStyle,
+            sourceOffset: segmentOffset,
+          )
         : [TextSpan(text: text, style: segmentStyle)];
 
     if (source.isEmpty) return const [];
@@ -224,7 +282,7 @@ class _MarkdownEditingController extends TextEditingController {
     if (!composingRange.isValid ||
         composingRange.isCollapsed ||
         localStart >= localEnd) {
-      return buildTextSegment(source, style);
+      return buildTextSegment(source, style, sourceOffset);
     }
 
     final composingDecorations = [
@@ -237,13 +295,21 @@ class _MarkdownEditingController extends TextEditingController {
     );
     return [
       if (localStart > 0)
-        ...buildTextSegment(source.substring(0, localStart), style),
+        ...buildTextSegment(
+          source.substring(0, localStart),
+          style,
+          sourceOffset,
+        ),
       TextSpan(
         text: source.substring(localStart, localEnd),
         style: composingStyle,
       ),
       if (localEnd < source.length)
-        ...buildTextSegment(source.substring(localEnd), style),
+        ...buildTextSegment(
+          source.substring(localEnd),
+          style,
+          sourceOffset + localEnd,
+        ),
     ];
   }
 
@@ -251,10 +317,11 @@ class _MarkdownEditingController extends TextEditingController {
     BuildContext context,
     String source,
     TextStyle style, {
+    required int sourceOffset,
     bool renderLinks = true,
   }) {
     final tokenSpans = renderLinks
-        ? _buildComposerTokenSpans(context, source, style)
+        ? _buildComposerTokenSpans(context, source, style, sourceOffset)
         : null;
     if (tokenSpans != null) return tokenSpans;
     if (_agentMentionNames.isEmpty) {
@@ -299,6 +366,12 @@ class _MarkdownEditingController extends TextEditingController {
           child: _ComposerAgentMentionChip(label: label, textStyle: style),
         ),
       );
+      _pendingChipRanges.add(
+        TextRange(
+          start: sourceOffset + match.start + prefix.length,
+          end: sourceOffset + match.end,
+        ),
+      );
       // The visual chip replaces the `@` placeholder. Keep the label as
       // invisible source text so the text span still has one character per
       // source character, preserving native cursor and deletion behavior.
@@ -321,6 +394,7 @@ class _MarkdownEditingController extends TextEditingController {
     BuildContext context,
     String source,
     TextStyle style,
+    int sourceOffset,
   ) {
     final expression = RegExp(
       r'''buzz://(?:message\?|channel/|(?:repo|pr|issue)\?)[^\s<>"']+''',
@@ -338,6 +412,7 @@ class _MarkdownEditingController extends TextEditingController {
             context,
             source.substring(offset, match.start),
             style,
+            sourceOffset: sourceOffset + offset,
             renderLinks: false,
           ),
         );
@@ -361,6 +436,12 @@ class _MarkdownEditingController extends TextEditingController {
             ),
           ),
         );
+        _pendingChipRanges.add(
+          TextRange(
+            start: sourceOffset + match.start,
+            end: sourceOffset + match.start + url.length,
+          ),
+        );
         // Preserve one source character per input character for native cursor
         // movement while the visible atomic chip replaces the URL.
         spans.add(
@@ -382,6 +463,7 @@ class _MarkdownEditingController extends TextEditingController {
           context,
           source.substring(offset),
           style,
+          sourceOffset: sourceOffset + offset,
           renderLinks: false,
         ),
       );
@@ -602,4 +684,18 @@ class _ComposerAgentMentionChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Routes user edits through [_MarkdownEditingController.expandChipDeletion]
+/// so backspace and forward delete remove a composer chip as one unit.
+class _ComposerChipDeletionFormatter extends TextInputFormatter {
+  final _MarkdownEditingController controller;
+
+  _ComposerChipDeletionFormatter(this.controller);
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) => controller.expandChipDeletion(oldValue, newValue);
 }

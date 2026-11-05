@@ -4017,10 +4017,48 @@ void main() {
         find.byKey(const ValueKey('composer-buzz-link-chip:buzz · cdcdcdcd')),
         findsNWidgets(2),
       );
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        urls.join(' '),
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(controller.text, urls.join(' '));
+      Finder linkChips() => find.byWidgetPredicate(
+        (widget) =>
+            widget.key is ValueKey<String> &&
+            (widget.key! as ValueKey<String>).value.startsWith(
+              'composer-buzz-link-chip:',
+            ),
       );
+
+      // Soft-keyboard backspace right after a chip removes the whole URL.
+      final full = urls.join(' ');
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: full.substring(0, full.length - 1),
+          selection: TextSelection.collapsed(offset: full.length - 1),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, '${urls.take(4).join(' ')} ');
+      expect(controller.selection.baseOffset, controller.text.length);
+      expect(linkChips(), findsNWidgets(4));
+
+      // Hardware backspace removes the separator, then the next chip whole.
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(controller.text, urls.take(4).join(' '));
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(controller.text, '${urls.take(3).join(' ')} ');
+      expect(linkChips(), findsNWidgets(3));
+
+      // Forward delete before a chip removes it whole too.
+      controller.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(controller.text, ' ${urls.skip(1).take(2).join(' ')} ');
+      expect(controller.selection.baseOffset, 0);
+      expect(linkChips(), findsNWidgets(2));
     });
 
     testWidgets('preserves underscore d-tags and Markdown delimiters', (
@@ -4919,6 +4957,33 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsOneWidget,
         );
+
+        // Backspace right after the chip removes the whole `@label`.
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo typing',
+            selection: TextSelection.collapsed(offset: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, ' typing');
+        expect(textField.controller!.selection.baseOffset, 0);
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        // Text that is not drawn as a chip still deletes one character.
+        await tester.enterText(find.byType(TextField), '`@Helper Bot`');
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '`@Helper Bo`',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '`@Helper Bo`');
         await tester.pump(const Duration(milliseconds: 250));
         semantics.dispose();
       },
