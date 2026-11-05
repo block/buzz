@@ -1,7 +1,6 @@
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
-import 'package:buzz/shared/relay/media_image.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -12,7 +11,13 @@ import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'dart:convert';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -385,6 +390,156 @@ void main() {
       container.invalidate(channelIdentityNamesProvider('channel'));
       await tester.pumpAndSettle();
       expect(calls, hasLength(count));
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native reaction sheet refreshes an assertion inside its refresh margin',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      FlutterSecureStorage.setMockInitialValues({});
+      final keys = nostr.Keys.generate();
+      final organization = Uri.parse('https://org.example');
+      final config = RelayConfig(
+        baseUrl: 'https://relay.example',
+        nsec: keys.nsec,
+      );
+      final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
+      await const FlutterSecureStorage().write(
+        key: 'buzz_hosted_session_org_example_v1',
+        value: jsonEncode({
+          'origin': organization.toString(),
+          'credential': 'secret',
+          'subject': 'member',
+          'expires_at': expiry.toIso8601String(),
+        }),
+      );
+      var clock = DateTime.utc(2026, 11, 4, 12);
+      var issued = 0;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: BuilderlabAccountClient(
+          accountOrigin: organization,
+          httpClient: MockClient((request) async {
+            return switch (request.url.path) {
+              '/api/goose/v1/auth/me' => http.Response(
+                jsonEncode({
+                  'subject': 'member',
+                  'expires_at': expiry.toIso8601String(),
+                }),
+                200,
+              ),
+              '/api/goose/v1/buzz/nostr-identities/current' => http.Response(
+                jsonEncode({
+                  'identity': {'pubkey_hex': keys.public},
+                }),
+                200,
+              ),
+              '/api/goose/v1/buzz/identity/assertions' => http.Response(
+                jsonEncode({
+                  'assertion': 'token-${++issued}',
+                  'nostr_pubkey': keys.public,
+                  'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
+                }),
+                200,
+              ),
+              _ => http.Response('{}', 404),
+            };
+          }),
+        ),
+        organizationRelay: (relay) => relay.host == 'relay.example',
+        now: () => clock,
+      );
+      addTearDown(auth.dispose);
+      // The live socket's assertion, issued when the session connected.
+      expect(await auth.headers(config), {
+        'Nostr-Federated-Identity': 'Bearer token-1',
+      });
+      final payloads = <Map<Object?, Object?>>[];
+      final completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payloads.add(call.arguments as Map<Object?, Object?>);
+            return completion.future;
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            relayConfigProvider.overrideWith(
+              () => _FixedRelayConfigNotifier(config),
+            ),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            userCacheProvider.overrideWith(
+              () => _FakeUserCacheNotifier({
+                _alice: const UserProfile(
+                  pubkey: _alice,
+                  displayName: 'Honey',
+                  avatarUrl: _aliceAvatarUrl,
+                ),
+              }),
+            ),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) => IdentityNameSources(
+                profiles: ref.watch(userCacheProvider),
+              ).scope([_alice]),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [
+              TimelineReaction(
+                emoji: _fire,
+                count: 1,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice],
+                emojiUrl: _customEmojiUrl,
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Rendering the row may itself fetch media through the hosted client,
+      // so enter the margin only now (120s lifetime, 30s margin): the socket
+      // is still valid, but the synchronous cache reads as empty.
+      final issuedBeforeSheet = issued;
+      clock = clock.add(const Duration(seconds: 100));
+      expect(auth.cachedHeaders(config), isNull);
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(issued, issuedBeforeSheet + 1);
+      final payload = payloads.single;
+      final avatar = (payload['profiles'] as Map)[_alice] as Map;
+      expect(
+        (avatar['headers'] as Map)['Nostr-Federated-Identity'],
+        'Bearer token-$issued',
+      );
+      final reaction = (payload['reactions'] as List).single as Map;
+      expect(
+        (reaction['headers'] as Map)['Nostr-Federated-Identity'],
+        'Bearer token-$issued',
+      );
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
       debugDefaultTargetPlatformOverride = null;
     },
   );
@@ -926,4 +1081,13 @@ void main() {
       expect(controller.hasParticles, isFalse);
     });
   });
+}
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  _FixedRelayConfigNotifier(this._config);
+
+  final RelayConfig _config;
+
+  @override
+  RelayConfig build() => _config;
 }

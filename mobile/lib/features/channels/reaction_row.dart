@@ -11,7 +11,10 @@ import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
+import '../../shared/hosted/builderlab_account.dart';
+import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/native_media_headers.dart';
+import '../../shared/relay/relay_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_avatar.dart';
@@ -725,6 +728,18 @@ Future<bool> _showNativeReactionDetails(
   var addRequested = false;
   final handled = await NativeMessagePresentation.withLease(() async {
     final container = ProviderScope.containerOf(context, listen: false);
+    final theme = Theme.of(context);
+    // The native headers read the cached assertion synchronously, and that
+    // cache reads as empty inside its refresh margin while the live socket is
+    // still valid. Refresh it first so avatars and custom emoji are not refused.
+    try {
+      await container
+          .read(hostedRelayAuthProvider)
+          .headers(container.read(relayConfigProvider));
+    } on AccountFailure {
+      // Send without the assertion; the relay decides, and sign-in is offered
+      // elsewhere.
+    }
     final nativeMediaHeaders = container.read(nativeMediaHeadersProvider);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     List<String> pubkeys() =>
@@ -837,17 +852,15 @@ Future<bool> _showNativeReactionDetails(
 
     reactions.addListener(updateReactions);
     try {
-      final sheetColors = utilitySurfaceThemeData(
-        Theme.of(context),
-      ).colorScheme;
+      final sheetColors = utilitySurfaceThemeData(theme).colorScheme;
       final pending = NativeMessagePresentation.present('reactions', {
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
-        'outlineColor': Theme.of(
-          context,
-        ).colorScheme.onSurface.withValues(alpha: 0.25).toARGB32(),
-        'dark': Theme.of(context).brightness == Brightness.dark,
+        'outlineColor': theme.colorScheme.onSurface
+            .withValues(alpha: 0.25)
+            .toARGB32(),
+        'dark': theme.brightness == Brightness.dark,
         'canAddReaction': onAddReaction != null,
         'addReactionIconCodePoint': BuzzIcons.smilePlus.codePoint,
         'profiles': profiles(),
