@@ -380,6 +380,9 @@ run_unit_tests() {
       state::tests::admitted_index_follows_every_key_change \
       shared_reads::tests::one_caller_reads_while_the_rest_wait_for_it \
       shared_reads::tests::a_waiter_stops_waiting_for_a_hung_read \
+      community_active::tests::concurrent_misses_share_one_read_and_expire_after_max_age \
+      community_active::tests::invalidation_fences_an_in_flight_fill_and_its_waiters \
+      community_active::tests::errors_are_not_cached \
       state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
       state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read \
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
@@ -398,6 +401,9 @@ run_unit_tests() {
   run_test_step "buzz-relay API query parsing tests" \
     cargo test -p buzz-relay --lib api::parse_query_tests:: -- --nocapture
 
+  run_test_step "buzz-relay API database error mapping tests" \
+    cargo test -p buzz-relay --lib api::db_read_error_tests:: -- --nocapture
+
   run_test_step "buzz-relay profile search request tests" \
     cargo test -p buzz-relay --lib api::profiles:: -- --nocapture
 
@@ -409,6 +415,11 @@ run_unit_tests() {
 
   run_test_step "buzz-relay community FI policy tests" \
     cargo test -p buzz-relay --lib nip_fi_policy::tests:: -- --nocapture
+
+  # Includes the opt-in live-MinIO ::probe tests, which skip without
+  # BUZZ_GIT_S3_PROBE=1.
+  run_test_step "buzz-relay Git object-store and conformance-probe tests" \
+    cargo test -p buzz-relay --lib api::git::store:: -- --nocapture
 
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
@@ -453,6 +464,7 @@ run_unit_tests() {
     connection::terminal_close_delivery_tests::blocked_frame_handler_does_not_hold_socket_open
     connection::terminal_close_delivery_tests::refused_bootstrap_holds_connection_slot_until_socket_ends
     connection::terminal_close_delivery_tests::stalled_bootstrap_holds_connection_slot
+    connection::terminal_close_delivery_tests::bootstrap_admits_from_the_cached_community_answer
     connection::terminal_close_delivery_tests::peer_wait_replies_to_client_initiated_close
     handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated
     handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable

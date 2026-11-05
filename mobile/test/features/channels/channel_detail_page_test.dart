@@ -307,7 +307,6 @@ Widget _buildTestable({
   List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
-  VideoPreviewFrameLoader? videoPreviewLoader,
   Widget? home,
   Stream<MeGroups>? organization,
   SendMessage? sender,
@@ -354,8 +353,6 @@ Widget _buildTestable({
         meMessagesProvider(_channelId).overrideWith(() => fakeMessagesNotifier),
         meAssistantsProvider.overrideWith((ref) async => []),
       ],
-      if (videoPreviewLoader != null)
-        videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
             ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
@@ -4510,6 +4507,74 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsNothing,
       );
+    });
+
+    testWidgets('composer growth reuses rows, recounts refresh them', (
+      tester,
+    ) async {
+      final messages = [
+        _textMsg(id: 'msg1', pubkey: 'alice', content: 'Hello world!'),
+        _textMsg(id: 'msg2', pubkey: 'bob', content: 'Hey Alice!'),
+      ];
+      final summaries = {
+        'msg1': const ChannelWindowThreadSummary(
+          replyCount: 2,
+          descendantCount: 2,
+          lastReplyAt: 1000,
+          participantPubkeys: ['bob'],
+        ),
+      };
+      final notifier = _FakeMessagesNotifier(messages, summaries: summaries);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          messagesNotifier: notifier,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          threadReplies: const {'msg1': []},
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('2 replies'), findsOneWidget);
+
+      Widget row(String id) =>
+          tester.widget(find.byKey(ValueKey('channel-message-send-$id')));
+      double listInset() => tester
+          .widget<ScrollablePositionedList>(
+            find.byKey(const ValueKey('channel-message-list')),
+          )
+          .padding!
+          .bottom;
+      final rowsBefore = [row('msg1'), row('msg2')];
+      final insetBefore = listInset();
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'one\ntwo\nthree\nfour');
+      await tester.pumpAndSettle();
+
+      // The list moved up for the taller composer without rebuilding rows.
+      expect(listInset(), greaterThan(insetBefore));
+      expect(row('msg1'), same(rowsBefore[0]));
+      expect(row('msg2'), same(rowsBefore[1]));
+
+      // A relay recount changes only the summary, so the next list rebuild
+      // must refresh that row while leaving the others alone.
+      summaries['msg1'] = const ChannelWindowThreadSummary(
+        replyCount: 3,
+        descendantCount: 3,
+        lastReplyAt: 1000,
+        participantPubkeys: ['bob'],
+      );
+      await tester.enterText(
+        find.byType(TextField),
+        'one\ntwo\nthree\nfour\nfive',
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('3 replies'), findsOneWidget);
+      expect(row('msg2'), same(rowsBefore[1]));
     });
 
     testWidgets('keeps animated message avatars static and transparent', (

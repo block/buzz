@@ -619,3 +619,6 @@ impl PausingProxy {
         self.next_session.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
+
+mod recent_pass_tests;
+pub(crate) use recent_pass_tests::replace_between_passes;

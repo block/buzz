@@ -32,6 +32,8 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/emoji/emoji_only.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
@@ -45,15 +47,9 @@ Widget _testable(
   bool disableAnimations = false,
   bool dark = false,
   ThemeData? theme,
-  VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
-    overrides: [
-      videoPreviewFrameLoaderProvider.overrideWithValue(
-        videoPreviewFrameLoader ?? (_) async => null,
-      ),
-      ...overrides,
-    ],
+    overrides: overrides,
     child: MaterialApp(
       theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
@@ -97,7 +93,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) => loadLocal(url, fallbackDuration: fallbackDuration);
 
@@ -123,6 +119,48 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   }
 }
 
+class _HeadersVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  FutureOr<Map<String, String>> Function()? headers;
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) {
+    this.headers = headers;
+    return super.loadRemote(
+      url,
+      headers: headers,
+      fallbackDuration: fallbackDuration,
+    );
+  }
+}
+
+class _FixedRelayConfig extends RelayConfigNotifier {
+  _FixedRelayConfig(this.config);
+
+  final RelayConfig config;
+
+  @override
+  RelayConfig build() => config;
+}
+
+/// A hosted relay whose cached assertion has expired, so only a fresh
+/// request carries one.
+class _ExpiredHostedRelayAuth extends HostedRelayAuth {
+  _ExpiredHostedRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  @override
+  Map<String, String>? cachedHeaders(RelayConfig config) => null;
+
+  @override
+  Future<Map<String, String>> headersForUrl(
+    RelayConfig config,
+    Uri url,
+  ) async => {'Nostr-Federated-Identity': 'Bearer fresh-token'};
+}
+
 class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   VoiceNotePlaybackState get state =>
@@ -131,7 +169,7 @@ class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 }
@@ -173,7 +211,7 @@ class _BufferingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -244,7 +282,7 @@ class _RetryableVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -1269,41 +1307,6 @@ void main() {
         expect(tester.takeException(), isNull);
       });
 
-      testWidgets('keeps video loading and decoded frame the same size', (
-        tester,
-      ) async {
-        final frame = Completer<LoadedVideoPreviewFrame?>();
-        const url = 'https://example.com/loading-video.mp4';
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($url)',
-              channelNames: {'general': 'general-id'},
-              tags: [
-                ['imeta', 'url $url', 'm video/mp4', 'dim 1920x1080'],
-              ],
-            ),
-            disableAnimations: true,
-            videoPreviewFrameLoader: (_) => frame.future,
-          ),
-        );
-        final preview = find.byKey(
-          const ValueKey('message-media-video-preview:$url'),
-        );
-        final before = tester.getSize(preview);
-        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
-        frame.complete(
-          LoadedVideoPreviewFrame(
-            child: const ColoredBox(color: Colors.black),
-            aspectRatio: 16 / 9,
-            dispose: () async {},
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
-        expect(tester.getSize(preview), before);
-      });
-
       testWidgets('uses the shared Buzz loader while a voice note loads', (
         tester,
       ) async {
@@ -1398,6 +1401,44 @@ void main() {
           semantics.dispose();
         },
       );
+
+      testWidgets('remote voice notes renew an expired relay assertion', (
+        tester,
+      ) async {
+        final player = _HeadersVoiceNotePlayer();
+        final hosted = _ExpiredHostedRelayAuth();
+        addTearDown(hosted.dispose);
+        final nsec = nostr.Keys.generate().nsec;
+        await tester.pumpWidget(
+          _testable(
+            const VoiceNoteAttachment.remote(
+              url: 'https://relay.example/media/voice.m4a',
+              duration: Duration(seconds: 3),
+              waveform: [],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              relayConfigProvider.overrideWith(
+                () => _FixedRelayConfig(
+                  RelayConfig(baseUrl: 'https://relay.example', nsec: nsec),
+                ),
+              ),
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(
+                  baseUrl: 'https://relay.example',
+                  nsec: nsec,
+                ),
+              ),
+              hostedRelayAuthProvider.overrideWithValue(hosted),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final headers = await player.headers!();
+        expect(headers['Authorization'], startsWith('Nostr '));
+        expect(headers['Nostr-Federated-Identity'], 'Bearer fresh-token');
+      });
 
       testWidgets('routes repeated loading-control taps through toggle', (
         tester,
@@ -2536,52 +2577,6 @@ Photos
           findsOneWidget,
         );
         expect(find.byIcon(BuzzIcons.play), findsOneWidget);
-      });
-
-      testWidgets('derives a first frame for a posterless video event', (
-        tester,
-      ) async {
-        const videoUrl = 'https://example.com/media/legacy-video.mp4';
-        var disposed = false;
-
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($videoUrl)',
-              tags: [
-                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
-              ],
-            ),
-            videoPreviewFrameLoader: (url) async {
-              expect(url, videoUrl);
-              return LoadedVideoPreviewFrame(
-                aspectRatio: 9 / 16,
-                child: const ColoredBox(
-                  key: ValueKey('derived-video-frame'),
-                  color: Colors.blue,
-                ),
-                dispose: () async => disposed = true,
-              );
-            },
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(
-            const ValueKey('message-media-video-first-frame:$videoUrl'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('derived-video-frame')),
-          findsOneWidget,
-        );
-        expect(find.text('Video attachment'), findsNothing);
-
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        expect(disposed, isTrue);
       });
 
       testWidgets(

@@ -159,20 +159,30 @@ impl Db {
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.
-    #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        Ok(self.is_community_active_read_at(community_id).await?.value)
+    }
+
+    /// [`Self::is_community_active`], with when its connection was checked
+    /// out, for caches that bound staleness from the read.
+    #[datastore_span(name = "is_community_active", system = "postgresql")]
+    pub async fn is_community_active_read_at(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<ReadAt<bool>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        let active = sqlx::query_scalar::<_, bool>(
+        let read_at = std::time::Instant::now();
+        let value = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
         .fetch_one(&mut *connection)
         .await?;
-        Ok(active)
+        Ok(ReadAt { value, read_at })
     }
 
     /// Runs `apply` while holding the community row lock only when the exact

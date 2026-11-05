@@ -264,7 +264,9 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .expect("channel lookup helper must precede canvas reads")
         .0;
     assert!(get_channel.contains("acquire_writer(pool, operation)"));
-    assert!(get_channel.contains("fetch_optional(&mut *connection)"));
+    assert!(get_channel.contains("select_channel(&mut connection, community_id, channel_id)"));
+    assert!(get_channel.contains("conn: &mut sqlx::PgConnection"));
+    assert!(get_channel.contains("fetch_optional(conn)"));
     assert!(!get_channel.contains("fetch_optional(pool)"));
     assert!(channel.contains("pub async fn get_channel_for_event_write("));
     let list_channels = channel
@@ -1942,7 +1944,7 @@ fn event_insert_hook_inventory_carries_the_insert_timestamp() {
         "event.rs: async fn insert_event_on(",
         "event.rs: pub(crate) async fn insert_event_with_thread_metadata_tx(",
         "replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
-        "replaceable.rs: pub async fn replace_addressable_event(",
+        "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock(",
         "channel_members.rs: pub async fn replace_member_event(",
         "relay_members.rs: pub(crate) async fn write_nip43_membership_snapshot(",
         "push.rs: pub async fn accept_lease_event(",
