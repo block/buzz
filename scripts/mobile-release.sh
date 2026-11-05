@@ -8,6 +8,8 @@ usage:
 
 candidate  Publish the next immutable mobile-vX.Y.Z-rc.N candidate tag at the
            selected commit in source history (defaults to the current source tip).
+           You push the annotated tag yourself, so you must be in the mobile
+           release team that bypasses the mobile tag ruleset.
 USAGE
   exit 2
 }
@@ -154,37 +156,27 @@ case "$command" in
     done <<< "$remote_tags"
 
     tag="mobile-v${version}-rc.${next}"
-    workflow="mobile-release-candidate.yml"
-    if dispatch_output="$(gh workflow run "$workflow" \
-      --repo block/buzz \
-      --ref main \
-      -f "version=$version" \
-      -f "candidate_number=$next" \
-      -f "source_branch=$MOBILE_RELEASE_SOURCE_BRANCH" \
-      -f "target_sha=$source_sha" 2>&1)"; then
-      :
-    else
-      if [[ "$dispatch_output" == *"does not have 'workflow_dispatch' trigger"* ]]; then
-        fail "$workflow is not available on main yet; merge the release-process change before publishing a candidate"
-      fi
-      fail "could not dispatch App-backed publication for $tag: $dispatch_output"
+    # Candidate tags are pushed by the operator, whose bypass of the mobile tag
+    # ruleset comes from membership in the mobile release team. No GitHub App
+    # or workflow is involved. Check before creating anything locally.
+    require_mobile_release_tag_ruleset || exit 1
+    # Annotated, never forced; the operator's own tag signing config applies.
+    git tag -a -m "Buzz Mobile $version release candidate $next" "$tag" "$source_sha" || \
+      fail "could not create local tag $tag"
+    # --no-verify: the release must not depend on development pre-push hooks.
+    if ! git push --no-verify origin "refs/tags/$tag"; then
+      git tag -d "$tag" >/dev/null
+      fail "could not push $tag; you must be a member of the mobile release team (@block/buzz-mobile-release), the only bypass of the mobile tag ruleset. The local tag was removed so a retry starts clean"
     fi
-    run_url="$(printf '%s\n' "$dispatch_output" | awk '/^https:\/\/github\.com\/block\/buzz\/actions\/runs\/[0-9]+$/ { if (found) exit 2; found = $0 } END { if (found) print found }')" || \
-      fail "GitHub returned multiple workflow run URLs for one candidate dispatch"
-    [[ -n "$run_url" ]] || \
-      fail "GitHub accepted the candidate dispatch but returned no workflow run URL"
-    run_id="${run_url##*/}"
-    gh run watch "$run_id" --repo block/buzz --exit-status --compact || \
-      fail "App-backed publication failed: $run_url"
 
     published_sha="$(remote_tag_commit_sha "refs/tags/$tag")" || \
-      fail "publication completed without exact annotated candidate tag $tag"
+      fail "push completed without exact annotated candidate tag $tag on origin"
     [[ "$published_sha" == "$source_sha" ]] || \
       fail "$tag resolved to $published_sha instead of requested commit $source_sha"
     if [[ "$local_head_sha" != "$source_sha" ]]; then
       echo "Note: local HEAD is $local_head_sha; candidate source is pinned from origin/$MOBILE_RELEASE_SOURCE_BRANCH $source_sha." >&2
     fi
-    printf 'Published %s at pinned origin/%s commit %s through buzz-release-bot. Use this exact tag in Release Mobile.\n' \
+    printf 'Published %s at pinned origin/%s commit %s. Use this exact tag in Release Mobile.\n' \
       "$tag" "$MOBILE_RELEASE_SOURCE_BRANCH" "$source_sha"
     ;;
 

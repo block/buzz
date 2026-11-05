@@ -2,9 +2,23 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-script="$repo_root/scripts/mobile-release.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# The checked-in ruleset ID is a placeholder until an administrator creates the
+# mobile tag ruleset. Exercise a copy with a numeric ID, and keep the real file
+# under test for the placeholder contract below.
+test_ruleset_id=424242
+id_line='readonly MOBILE_RELEASE_TAG_RULESET_ID='
+grep -q "^$id_line" "$repo_root/scripts/release-rulesets.sh" || {
+  echo "release-rulesets.sh no longer defines MOBILE_RELEASE_TAG_RULESET_ID" >&2
+  exit 1
+}
+mkdir -p "$tmp/scripts"
+cp "$repo_root/scripts/mobile-release.sh" "$repo_root/scripts/mobile-release-source.sh" "$tmp/scripts/"
+sed "s/^$id_line.*/$id_line$test_ruleset_id/" "$repo_root/scripts/release-rulesets.sh" \
+  > "$tmp/scripts/release-rulesets.sh"
+grep -Fq "$id_line$test_ruleset_id" "$tmp/scripts/release-rulesets.sh"
+script="$tmp/scripts/mobile-release.sh"
 remote="$tmp/remote.git"
 work="$tmp/work"
 operator="$tmp/operator"
@@ -22,7 +36,7 @@ case "${1:-}:${2:-}" in
     policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
     printf '%s\n' "${GH_BRANCH_POLICY:-$policy}" | jq -r "$4"
     ;;
-  api:repos/block/buzz/rulesets/14378754)
+  api:repos/block/buzz/rulesets/424242)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
       *'.current_user_can_bypass'*) printf '%s\n' "${GH_CURRENT_USER_CAN_BYPASS-always}" ;;
@@ -37,70 +51,12 @@ case "${1:-}:${2:-}" in
     pair="${2##*/}"
     git --git-dir="$GH_REMOTE" merge-base "${pair%%...*}" "${pair##*...}"
     ;;
-  workflow:run)
-    printf '%s\n' attempted >> "$GH_WORKFLOW_ATTEMPTS"
-    if [[ "${GH_WORKFLOW_DISPATCH_FAIL:-}" == "1" ]]; then
-      printf '%s\n' "${GH_WORKFLOW_DISPATCH_ERROR:-dispatch failed}" >&2
-      exit 1
-    fi
-    if [[ "${GH_WORKFLOW_WRONG_URL:-}" == "1" ]]; then
-      printf '%s\n' 'https://github.com/attacker/buzz/actions/runs/999'
-      exit 0
-    fi
-    if [[ "${GH_WORKFLOW_EXTRA_URL:-}" == "1" ]]; then
-      printf '%s\n' 'https://github.com/block/buzz/actions/runs/998'
-    fi
-    version=""
-    number=""
-    sha=""
-    source_branch=""
-    while [[ "$#" -gt 0 ]]; do
-      case "$1" in
-        version=*) version="${1#version=}" ;;
-        candidate_number=*) number="${1#candidate_number=}" ;;
-        source_branch=*) source_branch="${1#source_branch=}" ;;
-        target_sha=*) sha="${1#target_sha=}" ;;
-      esac
-      shift
-    done
-    [[ -n "$version" && -n "$number" && -n "$sha" && -n "$source_branch" ]] || exit 1
-    git --git-dir="$GH_REMOTE" merge-base --is-ancestor "$sha" "refs/heads/$source_branch" || exit 1
-    printf '%s\t%s\t%s\n' "$version" "$number" "$sha" >> "$GH_WORKFLOW_CAPTURE"
-    if [[ "${GH_WORKFLOW_NO_URL:-}" == "1" ]]; then
-      exit 0
-    fi
-    printf 'https://github.com/block/buzz/actions/runs/%s\n' "$number"
-    ;;
-  run:watch)
-    [[ "${GH_WORKFLOW_FAIL:-}" != "1" ]] || exit 1
-    number="$3"
-    IFS=$'\t' read -r version expected sha < <(tail -n 1 "$GH_WORKFLOW_CAPTURE")
-    [[ "$number" == "$expected" ]]
-    if [[ "${GH_MAIN_MOVE_DURING_WORKFLOW:-}" == "1" ]]; then
-      printf '%s\n' moved >> "$GH_WORKTREE/file"
-      git -C "$GH_WORKTREE" commit -qam moved-during-publication
-      git -C "$GH_WORKTREE" push -q origin main
-    fi
-    if [[ "${GH_TAG_VERIFY_LIGHTWEIGHT:-}" == "1" ]]; then
-      git -C "$GH_WORKTREE" -c tag.gpgSign=false tag \
-        "mobile-v${version}-rc.${expected}" "$sha"
-    else
-      git -C "$GH_WORKTREE" -c tag.gpgSign=false tag -a \
-        -m "Buzz Mobile $version release candidate $expected" \
-        "mobile-v${version}-rc.${expected}" "$sha"
-    fi
-    git -C "$GH_WORKTREE" -c core.hooksPath=/dev/null push -q \
-      origin "refs/tags/mobile-v${version}-rc.${expected}"
-    ;;
   *) exit 2 ;;
 esac
 GH
 chmod +x "$bin/gh"
 
 export PATH="$bin:$PATH"
-export GH_WORKFLOW_CAPTURE="$tmp/workflow-dispatches"
-export GH_WORKFLOW_ATTEMPTS="$tmp/workflow-attempts"
-export GH_WORKTREE="$work"
 export GH_REMOTE="$remote"
 
 run_release() {
@@ -149,6 +105,7 @@ git -c "url.file://$remote.insteadOf=$canonical_origin" \
   -c protocol.file.allow=always clone -q "$canonical_origin" "$operator"
 git -C "$operator" config user.name test
 git -C "$operator" config user.email test@example.com
+git -C "$operator" config tag.gpgSign false
 echo remote-only >> "$work/file"
 git -C "$work" commit -qam remote-only
 git -C "$work" push -q origin main
@@ -163,7 +120,8 @@ cat "$tmp/stale-output"
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.3-rc.1^{commit}')" == \
    "$remote_main_sha" ]]
 [[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v1.2.3-rc.1)" == tag ]]
-grep -Fq $'1.2.3\t1\t' "$GH_WORKFLOW_CAPTURE"
+# The operator pushed the tag itself: it exists locally too, annotated.
+[[ "$(git -C "$operator" cat-file -t refs/tags/mobile-v1.2.3-rc.1)" == tag ]]
 
 # A stable branch may diverge from main, including an empty release-only commit.
 git -C "$work" switch -q -c mobile-v1.2
@@ -208,7 +166,6 @@ run_release "$operator" candidate 1.2.3
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.3-rc.2^{commit}')" == \
    "$new_main_sha" ]]
 [[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v1.2.3-rc.2)" == tag ]]
-grep -Fq $'1.2.3\t2\t' "$GH_WORKFLOW_CAPTURE"
 
 # Sequence from the highest exact remote RC even if there are gaps, and ignore
 # malformed or other-version tags.
@@ -222,68 +179,95 @@ run_release "$operator" candidate 1.2.3
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.3-rc.8^{commit}')" == \
    "$new_main_sha" ]]
 
-# Failed or unattributable App-backed publication fails closed without creating
-# the expected candidate tag.
-if GH_WORKFLOW_DISPATCH_FAIL=1 run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
-  fail "candidate succeeded despite a rejected workflow dispatch"
+# Publication pushes exactly one new ref, the annotated candidate tag.
+refs_before="$(git --git-dir="$remote" for-each-ref --format='%(refname) %(objectname)')"
+run_release "$operator" candidate 9.9.1 > "$tmp/one-ref-output"
+grep -Fq 'Published mobile-v9.9.1-rc.1' "$tmp/one-ref-output"
+refs_after="$(git --git-dir="$remote" for-each-ref --format='%(refname) %(objectname)')"
+[[ "$(diff <(printf '%s\n' "$refs_before") <(printf '%s\n' "$refs_after") | grep -c '^[<>]')" == 1 ]]
+[[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v9.9.1-rc.1)" == tag ]]
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v9.9.1-rc.1^{commit}')" == \
+   "$(git --git-dir="$remote" rev-parse refs/heads/main)" ]]
+if grep -Eq 'buzz-release-bot|workflow' "$tmp/one-ref-output"; then
+  fail "publication output still refers to the App or a workflow"
 fi
-if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.7-rc.1; then
-  fail "rejected workflow dispatch created a candidate tag"
-fi
-if GH_WORKFLOW_DISPATCH_FAIL=1 \
-    GH_WORKFLOW_DISPATCH_ERROR="does not have 'workflow_dispatch' trigger" \
-    run_release "$operator" candidate 9.9.6 > "$tmp/missing-workflow-output" 2>&1; then
-  fail "candidate succeeded without the publication workflow on main"
-fi
-grep -Fq 'merge the release-process change before publishing a candidate' \
-  "$tmp/missing-workflow-output"
-if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.6-rc.1; then
-  fail "missing publication workflow created a candidate tag"
-fi
-if GH_WORKFLOW_FAIL=1 run_release "$operator" candidate 9.9.9 >/dev/null 2>&1; then
-  fail "candidate succeeded despite a failed App-backed workflow"
-fi
-if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.9-rc.1; then
-  fail "failed App-backed workflow created a candidate tag"
-fi
-if GH_WORKFLOW_NO_URL=1 run_release "$operator" candidate 9.9.8 >/dev/null 2>&1; then
-  fail "candidate succeeded without a workflow run URL"
-fi
-if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.8-rc.1; then
-  fail "URL-less dispatch created a candidate tag"
-fi
-if GH_WORKFLOW_WRONG_URL=1 run_release "$operator" candidate 9.9.5 >/dev/null 2>&1; then
-  fail "candidate accepted a workflow run URL from another repository"
-fi
-if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.5-rc.1; then
-  fail "wrong-repository workflow URL created a candidate tag"
-fi
-if GH_WORKFLOW_EXTRA_URL=1 run_release "$operator" candidate 9.9.4 >/dev/null 2>&1; then
-  fail "candidate accepted multiple workflow run URLs"
-fi
-if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.4-rc.1; then
-  fail "ambiguous workflow URLs created a candidate tag"
-fi
-if GH_TAG_VERIFY_LIGHTWEIGHT=1 run_release "$operator" candidate 9.9.2 >/dev/null 2>&1; then
-  fail "candidate accepted a lightweight published tag"
-fi
-[[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v9.9.2-rc.1)" == commit ]]
 
-# Advancing main during publication must not invalidate the pinned tag.
-pre_race_main_sha="$(git --git-dir="$remote" rev-parse refs/heads/main)"
-GH_MAIN_MOVE_DURING_WORKFLOW=1 run_release "$operator" candidate 9.9.3 > "$tmp/main-race-output" 2>&1
-post_race_main_sha="$(git --git-dir="$remote" rev-parse refs/heads/main)"
-[[ "$pre_race_main_sha" != "$post_race_main_sha" ]]
-[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v9.9.3-rc.1^{commit}')" == "$pre_race_main_sha" ]]
-grep -Fq 'Published mobile-v9.9.3-rc.1' "$tmp/main-race-output"
+assert_no_candidate_tag() {
+  local version="$1"
+  if git --git-dir="$remote" show-ref --verify --quiet "refs/tags/mobile-v$version-rc.1"; then
+    fail "mobile-v$version-rc.1 exists on the remote"
+  fi
+  [[ -z "$(git -C "$operator" tag -l "mobile-v$version-rc.*")" ]] || \
+    fail "a local mobile-v$version-rc tag was left behind"
+}
+
+# A tag ruleset the operator cannot bypass fails before any tag is created.
+# An absent bypass value is not accepted as success either.
+if GH_CURRENT_USER_CAN_BYPASS=never run_release "$operator" candidate 9.9.7 > "$tmp/no-bypass-output" 2>&1; then
+  fail "candidate succeeded without bypass of the mobile tag ruleset"
+fi
+grep -Fq '@block/buzz-mobile-release' "$tmp/no-bypass-output"
+assert_no_candidate_tag 9.9.7
+if GH_CURRENT_USER_CAN_BYPASS='' run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
+  fail "candidate succeeded with an empty bypass report"
+fi
+assert_no_candidate_tag 9.9.7
+
+# Any other ruleset drift also fails before a tag is created.
+if GH_TAG_RULESET_STATE=disabled run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
+  fail "candidate succeeded with an inactive mobile tag ruleset"
+fi
+if GH_TAG_RULE_TYPES=creation,deletion run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
+  fail "candidate succeeded with weakened mobile tag rules"
+fi
+if GH_TAG_INCLUDES='refs/tags/desktop-v*' run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
+  fail "candidate succeeded with a ruleset that does not cover mobile-v*"
+fi
+if GH_TAG_EXCLUDES='refs/tags/mobile-v9*' run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
+  fail "candidate succeeded with a ruleset that excludes mobile tags"
+fi
+assert_no_candidate_tag 9.9.7
+
+# The checked-in ruleset ID is a placeholder until an administrator records the
+# real one. It must fail loudly, never silently pass.
+mkdir -p "$tmp/placeholder-scripts"
+cp "$tmp/scripts/mobile-release.sh" "$tmp/scripts/mobile-release-source.sh" "$tmp/placeholder-scripts/"
+sed "s/^$id_line.*/${id_line}UNSET_PLACEHOLDER/" "$repo_root/scripts/release-rulesets.sh" \
+  > "$tmp/placeholder-scripts/release-rulesets.sh"
+if (cd "$operator" && "$tmp/placeholder-scripts/mobile-release.sh" candidate 9.9.7 > "$tmp/placeholder-output" 2>&1); then
+  fail "candidate succeeded with a placeholder mobile tag ruleset ID"
+fi
+grep -Fq 'placeholder' "$tmp/placeholder-output"
+assert_no_candidate_tag 9.9.7
+# The real script must either carry a numeric ID or the placeholder; never blank.
+grep -Eq "^${id_line}([0-9]+|UNSET_[A-Z_]+)\$" "$repo_root/scripts/release-rulesets.sh"
+
+# A rejected push (the operator is not in the bypass team) fails, explains why,
+# and removes the local tag so a retry is clean.
+# A machine-wide core.hooksPath would shadow the bare remote's own hooks.
+git --git-dir="$remote" config core.hooksPath "$remote/hooks"
+cat > "$remote/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+echo "remote: rejected by repository rule (test)" >&2
+exit 1
+HOOK
+chmod +x "$remote/hooks/pre-receive"
+if run_release "$operator" candidate 9.9.6 > "$tmp/push-rejected-output" 2>&1; then
+  fail "candidate succeeded despite a rejected tag push"
+fi
+grep -Fq 'mobile release team' "$tmp/push-rejected-output"
+assert_no_candidate_tag 9.9.6
+rm "$remote/hooks/pre-receive"
+# The retry after the rejection is clean and gets the same candidate number.
+run_release "$operator" candidate 9.9.6 >/dev/null
+[[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v9.9.6-rc.1)" == tag ]]
 
 # Explicit historical source remains pinned even when the source branch advances.
 run_release "$operator" candidate 7.7.0 --commit "$remote_main_sha"
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v7.7.0-rc.1^{commit}')" == "$remote_main_sha" ]]
 run_release "$operator" candidate 1.2.5 --commit "$remote_main_sha" --source-branch mobile-v1.2
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.5-rc.1^{commit}')" == "$remote_main_sha" ]]
-before_attempts="$(wc -l < "$GH_WORKFLOW_ATTEMPTS")"
-before_dispatches="$(wc -l < "$GH_WORKFLOW_CAPTURE")"
+tags_before="$(git --git-dir="$remote" for-each-ref refs/tags)"
 if run_release "$operator" candidate 7.7.1 --commit "$stable_sha" >/dev/null 2>&1; then
   fail "accepted a commit outside main history"
 fi
@@ -301,11 +285,11 @@ fi
 if run_release "$operator" candidate 7.7.1 --commit "$remote_main_sha" --commit "$new_main_sha" >/dev/null 2>&1; then
   fail "accepted duplicate commit options"
 fi
-[[ "$(wc -l < "$GH_WORKFLOW_ATTEMPTS")" == "$before_attempts" ]]
-[[ "$(wc -l < "$GH_WORKFLOW_CAPTURE")" == "$before_dispatches" ]]
+[[ "$(git --git-dir="$remote" for-each-ref refs/tags)" == "$tags_before" ]]
+[[ -z "$(git -C "$operator" tag -l 'mobile-v7.7.1-rc.*' 'mobile-v1.2.6-rc.*')" ]]
 
 # Publishing through a fork is rejected and unsupported gh versions fail before
-# dispatching any candidate publication.
+# publishing any candidate tag.
 fork_operator="$tmp/fork-operator"
 git clone -q "$remote" "$fork_operator"
 git -C "$fork_operator" config user.name test
@@ -313,14 +297,14 @@ git -C "$fork_operator" config user.email test@example.com
 if (cd "$fork_operator" && "$script" candidate 2.0.0 >/dev/null 2>&1); then
   fail "noncanonical origin was accepted"
 fi
-before_dispatches="$(wc -l < "$GH_WORKFLOW_CAPTURE")"
+tags_before="$(git --git-dir="$remote" for-each-ref refs/tags)"
 if GH_VERSION=2.86.0 run_release "$operator" candidate 2.0.0 >/dev/null 2>&1; then
   fail "gh older than 2.87.0 was accepted"
 fi
 if GH_VERSION=2.9.0 run_release "$operator" candidate 2.0.0 >/dev/null 2>&1; then
   fail "numeric gh version comparison accepted 2.9.0 as at least 2.87.0"
 fi
-[[ "$(wc -l < "$GH_WORKFLOW_CAPTURE")" == "$before_dispatches" ]]
+[[ "$(git --git-dir="$remote" for-each-ref refs/tags)" == "$tags_before" ]]
 
 # Dirty trees and invalid marketing versions fail before publication.
 echo dirty > "$operator/untracked"
@@ -336,8 +320,8 @@ if run_release "$operator" candidate 01.2.3 >/dev/null 2>&1; then
 fi
 
 # Mobile no longer has release branches, finalization, a stable alias, or a
-# GitHub Release call. Publication remains App-backed because the strict tag
-# ruleset denies direct human creation.
+# GitHub Release call, and no GitHub App or workflow publishes tags: the
+# operator pushes the tag directly.
 if run_release "$operator" start 2.0.0 >/dev/null 2>&1; then
   fail "removed start command was accepted"
 fi
@@ -351,9 +335,15 @@ if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v1.2.3; th
   fail "stable mobile tag alias was created"
 fi
 assert_no_removed_mobile_release_behavior \
-  "$repo_root/scripts/mobile-release.sh" \
-  "$repo_root/scripts/publish-mobile-release-candidate.sh" \
-  "$repo_root/.github/workflows/mobile-release-candidate.yml"
+  "$repo_root/scripts/mobile-release.sh"
+for removed in .github/workflows/mobile-release-candidate.yml \
+    scripts/publish-mobile-release-candidate.sh \
+    scripts/test-mobile-release-candidate-publisher.sh; do
+  [[ ! -e "$repo_root/$removed" ]] || fail "$removed must stay removed"
+done
+if grep -Eq 'buzz-release-bot|gh[[:space:]]+workflow' "$repo_root/scripts/mobile-release.sh"; then
+  fail "mobile-release.sh must not use the release App or dispatch a workflow"
+fi
 # Prove the negative contract itself is discriminating rather than merely
 # accepting a missing or broken search tool as "not found."
 printf '%s\n' 'gh release create forbidden' > "$tmp/forbidden-mobile-release-behavior"

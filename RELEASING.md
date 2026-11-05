@@ -12,8 +12,9 @@ with an optional stable source branch:
 
 The lanes version independently. Desktop reads its manifests, relay reads its
 crate manifest, and mobile derives both source and marketing version from the
-exact candidate tag. The mobile handoff to the private `buzz-releases` pipeline
-remains manual because OSS CI cannot trigger private CI.
+exact candidate tag. Mobile candidate tags are pushed by a human release
+manager, not by CI or a GitHub App. The handoff to the private `buzz-releases`
+pipeline remains manual because OSS CI cannot trigger private CI.
 
 ## Quick Start
 
@@ -33,6 +34,7 @@ just release-relay
 just release-relay 0.4.0
 
 # Publish the next mobile candidate from the exact current remote main commit
+# (requires membership in the mobile release team, see Mobile below)
 scripts/mobile-release.sh candidate 0.5.0
 ```
 
@@ -98,11 +100,18 @@ Every push to `main` continues to publish the rolling relay `:main` and
    `scripts/mobile-release.sh candidate X.Y.Z`. The script resolves and fetches
    a snapshot of `origin/main`, derives the next number from exact
    remote tags for that marketing version, and publishes an annotated
-   `mobile-vX.Y.Z-rc.N` tag there through the dedicated `buzz-release-bot`
-   GitHub App. It never uses the operator's checked-out commit and never moves
-   an existing candidate. To select a historical commit, add `--commit FULL_SHA`.
-   Both operator and publisher require that commit to be in the selected source
-   branch's history. Later branch advances do not change or invalidate the tag.
+   `mobile-vX.Y.Z-rc.N` tag at that snapshot with `git tag -a` (your own tag
+   signing configuration applies) and pushes exactly that one tag to `origin`.
+   The push is allowed only because you are a member of the mobile release team
+   (placeholder name `@block/buzz-mobile-release`, to be confirmed by a
+   repository administrator), which is the sole bypass actor of the dedicated
+   mobile tag ruleset for `refs/tags/mobile-v*`. The `buzz-release-bot` App and
+   its key are not involved in mobile. The script never uses the operator's
+   checked-out commit and never moves an existing candidate. To select a
+   historical commit, add `--commit FULL_SHA`. The script requires that commit
+   to be in the selected source branch's history. Later branch advances do not
+   change or invalidate the tag. If the push is rejected, the script deletes
+   the local tag and fails; check your team membership.
 2. **Build the exact tag.** Enter the candidate tag as `mobile_ref` in the
    private Buzz mobile Buildkite pipeline. OSS CI deliberately cannot trigger
    that private pipeline. The tag supplies both source commit and release
@@ -130,12 +139,11 @@ scripts/mobile-release.sh candidate 0.25.0 --source-branch mobile-v0.25
 
 The branch must match the marketing version's major and minor components:
 `mobile-v0.25` accepts 0.25.x, but rejects 0.26.x and 1.25.x. Without the option,
-the source remains `main`. Both the operator and publisher validate the source;
+the source remains `main`. The script validates the source;
 a missing branch or a commit outside its history fails rather than falling back
 to `main`. `--commit FULL_SHA` also works with a stable source branch, whose
 review and check protections remain required.
-The GitHub workflow itself continues to run from reviewed `main`. The private
-pipeline still builds only the resulting immutable candidate tag.
+The private pipeline still builds only the resulting immutable candidate tag.
 
 For the October 2026 stabilization period, all distributed mobile builds,
 including Company Portal dogfood builds, must come from `mobile-v0.25` until
@@ -301,10 +309,11 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
 - The Default `main` ruleset configured for squash-only merging, strict required
   checks, stale-review dismissal, and the **Desktop Release Candidate** check
 - Release tag ruleset [`14378754`](https://github.com/block/buzz/rules/14378754)
-  active for `desktop-v*` and `mobile-v*`, with creation, update, deletion, and
+  active for `desktop-v*`, with creation, update, deletion, and
   non-fast-forward protections and `buzz-release-bot` as its sole always-bypass
-  actor
-- The `buzz-release-bot` App credentials configured for GitHub Actions
+  actor. It must not cover `mobile-v*`.
+- The `buzz-release-bot` App credentials configured for GitHub Actions (desktop,
+  relay, and chart lanes only; mobile does not use them)
 - The following **GitHub Actions variables and secrets** configured for the
   desktop release lane:
 
@@ -318,21 +327,25 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
   | `TAURI_SIGNING_PRIVATE_KEY` | Secret | Tauri updater private key |
   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Secret | Password for the private key |
 
-Mobile candidate publication requires workflow-dispatch access and the existing
-release App because strict tag protection denies direct human creation. The App
-must be installed on `block/buzz`, have Contents write and Metadata read, and
-retain an `always` bypass on the immutable `mobile-v*` tag rules. It does not
-require GitHub Releases permissions or repository Administration permission.
+Mobile candidate publication requires membership in the mobile release team
+(placeholder name `@block/buzz-mobile-release`) and a dedicated tag ruleset for
+`refs/tags/mobile-v*`. The ruleset must be active, with creation, update,
+deletion, and non-fast-forward protections, no exclusions, and that team as its
+only bypass actor. The `buzz-release-bot` App must not be a bypass actor.
+An administrator creates the ruleset and records its numeric ID as
+`MOBILE_RELEASE_TAG_RULESET_ID` in `scripts/release-rulesets.sh`; until then,
+`scripts/mobile-release.sh candidate` fails loudly on the placeholder. On every
+publication the script checks the public policy and that the caller's effective
+`current_user_can_bypass` is `always`; GitHub hides the bypass actor list from
+non-admin tokens, so an administrator audits that list.
 Stable sources additionally require active branch ruleset `19321162` covering
 `refs/heads/mobile-v*`, with no exclusions or bypass actors, deletion and
 force-push prevention, at least one approval, stale-approval dismissal, last-push
 approval, resolved review threads, and strict required `Mobile` and `DCO Check`
 checks. An administrator must configure and audit the empty bypass list; GitHub
-hides that list from non-admin tokens. Both operator and publisher verify the
-public policy and their effective lack of branch bypass on every publication.
-The publisher validates the App token's effective
-`current_user_can_bypass` value rather than reading the ruleset's hidden bypass
-actor list.
+hides that list from non-admin tokens. The script verifies the
+public policy and the caller's effective lack of branch bypass on every
+publication.
 
 ---
 
@@ -362,9 +375,9 @@ its own exact tag.
 
 ### The source branch advances during candidate publication
 
-Publication remains pinned to the selected SHA. The publisher verifies that it
-is an ancestor of a resolved source-branch snapshot, then creates and verifies
-an immutable annotated tag for that exact SHA. The operator verifies the tag,
+Publication remains pinned to the selected SHA. The script verifies that it
+is an ancestor of a resolved source-branch snapshot, then creates, pushes, and
+verifies an immutable annotated tag for that exact SHA. It verifies the tag,
 not the branch's later tip. A newer commit does not require retrying or creating
 another candidate. Missing or unverifiable ancestry still fails closed.
 
@@ -376,10 +389,18 @@ increasing remote identities.
 
 ### A mobile candidate publication is rejected by repository rules
 
-Confirm `buzz-release-bot` remains the sole always-bypass actor for the active
-`mobile-v*` ruleset and that its Actions credentials are available. Do not grant
-direct human creation or weaken update or deletion protection. Existing
+Confirm you are a member of the mobile release team (placeholder
+`@block/buzz-mobile-release`), the only bypass actor of the active `mobile-v*`
+tag ruleset. The script removes its local tag after a rejected push, so retry
+after fixing membership. Do not add yourself or other individuals to the bypass
+list, grant the App bypass, or weaken update or deletion protection. Existing
 candidate tags must remain immutable.
+
+### Mobile candidate fails on the ruleset ID placeholder
+
+An administrator has not yet recorded the mobile tag ruleset's numeric ID in
+`MOBILE_RELEASE_TAG_RULESET_ID` in `scripts/release-rulesets.sh`. Do not bypass
+the check.
 
 ### Auto-updater reports "no update available"
 Verify that the `buzz-desktop-latest` release exists and contains a
