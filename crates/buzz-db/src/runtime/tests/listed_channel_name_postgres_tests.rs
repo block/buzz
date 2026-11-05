@@ -556,7 +556,7 @@ async fn migration_schema_listed_name_index_needs_the_renames_then_builds_inline
     migration::run_migrations(&pool)
         .await
         .expect("migrate a populated table after the renames");
-    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
+    assert_eq!(ledger_version(&pool).await, 84);
     let mut expected = vec![
         (kept, "square-ios".to_owned()),
         renamed(newer, "Square-iOS"),
@@ -633,6 +633,6 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
         .await
         .expect("accept the prebuild without waiting for channel writers");
     writer.rollback().await.unwrap();
-    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
+    assert_eq!(ledger_version(&pool).await, 84);
     assert_eq!(index_oid(&pool).await, oid, "the prebuild is not replaced");
 }
