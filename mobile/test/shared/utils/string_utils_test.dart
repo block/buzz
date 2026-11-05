@@ -16,6 +16,14 @@ void main() {
   const canonicalCompact = 'npub180c\u2026h6w6';
 
   group('fullNpub', () {
+    test('reuses the encoding of a key it has already encoded', () {
+      // Identity views relabel a large roster on every rebuild; each key's
+      // bech32 encoding must happen once, not once per rebuild.
+      final first = fullNpub(canonicalHex);
+      expect(first, canonicalNpub);
+      expect(identical(fullNpub(canonicalHex.toUpperCase()), first), isTrue);
+    });
+
     test('canonicalizes every accepted input wrapper', () {
       // Every accepted wrapper — lowercase hex, uppercase hex, whitespace-
       // padded, and an already-npub key — converges on the canonical npub.

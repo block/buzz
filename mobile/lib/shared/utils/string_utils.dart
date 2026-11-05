@@ -49,8 +49,22 @@ String? fullNpub(String identity) {
   }
 }
 
-String _encodeNpub(String hexPubkey) =>
-    nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: hexPubkey);
+/// Encoded npubs by lowercase hex key. Identity views label every roster
+/// member without a profile name by npub on each rebuild, and bech32 encoding
+/// dominated those rebuilds on large channels. Cleared when full, so its size
+/// stays bounded and a big channel's roster still fits.
+final _npubs = <String, String>{};
+const _npubLimit = 8192;
+
+String _encodeNpub(String hexPubkey) {
+  final cached = _npubs[hexPubkey];
+  if (cached != null) return cached;
+  if (_npubs.length >= _npubLimit) _npubs.clear();
+  return _npubs[hexPubkey] = nostr.Nip19.encode(
+    prefix: nostr.Nip19Prefix.npub,
+    data: hexPubkey,
+  );
+}
 
 /// The canonical compact public-key label: the first 8 and last 4 characters
 /// of the full npub joined by an ellipsis — the same truncation desktop uses
