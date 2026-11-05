@@ -69,16 +69,22 @@ class HostedRelayAuth extends ChangeNotifier {
   final bool Function(Uri relay) organizationRelay;
   final bool enabled;
   final DateTime Function() _now;
-  ({
-    String relay,
-    String pubkey,
-    String token,
-    DateTime expiry,
-    BuilderlabAccount account,
-  })?
-  _cached;
+  // One assertion per relay and key, so issuing for an inactive community (for
+  // example a background revocation) never evicts the active session's
+  // credentials that native media paths read synchronously.
+  final _cached =
+      <
+        ({String relay, String pubkey}),
+        ({String token, DateTime expiry, BuilderlabAccount account})
+      >{};
   // Per account client, so a stalled issuer never delays an unrelated one.
-  final _pending = <BuilderlabAccountClient, Future<void>>{};
+  // Waiters share account restoration, but only a recorded issuance for their
+  // own relay and key can fail on their behalf.
+  final _pending =
+      <
+        BuilderlabAccountClient,
+        ({Future<void> operation, String relay, String pubkey, bool background})
+      >{};
   bool _disposed = false;
   // Orders issuance and refusals, so a stale result never replaces a newer
   // failure for another relay or key.
@@ -112,10 +118,14 @@ class HostedRelayAuth extends ChangeNotifier {
   Map<String, String>? cachedHeaders(RelayConfig config) {
     if (_disposed) return null;
     if (!protects(config)) return const {};
-    final cached = _cached;
+    final pubkey = pubkeyFromNsec(config.nsec);
+    if (pubkey == null) return null;
+    final cached =
+        _cached[(
+          relay: Uri.parse(config.wsUrl).replace(path: '').toString(),
+          pubkey: pubkey,
+        )];
     if (cached == null ||
-        cached.relay != Uri.parse(config.wsUrl).replace(path: '').toString() ||
-        cached.pubkey != pubkeyFromNsec(config.nsec) ||
         !identical(cached.account, _accountFor(config)?.account) ||
         !cached.expiry.isAfter(_now())) {
       return null;
@@ -145,12 +155,26 @@ class HostedRelayAuth extends ChangeNotifier {
       url.host.isNotEmpty &&
       url.origin == Uri.parse(config.baseUrl).origin;
 
-  Future<Map<String, String>> headers(RelayConfig config) async {
+  /// The assertion for [config]'s relay and key. A [background] caller (such
+  /// as a push revocation for a removed community) never records its failure
+  /// or success, so it cannot hide or clear the active session's recovery.
+  /// It never backs up the key or binds it to an unbound account, and its
+  /// assertion bypasses the shared cache: each attempt gets a fresh one, and
+  /// foreground use never inherits an assertion whose key was not backed up.
+  /// Without an assertion it gets no headers rather than a failure, so the
+  /// relay decides.
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+  }) async {
     final client = _accountFor(config);
     if (client == null) return const {};
     try {
-      return await _headers(config, client);
+      return await _headers(config, client, background);
     } on AccountFailure catch (failure) {
+      // Cleanup still reaches a relay that does not enforce assertions; an
+      // enforcing relay refuses, and the caller's durable retry tries again.
+      if (background) return const {};
       // Without an organization session, connect as before and let the relay
       // decide: an enforcing relay refuses, and sign-in is offered.
       if (failure == AccountFailure.signedOut &&
@@ -164,15 +188,16 @@ class HostedRelayAuth extends ChangeNotifier {
   Future<Map<String, String>> _headers(
     RelayConfig config,
     BuilderlabAccountClient client,
+    bool background,
   ) async {
     final relay = Uri.parse(config.wsUrl).replace(path: '').toString();
     final pubkey = pubkeyFromNsec(config.nsec);
     if (pubkey == null) throw AccountFailure.denied;
     while (!_disposed) {
-      final cached = _cached;
+      final cached = background
+          ? null
+          : _cached[(relay: relay, pubkey: pubkey)];
       if (cached != null &&
-          cached.relay == relay &&
-          cached.pubkey == pubkey &&
           identical(cached.account, client.account) &&
           cached.expiry.isAfter(_now())) {
         return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
@@ -180,29 +205,48 @@ class HostedRelayAuth extends ChangeNotifier {
       final pending = _pending[client];
       if (pending != null) {
         // Different communities share account restoration, never assertions.
+        // A background failure is never recorded, so it is never inherited.
         try {
-          await pending;
+          await pending.operation;
         } on AccountFailure {
-          if (failedRelay == config.baseUrl && failedPubkey == pubkey) rethrow;
+          if (!pending.background &&
+              pending.relay == relay &&
+              pending.pubkey == pubkey &&
+              failedRelay == config.baseUrl &&
+              failedPubkey == pubkey) {
+            rethrow;
+          }
         }
         continue;
       }
-      final operation = _issue(config, client, relay, pubkey);
-      _pending[client] = operation;
+      final operation = _issue(config, client, relay, pubkey, background);
+      _pending[client] = (
+        operation: operation,
+        relay: relay,
+        pubkey: pubkey,
+        background: background,
+      );
       try {
-        await operation;
+        final token = await operation;
+        if (token != null) {
+          return {'Nostr-Federated-Identity': 'Bearer $token'};
+        }
       } finally {
-        if (identical(_pending[client], operation)) _pending.remove(client);
+        if (identical(_pending[client]?.operation, operation)) {
+          _pending.remove(client);
+        }
       }
     }
     throw AccountFailure.unavailable;
   }
 
-  Future<void> _issue(
+  /// The issued token, or null when the account session changed meanwhile.
+  Future<String?> _issue(
     RelayConfig config,
     BuilderlabAccountClient account,
     String relay,
     String pubkey,
+    bool background,
   ) async {
     final started = ++_sequence;
     try {
@@ -214,7 +258,11 @@ class HostedRelayAuth extends ChangeNotifier {
       if (!identical(session, account.account)) throw AccountFailure.denied;
       final identity = current['identity'];
       if (current['error'] != null) throw AccountFailure.invalidResponse;
-      if (identity == null && identical(account, organization)) {
+      if (identity == null && background) {
+        // Issuance can create a binding, and a background caller's key may be
+        // one the user discarded. Only foreground use chooses the identity.
+        throw AccountFailure.denied;
+      } else if (identity == null && identical(account, organization)) {
         // The organization's issuer binds the proven key on first issuance;
         // that binding is how a member's existing key joins the organization.
       } else if (identity == null) {
@@ -263,11 +311,13 @@ class HostedRelayAuth extends ChangeNotifier {
       );
       if (_disposed) throw AccountFailure.unavailable;
       if (!identical(session, account.account)) {
-        return;
+        return null;
       }
-      _cached = (
-        relay: relay,
-        pubkey: pubkey,
+      // A background caller may be removing this community: it must not clear
+      // recovery, back up a discarded key or seed the shared cache.
+      if (background) return token;
+      _cached.removeWhere((_, entry) => !entry.expiry.isAfter(_now()));
+      _cached[(relay: relay, pubkey: pubkey)] = (
         token: token,
         expiry: expires.subtract(
           Duration(seconds: (expiry - now) > 60 ? 30 : (expiry - now) ~/ 2),
@@ -276,13 +326,16 @@ class HostedRelayAuth extends ChangeNotifier {
       );
       // Issuance alone cannot prove admission after a relay refusal.
       if (failure != AccountFailure.denied) connected(config);
+      return token;
     } on AccountFailure catch (error) {
       // Issuers run in parallel, so a failure that started before another
       // relay's unresolved failure was recorded must not replace it.
       final otherScope =
           failure != null &&
           (failedRelay != config.baseUrl || failedPubkey != pubkey);
-      if (!_disposed && !(otherScope && _failureSequence > started)) {
+      if (!background &&
+          !_disposed &&
+          !(otherScope && _failureSequence > started)) {
         _record(config.baseUrl, pubkey, error, started);
       }
       rethrow;
@@ -306,7 +359,7 @@ class HostedRelayAuth extends ChangeNotifier {
     bool terminal = false,
   }) {
     if (!protects(config) || usedToken == null) return;
-    if ('Bearer ${_cached?.token}' == usedToken) _cached = null;
+    _cached.removeWhere((_, entry) => 'Bearer ${entry.token}' == usedToken);
     if (terminal && !_disposed) {
       _record(
         config.baseUrl,
@@ -333,7 +386,7 @@ class HostedRelayAuth extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _cached = null;
+    _cached.clear();
     super.dispose();
   }
 }
