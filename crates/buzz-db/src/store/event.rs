@@ -728,6 +728,12 @@ fn build_query_events_sql(
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
     push_event_filters(&mut qb, col_prefix, q);
+    // A per-channel read scopes each lateral to one channel of the set.
+    if per_channel.is_some() {
+        qb.push(" AND channel_id = c.ch");
+    } else {
+        push_channel_scope(&mut qb, col_prefix, q);
+    }
     if let Some(bound) = range.predicate(&format!("{col_prefix}created_at")) {
         qb.push(bound);
     }
@@ -755,8 +761,8 @@ fn build_query_events_sql(
 }
 
 /// AND every [`EventQuery`] predicate except the community, the `deleted_at`
-/// test and the `#p` join, on columns qualified by `col_prefix` (`""` or
-/// `"e."`).
+/// test, the channel scope (`push_channel_scope`) and the `#p` join, on
+/// columns qualified by `col_prefix` (`""` or `"e."`).
 fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
@@ -771,14 +777,6 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
             .push_bind(ch);
     } else if q.global_only {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
-    }
-
-    // A per-channel read (see `per_channel_scope`) scopes each lateral to one
-    // channel of the set. The thread route never qualifies: it reads one channel.
-    if per_channel_scope(q).is_some() {
-        qb.push(" AND channel_id = c.ch");
-    } else {
-        push_channel_scope(qb, col_prefix, q);
     }
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
@@ -1016,14 +1014,27 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
     }
     qb.push(" AND e.deleted_at IS NULL");
     push_event_filters(&mut qb, "e.", q);
+    push_channel_scope(&mut qb, "e.", q);
     qb.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ");
     qb.push_bind(page_limit(q));
     qb.push(" OFFSET ").push_bind(q.offset.unwrap_or(0));
     qb
 }
 
+/// Most candidate rows a per-channel read ([`per_channel_scope`]) may fetch:
+/// channels in the set × page limit.
+///
+/// A per-channel read fetches up to `n` rows from every channel, where the set
+/// read stops once the page fills. 128 busy channels at `limit 500` fetched
+/// 64,000 rows (114 ms) where the set read fetched 500 (2.3 ms), and the
+/// larger plan cost turned on JIT (about 0.9 s). At 7,500 candidates the
+/// per-channel read was still faster than the set read and stayed under the
+/// JIT threshold. Above the budget the set read runs as before.
+const PER_CHANNEL_CANDIDATE_BUDGET: usize = 8_192;
+
 /// The channels of a read that takes them one at a time: an explicit `#h` set
-/// (no global events), without a `#p` join, e-tag fence or offset.
+/// (no global events), without a `#p` join, e-tag fence or offset, whose
+/// channels × page limit fit [`PER_CHANNEL_CANDIDATE_BUDGET`].
 ///
 /// `channel_id = ANY($set) ORDER BY created_at DESC LIMIT n` leaves the
 /// planner to guess how many rows the set matches. With the ids as literals
@@ -1044,7 +1055,9 @@ fn per_channel_scope(q: &EventQuery) -> Option<&[Uuid]> {
         && !q.global_only
         && q.p_tag_hex.is_none()
         && q.e_tags.is_none()
-        && q.offset.unwrap_or(0) == 0;
+        && q.offset.unwrap_or(0) == 0
+        && usize::try_from(page_limit(q))
+            .is_ok_and(|n| ids.len().saturating_mul(n) <= PER_CHANNEL_CANDIDATE_BUDGET);
     eligible.then_some(ids)
 }
 
@@ -3524,7 +3537,8 @@ mod e_tag_filter_shape_tests {
     /// change the SQL text, or each count is its own statement that is planned
     /// again on every call. Holds for the `#p` join and plain reads, for
     /// access scope and explicit `#h`, in both the page SELECT and the COUNT.
-    /// A plain explicit `#h` page unnests the bind and reads each channel.
+    /// A plain explicit `#h` page within the candidate budget unnests the
+    /// bind and reads each channel; over it, the page is the set read.
     #[test]
     fn channel_scope_sql_does_not_depend_on_channel_count() {
         let sql = |p_tag: bool, include_global: bool, n: usize| {
@@ -3570,9 +3584,10 @@ mod e_tag_filter_shape_tests {
         }
     }
 
-    /// Only a plain explicit `#h` page reads channel by channel: global
-    /// events, a `#p` join, an e-tag fence, an offset or an empty set keep
-    /// their own SQL.
+    /// Only a plain explicit `#h` page within the candidate budget reads
+    /// channel by channel: global events, a `#p` join, an e-tag fence, an
+    /// offset, an empty set or a set × limit over the budget keep their own
+    /// SQL.
     #[test]
     fn per_channel_scope_eligibility() {
         let base = || EventQuery {
@@ -3584,6 +3599,16 @@ mod e_tag_filter_shape_tests {
         let mut offset_zero = base();
         offset_zero.offset = Some(0);
         assert!(per_channel_scope(&offset_zero).is_some());
+        let at_budget = |channels: usize, limit: i64| EventQuery {
+            channel_ids: Some((0..channels).map(|_| uuid::Uuid::new_v4()).collect()),
+            limit: Some(limit),
+            ..base()
+        };
+        assert!(per_channel_scope(&at_budget(16, 512)).is_some());
+        assert!(per_channel_scope(&at_budget(17, 512)).is_none());
+        assert!(per_channel_scope(&at_budget(128, 500)).is_none());
+        // The clamped page limit counts, not the requested one.
+        assert!(per_channel_scope(&at_budget(8, 5_000)).is_some());
         type Edit = fn(&mut EventQuery);
         let others: [(&str, Edit); 5] = [
             ("global", |q| q.channel_ids_include_global = true),
