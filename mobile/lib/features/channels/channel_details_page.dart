@@ -13,11 +13,13 @@ Future<bool?> showChannelDetailsPage({
   String? sectionId,
 }) => Navigator.of(context).push<bool>(
   MaterialPageRoute<bool>(
-    builder: (_) => ChannelDetailsPage(
-      channel: channel,
-      currentPubkey: currentPubkey,
-      onMemberTap: onMemberTap,
-      sectionId: sectionId,
+    builder: (_) => CoveredRouteKeyboardInsets(
+      child: ChannelDetailsPage(
+        channel: channel,
+        currentPubkey: currentPubkey,
+        onMemberTap: onMemberTap,
+        sectionId: sectionId,
+      ),
     ),
   ),
 );
