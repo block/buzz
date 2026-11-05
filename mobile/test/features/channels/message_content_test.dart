@@ -669,6 +669,24 @@ void main() {
       expect(openedHeaders?['Authorization'], startsWith('Nostr '));
     });
 
+    testWidgets('a link nothing can open offers only copy and share', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
+        ),
+      );
+      await tester.longPress(find.text('support'));
+      await tester.pumpAndSettle();
+      expect(find.text('mailto:support@example.com'), findsOneWidget);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+    });
+
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       testWidgets('holding a link opens link actions on ${platform.name}', (
         tester,

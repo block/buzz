@@ -736,9 +736,12 @@ class MessageContent extends HookConsumerWidget {
       }
     }
 
+    // openLink handles only these schemes; the sheet hides Open for others.
+    final scheme = Uri.tryParse(url)?.scheme;
+    final canOpen = scheme == 'buzz' || scheme == 'http' || scheme == 'https';
     return _LinkLongPress(
       url: url,
-      onOpen: () => unawaited(openLink()),
+      onOpen: canOpen ? () => unawaited(openLink()) : null,
       highlightColor: (baseStyle.color ?? context.colors.primary).withValues(
         alpha: 0.2,
       ),

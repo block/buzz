@@ -9,7 +9,9 @@ part of '../message_content.dart';
 /// the same way reaction pills claim their own hold.
 class _LinkLongPress extends HookWidget {
   final String url;
-  final VoidCallback onOpen;
+
+  /// Opens the link; null hides Open for destinations nothing can open.
+  final VoidCallback? onOpen;
 
   /// Tint painted behind the link while a finger is down on it.
   final Color highlightColor;
@@ -69,7 +71,7 @@ class _LinkLongPress extends HookWidget {
 void _showLinkActions(
   BuildContext context, {
   required String url,
-  required VoidCallback onOpen,
+  required VoidCallback? onOpen,
 }) {
   unawaited(HapticFeedback.mediumImpact());
   final uri = Uri.tryParse(url);
@@ -112,14 +114,15 @@ void _showLinkActions(
                   ),
                   SheetActionSection(
                     children: [
-                      ListTile(
-                        leading: const Icon(BuzzIcons.externalLink),
-                        title: const Text('Open link'),
-                        onTap: () {
-                          Navigator.of(sheetContext).pop();
-                          onOpen();
-                        },
-                      ),
+                      if (onOpen != null)
+                        ListTile(
+                          leading: const Icon(BuzzIcons.externalLink),
+                          title: const Text('Open link'),
+                          onTap: () {
+                            Navigator.of(sheetContext).pop();
+                            onOpen();
+                          },
+                        ),
                       ListTile(
                         leading: const Icon(BuzzIcons.copy),
                         title: const Text('Copy link'),
