@@ -299,8 +299,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
-      // The new account has its own image cache; drop the previous one's.
-      if (identityChanged) await _removeOrphanMediaCaches(updatedList);
+      // The new account has its own image cache; drop the previous one's in
+      // the background.
+      if (identityChanged) unawaited(_removeOrphanMediaCaches(updatedList));
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
@@ -339,7 +340,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
       final updatedList = current.where((w) => w.id != id).toList();
       await _removeOrphanChannelListSnapshots(updatedList);
-      await _removeOrphanMediaCaches(updatedList);
       state = AsyncData(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 
@@ -358,6 +358,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           ref.invalidate(authProvider);
         }
       }
+      // Deleting up to a full cache can take a while; never hold the removal
+      // on it. The launch sweep retries a failure.
+      unawaited(_removeOrphanMediaCaches(updatedList));
       if (revocationJournaled) {
         unawaited(
           ref.read(communityPushLeaseRevocationTriggerProvider)().catchError((

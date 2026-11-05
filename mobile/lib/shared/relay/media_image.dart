@@ -250,8 +250,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
   Future<void> _refresh(MediaDiskCache cache) async {
     try {
-      // Never aborted: nobody is waiting on it.
-      final bytes = await _fetchBytes(Completer<void>().future);
+      // Nobody is waiting on it, so it stops only when its cache retires.
+      if (cache.isClosed) return;
+      final bytes = await _fetchBytes(cache.closed);
       // Nothing displays these bytes yet, so check they decode before they
       // replace the saved copy. A tiny target keeps the check from
       // allocating a full-resolution frame.
@@ -348,14 +349,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     return other is MediaImageProvider &&
         other.url == url &&
         other.scale == scale &&
-        other.auth == auth &&
-        // A load started before the cache was ready must restart once it
-        // is, so the image can come from disk.
-        (other.diskCache == null) == (diskCache == null);
+        other.auth == auth;
   }
 
   @override
-  int get hashCode => Object.hash(url, scale, auth, diskCache == null);
+  int get hashCode => Object.hash(url, scale, auth);
 
   @override
   String toString() =>

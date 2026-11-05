@@ -96,7 +96,14 @@ void main() {
     Future<void> launch(
       Future<void> Function(MediaDiskCache cache) body,
     ) async {
-      final cache = MediaDiskCache.open(directory, now: () => now);
+      // The caches root resolves after the first images start loading.
+      final cache = MediaDiskCache.open(
+        Future<Directory>.delayed(
+          const Duration(milliseconds: 20),
+          () => directory,
+        ),
+        now: () => now,
+      );
       try {
         await body(cache);
       } finally {
@@ -136,15 +143,6 @@ void main() {
     fetched.clear();
     online = false;
     await launch((cache) async {
-      // An image shown before the cache is ready restarts once it is.
-      MediaImageProvider provider(MediaDiskCache? diskCache) =>
-          MediaImageProvider(
-            url: _relayUrl,
-            auth: auth,
-            client: client,
-            diskCache: diskCache,
-          );
-      expect(provider(null), isNot(provider(cache)));
       for (final url in saved) {
         expect(await show(cache, url), isNull, reason: url);
       }
@@ -214,6 +212,28 @@ void main() {
       }
     });
     expect(fetched, [_externalUrls.first]);
+
+    // Refreshes queued when the community or account retires never run.
+    fetched.clear();
+    malformedExternal = false;
+    MediaImageProvider.debugResetCooldowns();
+    await launch((cache) async {
+      for (final url in _externalUrls) {
+        await cache.write(url, _pngBytes, immutable: false);
+      }
+    });
+    now = now.add(const Duration(days: 8));
+    final held = replaceExternal = Completer<void>();
+    await launch((cache) async {
+      for (final url in _externalUrls) {
+        expect(await show(cache, url), isNull, reason: url);
+      }
+      await _settle();
+    });
+    held.complete();
+    await _settle();
+    replaceExternal = null;
+    expect(fetched, _externalUrls.take(2));
 
     // A replaced account's directory goes, including writes that land after
     // its delete; removing the community deletes its directory.

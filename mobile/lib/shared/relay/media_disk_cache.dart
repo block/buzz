@@ -29,29 +29,43 @@ typedef MediaDiskCacheHit = ({Uint8List bytes, bool isStale});
 /// change in place, so they are served from disk but refetched in the
 /// background once older than [externalRefreshAge].
 class MediaDiskCache {
-  MediaDiskCache._(this._manager, this._now);
-
-  /// Opens the store in [directory], creating it on first write. [now] is
-  /// the clock staleness is judged by.
-  factory MediaDiskCache.open(
-    Directory directory, {
+  /// Opens the store in [directory], creating it on first write, or a store
+  /// that saves nothing when [directory] is null. Reads and writes wait for
+  /// [directory] to resolve, so a load never skips the disk while it does.
+  /// [now] is the clock staleness is judged by.
+  MediaDiskCache.open(
+    FutureOr<Directory?> directory, {
     @visibleForTesting DateTime Function() now = DateTime.now,
-  }) {
-    final index = File(p.join(directory.path, 'index.json'));
-    return MediaDiskCache._(
-      CacheManager(
-        Config(
-          directory.path,
-          // Age never evicts: the byte budget below does.
-          stalePeriod: _neverStale,
-          maxNrOfCacheObjects: maxFiles,
-          repo: MediaCacheIndex(index, directory, maxBytes),
-          fileSystem: _DirectoryFileSystem(directory),
-        ),
-      ),
-      now,
-    );
+  }) : _now = now {
+    _manager = Future.value(directory)
+        // Images wait for the disk, so never wait on it for long.
+        .timeout(_openTimeout, onTimeout: () => null)
+        .then((directory) {
+          if (directory == null || isClosed) return null;
+          return _openManager(directory);
+        })
+        .catchError((Object error) {
+          debugPrint('[MediaDiskCache] open failed: $error');
+          return null;
+        });
   }
+
+  static CacheManager _openManager(Directory directory) => CacheManager(
+    Config(
+      directory.path,
+      // Age never evicts: the byte budget below does.
+      stalePeriod: _neverStale,
+      maxNrOfCacheObjects: maxFiles,
+      repo: MediaCacheIndex(
+        File(p.join(directory.path, 'index.json')),
+        directory,
+        maxBytes,
+      ),
+      fileSystem: _DirectoryFileSystem(directory),
+    ),
+  );
+
+  static const _openTimeout = Duration(seconds: 3);
 
   /// Most bytes one community's cache keeps on disk.
   static const maxBytes = 250 * 1024 * 1024;
@@ -69,9 +83,16 @@ class MediaDiskCache {
 
   static const _neverStale = Duration(days: 365 * 100);
 
-  final CacheManager _manager;
+  late final Future<CacheManager?> _manager;
   final DateTime Function() _now;
-  var _closed = false;
+  final _closed = Completer<void>();
+
+  /// Completes once the cache is disposed, when its community or account is
+  /// retired.
+  Future<void> get closed => _closed.future;
+
+  /// Whether the cache was disposed.
+  bool get isClosed => _closed.isCompleted;
 
   /// The directory holding everything one community persists under [root].
   static Directory communityDirectory(Directory root, String communityId) =>
@@ -128,15 +149,22 @@ class MediaDiskCache {
 
   /// Removes [url]'s saved bytes, for example when they no longer decode.
   /// Failures are logged; a later read finds the same bad bytes.
-  Future<void> remove(String url) =>
-      _manager.removeFile(url).catchError(_logFailure);
+  Future<void> remove(String url) async {
+    try {
+      await (await _manager)?.removeFile(url);
+    } on Object catch (error) {
+      _logFailure(error);
+    }
+  }
 
   /// [url]'s saved bytes, or null when they are not on disk.
   Future<MediaDiskCacheHit?> read(String url) async {
     final FileInfo? info;
     final Uint8List bytes;
+    final manager = await _manager;
+    if (manager == null) return null;
     try {
-      info = await _manager.getFileFromCache(url);
+      info = await manager.getFileFromCache(url);
       if (info == null) return null;
       bytes = await info.file.readAsBytes();
     } on FileSystemException {
@@ -161,13 +189,15 @@ class MediaDiskCache {
   }) async {
     // A download that finishes after its account or community was retired
     // must not repopulate the cache.
-    if (_closed || bytes.isEmpty) return;
+    if (isClosed || bytes.isEmpty) return;
+    final manager = await _manager;
+    if (manager == null || isClosed) return;
     try {
       if (bytes.length > maxFileBytes) {
-        await _manager.removeFile(url);
+        await manager.removeFile(url);
         return;
       }
-      await _manager.putFile(
+      await manager.putFile(
         url,
         bytes,
         maxAge: immutable ? _neverStale : externalRefreshAge,
@@ -179,9 +209,16 @@ class MediaDiskCache {
 
   /// Stops writes, then flushes the index.
   Future<void> dispose() {
-    _closed = true;
-    return _manager.dispose();
+    if (_closed.isCompleted) return _disposed;
+    _closed.complete();
+    return _disposed = _manager
+        .then((manager) => manager?.dispose())
+        .catchError((Object error) {
+          debugPrint('[MediaDiskCache] close failed: $error');
+        });
   }
+
+  Future<void> _disposed = Future.value();
 
   static void _logFailure(Object error) =>
       debugPrint('[MediaDiskCache] write failed: $error');
@@ -261,7 +298,6 @@ final mediaCacheRootProvider = FutureProvider<Directory?>((ref) async => null);
 /// The active community's image cache, or null when there is no caches root
 /// or no community. Switching community or account disposes the previous one.
 final mediaDiskCacheProvider = Provider<MediaDiskCache?>((ref) {
-  final root = ref.watch(mediaCacheRootProvider).value;
   final (communityId, signer) = ref.watch(
     activeCommunityProvider.select((value) {
       final community = value.value;
@@ -270,9 +306,21 @@ final mediaDiskCacheProvider = Provider<MediaDiskCache?>((ref) {
       return (community.id, signer);
     }),
   );
-  if (root == null || communityId == null || signer == null) return null;
+  if (communityId == null || signer == null) return null;
+  // The cache exists at once and opens its directory when the root
+  // resolves, so images shown during startup still read the disk.
   final cache = MediaDiskCache.open(
-    MediaDiskCache.directoryFor(root, communityId, signer.toLowerCase()),
+    ref
+        .watch(mediaCacheRootProvider.future)
+        .then(
+          (root) => root == null
+              ? null
+              : MediaDiskCache.directoryFor(
+                  root,
+                  communityId,
+                  signer.toLowerCase(),
+                ),
+        ),
   );
   ref.onDispose(() => unawaited(cache.dispose()));
   return cache;

@@ -527,6 +527,14 @@ void main() {
         return directory;
       }
 
+      // Media sweeps run in the background.
+      Future<bool> eventuallyExists(Directory directory) async {
+        for (var i = 0; i < 50 && await directory.exists(); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        return directory.exists();
+      }
+
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final cache = ChannelListSnapshotStorage(prefs);
@@ -560,11 +568,7 @@ void main() {
       expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
       expect(cache.read('restored', 'https://orphan.example'), isNull);
       expect(await cache.write(restoredToken, snapshot), isFalse);
-      // The startup sweep runs in the background.
-      for (var i = 0; i < 50 && await orphanMedia.exists(); i++) {
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      expect(await orphanMedia.exists(), isFalse);
+      expect(await eventuallyExists(orphanMedia), isFalse);
       expect(await oldMedia.exists(), isTrue);
 
       final notifier = container.read(communityListProvider.notifier);
@@ -578,7 +582,7 @@ void main() {
       await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
       expect(cache.read(oldKeys.public, community.relayUrl), isNull);
       expect(await cache.write(oldToken, snapshot), isFalse);
-      expect(await oldMedia.exists(), isFalse);
+      expect(await eventuallyExists(oldMedia), isFalse);
       expect(await newMedia.exists(), isTrue);
       final newToken = cache.capture(newKeys.public, community.relayUrl);
       await cache.write(newToken, snapshot);
@@ -587,7 +591,7 @@ void main() {
       expect(await communityStorage.loadAll(), isEmpty);
       expect(prefs.getKeys(), {'unrelated'});
       expect(await cache.write(newToken, snapshot), isFalse);
-      expect(await newMedia.exists(), isFalse);
+      expect(await eventuallyExists(newMedia), isFalse);
       expect(
         await MediaDiskCache.communityDirectory(
           mediaRoot,
