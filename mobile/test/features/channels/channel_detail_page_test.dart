@@ -4512,6 +4512,45 @@ void main() {
       );
     });
 
+    testWidgets('a growing composer reuses the message rows on screen', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: 'msg1', pubkey: 'alice', content: 'Hello world!'),
+            _textMsg(id: 'msg2', pubkey: 'bob', content: 'Hey Alice!'),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Widget row(String id) =>
+          tester.widget(find.byKey(ValueKey('channel-message-send-$id')));
+      double listInset() => tester
+          .widget<ScrollablePositionedList>(
+            find.byKey(const ValueKey('channel-message-list')),
+          )
+          .padding!
+          .bottom;
+      final rowsBefore = [row('msg1'), row('msg2')];
+      final insetBefore = listInset();
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'one\ntwo\nthree\nfour');
+      await tester.pumpAndSettle();
+
+      // The list moved up for the taller composer without rebuilding rows.
+      expect(listInset(), greaterThan(insetBefore));
+      expect(row('msg1'), same(rowsBefore[0]));
+      expect(row('msg2'), same(rowsBefore[1]));
+    });
+
     testWidgets('keeps animated message avatars static and transparent', (
       tester,
     ) async {
