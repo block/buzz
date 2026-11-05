@@ -150,6 +150,7 @@ class ReadStateManager {
   // Whether the latest snapshot read succeeded. A publish that skips its own
   // snapshot clears [syncError] only on this evidence.
   bool _lastSnapshotSucceeded = false;
+  int _liveGeneration = 0;
   final int Function() _now;
   // Override keys already in this device's own slot, carried unchanged.
   // See [isOverrideContext].
@@ -461,7 +462,8 @@ class ReadStateManager {
 
   Future<bool> _startLiveSubscription() async {
     try {
-      var interrupted = false;
+      final generation = ++_liveGeneration;
+      var returned = false;
       final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
@@ -474,18 +476,17 @@ class ReadStateManager {
           limit: 0,
         ),
         _handleIncomingEvent,
-        // RelaySession reopens a REQ the relay closed for a transient reason
-        // on the same socket. With limit 0 the reopened REQ replays nothing,
-        // so read the snapshot once it is live again to cover the gap.
+        // The snapshot after this call covers marks published before the REQ
+        // went live, unless it goes live later: after the 500 ms fallback
+        // (slow AUTH on a cold start) or after a transient CLOSED's retry.
+        // With limit 0 nothing replays the gap, so read the snapshot then.
         onStatusChanged: (status) {
-          if (status == RelaySubscriptionStatus.retrying) {
-            interrupted = true;
-          } else if (interrupted) {
-            interrupted = false;
-            unawaited(_catchUpAfterRetry());
+          if (status == RelaySubscriptionStatus.ready && returned) {
+            unawaited(_catchUpAfterLateReady(generation));
           }
         },
       );
+      returned = true;
       if (_disposed) {
         unsub.call();
         return false;
@@ -499,12 +500,14 @@ class ReadStateManager {
     }
   }
 
-  /// Reads the snapshot after the live subscription recovered from a retry,
-  /// after any reconnect pass already running, which reads it anyway.
-  Future<void> _catchUpAfterRetry() async {
+  /// Reads the snapshot after the live subscription went live late, once
+  /// any pass already running is done. Skipped when a reconnect pass has
+  /// replaced the subscription, since that pass read the snapshot after it.
+  Future<void> _catchUpAfterLateReady(int generation) async {
     final pass = _queuedResync ?? _runningResync ?? _initializing;
     if (pass != null) await pass;
     if (_disposed || !_servesThisCommunity) return;
+    if (generation != _liveGeneration) return;
     await _fetchAndMerge();
   }
 
@@ -638,6 +641,9 @@ class ReadStateManager {
         checkConnection?.call();
         snapshot = events;
         _mergeEvents(events);
+        // Unchanged slots publish nothing, so no echo would announce marks
+        // this snapshot brought in.
+        _onChanged();
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
