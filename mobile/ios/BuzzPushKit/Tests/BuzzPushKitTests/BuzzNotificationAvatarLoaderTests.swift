@@ -161,6 +161,50 @@ struct BuzzNotificationAvatarLoaderTests {
         == "Bearer header.payload.signature")
     #expect(request.value(forHTTPHeaderField: "Authorization") != nil)
   }
+
+  @Test("An avatar fetched with an assertion from a replaced organization session is refused")
+  func replacedOrganizationSessionRefusesAvatar() async throws {
+    let key = String(repeating: "0", count: 63) + "1"
+    let account = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    let scope = try #require(
+      BuzzNotificationCacheScope(
+        community: PushLeaseCommunity(
+          id: "community", name: "Test", relayUrl: "wss://relay.org.example", pubkey: account,
+          policies: [], notificationSessionID: "session")))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AssertionIssuanceStub.self]
+    let sessions = OrganizationSessions()
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { sessions.current })
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let loader = BuzzNotificationAvatarLoader(
+      directory: directory, privateKey: { _ in key }, isCurrent: { _ in true },
+      assertionIssuer: issuer)
+    let png = try #require(
+      Data(
+        base64Encoded:
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII="
+      ))
+    loader.startDownload = { _, _, _, completion in
+      // The member signs in again while the avatar is in flight; the community is unchanged.
+      sessions.replace()
+      completion(.success(png))
+    }
+
+    let result = await withCheckedContinuation { continuation in
+      loader.load(
+        source: "https://relay.org.example/media/\(String(repeating: "a", count: 64)).png",
+        scope: scope
+      ) { continuation.resume(returning: $0) }
+    }
+
+    guard case .failure(BuzzNotificationCacheError.revoked) = result else {
+      Issue.record("Expected a revoked failure, got \(result)")
+      return
+    }
+  }
 }
 
 private final class AvatarRequests: @unchecked Sendable {
@@ -169,6 +213,20 @@ private final class AvatarRequests: @unchecked Sendable {
 
   var first: URLRequest? { lock.withLock { requests.first } }
   func record(_ request: URLRequest) { lock.withLock { requests.append(request) } }
+}
+
+private final class OrganizationSessions: @unchecked Sendable {
+  private let lock = NSLock()
+  private var credential = "session-credential"
+
+  var current: BuzzOrganizationSession {
+    lock.withLock {
+      BuzzOrganizationSession(
+        origin: "https://identity.org.example", credential: credential,
+        relayHosts: ["relay.org.example"])
+    }
+  }
+  func replace() { lock.withLock { credential = "replacement-credential" } }
 }
 
 private final class AvatarScopeState: @unchecked Sendable {
