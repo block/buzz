@@ -1,3 +1,4 @@
+import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import '../../shared/widgets/ios_media_carousel.dart';
@@ -15,7 +16,6 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/widgets/media_loading_placeholder.dart';
@@ -35,6 +35,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
+import 'message_content/markdown_escapes.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -208,6 +209,32 @@ class MessageContent extends HookConsumerWidget {
     // Own-bubble links share the bubble ink; markdown marks them by underline.
     final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
     final bubbleInk = ownMessage ? ownTextColor : context.colors.onSurface;
+    final onSurface = context.colors.onSurface;
+    // GptMarkdownTheme notifies its dependents whenever the data object
+    // changes (the data has no value equality), and each notification makes
+    // every GptMarkdown below re-parse its text. Reuse one bubble theme while
+    // its inputs are unchanged so an ordinary rebuild does not re-parse.
+    final bubbleMarkdownTheme = useMemoized(
+      () => markdownTheme.copyWith(
+        linkColor: linkColor,
+        // A neutral chip would put white ink on a light fill; tint the accent
+        // instead.
+        inlineCode: ownMessage
+            ? markdownTheme.inlineCode.copyWith(
+                color: ownTextColor,
+                backgroundColor: chatCodeTint(ownTextColor, 0.18),
+                borderColor: ownTextColor.withValues(alpha: 0.3),
+              )
+            : null,
+        h1: markdownTheme.h1?.copyWith(color: bubbleInk),
+        h2: markdownTheme.h2?.copyWith(color: bubbleInk),
+        h3: markdownTheme.h3?.copyWith(color: bubbleInk),
+        h4: markdownTheme.h4?.copyWith(color: bubbleInk),
+        h5: markdownTheme.h5?.copyWith(color: bubbleInk),
+        h6: markdownTheme.h6?.copyWith(color: bubbleInk),
+      ),
+      [markdownTheme, linkColor, ownMessage, ownTextColor, onSurface],
+    );
     final baseTextStyle =
         (baseStyle ??
                 context.textTheme.bodyMedium?.copyWith(
@@ -270,7 +297,13 @@ class MessageContent extends HookConsumerWidget {
     final trailingGallery = maxLines == null
         ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
-    final markdownContent = trailingGallery?.content ?? normalizedContent;
+    final galleryText = trailingGallery?.content ?? normalizedContent;
+    // gpt_markdown has no backslash escapes, so hold escaped characters as
+    // stand-ins that _MarkdownEscapeMd and the link builders restore.
+    final markdownContent = useMemoized(
+      () => shieldMarkdownProseEscapes(galleryText),
+      [galleryText],
+    );
     final customEmoji = _mergeCustomEmoji(
       customEmojiFromTags(tags),
       ref.watch(customEmojiListProvider),
@@ -384,25 +417,31 @@ class MessageContent extends HookConsumerWidget {
           bubble: bubble,
           ink: bubble && ownMessage ? ownTextColor : null,
         ),
-        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
-          context,
-          ref,
-          linkText,
-          url,
-          imetaByUrl[url],
-          linkStyle,
-          style,
-          resolvedChannelTap,
-          resolvedChannelNames,
-        ),
-        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
-          context,
-          imageUrl,
-          imetaByUrl[imageUrl],
-          onReply: onMediaReply == null ? null : mediaReply,
-          onMore: onMediaMore == null ? null : mediaMore,
-        ),
-        textAlign: textAlign,
+        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
+          final url = unshieldMarkdownEscapes(shieldedUrl);
+          return _buildLink(
+            context,
+            ref,
+            linkText,
+            url,
+            imetaByUrl[url],
+            linkStyle,
+            style,
+            resolvedChannelTap,
+            resolvedChannelNames,
+          );
+        },
+        imageBuilder: (context, shieldedUrl, _, _) {
+          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
+          return _buildMedia(
+            context,
+            imageUrl,
+            imetaByUrl[imageUrl],
+            onReply: onMediaReply == null ? null : mediaReply,
+            onMore: onMediaMore == null ? null : mediaMore,
+          );
+        },
+        textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
         inlineComponents: inlineComponents,
       ),
@@ -419,15 +458,17 @@ class MessageContent extends HookConsumerWidget {
             children: [
               for (final (index, segment) in segments.indexed)
                 if (segment.attachment)
-                  MessageAttachmentCorners(
-                    borderRadius: _attachmentCorners(
-                      start: bubbleStart && index == 0,
-                      end:
-                          bubbleEnd &&
-                          trailingGallery == null &&
-                          index == segments.length - 1,
+                  MessageReplyDragTarget(
+                    child: MessageAttachmentCorners(
+                      borderRadius: _attachmentCorners(
+                        start: bubbleStart && index == 0,
+                        end:
+                            bubbleEnd &&
+                            trailingGallery == null &&
+                            index == segments.length - 1,
+                      ),
+                      child: renderMarkdown(segment.text),
                     ),
-                    child: renderMarkdown(segment.text),
                   )
                 else
                   Padding(
@@ -440,75 +481,40 @@ class MessageContent extends HookConsumerWidget {
                           ? 0
                           : Grid.quarter,
                     ),
-                    child: LocalSendBubbleSurface(
-                      color: ownMessage
-                          ? chatColors.outgoing
-                          : receivedMessageSurface(context.colors.brightness),
-                      shape: const _MessageBubbleShape(),
-                      child: Padding(
-                        padding: EdgeInsets.fromLTRB(
-                          Grid.xs,
-                          Grid.xxs,
-                          Grid.xs,
-                          hasReactions && index == segments.length - 1
-                              ? Grid.xs
-                              : Grid.xxs,
-                        ),
-                        child: Theme(
-                          data: Theme.of(context).copyWith(
-                            colorScheme: context.colors.copyWith(
-                              primary: linkColor,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth:
+                            MediaQuery.sizeOf(context).width *
+                            messageTextMaxWidthFraction,
+                      ),
+                      child: MessageReplyDragTarget(
+                        child: LocalSendBubbleSurface(
+                          color: ownMessage
+                              ? chatColors.outgoing
+                              : receivedMessageSurface(
+                                  context.colors.brightness,
+                                ),
+                          shape: const _MessageBubbleShape(),
+                          child: Padding(
+                            padding: EdgeInsets.fromLTRB(
+                              Grid.xs,
+                              Grid.xxs,
+                              Grid.xs,
+                              hasReactions && index == segments.length - 1
+                                  ? Grid.xs
+                                  : Grid.xxs,
                             ),
-                          ),
-                          child: GptMarkdownTheme(
-                            gptThemeData: markdownTheme.copyWith(
-                              linkColor: linkColor,
-                              // A neutral chip would put white ink on a light
-                              // fill; tint the accent instead.
-                              inlineCode: ownMessage
-                                  ? markdownTheme.inlineCode.copyWith(
-                                      color: ownTextColor,
-                                      backgroundColor: chatCodeTint(
-                                        ownTextColor,
-                                        0.18,
-                                      ),
-                                      borderColor: ownTextColor.withValues(
-                                        alpha: 0.3,
-                                      ),
-                                    )
-                                  : null,
-                              h1: markdownTheme.h1?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
+                            child: Theme(
+                              data: Theme.of(context).copyWith(
+                                colorScheme: context.colors.copyWith(
+                                  primary: linkColor,
+                                ),
                               ),
-                              h2: markdownTheme.h2?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h3: markdownTheme.h3?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h4: markdownTheme.h4?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h5: markdownTheme.h5?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
-                              ),
-                              h6: markdownTheme.h6?.copyWith(
-                                color: ownMessage
-                                    ? ownTextColor
-                                    : context.colors.onSurface,
+                              child: GptMarkdownTheme(
+                                gptThemeData: bubbleMarkdownTheme,
+                                child: renderMarkdown(segment.text),
                               ),
                             ),
-                            child: renderMarkdown(segment.text),
                           ),
                         ),
                       ),
@@ -526,21 +532,23 @@ class MessageContent extends HookConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (trailingGallery.content.trim().isNotEmpty) markdown,
-        MessageAttachmentCorners(
-          borderRadius: _attachmentCorners(
-            start: bubbleStart && trailingGallery.content.trim().isEmpty,
-            end: bubbleEnd,
-          ),
-          child: _MessageImageCarousel(
-            key: ValueKey(
-              trailingGallery.items.map((item) => item.url).join('\u0000'),
+        MessageReplyDragTarget(
+          child: MessageAttachmentCorners(
+            borderRadius: _attachmentCorners(
+              start: bubbleStart && trailingGallery.content.trim().isEmpty,
+              end: bubbleEnd,
             ),
-            items: trailingGallery.items,
-            mirrored: ownMessage,
-            leadingOverflow: mediaCarouselLeadingOverflow,
-            trailingOverflow: mediaCarouselTrailingOverflow,
-            onReply: onMediaReply,
-            onMore: onMediaMore,
+            child: _MessageImageCarousel(
+              key: ValueKey(
+                trailingGallery.items.map((item) => item.url).join('\u0000'),
+              ),
+              items: trailingGallery.items,
+              mirrored: ownMessage,
+              leadingOverflow: mediaCarouselLeadingOverflow,
+              trailingOverflow: mediaCarouselTrailingOverflow,
+              onReply: onMediaReply,
+              onMore: onMediaMore,
+            ),
           ),
         ),
       ],

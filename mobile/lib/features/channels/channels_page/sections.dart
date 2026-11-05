@@ -6,6 +6,7 @@ class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
+  final Set<String> attentionChannelIds;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final bool expanded;
@@ -25,6 +26,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.section,
     required this.channels,
     required this.unreadChannelIds,
+    required this.attentionChannelIds,
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.expanded,
@@ -68,6 +70,7 @@ class _CustomChannelSection extends StatelessWidget {
                 _ChannelTile(
                   channel: channel,
                   isUnread: unreadChannelIds.contains(channel.id),
+                  hasAttention: attentionChannelIds.contains(channel.id),
                   isMuted: mutedChannelIds.contains(channel.id),
                   currentPubkey: currentPubkey,
                   onTap: () => onSelectChannel(channel),
@@ -321,6 +324,7 @@ class _ChannelSection extends StatelessWidget {
   final VoidCallback onToggle;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
+  final Set<String> attentionChannelIds;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
@@ -334,6 +338,7 @@ class _ChannelSection extends StatelessWidget {
     required this.onToggle,
     required this.channels,
     required this.unreadChannelIds,
+    required this.attentionChannelIds,
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
@@ -384,6 +389,7 @@ class _ChannelSection extends StatelessWidget {
                   _ChannelTile(
                     channel: channel,
                     isUnread: unreadChannelIds.contains(channel.id),
+                    hasAttention: attentionChannelIds.contains(channel.id),
                     isMuted: mutedChannelIds.contains(channel.id),
                     currentPubkey: currentPubkey,
                     onTap: () => onSelectChannel(channel),

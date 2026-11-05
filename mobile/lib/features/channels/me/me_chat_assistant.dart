@@ -229,6 +229,7 @@ useMeChatAssistant(
     nativeAction: IosNavigationAction(
       label: label,
       symbol: 'person.crop.circle',
+      sharesBackground: false,
       avatarIdentity: selected,
       avatarIsAgent: selected != null,
       imageUrl: profile?.avatarUrl,

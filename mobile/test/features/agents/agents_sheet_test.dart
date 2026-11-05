@@ -3,6 +3,7 @@ import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
@@ -11,6 +12,7 @@ import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'agents_harness.dart';
 import '../../helpers/remote_agents_fixture.dart';
@@ -37,13 +39,14 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     final h = await AgentsHarness.create();
+    final prefs = await SharedPreferences.getInstance();
     await h.open(
       tester,
       directory: [existing, otherAgentKeys.public],
-      botDirectory: ['b' * 64],
+      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
     );
     expect(find.byKey(ValueKey(otherAgentKeys.public)), findsNothing);
-    expect(find.byKey(ValueKey('b' * 64)), findsNothing);
+    expect(find.byKey(ValueKey(oldAppAgentKeys.public)), findsNothing);
     if (!supportsRemoteAgents(h.community)) {
       expect(find.text('Sign in to create an agent'), findsNothing);
       for (final button in tester.widgetList<IconButton>(
@@ -207,6 +210,7 @@ void main() {
           'agent_pubkey': fakeAgent,
           'agent_id': 'remote-id',
           'agent_name': 'Scout',
+          'agent_instructions': 'Review carefully.',
         },
       ];
       await h.controller.run(h.controller.refresh);
@@ -216,6 +220,15 @@ void main() {
       expect(
         find.textContaining('This agent runs on Builderbot.'),
         findsOneWidget,
+      );
+      // Remote instructions come from the registry row, not published config.
+      expect(h.registry.bodies['/v3/beekeeper/list-agents'], {
+        'include_instructions': true,
+      });
+      expect(find.text('Review carefully.'), findsOneWidget);
+      expect(
+        find.textContaining('Instructions aren’t available'),
+        findsNothing,
       );
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Delete agent'));
@@ -264,10 +277,12 @@ void main() {
     await h.open(
       tester,
       directory: [existing],
+      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
       home: HomePage(
         onAgents: showAgents,
-        defaultAgentBuilder: (context) =>
-            DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
+        defaultAgentBuilder: (context) => DefaultAgentLauncher(
+          onChooseAgent: () => showAgents(context, createOnOpen: true),
+        ),
         settingsPageBuilder: (_) => const SizedBox.shrink(),
         mePageBuilder: (_, _, _) =>
             const SliverToBoxAdapter(child: Text('Solo workspace')),

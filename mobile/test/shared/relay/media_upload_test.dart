@@ -1701,3 +1701,27 @@ void main() {
     });
   });
 }
+
+/// Pick-then-upload compositions over the service's picker and upload steps.
+extension on MediaUploadService {
+  Future<BlobDescriptor?> pickAndUploadImage() async {
+    final image = await pickGalleryImage();
+    return image == null ? null : uploadImage(image);
+  }
+
+  Future<BlobDescriptor?> pickAndUploadVideo() async {
+    final video = await pickGalleryVideo();
+    return video == null ? null : uploadVideo(video);
+  }
+
+  Future<BlobDescriptor?> pickAndUploadFile() async {
+    final file = await pickAttachmentFile();
+    return file == null ? null : uploadFile(file);
+  }
+
+  Future<BlobDescriptor> readAndUploadClipboardImage() async {
+    final image = await readClipboardImage();
+    if (image == null) throw Exception('Unable to read pasted image');
+    return uploadImage(image);
+  }
+}

@@ -7,6 +7,8 @@ flutter_root=$(sed -n 's/^FLUTTER_ROOT=//p' "$repo_root/mobile/ios/Flutter/Gener
 frameworks="$flutter_root/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
 fixture=$(mktemp -d)
 trap 'rm -r "$fixture"' EXIT
+mkdir -p "$fixture/Frameworks/App.framework/flutter_assets/assets/fonts"
+cp "$repo_root/mobile/assets/fonts/TablerIcons.ttf" "$fixture/Frameworks/App.framework/flutter_assets/assets/fonts/TablerIcons.ttf"
 # Compile the production menu and invoke its actual UIKit UIActions.
 cat "$repo_root/mobile/ios/Runner/NativeTabler.swift" \
   "$repo_root/mobile/ios/Runner/JumpToLatestGlassButton.swift" \

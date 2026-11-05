@@ -10,6 +10,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
   final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
   final Widget fallback;
 
   const _IOSInlinePhotoPicker({
@@ -17,6 +18,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
     required this.onChooseAllPhotos,
+    required this.preparePhotos,
     required this.fallback,
   });
 
@@ -74,7 +76,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
         !isPreparingSelection.value &&
         !isProcessing.value;
 
-    Future<void> submitSelection() async {
+    Future<void> submitSelection() => preparePhotos(() async {
       if (!canSelect) return;
       isProcessing.value = true;
       try {
@@ -91,7 +93,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
       } finally {
         if (context.mounted) isProcessing.value = false;
       }
-    }
+    });
 
     Future<void> openAllPhotos() async {
       if (isPreparingSelection.value || isProcessing.value) return;

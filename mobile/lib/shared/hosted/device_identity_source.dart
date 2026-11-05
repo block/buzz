@@ -62,6 +62,11 @@ class DeviceIdentitySource {
     return null;
   }
 
+  /// Whether a saved community or previous device record holds exactly [nsec].
+  Future<bool> holds(String nsec) async =>
+      (await _read())[AccountIdentityStore.publicKeyForNsec(nsec)]?.nsec ==
+      nsec;
+
   /// Reread and validate the chosen key immediately before create-only adoption.
   Future<AccountIdentitySnapshot> adopt(
     String pubkey,

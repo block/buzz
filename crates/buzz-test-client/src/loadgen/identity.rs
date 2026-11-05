@@ -7,7 +7,7 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, SecretKey, Tag};
 use sha2::{Digest, Sha256};
 
 /// Role of a derived identity; part of the derivation so roles never collide.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Owner,
     Human,

@@ -52,6 +52,15 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
     }
 }
 
+/// Time one persistent WebSocket EVENT from frame to OK under `outcome`:
+/// `accepted`, `not_accepted` (for example a duplicate), or the ingest error
+/// class (`invalid`, `auth`, `error`). Failures are timed too, so a slow
+/// failing store shows in the latency instead of hiding from it.
+fn record_event_processing(start: std::time::Instant, outcome: &'static str) {
+    metrics::histogram!("buzz_event_processing_seconds", "outcome" => outcome)
+        .record(start.elapsed().as_secs_f64());
+}
+
 fn event_frame_for_sub(sub_id: &str, event_json: &str) -> String {
     format!(r#"["EVENT","{}",{}]"#, sub_id, event_json)
 }
@@ -715,19 +724,15 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 
     // Observer frames and ephemeral kinds return before ingest, so they take
-    // the ban / timeout write-block here, over a short-TTL cache because it
-    // runs per frame. Persistent kinds get the uncached check in ingest, and
-    // so does NIP-43 leave (28936), which is ephemeral-range but ingested.
+    // the ban / timeout write-block here. Persistent kinds get the same check
+    // in ingest, and so does NIP-43 leave (28936), which is ephemeral-range but
+    // ingested.
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME
         || (is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST)
     {
-        if let Err(e) = super::ingest::enforce_cached_write_restriction(
-            &state,
-            &conn.tenant,
-            kind_u32,
-            &auth_pubkey,
-        )
-        .await
+        if let Err(e) =
+            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
+                .await
         {
             let (message, reason) = match e.into_legacy() {
                 // `into_legacy` never returns `Ban`; it would fail closed here.
@@ -802,10 +807,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        // Cached (10s): this runs per ephemeral event. Persistent ingest keeps
-        // the uncached read as its durable write fence.
+        // Cached: this runs per ephemeral event. Persistent ingest keeps the
+        // uncached read as its durable write fence.
         match state
-            .is_serving_active_cached(conn.tenant.community())
+            .is_community_active_cached(conn.tenant.community())
             .await
         {
             Ok(true) => {}
@@ -925,8 +930,14 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     "Event ingested"
                 );
             }
-            metrics::histogram!("buzz_event_processing_seconds")
-                .record(start.elapsed().as_secs_f64());
+            record_event_processing(
+                start,
+                if result.accepted {
+                    "accepted"
+                } else {
+                    "not_accepted"
+                },
+            );
             conn.send(RelayMessage::ok(
                 &result.event_id,
                 result.accepted,
@@ -945,6 +956,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     ("error: internal server error".to_string(), "error")
                 }
             };
+            record_event_processing(start, reason);
             reject(reason);
             conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
         }
@@ -1250,17 +1262,12 @@ pub(crate) async fn publish_http_typing(
         Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
         Err(_) => return Err(IngestError::Internal("error: internal error".into())),
     }
-    // Same short-TTL caches as the WebSocket ephemeral path: this runs per
-    // typing pulse, and persistent ingest keeps the uncached durable fence.
-    super::ingest::enforce_cached_write_restriction(
-        state,
-        tenant,
-        KIND_TYPING_INDICATOR,
-        &auth_pubkey,
-    )
-    .await?;
+    // Same restriction gate and serving-fence cache as the WebSocket
+    // ephemeral path: this runs per typing pulse.
+    super::ingest::enforce_write_restriction(state, tenant, KIND_TYPING_INDICATOR, &auth_pubkey)
+        .await?;
     super::ingest::map_serving_fence_state(
-        state.is_serving_active_cached(tenant.community()).await,
+        state.is_community_active_cached(tenant.community()).await,
     )?;
     publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
@@ -1794,6 +1801,7 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
@@ -1881,6 +1889,7 @@ mod tests {
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2042,6 +2051,7 @@ mod tests {
             }
             let (send_tx, _send_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2164,6 +2174,7 @@ mod tests {
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3678,6 +3689,7 @@ mod tests {
             let (ctrl_tx, _) = mpsc::channel(8);
             let (terminal_ctrl_tx, _) = mpsc::channel(1);
             let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant,
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3870,10 +3882,11 @@ mod tests {
             let (state, tenant, user) = unrestricted_fixture().await;
             let key = (tenant.community(), user.public_key().to_bytes().to_vec());
 
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key.clone(),
                 buzz_db::moderation::RestrictionState {
                     banned: true,
+                    own_banned: true,
                     muted_until: None,
                 },
             );
@@ -3883,10 +3896,11 @@ mod tests {
                 "a cached ban must refuse the ephemeral event; got {frame}"
             );
 
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key,
                 buzz_db::moderation::RestrictionState {
                     banned: false,
+                    own_banned: false,
                     muted_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
                 },
             );
@@ -3898,12 +3912,12 @@ mod tests {
         }
 
         /// The ephemeral community fence reads the cached serving state.
-        /// Mutation: call the uncached `is_serving_active` → RED.
+        /// Mutation: call the uncached `is_community_active` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn ephemeral_fence_uses_cached_serving_state() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.serving_active_cache.insert(tenant.community(), false);
+            state.community_active.seed(tenant.community(), false);
             let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert!(
                 frame.contains("false") && frame.contains("community writes are fenced"),
@@ -3918,13 +3932,17 @@ mod tests {
             let (state, tenant, user) = unrestricted_fixture().await;
             ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert_eq!(
-                state.serving_active_cache.get(&tenant.community()),
+                state
+                    .community_active
+                    .entry(tenant.community())
+                    .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|cached| cached.state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -3935,53 +3953,105 @@ mod tests {
                 .expect("sign text note")
         }
 
-        /// Stored writes, and NIP-43 leave, skip the cached restriction row:
-        /// a cached ban on a sender Postgres has never restricted refuses
-        /// neither. The leave reaches ingest's later membership check, past
-        /// its uncached restriction check.
-        /// Mutation: make ingest call `enforce_cached_write_restriction`, or
-        /// drop the 28936 carve-out from the `handle_event` gate → RED.
+        /// Stored writes read the restriction through the cache, and only
+        /// while the entry is younger than `RESTRICTION_CACHE_MAX_AGE`: a
+        /// fresh cached ban on a sender Postgres has never restricted refuses
+        /// a stored write, and the same row past that age is reread and
+        /// admits it.
+        /// Mutation: make ingest read the restriction uncached, or drop the
+        /// max-age check from `restriction_state_cached` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn stored_writes_ignore_cached_ban() {
+        async fn stored_writes_honor_cached_ban_until_it_ages_out() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.restriction_cache.insert(
-                (tenant.community(), user.public_key().to_bytes().to_vec()),
-                buzz_db::moderation::RestrictionState {
-                    banned: true,
-                    muted_until: None,
-                },
-            );
+            let key = (tenant.community(), user.public_key().to_bytes().to_vec());
+            let banned = buzz_db::moderation::RestrictionState {
+                banned: true,
+                own_banned: true,
+                muted_until: None,
+            };
             let scopes = buzz_auth::Scope::all_non_admin();
 
+            state.seed_restriction(key.clone(), banned.clone());
             let frame =
                 ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
             assert!(
-                frame.contains(",true,"),
-                "a stored write must read the restriction from Postgres; got {frame}"
+                frame.contains("blocked: you are banned"),
+                "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            let leave = nostr::EventBuilder::new(
-                nostr::Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
-                "",
-            )
-            .sign_with_keys(&user)
-            .expect("sign leave");
-            let frame = ok_frame_scoped(&state, &tenant, &user, leave, scopes).await;
-            assert!(
-                frame.contains("relay membership is not enabled"),
-                "NIP-43 leave must skip the cached gate and pass ingest's uncached one; got {frame}"
+            state.restriction_cache.insert(
+                key,
+                crate::state::CachedRestriction {
+                    state: banned,
+                    read_at: std::time::Instant::now()
+                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
+                        .expect("instant past max age"),
+                },
             );
+            let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
+            assert!(
+                frame.contains(",true,"),
+                "an aged-out cached ban must be reread from Postgres; got {frame}"
+            );
+        }
+
+        /// Every persistent ingest is timed under its outcome, failures
+        /// included, so a failing store cannot hide from the latency.
+        /// Mutation: drop `record_event_processing` from the `Err` arm → RED.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn event_processing_is_timed_for_accepted_and_refused_ingest() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            let scopes = buzz_auth::Scope::all_non_admin();
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                let frame =
+                    ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+                assert!(frame.contains(",true,"), "{frame}");
+                state.seed_restriction(
+                    (tenant.community(), user.public_key().to_bytes().to_vec()),
+                    buzz_db::moderation::RestrictionState {
+                        banned: true,
+                        own_banned: true,
+                        muted_until: None,
+                    },
+                );
+                let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
+                assert!(frame.contains("blocked: you are banned"), "{frame}");
+            }
+            let mut timed: Vec<(String, usize)> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_event_processing_seconds")
+                .map(|(key, _, _, value)| {
+                    let metrics_util::debugging::DebugValue::Histogram(samples) = value else {
+                        panic!("buzz_event_processing_seconds must be a histogram");
+                    };
+                    let outcome = key
+                        .key()
+                        .labels()
+                        .find(|l| l.key() == "outcome")
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default();
+                    (outcome, samples.len())
+                })
+                .collect();
+            timed.sort();
+            assert_eq!(timed, [("accepted".to_owned(), 1), ("auth".to_owned(), 1)]);
         }
 
         /// Stored writes skip the cached serving state: a cached "fenced"
         /// for a community Postgres says is active does not refuse them.
-        /// Mutation: make ingest's fence call `is_serving_active_cached` → RED.
+        /// Mutation: make ingest's fence call `is_community_active_cached` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_ignore_cached_fence() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.serving_active_cache.insert(tenant.community(), false);
+            state.community_active.seed(tenant.community(), false);
             let frame = ok_frame_scoped(
                 &state,
                 &tenant,
@@ -4033,6 +4103,7 @@ mod tests {
                 mpsc::channel::<axum::extract::ws::Message>(1);
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -4226,6 +4297,7 @@ mod tests {
                 mpsc::channel::<axum::extract::ws::Message>(1);
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,

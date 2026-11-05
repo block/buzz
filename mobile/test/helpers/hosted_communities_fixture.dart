@@ -120,7 +120,11 @@ class HostedCommunitiesFixture {
         if (path.endsWith('/me')) {
           if (expired) return http.Response('{}', 401);
           return http.Response(
-            jsonEncode({'subject': subject, 'expires_at': expiry}),
+            jsonEncode({
+              'subject': subject,
+              'email': 'owner@example.com',
+              'expires_at': expiry,
+            }),
             200,
           );
         }
@@ -180,9 +184,10 @@ class HostedCommunitiesFixture {
         if (current()) openedCommunity = link.relayUrl;
       },
       enterCommunity: (link, subject, pubkey, current) async {
-        final target = link as AddCommunityDeepLink;
-        await beforeAdmission?.call(target.name);
-        if (current()) admitted.add(target.name);
+        // Record the relay host: names are display labels.
+        final host = Uri.parse((link as AddCommunityDeepLink).relayUrl).host;
+        await beforeAdmission?.call(host);
+        if (current()) admitted.add(host);
       },
     );
   }

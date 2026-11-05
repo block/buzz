@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::{
     api_error, authorize_operator_listener_request, internal_error, verify_registration_proof,
 };
-use crate::state::AppState;
+use crate::{access::AccessSlot, state::AppState};
 use buzz_core::CommunityId;
 
 const PATH: &str = "/operator/listener/threads";
@@ -94,11 +94,12 @@ fn parse_registration(
 /// server expiry is 30 days, with at most 128 watches per target/community.
 pub async fn register_listener_threads(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let listener =
-        authorize_operator_listener_request(&state, &headers, "POST", PATH, &body).await?;
+        authorize_operator_listener_request(&state, &slot, &headers, "POST", PATH, &body).await?;
     let request: Registration = serde_json::from_slice(&body)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid thread registration JSON"))?;
     if request.registrations.is_empty() || request.registrations.len() > MAX_REGISTRATIONS {
@@ -151,11 +152,12 @@ pub async fn register_listener_threads(
 /// to relinquish delivery; this cannot create or broaden a subscription.
 pub async fn remove_listener_threads(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let listener =
-        authorize_operator_listener_request(&state, &headers, "DELETE", PATH, &body).await?;
+        authorize_operator_listener_request(&state, &slot, &headers, "DELETE", PATH, &body).await?;
     let request: Removal = serde_json::from_slice(&body)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid thread removal JSON"))?;
     state

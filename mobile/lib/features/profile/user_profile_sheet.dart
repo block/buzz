@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+
 import '../../shared/widgets/profile_action_chip.dart';
 import '../../shared/widgets/app_list_card.dart';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -16,9 +18,11 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/agent_artwork_panel.dart';
 import '../../shared/widgets/buzz_sheet_header.dart';
+import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -156,6 +160,13 @@ class UserProfileSheet extends HookConsumerWidget {
     final displayName =
         (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
             .labelFor(pk);
+    final verifiedFullName = ref.watch(
+      verifiedProfilesProvider.select((all) => all[pk]?.fullName),
+    );
+    final titleName = agentPresentation
+        ? displayName
+        : verifiedFullName ?? displayName;
+    final secondaryName = titleName != displayName ? displayName : null;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
@@ -258,21 +269,40 @@ class UserProfileSheet extends HookConsumerWidget {
 
                     // Display name — centered, large
                     Center(
-                      child: Text(
-                        displayName,
-                        style: agentPresentation
-                            ? context.textTheme.bodyLarge?.copyWith(
-                                fontSize: 20,
-                                height: 1.4,
-                                letterSpacing: -0.2,
-                              )
-                            : context.textTheme.headlineSmall?.copyWith(
-                                fontWeight: FontWeight.w700,
-                              ),
-                        textAlign: TextAlign.center,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              titleName,
+                              style: agentPresentation
+                                  ? context.textTheme.bodyLarge?.copyWith(
+                                      fontSize: 20,
+                                      height: 1.4,
+                                      letterSpacing: -0.2,
+                                    )
+                                  : context.textTheme.headlineSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-
+                    if (secondaryName != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: Grid.xxs),
+                        child: Center(
+                          child: Text(
+                            secondaryName,
+                            textAlign: TextAlign.center,
+                            style: context.textTheme.bodySmall?.copyWith(
+                              color: context.colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ),
                     if (!agentPresentation && agentSubtitle != null) ...[
                       const SizedBox(height: Grid.xxs),
                       Center(
@@ -601,14 +631,12 @@ class _ProfileAvatar extends HookWidget {
                   )
                 : AvatarImageContent(
                     imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                    preferThumbnail: true,
                     fallback: _AvatarFallback(initial: initial),
                   );
-            if (!isAgent) return ClipOval(child: avatar);
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(
-                constraints.biggest.shortestSide * 0.3,
-              ),
-              child: !usesInsetAgentArtwork(avatarUrl)
+            return AvatarClip(
+              isAgent: isAgent,
+              child: !isAgent || !usesInsetAgentArtwork(avatarUrl)
                   ? avatar
                   : Transform.scale(
                       scale: animatedAvatarArtworkScale,

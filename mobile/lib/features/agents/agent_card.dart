@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 
@@ -44,6 +45,9 @@ class AgentCard extends StatelessWidget {
         style: context.textTheme.headlineMedium,
       ),
     );
+    final portraitFit = usesInsetAgentArtwork(imageUrl)
+        ? BoxFit.contain
+        : BoxFit.cover;
     final portrait =
         animation != null &&
             !MediaQuery.disableAnimationsOf(context) &&
@@ -51,12 +55,13 @@ class AgentCard extends StatelessWidget {
         ? ProgressiveAnimatedAvatar(
             descriptor: animation,
             fallback: fallback,
-            fit: BoxFit.contain,
+            fit: portraitFit,
           )
         : AvatarImageContent(
             imageUrl: poster,
+            preferThumbnail: true,
             fallback: fallback,
-            fit: BoxFit.contain,
+            fit: portraitFit,
           );
     return ClipRRect(
       borderRadius: BorderRadius.circular(Radii.card),
@@ -85,6 +90,7 @@ class AgentCard extends StatelessWidget {
                             scale: 1.8,
                             child: AvatarImageContent(
                               imageUrl: poster,
+                              preferThumbnail: true,
                               fallback: const SizedBox.shrink(),
                             ),
                           ),
@@ -122,10 +128,8 @@ class AgentCard extends StatelessWidget {
                                     child: RepaintBoundary(
                                       child: SizedBox.square(
                                         dimension: 104,
-                                        child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(
-                                            Radii.card,
-                                          ),
+                                        child: AvatarClip(
+                                          isAgent: true,
                                           child: portrait,
                                         ),
                                       ),

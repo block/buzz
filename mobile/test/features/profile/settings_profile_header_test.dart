@@ -12,7 +12,6 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -269,7 +268,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(Hero), findsNothing);
-    expect(find.byType(MaskedAvatarBadge), findsNothing);
     expect(find.text('$missingShortcode Focusing'), findsOneWidget);
     expect(
       tester.getSize(find.byKey(const ValueKey('settings-profile-avatar'))),
@@ -340,7 +338,6 @@ void main() {
           findsOneWidget,
         );
       }
-      expect(find.byType(MaskedAvatarBadge), findsNothing);
       await tester.tap(
         scenario.resolved
             ? find.byType(CustomEmojiImage)

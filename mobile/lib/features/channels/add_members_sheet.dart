@@ -16,6 +16,10 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
 import 'ios_add_members_sheet.dart';
+import 'mentions/mention_candidates.dart';
+import 'mentions/mention_candidates_provider.dart';
+import 'mentions/mention_ranking.dart';
+import 'mentions/stable_mention_rows.dart';
 import '../../shared/widgets/modal_presentation.dart';
 
 bool _nativePickerOpen = false;
@@ -78,23 +82,27 @@ class AddChannelMembersSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final queryController = useTextEditingController();
     final query = useState('');
-    final debouncedQuery = useState('');
-    final selectedUsers = useState<List<DirectoryUser>>([]);
+    // A new opening after each pick, as the mention chooser starts one per
+    // `@`: shown rows keep their places only within one query and opening.
+    final opening = useState(0);
+    final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
     final actions = useMemoized(() => ref.read(channelActionsProvider));
 
-    useEffect(() {
-      final timer = Timer(const Duration(milliseconds: 250), () {
-        debouncedQuery.value = query.value.trim().toLowerCase();
-      });
-      return timer.cancel;
-    }, [query.value]);
-
-    final normalizedQuery = debouncedQuery.value;
-    final directoryAsync = normalizedQuery.isEmpty
-        ? ref.watch(relayDirectoryUsersProvider)
-        : ref.watch(relayDirectorySearchProvider(normalizedQuery));
+    // The same candidates, ranking, debounce and search cache as mention
+    // autocomplete and New DM. A channel can hold agents that do not answer
+    // the viewer, so those are offered too.
+    final search = query.value.trim();
+    final ranked = ref.watch(
+      recipientCandidatesProvider((
+        query: search,
+        historyKey: addMembersMentionHistoryKey,
+        unsharedAgents: true,
+      )),
+    );
+    final searching = ref.watch(recipientSearchPendingProvider(search));
+    final searchFailed = ref.watch(recipientSearchFailedProvider(search));
     final normalizedExisting = existingPubkeys
         .map((pubkey) => pubkey.toLowerCase())
         .toSet();
@@ -102,14 +110,28 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         .map((user) => user.pubkey.toLowerCase())
         .toSet();
     final successfulPubkeys = useState<Set<String>>(<String>{});
-    final excludedPubkeys = {...normalizedExisting, ...successfulPubkeys.value};
-    final availableUsers =
-        directoryAsync.asData?.value
-            .where(
-              (user) => !excludedPubkeys.contains(user.pubkey.toLowerCase()),
-            )
-            .toList() ??
-        const <DirectoryUser>[];
+    final excludedPubkeys = {
+      ...normalizedExisting,
+      ...successfulPubkeys.value,
+      ...selectedPubkeys,
+    };
+    final shown = useStableMentionRows(
+      [
+        for (final candidate in ranked)
+          if (!excludedPubkeys.contains(candidate.pubkey.toLowerCase()))
+            candidate,
+      ],
+      query: search,
+      opening: opening.value,
+      pending: searching,
+    );
+    final availableUsers = shown.rows;
+    final userCache = ref.watch(userCacheProvider);
+    final currentPubkey = ref.watch(currentPubkeyProvider);
+    String? detail(MentionCandidate user) =>
+        recipientRowDetail(user, currentPubkey, userCache);
+    String? avatarUrl(MentionCandidate user) =>
+        user.avatarUrl ?? userCache[user.pubkey]?.avatarUrl;
     // Compare every shown choice with the channel's members, so a candidate
     // who shares a member's name is told apart before being added. Members
     // are only compared: their names come from the roster the details page
@@ -129,27 +151,35 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       },
       fallbackNames: {
         for (final member in roster) member.pubkey: ?member.displayName,
-        for (final user in choices) user.pubkey: user.label,
+        for (final user in choices) user.pubkey: user.pickerLabel,
       },
       shown: [for (final user in choices) user.pubkey],
     );
-    String labelFor(DirectoryUser user) => names.labelFor(user.pubkey);
+    String labelFor(MentionCandidate user) => names.labelFor(user.pubkey);
+    void retry() => ref.invalidate(mentionUserSearchProvider(search));
 
-    void toggleUser(DirectoryUser user) {
+    void toggleUser(MentionCandidate user) {
       if (isSubmitting.value) return;
       final normalized = user.pubkey.toLowerCase();
-      selectedUsers.value = selectedPubkeys.contains(normalized)
-          ? [
-              for (final selected in selectedUsers.value)
-                if (selected.pubkey.toLowerCase() != normalized) selected,
-            ]
-          : [...selectedUsers.value, user];
+      if (selectedPubkeys.contains(normalized)) {
+        selectedUsers.value = [
+          for (final selected in selectedUsers.value)
+            if (selected.pubkey.toLowerCase() != normalized) selected,
+        ];
+      } else {
+        if (shown.unavailable.contains(user.pubkey)) return;
+        selectedUsers.value = [...selectedUsers.value, user];
+        ref
+            .read(mentionHistoryProvider.notifier)
+            .remember(addMembersMentionHistoryKey, user.pubkey);
+      }
+      opening.value++;
       submitError.value = null;
     }
 
     Future<void> addSelectedMembers() async {
       if (selectedUsers.value.isEmpty || isSubmitting.value) return;
-      final submittedUsers = List<DirectoryUser>.of(selectedUsers.value);
+      final submittedUsers = List<MentionCandidate>.of(selectedUsers.value);
       isSubmitting.value = true;
       submitError.value = null;
       try {
@@ -183,13 +213,10 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     }
 
     if (nativePresentation) {
-      final profiles = ref.watch(userCacheProvider);
       final auth = ref.watch(mediaGetAuthServiceProvider);
       final client = ref.watch(mediaHttpClientProvider);
       final colors = Theme.of(context).colorScheme;
-      String? avatarUrl(DirectoryUser user) =>
-          profiles[user.pubkey]?.avatarUrl ?? user.avatarUrl;
-      String avatarKey(DirectoryUser user) => jsonEncode([
+      String avatarKey(MentionCandidate user) => jsonEncode([
         user.pubkey,
         avatarUrl(user),
         user.initial,
@@ -197,11 +224,12 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         colors.primaryContainer.toARGB32(),
         colors.onPrimaryContainer.toARGB32(),
       ]);
-      Map<String, Object?> row(DirectoryUser user) => {
+      Map<String, Object?> row(MentionCandidate user) => {
         'pubkey': user.pubkey,
         'name': labelFor(user),
-        'detail': user.secondaryLabel,
+        'detail': detail(user),
         'agent': user.isAgent,
+        'unavailable': shown.unavailable.contains(user.pubkey),
         'avatarKey': avatarKey(user),
         'initial': user.initial,
         'avatarBackground': colors.primaryContainer.toARGB32(),
@@ -226,10 +254,9 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         },
         state: {
           'query': query.value,
-          'loading':
-              directoryAsync.isLoading ||
-              query.value.trim().toLowerCase() != normalizedQuery,
-          'loadError': directoryAsync.hasError,
+          'emptyQueryHint': 'Type a name to find people or agents.',
+          'loading': searching,
+          'loadError': searchFailed,
           'error': submitError.value,
           'submitting': isSubmitting.value,
           'selected': [for (final user in selectedUsers.value) row(user)],
@@ -245,13 +272,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
           if (user != null) toggleUser(user);
         },
         onSubmit: () => unawaited(addSelectedMembers()),
-        onRetry: () {
-          if (normalizedQuery.isEmpty) {
-            ref.invalidate(relayDirectoryUsersProvider);
-          } else {
-            ref.invalidate(relayDirectorySearchProvider(normalizedQuery));
-          }
-        },
+        onRetry: retry,
         onClose: () => Navigator.of(context).pop(false),
       );
     }
@@ -308,85 +329,91 @@ class AddChannelMembersSheet extends HookConsumerWidget {
               ],
               const SizedBox(height: Grid.xxs),
               Expanded(
-                child: directoryAsync.when(
-                  data: (_) => availableUsers.isEmpty
-                      ? Center(
-                          child: Text(
-                            normalizedQuery.isEmpty
-                                ? 'Everyone available is already in this channel.'
-                                : 'No matching people or agents.',
-                            textAlign: TextAlign.center,
-                          ),
-                        )
-                      : ListView.builder(
-                          key: const ValueKey('add-channel-members-results'),
-                          itemCount: availableUsers.length,
-                          itemBuilder: (context, index) {
-                            final user = availableUsers[index];
-                            final selected = selectedPubkeys.contains(
-                              user.pubkey.toLowerCase(),
-                            );
-                            return AppListCardItem(
-                              index: index,
-                              itemCount: availableUsers.length,
-                              dividerIndent: Grid.xs + 40 + Grid.xs,
-                              child: Semantics(
-                                key: ValueKey(
-                                  'add-channel-member-${user.pubkey}',
-                                ),
-                                button: true,
-                                selected: selected,
-                                label: selected
-                                    ? '${labelFor(user)}, selected'
-                                    : labelFor(user),
-                                child: ListTile(
-                                  leading: AvatarImage(
-                                    imageUrl: user.avatarUrl,
-                                    radius: 20,
-                                    backgroundColor: context.controlSurface,
-                                    fallback: Text(user.initial),
-                                    isAgent: user.isAgent,
-                                  ),
-                                  title: Text(
-                                    labelFor(user),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  subtitle: Text(
-                                    user.secondaryLabel,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  trailing: Icon(
-                                    selected
-                                        ? BuzzIcons.circleCheck
-                                        : BuzzIcons.plus,
-                                    color: selected
-                                        ? context.colors.primary
-                                        : context.colors.onSurfaceVariant,
-                                  ),
-                                  onTap: () => toggleUser(user),
+                child: availableUsers.isEmpty && !searchFailed
+                    ? Center(
+                        child: searching
+                            ? const BuzzLoadingIndicator(
+                                size: 44,
+                                semanticLabel: 'Searching people and agents',
+                              )
+                            : Text(
+                                search.isEmpty
+                                    ? 'Type a name to find people or agents.'
+                                    : 'No matching people or agents.',
+                                textAlign: TextAlign.center,
+                              ),
+                      )
+                    : ListView.builder(
+                        key: const ValueKey('add-channel-members-results'),
+                        itemCount:
+                            availableUsers.length + (searchFailed ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index == availableUsers.length) {
+                            return ListTile(
+                              key: const ValueKey(
+                                'add-channel-members-search-error',
+                              ),
+                              title: Text(
+                                'Couldn’t search people or agents.',
+                                style: context.textTheme.bodyMedium?.copyWith(
+                                  color: context.colors.error,
                                 ),
                               ),
+                              trailing: TextButton(
+                                onPressed: retry,
+                                child: const Text('Retry'),
+                              ),
                             );
-                          },
-                        ),
-                  loading: () => const Center(
-                    child: BuzzLoadingIndicator(
-                      size: 44,
-                      semanticLabel: 'Loading people and agents',
-                    ),
-                  ),
-                  error: (error, _) => Center(
-                    child: Text(
-                      'Couldn’t load people or agents. Try again.',
-                      style: context.textTheme.bodyMedium?.copyWith(
-                        color: context.colors.error,
+                          }
+                          final user = availableUsers[index];
+                          final available = !shown.unavailable.contains(
+                            user.pubkey,
+                          );
+                          final info = detail(user);
+                          return AppListCardItem(
+                            index: index,
+                            itemCount: availableUsers.length,
+                            dividerIndent: Grid.xs + 40 + Grid.xs,
+                            child: Semantics(
+                              key: ValueKey(
+                                'add-channel-member-${user.pubkey}',
+                              ),
+                              button: true,
+                              enabled: available,
+                              label: labelFor(user),
+                              child: ListTile(
+                                enabled: available,
+                                leading: AvatarImage(
+                                  imageUrl: avatarUrl(user),
+                                  radius: 20,
+                                  backgroundColor: context.controlSurface,
+                                  fallback: Text(user.initial),
+                                  isAgent: user.isAgent,
+                                ),
+                                title: Text(
+                                  labelFor(user),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: info == null
+                                    ? null
+                                    : Text(
+                                        info,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                trailing: Icon(
+                                  BuzzIcons.plus,
+                                  color: context.colors.onSurfaceVariant,
+                                ),
+                                onTap: available
+                                    ? () => toggleUser(user)
+                                    : null,
+                              ),
+                            ),
+                          );
+                        },
                       ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ),
               ),
               if (submitError.value case final error?) ...[
                 const SizedBox(height: Grid.xxs),

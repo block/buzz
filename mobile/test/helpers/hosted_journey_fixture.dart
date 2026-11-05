@@ -1,5 +1,6 @@
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/services.dart';
@@ -19,6 +20,8 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/organization_sign_in.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_socket.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
@@ -57,9 +60,18 @@ class HostedJourneyFixture {
   HostedFlow get flow => activeFlow!;
   late ProviderContainer container;
   String? bound;
+
+  /// Binding these pubkeys answers [bindStatus]; [challengeStatus] fails the
+  /// challenge first.
+  final rejectedBindings = <String>{};
+  int bindStatus = 409;
+  int? challengeStatus;
   int starterFailures = 0;
   final policyResponses = <http.Response>[];
   int browserStarts = 0;
+  final browserUrls = <Uri>[];
+  bool needsAccountSetup = false;
+  bool screeningPending = false;
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
   bool relayAuthEnabled = false;
@@ -67,6 +79,15 @@ class HostedJourneyFixture {
   bool denyAssertion = false;
   bool refuseUpgrade = false;
   String subject = 'journey-owner';
+
+  /// A separate organization realm, as BUZZ_ORGANIZATION_URL and
+  /// BUZZ_ORGANIZATION_RELAYS configure. Enable before [mount].
+  static final organizationOrigin = Uri.parse('https://block.example.com');
+  static const organizationRelayHost = 'buzz.block.example.com';
+  bool organizationEnabled = false;
+  String organizationSubject = 'journey-owner';
+  String? organizationBound;
+  int organizationBrowserStarts = 0;
   Future<void> Function()? beforeAssertionReturn;
   final socketHeaders = <Map<String, String>>[];
   bool offerProfile = true;
@@ -131,7 +152,20 @@ class HostedJourneyFixture {
       };
     } else if (path.endsWith('/me')) {
       if (expiredSession) return http.Response('{}', 401);
-      result = {'subject': subject, 'expires_at': expiry};
+      result = {
+        'subject': subject,
+        'expires_at': expiry,
+        'account_status': needsAccountSetup
+            ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
+            : screeningPending
+            ? 'ACCOUNT_STATUS_PENDING'
+            : 'ACCOUNT_STATUS_OK',
+        if (needsAccountSetup || screeningPending)
+          'account_standing': {
+            'details_status': 'ACCOUNT_DETAILS_STATUS_MISSING',
+            'screening_status': 'ACCOUNT_SCREENING_STATUS_NOT_SCREENED',
+          },
+      };
     } else if (path.endsWith('/identity/assertions')) {
       await beforeAssertionReturn?.call();
       if (expiredSession) return http.Response('{}', 401);
@@ -195,6 +229,7 @@ class HostedJourneyFixture {
         'failed_backup_ids': <String>[],
       };
     } else if (path.endsWith('/challenge')) {
+      if (challengeStatus != null) return http.Response('{}', challengeStatus!);
       result = {
         'challenge_id': '12345678-1234-1234-1234-123456789abc',
         'nonce': 'a' * 43,
@@ -206,6 +241,9 @@ class HostedJourneyFixture {
       final event =
           jsonDecode(jsonDecode(request.body)['signed_payload'] as String)
               as Map;
+      if (rejectedBindings.contains(event['pubkey'])) {
+        return http.Response('{}', bindStatus);
+      }
       bound = event['pubkey'] as String;
       result = {
         'identity': {'pubkey_hex': bound},
@@ -301,9 +339,64 @@ class HostedJourneyFixture {
     );
   });
 
+  http.Client organizationClient() => MockClient((request) async {
+    requests.add(request);
+    expect(request.url.origin, organizationOrigin.origin);
+    final path = request.url.path;
+    Object result;
+    if (path.endsWith('/exchange')) {
+      result = {
+        'session_credential': 'organization-session',
+        'expires_at': expiry,
+      };
+    } else if (path.endsWith('/me')) {
+      result = {'subject': organizationSubject, 'expires_at': expiry};
+    } else if (path.endsWith('/current')) {
+      result = {
+        'identity': organizationBound == null
+            ? null
+            : {'pubkey_hex': organizationBound},
+      };
+    } else if (path.endsWith('/identity/assertions')) {
+      final body = jsonDecode(request.body) as Map;
+      if (organizationBound != null &&
+          body['nostr_pubkey'] != organizationBound) {
+        return http.Response('{}', 403);
+      }
+      organizationBound ??= body['nostr_pubkey'] as String;
+      result = {
+        'assertion': 'organization-assertion',
+        'nostr_pubkey': organizationBound,
+        'expires_at':
+            assertionNow
+                .add(const Duration(minutes: 5))
+                .millisecondsSinceEpoch ~/
+            1000,
+      };
+    } else {
+      return http.Response('{}', 404);
+    }
+    return http.Response(
+      jsonEncode(result),
+      200,
+      headers: {'content-type': 'application/json'},
+    );
+  });
+
+  /// Stores an organization session as a completed sign-in would.
+  Future<void> signInOrganization() async {
+    final account = BuilderlabAccountClient(
+      accountOrigin: organizationOrigin,
+      httpClient: organizationClient(),
+    );
+    await account.exchange(code: 'synthetic-code', verifier: 'v' * 43);
+    account.dispose();
+  }
+
   HostedFlow createFlow(Ref ref) => activeFlow = createHostedFlow(
     ref,
-    browserAuth: _Browser(() async {
+    browserAuth: _Browser((uri) async {
+      browserUrls.add(uri);
       browserStarts++;
       await beforeBrowserReturn?.call();
     }),
@@ -319,9 +412,15 @@ class HostedJourneyFixture {
   Future<void> mount(
     WidgetTester tester, {
     bool openEntry = true,
+    bool addingCommunity = true,
     PairingCredentialValidator? pairingValidator,
+    PairingSocketFactory? pairingSocketFactory,
   }) async {
     await tester.binding.setSurfaceSize(const Size(440, 1100));
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/browser_auth'),
+      (_) async => null,
+    );
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
       (call) async => call.method == 'isSupported'
@@ -336,14 +435,51 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
-          if (pairingValidator != null)
+          if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
-              () => PairingNotifier(credentialValidator: pairingValidator),
+              () => PairingNotifier(
+                credentialValidator: pairingValidator,
+                socketFactory: pairingSocketFactory,
+              ),
             ),
+          if (organizationEnabled) ...[
+            organizationAccountProvider.overrideWith((ref) {
+              final account = BuilderlabAccountClient(
+                accountOrigin: organizationOrigin,
+                httpClient: organizationClient(),
+              );
+              ref.onDispose(account.dispose);
+              return account;
+            }),
+            organizationSignInProvider.overrideWith((ref) {
+              final signIn = OrganizationSignIn(
+                account: ref.watch(organizationAccountProvider)!,
+                browser: _Browser(
+                  (_) async => organizationBrowserStarts++,
+                  origin: organizationOrigin,
+                ),
+                // As in production: only the organization's relay reconnects.
+                reconnect: () async {
+                  final config = ref.read(relayConfigProvider);
+                  if (ref
+                      .read(hostedRelayAuthProvider)
+                      .organizationProtects(config)) {
+                    await ref.read(relaySessionProvider.notifier).reconnect();
+                  }
+                },
+              );
+              ref.onDispose(signIn.dispose);
+              unawaited(signIn.initialize());
+              return signIn;
+            }),
+          ],
           if (relayAuthEnabled) ...[
             hostedRelayAuthProvider.overrideWith((ref) {
               final auth = HostedRelayAuth(
                 ref.watch(builderlabAccountProvider),
+                organization: ref.watch(organizationAccountProvider),
+                organizationRelay: (relay) =>
+                    organizationEnabled && relay.host == organizationRelayHost,
                 enabled: true,
                 now: () => assertionNow,
               );
@@ -396,7 +532,7 @@ class HostedJourneyFixture {
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) =>
-                        const OnboardingAppEntry(addingCommunity: true),
+                        OnboardingAppEntry(addingCommunity: addingCommunity),
                   ),
                 ),
                 child: const Text('Community home'),
@@ -455,7 +591,7 @@ class HostedJourneyFixture {
         .open(
           Uri(
             scheme: 'buzz',
-            host: invite ? 'join' : 'add',
+            host: invite ? 'join' : 'add-community',
             queryParameters: {
               'relay': 'wss://$name.communities.buzz.xyz',
               if (invite) 'code': 'invite-$name',
@@ -475,6 +611,10 @@ class HostedJourneyFixture {
     await Future<void>.delayed(Duration.zero);
     await tester.pump();
     PendingDeepLinkNotifier.debugUriStreamOverride = null;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/browser_auth'),
+      null,
+    );
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/hosted_hpke'),
       null,
@@ -551,10 +691,10 @@ class _Recovery implements InviteJoinRecovery {
 }
 
 class _Browser extends BrowserAuth {
-  _Browser(Future<void> Function() onStart)
+  _Browser(Future<void> Function(Uri) onStart, {super.origin})
     : super(
         openBrowser: (uri) async {
-          await onStart();
+          await onStart(uri);
           return Uri.parse(BrowserAuth.callback)
               .replace(
                 queryParameters: {
@@ -587,9 +727,14 @@ class _RelaySocket extends RelaySocket {
   @override
   Future<void> connect() async {
     fixture.socketHeaders.add(Map.of(headers));
+    final host = Uri.parse(url).host;
     expect(
       headers['Nostr-Federated-Identity'],
-      HostedEnvironment.requiresAuth(Uri.parse(url).host)
+      fixture.organizationEnabled &&
+              host == HostedJourneyFixture.organizationRelayHost
+          // Signed out connects without one and lets the relay decide.
+          ? anyOf(isNull, 'Bearer organization-assertion')
+          : HostedEnvironment.requiresAuth(host)
           ? 'Bearer synthetic-assertion'
           : isNull,
     );

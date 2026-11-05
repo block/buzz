@@ -32,6 +32,8 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/emoji/emoji_only.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
@@ -45,15 +47,9 @@ Widget _testable(
   bool disableAnimations = false,
   bool dark = false,
   ThemeData? theme,
-  VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
-    overrides: [
-      videoPreviewFrameLoaderProvider.overrideWithValue(
-        videoPreviewFrameLoader ?? (_) async => null,
-      ),
-      ...overrides,
-    ],
+    overrides: overrides,
     child: MaterialApp(
       theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
@@ -97,7 +93,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) => loadLocal(url, fallbackDuration: fallbackDuration);
 
@@ -123,6 +119,48 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   }
 }
 
+class _HeadersVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  FutureOr<Map<String, String>> Function()? headers;
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) {
+    this.headers = headers;
+    return super.loadRemote(
+      url,
+      headers: headers,
+      fallbackDuration: fallbackDuration,
+    );
+  }
+}
+
+class _FixedRelayConfig extends RelayConfigNotifier {
+  _FixedRelayConfig(this.config);
+
+  final RelayConfig config;
+
+  @override
+  RelayConfig build() => config;
+}
+
+/// A hosted relay whose cached assertion has expired, so only a fresh
+/// request carries one.
+class _ExpiredHostedRelayAuth extends HostedRelayAuth {
+  _ExpiredHostedRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  @override
+  Map<String, String>? cachedHeaders(RelayConfig config) => null;
+
+  @override
+  Future<Map<String, String>> headersForUrl(
+    RelayConfig config,
+    Uri url,
+  ) async => {'Nostr-Federated-Identity': 'Bearer fresh-token'};
+}
+
 class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   VoiceNotePlaybackState get state =>
@@ -131,7 +169,7 @@ class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 }
@@ -173,7 +211,7 @@ class _BufferingVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -244,7 +282,7 @@ class _RetryableVoiceNotePlayer extends _FakeVoiceNotePlayer {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -492,6 +530,88 @@ void main() {
   });
 
   group('MessageContent', () {
+    testWidgets('renders backslash escapes as the escaped character', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      String visible() => [
+        for (final element in find.byType(RichText).evaluate())
+          (element.widget as RichText).text.toPlainText(),
+      ].join('|');
+
+      for (final (content, shown) in [
+        (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        (r'**bold \#x** \[not math\](y)', '[not math](y)'),
+        (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
+        (
+          r'[\#buzz-mobile](buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b)',
+          '#buzz-mobile',
+        ),
+        ('```\nx \\# y\n```', r'x \# y'),
+        (r'code `a\#b`', r'a\#b'),
+        (r'\`literal\` then `a\#b`', '`literal` then '),
+        // Authored stand-in characters are not mistaken for escapes.
+        ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
+        ('~~~\nx \\# y\n~~~', r'x \# y'),
+        // A fence that never closes is still code inside a quote or list.
+        ('> ```sh\n> echo \\#x', r'echo \#x'),
+        ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // A fence closes only at the quote depth it opened at.
+        ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
+        ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
+        // A quoted fence ends with its quote, so later prose is parsed.
+        ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
+        // Known limitation: gpt_markdown's raw-text fallback for this
+        // unclaimed strike skips inline components, so the stand-in shows.
+        // Its fullwidth form still reads as #.
+        ('~~a\nb \\#c~~', '\uFF03c'),
+        // A bare link's trailing backslash stays outside the link.
+        (r'see https://example.com/a\', 'see '),
+        (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
+        (r'*https://example.com/a\**', '*'),
+        (r'see \<https://example.com/b>', 'see <'),
+        (r'see \https://example.com/c', r'see \'),
+        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        (
+          '![shot \\#1](https://example.com/a.png)\n'
+              '![shot \\#2](https://example.com/b.png)',
+          null,
+        ),
+      ]) {
+        for (final bubble in [false, true]) {
+          await tester.pumpWidget(
+            _testable(MessageContent(content: content, bubble: bubble)),
+          );
+          final reason = '$content (bubble: $bubble) showed ${visible()}';
+          if (shown != null) {
+            expect(
+              find.textContaining(shown, findRichText: true),
+              findsWidgets,
+              reason: reason,
+            );
+          }
+          // No stand-in or leaked link syntax reaches text or semantics.
+          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          expect(
+            find.textContaining(
+              RegExp('\u2060|\\]\\(http'),
+              findRichText: true,
+            ),
+            findsNothing,
+            reason: reason,
+          );
+          expect(
+            find.bySemanticsLabel(RegExp('\u2060')),
+            findsNothing,
+            reason: reason,
+          );
+        }
+      }
+      // Gallery labels drop their escapes too.
+      expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
+      semantics.dispose();
+    });
+
     testWidgets('forwards text alignment to markdown rendering', (
       tester,
     ) async {
@@ -1187,41 +1307,6 @@ void main() {
         expect(tester.takeException(), isNull);
       });
 
-      testWidgets('keeps video loading and decoded frame the same size', (
-        tester,
-      ) async {
-        final frame = Completer<LoadedVideoPreviewFrame?>();
-        const url = 'https://example.com/loading-video.mp4';
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($url)',
-              channelNames: {'general': 'general-id'},
-              tags: [
-                ['imeta', 'url $url', 'm video/mp4', 'dim 1920x1080'],
-              ],
-            ),
-            disableAnimations: true,
-            videoPreviewFrameLoader: (_) => frame.future,
-          ),
-        );
-        final preview = find.byKey(
-          const ValueKey('message-media-video-preview:$url'),
-        );
-        final before = tester.getSize(preview);
-        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
-        frame.complete(
-          LoadedVideoPreviewFrame(
-            child: const ColoredBox(color: Colors.black),
-            aspectRatio: 16 / 9,
-            dispose: () async {},
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
-        expect(tester.getSize(preview), before);
-      });
-
       testWidgets('uses the shared Buzz loader while a voice note loads', (
         tester,
       ) async {
@@ -1316,6 +1401,44 @@ void main() {
           semantics.dispose();
         },
       );
+
+      testWidgets('remote voice notes renew an expired relay assertion', (
+        tester,
+      ) async {
+        final player = _HeadersVoiceNotePlayer();
+        final hosted = _ExpiredHostedRelayAuth();
+        addTearDown(hosted.dispose);
+        final nsec = nostr.Keys.generate().nsec;
+        await tester.pumpWidget(
+          _testable(
+            const VoiceNoteAttachment.remote(
+              url: 'https://relay.example/media/voice.m4a',
+              duration: Duration(seconds: 3),
+              waveform: [],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              relayConfigProvider.overrideWith(
+                () => _FixedRelayConfig(
+                  RelayConfig(baseUrl: 'https://relay.example', nsec: nsec),
+                ),
+              ),
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(
+                  baseUrl: 'https://relay.example',
+                  nsec: nsec,
+                ),
+              ),
+              hostedRelayAuthProvider.overrideWithValue(hosted),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final headers = await player.headers!();
+        expect(headers['Authorization'], startsWith('Nostr '));
+        expect(headers['Nostr-Federated-Identity'], 'Bearer fresh-token');
+      });
 
       testWidgets('routes repeated loading-control taps through toggle', (
         tester,
@@ -1842,7 +1965,8 @@ void main() {
         'groups uploaded photos into a carousel and opens the full gallery',
         (tester) async {
           const first = 'https://example.com/media/one.png';
-          const second = 'https://example.com/media/two.png';
+          // The second destination is escaped; the carousel must unescape it.
+          const second = 'https://example.com/media/two_2.png';
           const third = 'https://example.com/media/three.png';
           await tester.pumpWidget(
             _testable(
@@ -1851,7 +1975,7 @@ void main() {
                     '''
 Photos
 ![image]($first)
-![image]($second)
+![image](https://example.com/media/two\\_2.png)
 ![image]($third)
 ''',
                 tags: [
@@ -2453,52 +2577,6 @@ Photos
           findsOneWidget,
         );
         expect(find.byIcon(BuzzIcons.play), findsOneWidget);
-      });
-
-      testWidgets('derives a first frame for a posterless video event', (
-        tester,
-      ) async {
-        const videoUrl = 'https://example.com/media/legacy-video.mp4';
-        var disposed = false;
-
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($videoUrl)',
-              tags: [
-                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
-              ],
-            ),
-            videoPreviewFrameLoader: (url) async {
-              expect(url, videoUrl);
-              return LoadedVideoPreviewFrame(
-                aspectRatio: 9 / 16,
-                child: const ColoredBox(
-                  key: ValueKey('derived-video-frame'),
-                  color: Colors.blue,
-                ),
-                dispose: () async => disposed = true,
-              );
-            },
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(
-            const ValueKey('message-media-video-first-frame:$videoUrl'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('derived-video-frame')),
-          findsOneWidget,
-        );
-        expect(find.text('Video attachment'), findsNothing);
-
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        expect(disposed, isTrue);
       });
 
       testWidgets(

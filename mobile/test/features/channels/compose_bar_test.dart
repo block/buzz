@@ -1,5 +1,7 @@
+import 'package:flutter/scheduler.dart';
 import 'dart:async';
 import 'package:buzz/features/channels/composer_send_origin.dart';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -26,6 +28,7 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -38,6 +41,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
@@ -182,6 +186,8 @@ late SharedPreferences _testPrefs;
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
+  List<ChannelMember>? draftMembers,
+  ValueChanged<bool>? onSendingChanged,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
   Future<List<ChannelMember>> Function()? loadMembers,
@@ -207,14 +213,25 @@ Widget _buildComposeBar({
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
   Future<List<UserProfile>> Function(String query)? searchPeople,
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
+  bool ownedAgentsUnknown = false,
 }) {
   return ProviderScope(
     overrides: [
+      if (ownedAgents != null)
+        ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
+      if (ownedAgentsUnknown)
+        ownedAgentDirectoryProvider.overrideWith(
+          (ref) => Completer<List<OwnedAgentDirectoryEntry>>().future,
+        ),
       // Directory people by exact query, found after the real typing pause.
       if (searchPeople != null)
         mentionUserSearchProvider.overrideWith((ref, query) async {
           await Future<void>.delayed(mentionSearchDebounce);
-          return searchPeople(query.trim());
+          final people = await searchPeople(query.trim());
+          // Like the real search, a finished page is cached by query.
+          ref.read(mentionSearchCacheProvider).put(query.trim(), people);
+          return people;
         }),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
@@ -279,6 +296,8 @@ Widget _buildComposeBar({
                 final composeBar = ComposeBar(
                   key: ValueKey(composeBarKey),
                   channelId: 'channel-1',
+                  draftMembers: draftMembers,
+                  onSendingChanged: onSendingChanged,
                   threadHeadId: threadHeadId,
                   focusNode: focusNode,
                   onFocusRestorerChanged: onFocusRestorerChanged,
@@ -532,7 +551,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) => loadLocal(url, fallbackDuration: fallbackDuration);
 
@@ -677,9 +696,41 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   void notifyWithCopy() {
     state = AsyncData([..._channels]);
   }
+
+  void replaceChannels(List<Channel> channels) {
+    state = AsyncData(channels);
+  }
+}
+
+/// A channel list that counts how many times it is iterated.
+class _IterationCountingChannels extends ListBase<Channel> {
+  _IterationCountingChannels(this._channels);
+
+  final List<Channel> _channels;
+  int iterations = 0;
+
+  @override
+  Iterator<Channel> get iterator {
+    iterations++;
+    return _channels.iterator;
+  }
+
+  @override
+  int get length => _channels.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only');
+
+  @override
+  Channel operator [](int index) => _channels[index];
+
+  @override
+  void operator []=(int index, Channel value) =>
+      throw UnsupportedError('read-only');
 }
 
 void main() {
+  soloDraftTests();
   exactMentionTests();
   durableMentionTests();
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -1091,6 +1142,40 @@ void main() {
       expect(focusNode.hasFocus, isTrue);
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
+      await tester.pump();
+
+      // iOS drops the inset while Control Center or the app switcher covers
+      // the app, reports `resumed` with it still at zero, and restores the
+      // keyboard natively a moment later. That is not a dismissal.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 40);
+      await tester.pump();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+
+      // A keyboard that stays down after the app resumes still collapses the
+      // composer once the restore grace has passed.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
+
+      await tester.tap(find.text('Message…'));
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pump();
 
       tester.view.viewInsets = FakeViewPadding.zero;
@@ -1879,6 +1964,124 @@ void main() {
         await settleSearch(tester);
         expect(popover(), findsOneWidget);
         expect(find.text('Mary Jane'), findsOneWidget);
+      });
+
+      testWidgets('a late directory person does not move the shown rows', (
+        tester,
+      ) async {
+        const saba = UserProfile(
+          pubkey:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          displayName: 'Saba Saba',
+        );
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? [saba] : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(find.text('Saba Saba'), findsNothing);
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        final height = tester.getSize(popover()).height;
+
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsOneWidget);
+        // The late row filled reserved space: nothing shown moved.
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getSize(popover()).height, height);
+      });
+
+      testWidgets('a cached query\'s refresh does not move the shown rows', (
+        tester,
+      ) async {
+        const saba = UserProfile(
+          pubkey:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          displayName: 'Saba Saba',
+        );
+        var searches = 0;
+        await pumpMembers(
+          tester,
+          ['Sam'],
+          searchPeople: (query) async =>
+              query == 'S' && searches++ > 0 ? [saba] : const [],
+        );
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsNothing);
+        await tester.enterText(find.byType(TextField), '');
+        await tester.pump();
+
+        // A new opening shows the cached page at once, then refreshes.
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(find.text('Saba Saba'), findsNothing);
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        final height = tester.getSize(popover()).height;
+
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsOneWidget);
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getSize(popover()).height, height);
+      });
+
+      testWidgets(
+        'a short landscape view keeps the reserved chooser on screen',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(844, 390);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 170);
+          addTearDown(tester.view.reset);
+          await pumpMembers(tester, ['Sam']);
+          await tester.enterText(find.byType(TextField), '@S');
+          await tester.pump();
+
+          // The search is still running, so the chooser reserves its height,
+          // but no more than fits above the composer.
+          expect(
+            find.byKey(const ValueKey('mention-search-progress')),
+            findsOneWidget,
+          );
+          final sam = tester.getRect(find.widgetWithText(ListTile, 'Sam'));
+          expect(sam.top, greaterThanOrEqualTo(0));
+          expect(tester.getRect(popover()).top, greaterThanOrEqualTo(0));
+          await tester.tap(find.text('Sam'));
+          await tester.pump();
+          expect(find.textContaining('@Sam'), findsWidgets);
+          await settleSearch(tester);
+        },
+      );
+
+      testWidgets('the chooser shows at most three rows, then scrolls', (
+        tester,
+      ) async {
+        final people = [
+          for (final (i, name) in ['Saba', 'Sage', 'Sasha', 'Selma'].indexed)
+            UserProfile(pubkey: '${'a' * 63}$i', displayName: '$name Person'),
+        ];
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? people : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        final row = tester.getSize(
+          find.widgetWithText(ListTile, 'Saba Person'),
+        );
+        expect(tester.getSize(popover()).height, row.height * 3 + Grid.xxs * 2);
+      });
+
+      testWidgets('a running search shows a progress bar on the chooser', (
+        tester,
+      ) async {
+        final progress = find.byKey(const ValueKey('mention-search-progress'));
+        await pumpMembers(tester, ['Sam']);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(progress, findsOneWidget);
+        expect(tester.getTopLeft(progress).dy, tester.getTopLeft(popover()).dy);
+        await settleSearch(tester);
+        expect(progress, findsNothing);
       });
 
       testWidgets('a DM finds directory people too, marked not in DM', (
@@ -3669,6 +3872,86 @@ void main() {
       );
     });
 
+    testWidgets('builds channel names once per channel list, not per build', (
+      tester,
+    ) async {
+      final channels = _IterationCountingChannels([
+        _makeChannel(name: 'engineering', channelType: 'stream'),
+      ]);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: channels,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.pump();
+      expect(channels.iterations, greaterThan(0));
+      final settled = channels.iterations;
+
+      // Typing and keyboard frames rebuild the composer without changing the
+      // channel list.
+      addTearDown(tester.view.resetViewInsets);
+      for (var i = 1; i <= 5; i++) {
+        tester.view.viewInsets = FakeViewPadding(bottom: i * 40.0);
+        await tester.enterText(find.byType(TextField), 'draft $i');
+        await tester.pump();
+      }
+
+      expect(channels.iterations, settled);
+    });
+
+    testWidgets('composer channel chips follow channel list changes', (
+      tester,
+    ) async {
+      const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+      Channel named(String name) => Channel(
+        id: channelId,
+        name: name,
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'creator',
+        createdAt: DateTime(2026),
+        memberCount: 1,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [named('engineering')],
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.enterText(
+        find.byType(TextField),
+        'buzz://channel/$channelId',
+      );
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsOneWidget,
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+          .replaceChannels([named('platform')]);
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:platform')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsNothing,
+      );
+    });
+
     testWidgets('renders all five permalink types as composer chips', (
       tester,
     ) async {
@@ -3829,19 +4112,25 @@ void main() {
         },
       );
 
+      var busy = false;
+      final delivery = Completer<void>();
       String? sentContent;
       List<List<String>> sentMediaTags = const [];
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
+          draftMembers: const [],
+          onSendingChanged: (value) => busy = value,
           onSend:
               (
                 content,
                 mentionPubkeys, {
                 mediaTags = const <List<String>>[],
               }) async {
+                expect(busy, isTrue);
                 sentContent = content;
                 sentMediaTags = mediaTags;
+                await delivery.future;
               },
         ),
       );
@@ -3875,8 +4164,16 @@ void main() {
       );
 
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
+      for (var frame = 0; frame < 100 && sentContent == null; frame++) {
+        await tester.pump();
+      }
+      expect(sentContent, isNotNull);
 
+      expect(busy, isTrue);
+      delivery.completeError(Exception('First send failed'));
+      await tester.pumpAndSettle();
+      expect(busy, isFalse);
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
       expect(uploadedBytes, _pngBytes);
       expect(uploadedMimeType, 'image/png');
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -4124,6 +4421,7 @@ void main() {
     ) async {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var busy = false;
       try {
         final uploadService = MediaUploadService(
           baseUrl: 'https://relay.example',
@@ -4135,6 +4433,8 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: uploadService,
+            draftMembers: const [],
+            onSendingChanged: (value) => busy = value,
             onSend:
                 (
                   content,
@@ -4160,6 +4460,7 @@ void main() {
             .onPressed!();
         await tester.pumpAndSettle();
 
+        expect(busy, isFalse);
         expect(find.text('Unable to read pasted image'), findsOneWidget);
         expect(find.byTooltip('Remove attachment'), findsNothing);
       } finally {

@@ -871,6 +871,9 @@ void main() {
           ),
         ),
         inviteJoinRecoveryProvider.overrideWithValue((_) => recovery),
+        channelsProvider.overrideWith(
+          () => _FakeChannelsNotifier(Future.value(const [])),
+        ),
       ],
     );
     addTearDown(container.dispose);

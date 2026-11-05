@@ -3,7 +3,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/hosted_flow.dart';
-import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/theme/grid.dart';
 import '../../shared/community/community_grid.dart';
 import '../../shared/community/community_grid_option.dart';
@@ -54,13 +53,6 @@ class HostedCommunitySelection extends HookConsumerWidget {
           addingCommunity: true,
           restoreAccount: false,
           onExit: exit,
-          onComplete: () {
-            if (flow.restoreCommunityChoices(choices)) {
-              flow.addSelectedCommunities(returnToAddedCommunity: true);
-            } else {
-              flow.signInAccount();
-            }
-          },
         ),
       );
       navigator.push(route);
@@ -75,10 +67,7 @@ class HostedCommunitySelection extends HookConsumerWidget {
         for (final community in flow.communities)
           CommunityGridOption(
             id: community.relayUrl,
-            name: HostedEnvironment.communityDisplayName(
-              community.name,
-              community.relayUrl,
-            ),
+            name: community.name,
             relayUrl: community.relayUrl,
             onSelect: (_) async {
               flow.chooseLandingCommunity(community.relayUrl);

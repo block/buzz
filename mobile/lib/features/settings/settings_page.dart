@@ -41,7 +41,6 @@ class SettingsPage extends HookConsumerWidget {
     required this.profileHeader,
     required this.identityRecoveryPageBuilder,
     this.profileEditPageBuilder = _emptyProfileEditPage,
-    this.embedded = false,
     this.onSetStatus,
     this.onEditDisplayName,
     this.onEditProfileDescription,
@@ -49,9 +48,6 @@ class SettingsPage extends HookConsumerWidget {
 
   /// Header widget displayed at the top of settings.
   final Widget profileHeader;
-
-  /// The profile destination in the main tab bar.
-  final bool embedded;
 
   /// Builds the identity-recovery page pushed from the recovery settings row.
   final WidgetBuilder identityRecoveryPageBuilder;
@@ -82,20 +78,15 @@ class SettingsPage extends HookConsumerWidget {
       child: FrostedScaffold(
         useUtilitySurfaceTheme: true,
         appBar: FrostedAppBar(
-          nativeTitle: embedded ? '' : 'Settings',
-          nativeLeading: embedded
-              ? null
-              : IosNavigationAction(
-                  label: 'Close settings',
-                  symbol: 'xmark',
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
+          nativeTitle: 'Settings',
+          nativeLeading: IosNavigationAction(
+            label: 'Close settings',
+            symbol: 'xmark',
+            onPressed: () => Navigator.of(context).pop(),
+          ),
           automaticallyImplyLeading: false,
           horizontalInset: Grid.gutter,
-          showBottomDivider: false,
-          leading: embedded
-              ? null
-              : Theme.of(context).platform == TargetPlatform.iOS
+          leading: Theme.of(context).platform == TargetPlatform.iOS
               ? IosGlassNavigationButton(
                   key: const ValueKey('settings-ios-glass-close'),
                   icon: IosGlassNavigationIcon.close,
@@ -159,15 +150,41 @@ class _VersionFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final label = buildNumber.isEmpty
+        ? 'v$version'
+        : 'v$version ($buildNumber)';
     return SafeArea(
       top: false,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: Grid.xs, top: Grid.xxs),
-        child: Center(
-          child: Text(
-            buildNumber.isEmpty ? 'v$version' : 'v$version ($buildNumber)',
-            style: context.textTheme.bodySmall?.copyWith(
-              color: context.colors.onSurfaceVariant.withValues(alpha: 0.6),
+      child: Center(
+        child: Semantics(
+          button: true,
+          onTapHint: 'Copy version',
+          child: InkWell(
+            borderRadius: BorderRadius.circular(Grid.xs),
+            onTap: () =>
+                copyToClipboard(context, label, message: 'Version copied'),
+            // Keep the text where it was and grow the tap target downward
+            // to the platform minimum.
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minHeight: kMinInteractiveDimension,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.xs,
+                  Grid.xxs,
+                  Grid.xs,
+                  Grid.xs,
+                ),
+                child: Text(
+                  label,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant.withValues(
+                      alpha: 0.6,
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),

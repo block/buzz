@@ -824,12 +824,17 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, SdkError> {
 }
 
 /// Build a NIP-29 edit-metadata event for
-/// name/about/visibility/ttl/join_role/unlisted (kind 9002).
+/// name/about/visibility/ttl/join_role/unlisted/auto_join (kind 9002).
 ///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
 /// `unlisted`: `None` leaves it unchanged; `Some(b)` emits
 /// `["unlisted", "true"|"false"]`.
+///
+/// `auto_join`: whether the relay joins new community members into the
+/// channel. Relay owner/admin only; accepted only on an open, unarchived
+/// stream channel.
+#[allow(clippy::too_many_arguments)]
 pub fn build_update_channel(
     channel_id: Uuid,
     name: Option<&str>,
@@ -838,6 +843,7 @@ pub fn build_update_channel(
     ttl: Option<Option<i32>>,
     join_role: Option<buzz_core::channel::ChannelJoinRole>,
     unlisted: Option<bool>,
+    auto_join: Option<bool>,
 ) -> Result<EventBuilder, SdkError> {
     if name.is_none()
         && about.is_none()
@@ -845,9 +851,10 @@ pub fn build_update_channel(
         && ttl.is_none()
         && join_role.is_none()
         && unlisted.is_none()
+        && auto_join.is_none()
     {
         return Err(SdkError::InvalidTag(
-            "at least one of name, about, visibility, ttl, join_role, or unlisted must be provided"
+            "at least one of name, about, visibility, ttl, join_role, unlisted, or auto_join must be provided"
                 .into(),
         ));
     }
@@ -890,6 +897,12 @@ pub fn build_update_channel(
     }
     if let Some(unlisted) = unlisted {
         tags.push(tag(&["unlisted", if unlisted { "true" } else { "false" }])?);
+    }
+    if let Some(auto_join) = auto_join {
+        tags.push(tag(&[
+            "auto_join",
+            if auto_join { "true" } else { "false" },
+        ])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
@@ -3668,6 +3681,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -3687,6 +3701,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -3696,7 +3711,7 @@ mod tests {
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("  ###  "), None, None, None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3713,6 +3728,7 @@ mod tests {
                 Some(Some(3600)),
                 None,
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -3724,7 +3740,9 @@ mod tests {
     #[test]
     fn update_channel_clears_ttl() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, None, None, None, Some(None), None, None).unwrap());
+        let ev = sign(
+            build_update_channel(cid, None, None, None, Some(None), None, None, None).unwrap(),
+        );
         assert!(has_tag(&ev, "ttl", ""));
     }
 
@@ -3732,7 +3750,7 @@ mod tests {
     fn update_channel_invalid_visibility_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, Some("secret"), None, None, None),
+            build_update_channel(cid, None, None, Some("secret"), None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3750,6 +3768,7 @@ mod tests {
                 None,
                 Some(ChannelJoinRole::Guest),
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -3763,12 +3782,13 @@ mod tests {
                 None,
                 Some(ChannelJoinRole::Member),
                 None,
+                None,
             )
             .unwrap(),
         );
         assert!(has_tag(&off, "join_role", "member"));
         let other =
-            sign(build_update_channel(cid, Some("n"), None, None, None, None, None).unwrap());
+            sign(build_update_channel(cid, Some("n"), None, None, None, None, None, None).unwrap());
         assert!(!other
             .tags
             .iter()
@@ -3779,15 +3799,17 @@ mod tests {
     fn update_channel_unlisted_is_always_explicit() {
         let cid = uuid();
         let on = sign(
-            build_update_channel(cid, None, None, Some("open"), None, None, Some(true)).unwrap(),
+            build_update_channel(cid, None, None, Some("open"), None, None, Some(true), None)
+                .unwrap(),
         );
         assert!(has_tag(&on, "visibility", "open"));
         assert!(has_tag(&on, "unlisted", "true"));
-        let off =
-            sign(build_update_channel(cid, None, None, None, None, None, Some(false)).unwrap());
+        let off = sign(
+            build_update_channel(cid, None, None, None, None, None, Some(false), None).unwrap(),
+        );
         assert!(has_tag(&off, "unlisted", "false"));
         let other =
-            sign(build_update_channel(cid, Some("n"), None, None, None, None, None).unwrap());
+            sign(build_update_channel(cid, Some("n"), None, None, None, None, None, None).unwrap());
         assert!(!other
             .tags
             .iter()
@@ -3795,10 +3817,29 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_auto_join_is_always_explicit() {
+        let cid = uuid();
+        let on = sign(
+            build_update_channel(cid, None, None, None, None, None, None, Some(true)).unwrap(),
+        );
+        assert!(has_tag(&on, "auto_join", "true"));
+        let off = sign(
+            build_update_channel(cid, None, None, None, None, None, None, Some(false)).unwrap(),
+        );
+        assert!(has_tag(&off, "auto_join", "false"));
+        let other =
+            sign(build_update_channel(cid, Some("n"), None, None, None, None, None, None).unwrap());
+        assert!(!other
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "auto_join"));
+    }
+
+    #[test]
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, None, None, None, None),
+            build_update_channel(cid, None, None, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
