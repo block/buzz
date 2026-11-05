@@ -309,6 +309,14 @@ if run_release "$operator" candidate 2.0.1 > "$tmp/pushurl-output" 2>&1; then
 fi
 git -C "$operator" config --unset remote.origin.pushurl
 grep -Fq 'origin pushes somewhere other than it fetches from' "$tmp/pushurl-output"
+# A second pushurl after a canonical first one would also receive the tag.
+git -C "$operator" config --add remote.origin.pushurl "$canonical_origin"
+git -C "$operator" config --add remote.origin.pushurl "file://$fork_remote"
+if run_release "$operator" candidate 2.0.1 > "$tmp/pushurl-output" 2>&1; then
+  fail "candidate succeeded with an extra push URL pointing at a fork"
+fi
+git -C "$operator" config --unset-all remote.origin.pushurl
+grep -Fq 'origin pushes somewhere other than it fetches from' "$tmp/pushurl-output"
 git -C "$operator" config "url.file://$fork_remote.pushInsteadOf" "$canonical_origin"
 if run_release "$operator" candidate 2.0.1 >/dev/null 2>&1; then
   fail "candidate succeeded with pushInsteadOf pointing at a fork"

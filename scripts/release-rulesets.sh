@@ -23,9 +23,10 @@ require_canonical_repository() {
       ;;
   esac
   # Tags are pushed with `git push origin`, which honors remote.origin.pushurl
-  # and url.*.pushInsteadOf. Require the effective push destination to be the
-  # same canonical repository that origin fetches from.
-  [[ "$(git remote get-url --push origin)" == "$(git remote get-url origin)" ]] || \
+  # and url.*.pushInsteadOf. Require exactly one effective push destination,
+  # the same canonical repository that origin fetches from.
+  # --all: git push sends to every configured push URL, not just the first.
+  [[ "$(git remote get-url --push --all origin)" == "$(git remote get-url origin)" ]] || \
     fail_release_ruleset "origin pushes somewhere other than it fetches from; remove remote.origin.pushurl or pushInsteadOf so candidate tags reach canonical block/buzz" || return 1
 }
 
