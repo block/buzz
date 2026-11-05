@@ -176,12 +176,14 @@ case "$command" in
 
     # git URL rewriting (insteadOf) can send even a canonical-looking origin
     # to a fork, so confirm with GitHub itself that block/buzz now has this
-    # exact annotated tag object.
+    # exact annotated tag object. An unavailable API and a mismatch both stop
+    # here without deleting anything.
     local_tag_oid="$(git rev-parse --verify "refs/tags/$tag")" || fail "local tag $tag disappeared"
     if ! canonical_tag_oid="$(gh api "repos/block/buzz/git/ref/tags/$tag" --jq .object.sha)" || \
         [[ "$canonical_tag_oid" != "$local_tag_oid" ]]; then
-      git tag -d "$tag" >/dev/null
-      fail "push did not publish $tag to canonical block/buzz; check git url.*.insteadOf rewrites for origin. The local tag was removed so a retry starts clean"
+      # Keep the local tag: if GitHub was only unreachable, the tag may already
+      # be published, and the next run would otherwise skip past it silently.
+      fail "could not confirm $tag on canonical block/buzz. Check GitHub for the tag and git url.*.insteadOf rewrites for origin before retrying; the local tag $tag was kept"
     fi
     published_sha="$(remote_tag_commit_sha "refs/tags/$tag")" || \
       fail "push completed without exact annotated candidate tag $tag on origin"

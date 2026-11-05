@@ -44,6 +44,7 @@ case "${1:-}:${2:-}" in
     esac
     ;;
   api:repos/block/buzz/git/ref/tags/*)
+    [[ "${GH_TAG_REF_FAIL:-}" != 1 ]] || exit 1
     git --git-dir="$GH_REMOTE" rev-parse --verify --quiet "refs/tags/${2#repos/block/buzz/git/ref/tags/}" || exit 1
     ;;
   api:repos/block/buzz/compare/*)
@@ -325,15 +326,27 @@ git -C "$operator" config --unset "url.file://$fork_remote.pushInsteadOf"
 assert_no_candidate_tag 2.0.1
 [[ "$(git --git-dir="$fork_remote" for-each-ref refs/tags)" == "$fork_tags_before" ]]
 # An insteadOf rewrite sends both fetch and push to the fork. GitHub then has
-# no tag, so publication fails loudly and cleans up the local tag.
+# no tag, so publication fails loudly and keeps the local tag as evidence.
 git -C "$operator" config --unset "url.file://$remote.insteadOf"
 git -C "$operator" config "url.file://$fork_remote.insteadOf" "$canonical_origin"
 if (cd "$operator" && "$script" candidate 2.0.1 > "$tmp/insteadof-output" 2>&1); then
   fail "candidate reported success after publishing into a fork"
 fi
 git -C "$operator" config --unset "url.file://$fork_remote.insteadOf"
-grep -Fq 'push did not publish mobile-v2.0.1-rc.1 to canonical block/buzz' "$tmp/insteadof-output"
+grep -Fq 'could not confirm mobile-v2.0.1-rc.1 on canonical block/buzz' "$tmp/insteadof-output"
+[[ "$(git -C "$operator" cat-file -t refs/tags/mobile-v2.0.1-rc.1)" == tag ]] || \
+  fail "the local tag was not kept after an unconfirmed publication"
+git -C "$operator" tag -d mobile-v2.0.1-rc.1 >/dev/null
 assert_no_candidate_tag 2.0.1
+# GitHub being unavailable after a successful push also stops without deleting
+# the local tag, which may already be published.
+if GH_TAG_REF_FAIL=1 run_release "$operator" candidate 2.0.2 > "$tmp/api-down-output" 2>&1; then
+  fail "candidate reported success without GitHub confirmation"
+fi
+grep -Fq 'could not confirm mobile-v2.0.2-rc.1 on canonical block/buzz' "$tmp/api-down-output"
+[[ "$(git -C "$operator" cat-file -t refs/tags/mobile-v2.0.2-rc.1)" == tag ]] || \
+  fail "the local tag was deleted while GitHub was unavailable"
+[[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v2.0.2-rc.1)" == tag ]]
 
 # A shallow operator clone can still pin a verified ancestor outside its
 # local history.
