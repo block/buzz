@@ -76,6 +76,7 @@ class PairingPage extends HookConsumerWidget {
   final VoidCallback? onCommunityLink;
   final VoidCallback? onCreateCommunity;
   final VoidCallback? onBuilderlab;
+  final VoidCallback? onImportIdentity;
   final String? accountStatus;
   final Widget? setupContent;
   final String builderlabLabel;
@@ -99,6 +100,7 @@ class PairingPage extends HookConsumerWidget {
     this.onCommunityLink,
     this.onCreateCommunity,
     this.onBuilderlab,
+    this.onImportIdentity,
     this.accountStatus,
     this.setupContent,
     this.builderlabLabel = 'Connect to Builderlab',
@@ -307,9 +309,8 @@ class PairingPage extends HookConsumerWidget {
             builder: (context, progress, _) => AddCommunityPage(
               scannerProgress: progress,
               onboarding: signedInOnboarding,
-              onFindCommunities: signedInOnboarding && hasKnownCommunities
-                  ? onBuilderlab
-                  : null,
+              onFindCommunities: hasKnownCommunities ? onBuilderlab : null,
+              onImportIdentity: signedInOnboarding ? onImportIdentity : null,
               onCreateCommunity: signedInOnboarding ? onCreateCommunity : null,
               enteringCommunityLink: enteringCommunityLink,
               existingUser: existingUser,

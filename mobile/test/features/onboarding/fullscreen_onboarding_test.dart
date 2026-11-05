@@ -268,10 +268,7 @@ void main() {
       expect(find.text('Home content'), findsNothing);
       opening.complete();
       await tester.pumpAndSettle();
-      expect(fixture.admitted, [
-        'two.communities.buzz.xyz',
-        'one.communities.buzz.xyz',
-      ]);
+      expect(fixture.admitted, ['two.communities.buzz.xyz']);
       expect(fixture.openedCommunity, 'wss://two.communities.buzz.xyz');
       expect(find.text('Home content').hitTestable(), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
