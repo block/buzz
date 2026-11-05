@@ -590,14 +590,14 @@ pub(crate) async fn query_events_on(
     let rows = match (root, recent_pass_floor(q, Utc::now())) {
         (Some(root), _) => {
             let mut qb = build_thread_reply_sql(q, root);
-            fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?
+            fetch_with_read_deadline(conn, qb.build().persistent(persistent), deadline).await?
         }
         (None, None) => {
             let mut qb = build_query_events_sql(q, Range::All, limit);
-            fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?
+            fetch_with_read_deadline(conn, qb.build().persistent(persistent), deadline).await?
         }
         (None, Some(floor)) => {
-            let mut read = ReadTransaction::begin(conn, Some(deadline)).await?;
+            let mut read = ReadTransaction::begin(conn, deadline).await?;
             let mut rows = Vec::new();
             let mut pass = Some((Range::Recent(floor), limit));
             while let Some((range, pass_limit)) = pass {
@@ -959,7 +959,7 @@ async fn is_recorded_reply(
         // One id can carry a reply row and a stub with a fallback timestamp;
         // prefer the row that answers the question.
         .push(" ORDER BY (tm.root_event_id IS NOT NULL) DESC, (e.id IS NOT NULL) DESC LIMIT 1");
-    let rows = fetch_with_read_deadline(conn, &mut qb, true, deadline).await?;
+    let rows = fetch_with_read_deadline(conn, qb.build().persistent(true), deadline).await?;
     let Some(row) = rows.first() else {
         return Ok(false);
     };
@@ -1075,7 +1075,7 @@ pub const READ_STATEMENT_TIMEOUT: &str = concat!(read_statement_timeout_secs!(),
 
 /// [`READ_STATEMENT_TIMEOUT`] as a duration, for the budget a split read's
 /// later passes run under.
-const READ_DEADLINE: std::time::Duration =
+pub(crate) const READ_DEADLINE: std::time::Duration =
     std::time::Duration::from_secs(read_statement_timeout_secs!());
 
 /// Lower `statement_timeout` to `$1` unless it is already tighter; `$2`
@@ -1144,27 +1144,26 @@ pub async fn tighten_session_read_statement_timeout(
 /// callers that read inside a transaction are routed replica reads, already
 /// `REPEATABLE READ`.
 ///
-/// With a [`ReadDeadline`] the read runs under [`READ_STATEMENT_TIMEOUT`]
-/// without changing the deadline for anything else on the connection, and
-/// its statements share it: each after the first runs under what the earlier
-/// ones left. [`ReadDeadline::PerRead`] tightens the deadline in the
-/// transaction or savepoint. Rolling it back (the read has no writes to keep)
-/// reverts every tighten.
+/// The read runs under [`READ_STATEMENT_TIMEOUT`] without changing the
+/// deadline for anything else on the connection, and its statements share
+/// it: each after the first runs under what the earlier ones left.
+/// [`ReadDeadline::PerRead`] tightens the deadline in the transaction or
+/// savepoint. Rolling it back (the read has no writes to keep) reverts every
+/// tighten.
 pub(crate) struct ReadTransaction<'c> {
     tx: sqlx::Transaction<'c, sqlx::Postgres>,
-    deadline_from: Option<std::time::Instant>,
+    started: std::time::Instant,
     statements: usize,
 }
 
 impl<'c> ReadTransaction<'c> {
-    /// Open the read on `conn`; `deadline` `None` leaves `statement_timeout`
-    /// as it is.
+    /// Open the read on `conn`.
     pub(crate) async fn begin(
         conn: &'c mut sqlx::PgConnection,
-        deadline: Option<ReadDeadline>,
+        deadline: ReadDeadline,
     ) -> Result<Self> {
         use sqlx::Connection as _;
-        let per_read = deadline == Some(ReadDeadline::PerRead);
+        let per_read = deadline == ReadDeadline::PerRead;
         let tx = if conn.is_in_transaction() {
             let mut tx = conn.begin().await?;
             if per_read {
@@ -1178,7 +1177,7 @@ impl<'c> ReadTransaction<'c> {
         };
         Ok(Self {
             tx,
-            deadline_from: deadline.map(|_| std::time::Instant::now()),
+            started: std::time::Instant::now(),
             statements: 0,
         })
     }
@@ -1188,9 +1187,9 @@ impl<'c> ReadTransaction<'c> {
         &mut self,
         query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
     ) -> Result<Vec<sqlx::postgres::PgRow>> {
-        if let Some(from) = self.deadline_from.filter(|_| self.statements > 0) {
+        if self.statements > 0 {
             let left = READ_DEADLINE
-                .saturating_sub(from.elapsed())
+                .saturating_sub(self.started.elapsed())
                 .max(std::time::Duration::from_millis(1));
             tighten_read_deadline(&mut self.tx, &format!("{}ms", left.as_millis())).await?;
         }
@@ -1220,18 +1219,17 @@ async fn tighten_read_deadline(
 /// Run a single-statement event read as a [`ReadTransaction`], except on an
 /// autocommit session already under the deadline, where the statement alone
 /// is the read.
-async fn fetch_with_read_deadline(
+pub(crate) async fn fetch_with_read_deadline(
     conn: &mut sqlx::PgConnection,
-    qb: &mut QueryBuilder<sqlx::Postgres>,
-    persistent: bool,
+    query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
     deadline: ReadDeadline,
 ) -> Result<Vec<sqlx::postgres::PgRow>> {
     use sqlx::Connection as _;
     if !conn.is_in_transaction() && deadline == ReadDeadline::Session {
-        return Ok(qb.build().persistent(persistent).fetch_all(conn).await?);
+        return Ok(query.fetch_all(conn).await?);
     }
-    let mut read = ReadTransaction::begin(conn, Some(deadline)).await?;
-    let rows = read.fetch(qb.build().persistent(persistent)).await?;
+    let mut read = ReadTransaction::begin(conn, deadline).await?;
+    let rows = read.fetch(query).await?;
     read.finish().await?;
     Ok(rows)
 }
@@ -1469,7 +1467,7 @@ pub(crate) async fn count_events_on(
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
     // stall indefinitely either.
-    let row = fetch_with_read_deadline(conn, &mut qb, !has_tag_values(q), deadline)
+    let row = fetch_with_read_deadline(conn, qb.build().persistent(!has_tag_values(q)), deadline)
         .await?
         .into_iter()
         .next()
@@ -3934,7 +3932,7 @@ mod postgres_tests {
                 .fetch_one(&mut *conn)
                 .await
                 .expect("show timeout");
-            let mut read = ReadTransaction::begin(&mut *conn, Some(deadline))
+            let mut read = ReadTransaction::begin(&mut *conn, deadline)
                 .await
                 .expect("begin read");
             let first: f64 = read.fetch(timeout_ms()).await.expect("first")[0].get(0);
@@ -3961,9 +3959,10 @@ mod postgres_tests {
     /// the value restored on `conn` afterwards.
     async fn deadline_inside_and_after(conn: &mut sqlx::PgConnection) -> (String, String) {
         let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
-        let rows = fetch_with_read_deadline(conn, &mut qb, true, ReadDeadline::PerRead)
-            .await
-            .expect("deadline read");
+        let rows =
+            fetch_with_read_deadline(conn, qb.build().persistent(true), ReadDeadline::PerRead)
+                .await
+                .expect("deadline read");
         let inside: String = rows[0].get(0);
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *conn)
@@ -4425,7 +4424,12 @@ mod postgres_tests {
             .expect("set session timeout");
         // Autocommit connection (writer path).
         let mut qb = QueryBuilder::new("SELECT 1/0");
-        let err = fetch_with_read_deadline(&mut conn, &mut qb, true, ReadDeadline::PerRead).await;
+        let err = fetch_with_read_deadline(
+            &mut conn,
+            qb.build().persistent(true),
+            ReadDeadline::PerRead,
+        )
+        .await;
         assert!(err.is_err(), "division by zero must fail");
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *conn)
@@ -4437,7 +4441,9 @@ mod postgres_tests {
         // the failed savepoint must roll back and leave the outer tx usable.
         let mut tx = sqlx::Connection::begin(&mut *conn).await.expect("begin");
         let mut qb = QueryBuilder::new("SELECT 1/0");
-        let err = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::PerRead).await;
+        let err =
+            fetch_with_read_deadline(&mut tx, qb.build().persistent(true), ReadDeadline::PerRead)
+                .await;
         assert!(err.is_err(), "division by zero must fail");
         let after: String = sqlx::query_scalar("SHOW statement_timeout")
             .fetch_one(&mut *tx)
@@ -4469,9 +4475,10 @@ mod postgres_tests {
         let mut qb = QueryBuilder::new(
             "SELECT current_setting('statement_timeout'), (SELECT count(*) FROM events)",
         );
-        let rows = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::Session)
-            .await
-            .expect("session read");
+        let rows =
+            fetch_with_read_deadline(&mut tx, qb.build().persistent(true), ReadDeadline::Session)
+                .await
+                .expect("session read");
         let inside: String = rows[0].get(0);
         assert_eq!(inside, "1min", "Session must not tighten");
         let held: i64 = sqlx::query_scalar(
@@ -4484,9 +4491,10 @@ mod postgres_tests {
         assert_eq!(held, 0, "a Session read must release its locks");
 
         let mut qb = QueryBuilder::new("SELECT current_setting('statement_timeout')");
-        let rows = fetch_with_read_deadline(&mut tx, &mut qb, true, ReadDeadline::PerRead)
-            .await
-            .expect("per-read read");
+        let rows =
+            fetch_with_read_deadline(&mut tx, qb.build().persistent(true), ReadDeadline::PerRead)
+                .await
+                .expect("per-read read");
         let inside: String = rows[0].get(0);
         assert_eq!(inside, READ_STATEMENT_TIMEOUT, "PerRead tightens");
         tx.rollback().await.expect("rollback");

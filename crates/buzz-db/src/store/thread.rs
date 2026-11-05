@@ -582,6 +582,7 @@ pub async fn get_channel_window(
         limit,
         cursor,
         kind_filter,
+        crate::event::ReadDeadline::PerRead,
     )
     .await
 }
@@ -590,7 +591,8 @@ pub async fn get_channel_window(
 /// runs the page (and its participants batch) on the exact reader connection
 /// whose heartbeat observation proved coverage (the proof is
 /// connection-local; a different pooled session may sit at a different
-/// replay position).
+/// replay position). The page runs under the event read deadline, shared by
+/// its passes (see `ReadTransaction`).
 pub(crate) async fn get_channel_window_on(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
@@ -598,6 +600,7 @@ pub(crate) async fn get_channel_window_on(
     limit: u32,
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
+    deadline: crate::event::ReadDeadline,
 ) -> Result<ChannelWindow> {
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
@@ -684,13 +687,17 @@ pub(crate) async fn get_channel_window_on(
     };
     let mut db_rows = match floor {
         None => {
-            pass_query(Range::All, probe_limit)
-                .fetch_all(&mut *conn)
-                .await?
+            crate::event::fetch_with_read_deadline(
+                &mut *conn,
+                pass_query(Range::All, probe_limit),
+                deadline,
+            )
+            .await?
         }
         Some(floor) => {
-            // One snapshot for both passes (see `ReadTransaction`).
-            let mut read = crate::event::ReadTransaction::begin(conn, None).await?;
+            // One snapshot and one deadline for both passes (see
+            // `ReadTransaction`).
+            let mut read = crate::event::ReadTransaction::begin(conn, deadline).await?;
             let mut rows = Vec::new();
             let mut pass = Some((Range::Recent(floor), probe_limit));
             while let Some((range, pass_limit)) = pass {
@@ -1128,6 +1135,7 @@ impl Db {
                     limit,
                     cursor.clone(),
                     kind_filter,
+                    crate::event::ReadDeadline::Session,
                 )
                 .await
                 {
@@ -1200,7 +1208,7 @@ mod postgres_tests {
     use super::*;
     use crate::{
         channel::{ChannelType, ChannelVisibility},
-        event::{insert_event_with_thread_metadata, ThreadMetadataParams},
+        event::{insert_event_with_thread_metadata, ReadDeadline, ThreadMetadataParams},
     };
     use nostr::{EventBuilder, Keys, Kind};
 
@@ -2343,9 +2351,17 @@ mod postgres_tests {
         };
 
         // Limit 1: two recent rows fill the page and its probe row.
-        let window = get_channel_window_on(&mut conn, community, channel.id, 1, None, None)
-            .await
-            .expect("recent window");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            1,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("recent window");
         assert_eq!(ids(&window), newest_first[..1]);
         assert!(window.has_more);
         let recent_count = prepared(recent).fetch_one(&mut *conn).await.expect("count");
@@ -2354,9 +2370,17 @@ mod postgres_tests {
 
         // Limit 2: the recent pass has no probe row, so the older pass reads
         // it and `has_more` sees the rows before the floor.
-        let window = get_channel_window_on(&mut conn, community, channel.id, 2, None, None)
-            .await
-            .expect("split window");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("split window");
         assert_eq!(ids(&window), newest_first[..2]);
         assert!(window.has_more, "older rows lie before the floor");
         let older_count = prepared(older).fetch_one(&mut *conn).await.expect("count");
@@ -2364,19 +2388,43 @@ mod postgres_tests {
         assert_eq!((older_count, all_count), (1, 2), "older pass ran");
 
         // The whole channel, then a cursor page below the floor.
-        let window = get_channel_window_on(&mut conn, community, channel.id, 4, None, None)
-            .await
-            .expect("whole window");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            4,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("whole window");
         assert_eq!(ids(&window), newest_first);
         assert!(!window.has_more);
-        let cursor = get_channel_window_on(&mut conn, community, channel.id, 2, None, None)
-            .await
-            .expect("first page")
-            .next_cursor
-            .expect("cursor");
-        let window = get_channel_window_on(&mut conn, community, channel.id, 2, Some(cursor), None)
-            .await
-            .expect("older page");
+        let cursor = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("first page")
+        .next_cursor
+        .expect("cursor");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            Some(cursor),
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("older page");
         assert_eq!(ids(&window), newest_first[2..]);
         assert!(!window.has_more);
 
@@ -2414,11 +2462,28 @@ mod postgres_tests {
             .execute(&mut *conn)
             .await
             .expect("set lock_timeout");
-        let window = get_channel_window_on(&mut conn, community, channel.id, 1, None, None)
-            .await
-            .expect("a full recent window never touches the old partition");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            1,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("a full recent window never touches the old partition");
         assert_eq!(ids(&window), newest_first[..1]);
-        let failed = get_channel_window_on(&mut conn, community, channel.id, 2, None, None).await;
+        let failed = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await;
         assert!(
             failed.is_err(),
             "a failed older pass must fail the window, got {:?}",
@@ -2456,17 +2521,137 @@ mod postgres_tests {
             community,
             channel_id,
             move |mut conn| async move {
-                get_channel_window_on(&mut conn, community, channel_id, 10, None, None)
-                    .await
-                    .expect("split window")
-                    .rows
-                    .iter()
-                    .map(|row| row.stored_event.event.id)
-                    .collect::<Vec<_>>()
+                get_channel_window_on(
+                    &mut conn,
+                    community,
+                    channel_id,
+                    10,
+                    None,
+                    None,
+                    ReadDeadline::PerRead,
+                )
+                .await
+                .expect("split window")
+                .rows
+                .iter()
+                .map(|row| row.stored_event.event.id)
+                .collect::<Vec<_>>()
             },
         )
         .await;
         assert_eq!(window, expected);
+    }
+
+    /// A split window's passes share one read deadline. Another session holds
+    /// the newest partition for a while, so the recent pass spends part of
+    /// the deadline waiting, and holds the oldest partition, which only the
+    /// older pass plans, for good. The window must be cancelled once the whole
+    /// deadline has passed, not a full deadline after its older pass starts.
+    /// This goes through the production writer entry, whose own session
+    /// timeout is longer.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_passes_share_one_deadline() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-deadline-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let db = crate::Db::from_pool(pool.clone());
+        let mut partitions = Vec::new();
+        for at in [Utc::now().timestamp() as u64 - 10, 1_748_736_000] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel.id))
+                .await
+                .expect("insert");
+            partitions.push(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT tableoid::regclass::text FROM events WHERE id = $1",
+                )
+                .bind(event.id.as_bytes().to_vec())
+                .fetch_one(&pool)
+                .await
+                .expect("partition"),
+            );
+        }
+        let [newest, oldest] = <[String; 2]>::try_from(partitions).expect("two partitions");
+        assert_ne!(newest, oldest);
+        let lock = |partition: String| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.expect("begin locker");
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "LOCK TABLE {partition} IN ACCESS EXCLUSIVE MODE"
+                )))
+                .execute(&mut *tx)
+                .await
+                .expect("lock");
+                tx
+            }
+        };
+        let mut newest_lock = lock(newest.clone()).await;
+        let oldest_lock = lock(oldest).await;
+
+        let started = std::time::Instant::now();
+        let window_pool = pool.clone();
+        let mut task = tokio::spawn(async move {
+            get_channel_window(&window_pool, community, channel.id, 10, None, None).await
+        });
+        let waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE relation = $1::text::regclass AND NOT granted)",
+                )
+                .bind(&newest)
+                .fetch_one(&mut *newest_lock)
+                .await
+                .expect("inspect the recent pass");
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(waiting.is_ok(), "the recent pass never waited on the lock");
+        // Spend part of the deadline in the recent pass, then let it finish.
+        let hold = std::time::Duration::from_secs(8);
+        tokio::time::sleep(hold).await;
+        newest_lock
+            .rollback()
+            .await
+            .expect("release the newest partition");
+
+        let result = tokio::time::timeout(crate::event::READ_DEADLINE + hold * 2, &mut task).await;
+        let elapsed = started.elapsed();
+        drop(oldest_lock);
+        let Ok(result) = result else {
+            task.abort();
+            panic!("the window was never cancelled");
+        };
+        let err = result
+            .expect("window task")
+            .expect_err("the older pass must be cancelled");
+        assert!(
+            err.is_statement_cancelled(),
+            "cancelled by the deadline: {err}"
+        );
+        assert!(
+            elapsed < crate::event::READ_DEADLINE + hold / 2,
+            "the older pass got only what the recent pass left; took {elapsed:?}"
+        );
     }
 
     /// Rows with replies carry a thread summary (counts + batched
