@@ -203,45 +203,89 @@ fn executed_event_relations(plan: &Value, relations: &mut Vec<String>) {
     }
 }
 
+/// The custom plan the production statement receives executes one partition.
+/// Executed nodes say nothing about locks: a generic plan also executes one
+/// partition after locking all of them, so lock coverage is asserted below.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn production_enqueue_sql_prunes_to_one_month_custom_and_generic_plans() {
+async fn production_enqueue_sql_executes_one_month_in_custom_plan() {
     let (db, community) = fixture().await;
     let event = historical_event(&Keys::generate(), 9, "2026-02-01T00:00:00Z");
     event::insert_event(db.pool(), community, &event, None)
         .await
         .unwrap();
-    for mode in ["force_custom_plan", "force_generic_plan"] {
-        let mut tx = db.pool().begin().await.unwrap();
-        sqlx::query("SELECT set_config('plan_cache_mode', $1, true)")
-            .bind(mode)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        sqlx::query(AssertSqlSafe(format!(
-            "PREPARE push_pruning (uuid, bytea, timestamptz) AS {ENQUEUE_SQL}"
-        )))
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('plan_cache_mode', 'force_custom_plan', true)")
         .execute(&mut *tx)
         .await
         .unwrap();
-        // Only generated UUID/hex and a fixed signed date enter this test SQL.
-        // EXPLAIN the exact INSERT used by enqueue, not a lookalike SELECT.
-        let plan: Value = sqlx::query_scalar(AssertSqlSafe(format!(
-            "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE push_pruning \
-             ('{community}', '\\x{}'::bytea, '{}')",
-            hex::encode(event.id.as_bytes()),
-            signed_timestamp(&event).to_rfc3339(),
-        )))
-        .fetch_one(&mut *tx)
+    sqlx::query(AssertSqlSafe(format!(
+        "PREPARE push_pruning (uuid, bytea, timestamptz) AS {ENQUEUE_SQL}"
+    )))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    // Only generated UUID/hex and a fixed signed date enter this test SQL.
+    // EXPLAIN the exact INSERT used by enqueue, not a lookalike SELECT.
+    let plan: Value = sqlx::query_scalar(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE push_pruning \
+         ('{community}', '\\x{}'::bytea, '{}')",
+        hex::encode(event.id.as_bytes()),
+        signed_timestamp(&event).to_rfc3339(),
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let mut relations = Vec::new();
+    executed_event_relations(&plan, &mut relations);
+    assert_eq!(relations, ["events_p2026_02"], "{plan}");
+    tx.rollback().await.unwrap();
+}
+
+/// The production statement must lock one `events` partition. Locks, not
+/// executed plan nodes, are what a long-lived push worker would contend on: a
+/// generic plan executes one partition only after locking all of them. The
+/// statement must therefore never be a cached prepared statement, which
+/// Postgres may move to a generic plan after five executions.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn production_enqueue_statement_locks_only_the_signed_month_partition() {
+    let (db, community) = fixture().await;
+    let event = historical_event(&Keys::generate(), 9, "2026-02-01T00:00:00Z");
+    event::insert_event(db.pool(), community, &event, None)
         .await
         .unwrap();
-        let mut relations = Vec::new();
-        executed_event_relations(&plan, &mut relations);
-        assert_eq!(relations, ["events_p2026_02"], "{mode}: {plan}");
-        sqlx::query("DEALLOCATE push_pruning")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        tx.rollback().await.unwrap();
+    let job = Job {
+        community,
+        event_id: event.id.as_bytes().to_vec(),
+        created_at: signed_timestamp(&event),
+        barrier: None,
+    };
+    let mut tx = db.pool().begin().await.unwrap();
+    // Past the five-execution custom-plan window of a cached statement.
+    for _ in 0..7 {
+        insert_queue_row(&mut tx, &job).await.unwrap();
     }
+    let cached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_prepared_statements \
+         WHERE statement LIKE 'INSERT INTO push_match_queue%'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(cached, 0, "enqueue SQL must not be a cached statement");
+    // Locks on a partition or any of its indexes, attributed to the partition.
+    let locked: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT t.relname::text FROM pg_locks l \
+         JOIN pg_class c ON c.oid = l.relation \
+         LEFT JOIN pg_index i ON i.indexrelid = c.oid \
+         JOIN pg_class t ON t.oid = COALESCE(i.indrelid, c.oid) \
+         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
+           AND t.relname LIKE 'events\\_p%' ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(locked, ["events_p2026_02"]);
+    tx.rollback().await.unwrap();
 }

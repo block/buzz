@@ -224,13 +224,27 @@ async fn enqueue(
     // Compare recorded receipt/update times without imposing commit ordering.
     // Registration overlapping message arrival may send or suppress a wake.
     // This bounded job never scans historical messages on lease activation.
+    insert_queue_row(&mut tx, job).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn insert_queue_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job: &Job,
+) -> crate::Result<()> {
+    // Not a cached prepared statement: this worker connection is long-lived, so
+    // after five runs Postgres could switch a cached statement to a generic
+    // plan. A generic plan prunes `events` partitions only at executor startup,
+    // after locking every partition and its indexes; a custom plan prunes at
+    // plan time and locks only the signed timestamp's month.
     sqlx::query(ENQUEUE_SQL)
+        .persistent(false)
         .bind(job.community.as_uuid())
         .bind(&job.event_id)
         .bind(job.created_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
