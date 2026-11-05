@@ -401,6 +401,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     if (nativePresentation) {
       final auth = ref.watch(mediaGetAuthServiceProvider);
       final client = ref.watch(mediaHttpClientProvider);
+      final diskCache = ref.watch(mediaDiskCacheProvider);
       final colors = context.colors;
       String? avatarUrl(MentionCandidate user) =>
           user.avatarUrl ?? userCache[user.pubkey]?.avatarUrl;
@@ -437,8 +438,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             isAgent: user.isAgent,
             background: colors.primaryContainer,
             foreground: colors.onPrimaryContainer,
-            networkImage: (url) =>
-                MediaImageProvider(url: url, auth: auth, client: client),
+            networkImage: (url) => MediaImageProvider(
+              url: url,
+              auth: auth,
+              client: client,
+              diskCache: diskCache,
+            ),
           );
         },
         state: {

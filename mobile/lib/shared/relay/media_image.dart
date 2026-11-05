@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import '../hosted/hosted_relay_auth.dart';
 import '../utils/bounded_fetch.dart';
 import 'media_auth.dart';
+import 'media_disk_cache.dart';
 
 /// Shared, keep-alive HTTP client for media fetches. One client per container
 /// so TLS connections are reused across images instead of re-handshaking per
@@ -48,6 +49,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
+  /// Where loaded bytes persist across launches, or null to keep them in
+  /// memory only. Excluded from equality: storage, not identity.
+  final MediaDiskCache? diskCache;
+
   /// Longest wait for response headers or the next body chunk. A slow link
   /// that keeps delivering bytes finishes; one that stops is aborted without
   /// closing the shared client.
@@ -61,6 +66,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.url,
     required this.auth,
     required this.client,
+    this.diskCache,
     this.onBytesLoaded,
     this.scale = 1.0,
     this.stallTimeout = defaultStallTimeout,
@@ -75,6 +81,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
   static final Map<String, DateTime> _cooldownUntil = {};
   static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
+
+  /// URLs with a background refresh of stale disk bytes under way.
+  static final Set<String> _refreshing = {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -122,7 +131,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // fetching the same bytes once per size.
       final fetchKey = (url, auth);
       final fetch = _inFlight[fetchKey] ??= _SharedFetch(
-        _fetchBytes,
+        _loadBytes,
         onFinished: (fetch) {
           if (_inFlight[fetchKey] == fetch) _inFlight.remove(fetchKey);
         },
@@ -164,6 +173,44 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       });
       rethrow;
     }
+  }
+
+  /// [url]'s bytes from [diskCache] when saved there, else downloaded and
+  /// saved. Stale saved bytes are shown while a background download
+  /// replaces them.
+  Future<Uint8List> _loadBytes(Future<void> abort) async {
+    final cache = diskCache;
+    if (cache == null) return _fetchBytes(abort);
+    final hit = await cache.read(url);
+    if (hit != null) {
+      if (hit.isStale) unawaited(_refresh(cache));
+      return hit.bytes;
+    }
+    final bytes = await _fetchBytes(abort);
+    unawaited(cache.write(url, bytes, immutable: _isContentAddressed));
+    return bytes;
+  }
+
+  Future<void> _refresh(MediaDiskCache cache) async {
+    if (!_refreshing.add(url)) return;
+    try {
+      // Never aborted: nobody is waiting on it.
+      final bytes = await _fetchBytes(Completer<void>().future);
+      await cache.write(url, bytes, immutable: _isContentAddressed);
+    } on Object catch (error) {
+      // The stale bytes stay; the next load after the cooldown retries.
+      debugPrint('[MediaImageProvider] refresh of $url failed: $error');
+    } finally {
+      _refreshing.remove(url);
+    }
+  }
+
+  /// A relay blob or its thumbnail: named by content hash, so its bytes
+  /// never change.
+  bool get _isContentAddressed {
+    if (!auth.isRelayMediaUrl(url)) return false;
+    final uri = Uri.parse(url);
+    return !uri.hasQuery && _relayContentPath.hasMatch(uri.path);
   }
 
   /// Downloads [url]. Completing [abort] means every load waiting for this
@@ -339,6 +386,10 @@ class MediaImageCooldownException implements Exception {
       'MediaImageCooldownException: $url is cooling down until $until';
 }
 
+final _relayContentPath = RegExp(
+  r'^/media/[0-9a-f]{64}(?:\.thumb\.jpg|\.[a-z0-9]{1,8})?$',
+);
+
 final _relayBlobPath = RegExp(r'^/media/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$');
 
 /// The relay's generated thumbnail for a relay-hosted image, or null when
@@ -426,10 +477,12 @@ class MediaImage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
+    final diskCache = ref.watch(mediaDiskCacheProvider);
     MediaImageProvider providerFor(String source) => MediaImageProvider(
       url: source,
       auth: auth,
       client: client,
+      diskCache: diskCache,
       onBytesLoaded: onBytesLoaded,
     );
 

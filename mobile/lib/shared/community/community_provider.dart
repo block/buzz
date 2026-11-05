@@ -14,6 +14,7 @@ import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
+import '../relay/media_disk_cache.dart';
 import '../relay/signed_event_relay.dart';
 import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
 import 'community.dart';
@@ -264,6 +265,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     unawaited(_removeOrphanChannelListSnapshots(communities));
+    unawaited(_removeOrphanMediaCaches(communities));
     await syncCommunitySnapshot(ref, communities);
     return communities;
   }
@@ -335,6 +337,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
       final updatedList = current.where((w) => w.id != id).toList();
       await _removeOrphanChannelListSnapshots(updatedList);
+      await _removeOrphanMediaCaches(updatedList);
       state = AsyncData(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 
@@ -397,6 +400,25 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         if (_channelSnapshotPubkey(community) case final pubkey?)
           ChannelListSnapshotStorage.key(pubkey, community.relayUrl),
     });
+  }
+
+  /// Deletes the image caches of communities no longer in [communities].
+  /// A failure is retried by the sweep on the next launch.
+  Future<void> _removeOrphanMediaCaches(List<Community> communities) async {
+    try {
+      final root = await ref.read(mediaCacheRootProvider.future);
+      if (root == null) return;
+      await MediaDiskCache.removeOrphans(root, {
+        for (final community in communities) community.id,
+      });
+    } catch (error, stackTrace) {
+      developer.log(
+        'Media cache deletion failed; the next launch will retry',
+        name: 'buzz.community',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   Future<void> switchCommunity(String id) {
