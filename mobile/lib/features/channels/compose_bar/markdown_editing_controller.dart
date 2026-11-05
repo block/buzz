@@ -126,7 +126,8 @@ class _MarkdownEditingController extends TextEditingController {
         _chipRangesText != oldValue.text ||
         !oldSelection.isValid ||
         !oldSelection.isCollapsed ||
-        (oldValue.composing.isValid && !oldValue.composing.isCollapsed)) {
+        (oldValue.composing.isValid && !oldValue.composing.isCollapsed) ||
+        (newValue.composing.isValid && !newValue.composing.isCollapsed)) {
       return newValue;
     }
     final deleted = _caretDeletion(

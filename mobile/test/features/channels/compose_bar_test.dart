@@ -4029,8 +4029,28 @@ void main() {
             ),
       );
 
-      // Soft-keyboard backspace right after a chip removes the whole URL.
       final full = urls.join(' ');
+
+      // An IME edit that leaves text composing is never rewritten, so the
+      // composition stays intact.
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: full.substring(0, full.length - 1),
+          selection: TextSelection.collapsed(offset: full.length - 1),
+          composing: TextRange(start: full.length - 2, end: full.length - 1),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, full.substring(0, full.length - 1));
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: full,
+          selection: TextSelection.collapsed(offset: full.length),
+        ),
+      );
+      await tester.pump();
+
+      // Soft-keyboard backspace right after a chip removes the whole URL.
       tester.testTextInput.updateEditingValue(
         TextEditingValue(
           text: full.substring(0, full.length - 1),
