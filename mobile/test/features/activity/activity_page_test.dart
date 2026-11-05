@@ -12,9 +12,12 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/reminders/reminder_service.dart' as reminder;
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -27,6 +30,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -884,6 +888,83 @@ void main() {
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
   });
 
+  testWidgets('long-press follows a thread and sets a reminder', (
+    tester,
+  ) async {
+    final reminders = _CapturingReminderService();
+    await tester.pumpWidget(
+      await buildTestable(
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ActivityPage)),
+    );
+    Finder sheetText(String text) => find.descendant(
+      of: find.byType(BottomSheet),
+      matching: find.text(text),
+    );
+
+    // A thread row follows its root, and the menu then offers unfollow.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-a1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Follow thread'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(threadFollowsProvider).isFollowing(threadIdRoot1),
+      isTrue,
+    );
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-a1')));
+    await tester.pumpAndSettle();
+    expect(sheetText('Follow thread'), findsNothing);
+    await tester.tap(sheetText('Unfollow thread'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(threadFollowsProvider).isFollowing(threadIdRoot1),
+      isFalse,
+    );
+
+    // A top-level row follows the message itself as a potential thread head.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Follow thread'));
+    await tester.pumpAndSettle();
+    expect(container.read(threadFollowsProvider).isFollowing('m1'), isTrue);
+
+    // Remind me opens the shared reminder sheet for the row's message.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Remind me'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remind me about this message'), findsOneWidget);
+    await tester.tap(find.text('In 1 hour'));
+    await tester.pumpAndSettle();
+
+    final target = reminders.targets.single;
+    expect(target.eventId, 'm1');
+    expect(target.channelId, 'ch1');
+    expect(target.preview, 'Hey check this out');
+    expect(find.text('Reminder set'), findsOneWidget);
+  });
+
+  testWidgets('long-press hides reminders when signed out', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        overrides: [reminder.reminderServiceProvider.overrideWithValue(null)],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Follow thread'), findsOneWidget);
+    expect(find.text('Remind me'), findsNothing);
+  });
+
   testWidgets('swiping an inbox row reveals and runs its row actions', (
     tester,
   ) async {
@@ -1112,4 +1193,29 @@ class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
 
   @override
   List<ComposeDraft> build() => _drafts;
+}
+
+class _CapturingReminderService extends reminder.ReminderService {
+  _CapturingReminderService._(nostr.Keys keys)
+    : super(
+        signedEventRelay: SignedEventRelay(
+          session: RelaySessionNotifier(),
+          nsec: keys.nsec,
+        ),
+        crypto: reminder.ReminderCrypto(keys.nsec, keys.public),
+      );
+
+  factory _CapturingReminderService() =>
+      _CapturingReminderService._(nostr.Keys.generate());
+
+  final targets = <reminder.ReminderTarget>[];
+
+  @override
+  Future<void> createReminder({
+    required reminder.ReminderTarget target,
+    required int notBefore,
+    String? note,
+  }) async {
+    targets.add(target);
+  }
 }

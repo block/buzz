@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -31,6 +32,10 @@ import '../channels/channels_provider.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
 import '../../shared/read_state/read_state_format.dart';
+import '../../shared/reminders/remind_me_later_sheet.dart';
+import '../../shared/reminders/reminder_service.dart'
+    show ReminderTarget, reminderServiceProvider;
+import '../channels/thread_follows/thread_follows_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
@@ -40,7 +45,7 @@ import 'dm_resurface.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
-import 'reminders_provider.dart';
+import 'reminders_provider.dart' hide ReminderTarget;
 
 part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
