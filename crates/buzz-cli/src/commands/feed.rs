@@ -3,19 +3,28 @@ use std::cmp::Reverse;
 use crate::client::{normalize_events, BuzzClient};
 use crate::commands::event_output::format_events;
 use crate::error::CliError;
+use crate::limits::{truncation_notice, Paging, ReadLimits};
 
 const VALID_FEED_TYPES: &[&str] = &["mentions", "needs_action", "activity", "agent_activity"];
+
+/// `feed get` exposes `--since` but no `--before`, so the window can only be
+/// narrowed to newer entries — never walked backwards.
+const FEED_LIMITS: ReadLimits = ReadLimits {
+    default: 20,
+    max: 50,
+    paging: Paging::SinceOnly,
+};
 
 /// Get activity feed — query events mentioning our pubkey (via p-tag).
 pub async fn cmd_get_feed(
     client: &BuzzClient,
     since: Option<i64>,
-    limit: Option<u32>,
+    requested_limit: Option<u32>,
     types: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let my_pk = client.keys().public_key().to_hex();
-    let limit = limit.unwrap_or(20).min(50);
+    let limit = FEED_LIMITS.effective(requested_limit);
 
     let mut filter = serde_json::json!({
         "#p": [my_pk],
@@ -44,6 +53,9 @@ pub async fn cmd_get_feed(
     events.sort_by_key(|e| Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0)));
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
+    if let Some(notice) = truncation_notice(events.len(), requested_limit, FEED_LIMITS) {
+        eprintln!("{notice}");
+    }
     Ok(())
 }
 
