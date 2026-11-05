@@ -4,6 +4,10 @@
 # bypass actors are the mobile release managers, never the buzz-release-bot App:
 # operators push candidate tags themselves.
 readonly MOBILE_RELEASE_TAG_RULESET_ID=26588677
+# General tag ruleset ("Release", ~ALL tags) whose only bypass actor is the
+# App. Rulesets stack, so it must exclude mobile tags or operators can't push
+# them even though they bypass the mobile tag ruleset.
+readonly GENERAL_RELEASE_TAG_RULESET_ID=14378754
 
 fail_release_ruleset() {
   echo "Error: $*" >&2
@@ -63,4 +67,9 @@ require_mobile_release_tag_ruleset() {
     fail_release_ruleset "could not verify mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID exclusions" || return 1
   [[ -z "$excludes" ]] || \
     fail_release_ruleset "mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID has unexpected exclusions: '$excludes'" || return 1
+
+  excludes="$(gh api "repos/block/buzz/rulesets/$GENERAL_RELEASE_TAG_RULESET_ID" --jq '[.conditions.ref_name.exclude[]] | join(",")')" || \
+    fail_release_ruleset "could not verify general tag ruleset $GENERAL_RELEASE_TAG_RULESET_ID exclusions" || return 1
+  [[ ",$excludes," == *",refs/tags/mobile-*,"* ]] || \
+    fail_release_ruleset "general tag ruleset $GENERAL_RELEASE_TAG_RULESET_ID must exclude refs/tags/mobile-*, or it rejects your candidate tag push; ask a repository admin" || return 1
 }

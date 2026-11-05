@@ -43,6 +43,9 @@ case "${1:-}:${2:-}" in
       *) exit 2 ;;
     esac
     ;;
+  api:repos/block/buzz/rulesets/14378754)
+    printf '%s\n' "${GH_GENERAL_TAG_EXCLUDES-refs/tags/mobile-*}"
+    ;;
   api:repos/block/buzz/git/ref/tags/*)
     [[ "${GH_TAG_REF_FAIL:-}" != 1 ]] || exit 1
     git --git-dir="$GH_REMOTE" rev-parse --verify --quiet "refs/tags/${2#repos/block/buzz/git/ref/tags/}" || exit 1
@@ -56,6 +59,18 @@ case "${1:-}:${2:-}" in
 esac
 GH
 chmod +x "$bin/gh"
+
+# A git wrapper lets one case simulate a push that lands but reports failure.
+real_git="$(command -v git)"
+cat > "$bin/git" <<GIT
+#!/usr/bin/env bash
+if [[ "\${GIT_PUSH_LANDS_BUT_FAILS:-}" == 1 && " \$* " == *" push "* ]]; then
+  "$real_git" "\$@"
+  exit 1
+fi
+exec "$real_git" "\$@"
+GIT
+chmod +x "$bin/git"
 
 export PATH="$bin:$PATH"
 export GH_REMOTE="$remote"
@@ -228,6 +243,13 @@ if GH_TAG_EXCLUDES='refs/tags/mobile-v9*' run_release "$operator" candidate 9.9.
   fail "candidate succeeded with a ruleset that excludes mobile tags"
 fi
 assert_no_candidate_tag 9.9.7
+# The App-only general tag ruleset must exclude mobile tags, or the operator's
+# push would be rejected.
+if GH_GENERAL_TAG_EXCLUDES='' run_release "$operator" candidate 9.9.7 > "$tmp/general-output" 2>&1; then
+  fail "candidate succeeded while the general tag ruleset still covers mobile tags"
+fi
+grep -Fq 'general tag ruleset 14378754 must exclude refs/tags/mobile-*' "$tmp/general-output"
+assert_no_candidate_tag 9.9.7
 
 # The narrower refs/tags/mobile-v* include also covers candidate tags.
 GH_TAG_INCLUDES='refs/tags/mobile-v*' run_release "$operator" candidate 9.9.8 >/dev/null
@@ -347,6 +369,37 @@ grep -Fq 'could not confirm mobile-v2.0.2-rc.1 on canonical block/buzz' "$tmp/ap
 [[ "$(git -C "$operator" cat-file -t refs/tags/mobile-v2.0.2-rc.1)" == tag ]] || \
   fail "the local tag was deleted while GitHub was unavailable"
 [[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v2.0.2-rc.1)" == tag ]]
+# Rerunning after that numbers from the remote tags: rc.1 stays as published
+# and the rerun publishes rc.2.
+rc1_kept_oid="$(git --git-dir="$remote" rev-parse refs/tags/mobile-v2.0.2-rc.1)"
+run_release "$operator" candidate 2.0.2 >/dev/null
+[[ "$(git --git-dir="$remote" rev-parse refs/tags/mobile-v2.0.2-rc.1)" == "$rc1_kept_oid" ]]
+[[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v2.0.2-rc.2)" == tag ]]
+
+# push.followTags must not publish other local annotated tags: a stray local
+# mobile tag on an ancestor stays unpublished.
+git -C "$operator" fetch -q origin main
+git -C "$operator" -c tag.gpgSign=false tag -a -m stray mobile-v9.9.9-rc.99 "$remote_main_sha"
+git -C "$operator" config push.followTags true
+refs_before="$(git --git-dir="$remote" for-each-ref --format='%(refname)')"
+run_release "$operator" candidate 2.0.3 >/dev/null
+git -C "$operator" config --unset push.followTags
+git -C "$operator" tag -d mobile-v9.9.9-rc.99 >/dev/null
+[[ "$(diff <(printf '%s\n' "$refs_before") \
+  <(git --git-dir="$remote" for-each-ref --format='%(refname)') | grep -c '^[<>]')" == 1 ]] || \
+  fail "candidate publication pushed more than one ref"
+if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.9-rc.99; then
+  fail "push.followTags published a stray local mobile tag"
+fi
+
+# A push that lands but reports failure keeps the local tag and says the
+# candidate is on origin.
+if GIT_PUSH_LANDS_BUT_FAILS=1 run_release "$operator" candidate 2.0.4 > "$tmp/landed-output" 2>&1; then
+  fail "candidate reported success after a failed push"
+fi
+grep -Fq 'reported failure, but origin has mobile-v2.0.4-rc.1' "$tmp/landed-output"
+[[ "$(git -C "$operator" cat-file -t refs/tags/mobile-v2.0.4-rc.1)" == tag ]] || \
+  fail "the local tag was deleted although the candidate landed"
 
 # A shallow operator clone can still pin a verified ancestor outside its
 # local history.

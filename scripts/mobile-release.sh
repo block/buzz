@@ -169,7 +169,16 @@ case "$command" in
     git tag -a -m "Buzz Mobile $version release candidate $next" "$tag" "$source_sha" || \
       fail "could not create local tag $tag"
     # --no-verify: the release must not depend on development pre-push hooks.
-    if ! git push --no-verify origin "refs/tags/$tag"; then
+    # --no-follow-tags and an explicit refspec: push exactly this one ref, even
+    # when push.followTags would add other local annotated tags.
+    if ! git push --no-verify --no-follow-tags origin "refs/tags/$tag:refs/tags/$tag"; then
+      # Only delete the local tag when origin certainly lacks the candidate.
+      if ! remote_line="$(git ls-remote --refs origin "refs/tags/$tag")"; then
+        fail "could not push $tag, and could not check whether origin has it. If GitHub shows $tag, use it and don't rerun; otherwise run 'git tag -d $tag' before retrying"
+      fi
+      if [[ -n "$remote_line" ]]; then
+        fail "push of $tag reported failure, but origin has $tag. Check that it points at $source_sha and use it; don't rerun"
+      fi
       git tag -d "$tag" >/dev/null
       fail "could not push $tag; you must be a bypass actor of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (currently the mobile release managers). The local tag was removed so a retry starts clean"
     fi
@@ -177,13 +186,14 @@ case "$command" in
     # git URL rewriting (insteadOf) can send even a canonical-looking origin
     # to a fork, so confirm with GitHub itself that block/buzz now has this
     # exact annotated tag object. An unavailable API and a mismatch both stop
-    # here without deleting anything.
+    # here without deleting the local tag.
     local_tag_oid="$(git rev-parse --verify "refs/tags/$tag")" || fail "local tag $tag disappeared"
     if ! canonical_tag_oid="$(gh api "repos/block/buzz/git/ref/tags/$tag" --jq .object.sha)" || \
         [[ "$canonical_tag_oid" != "$local_tag_oid" ]]; then
-      # Keep the local tag: if GitHub was only unreachable, the tag may already
-      # be published, and the next run would otherwise skip past it silently.
-      fail "could not confirm $tag on canonical block/buzz. Check GitHub for the tag and git url.*.insteadOf rewrites for origin before retrying; the local tag $tag was kept"
+      # Numbering reads only remote tags, so keeping the local tag doesn't
+      # change the next candidate number. It records what was attempted, and
+      # after a fork rewrite is fixed it must be deleted before rerunning.
+      fail "could not confirm $tag on canonical block/buzz. If GitHub shows $tag, use it and don't rerun. If it doesn't, fix any git url.*.insteadOf rewrite for origin and run 'git tag -d $tag' before retrying"
     fi
     published_sha="$(remote_tag_commit_sha "refs/tags/$tag")" || \
       fail "push completed without exact annotated candidate tag $tag on origin"
