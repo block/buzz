@@ -316,6 +316,7 @@ class _RecordingSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
   }) async {
     submitCount++;
     onSigned?.call(

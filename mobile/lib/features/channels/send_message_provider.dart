@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/mentions/mention_tags.dart';
@@ -52,7 +54,8 @@ class SendMessage {
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  /// relay-validated `imeta` tags and NIP-30 `emoji` tags. [beforePublish]
+  /// can durably retain the signed event; a failure prevents publication.
   Future<void> call({
     required String channelId,
     required String content,
@@ -61,6 +64,7 @@ class SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent event)? beforePublish,
   }) async {
     _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -118,9 +122,12 @@ class SendMessage {
     try {
       await _signedEventRelay.submit(
         kind: EventKind.streamMessage,
+        validateDelivery: _ensureDeliveryValid,
         content: content,
         tags: tags,
-        onSigned: (event) {
+        onSigned: (event) async {
+          await beforePublish?.call(event);
+          _ensureDeliveryValid();
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
