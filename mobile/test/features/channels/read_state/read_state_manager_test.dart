@@ -1013,6 +1013,45 @@ void main() {
     expect(relay.liveSubscriptions, 0);
   });
 
+  test(
+    'live subscription replays nothing and opens before each snapshot',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      await manager.initialize();
+      await manager.reinitializeRemote();
+
+      // The snapshot is the only read of stored blobs. A stored replay on the
+      // live subscription re-downloaded every slot (megabytes) on each resume.
+      expect(relay.subscribeFilters, hasLength(2));
+      for (final filter in relay.subscribeFilters) {
+        expect(filter.limit, 0);
+      }
+      // Opened before its snapshot, so the snapshot covers the gap.
+      expect(relay.fetchCountAtSubscribe, [0, 1]);
+      expect(relay.fetchCount, 2);
+
+      manager.dispose();
+    },
+  );
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1207,6 +1246,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int liveSubscriptions = 0;
   final List<NostrFilter> fetchFilters = [];
   final List<NostrFilter> subscribeFilters = [];
+  final List<int> fetchCountAtSubscribe = [];
 
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
@@ -1236,6 +1276,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     subscribeCount++;
     subscribeFilters.add(filter);
+    fetchCountAtSubscribe.add(fetchCount);
     liveSubscriptions++;
     var open = true;
     return () {
