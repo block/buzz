@@ -11,9 +11,11 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
+import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'ios_add_members_sheet.dart';
 import 'mentions/mention_candidates.dart';
@@ -25,10 +27,15 @@ import '../../shared/widgets/modal_presentation.dart';
 bool _nativePickerOpen = false;
 
 /// Opens the platform member picker, retaining the Android sheet presentation.
+///
+/// For a DM, [isDm] asks whether added people see its history, and
+/// [onMovedTo] receives the DM they ended up in when it is another one.
 Future<bool?> showAddChannelMembersSheet({
   required BuildContext context,
   required String channelId,
   required Set<String> existingPubkeys,
+  bool isDm = false,
+  void Function(Channel dm)? onMovedTo,
 }) async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     if (_nativePickerOpen) return null;
@@ -41,6 +48,8 @@ Future<bool?> showAddChannelMembersSheet({
         pageBuilder: (_, _, _) => AddChannelMembersSheet(
           channelId: channelId,
           existingPubkeys: existingPubkeys,
+          isDm: isDm,
+          onMovedTo: onMovedTo,
           nativePresentation: true,
         ),
       );
@@ -61,6 +70,8 @@ Future<bool?> showAddChannelMembersSheet({
     builder: (_) => AddChannelMembersSheet(
       channelId: channelId,
       existingPubkeys: existingPubkeys,
+      isDm: isDm,
+      onMovedTo: onMovedTo,
     ),
   );
 }
@@ -71,11 +82,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     super.key,
     required this.channelId,
     required this.existingPubkeys,
+    this.isDm = false,
+    this.onMovedTo,
     this.nativePresentation = false,
   });
 
   final String channelId;
   final Set<String> existingPubkeys;
+  final bool isDm;
+  final void Function(Channel dm)? onMovedTo;
   final bool nativePresentation;
 
   @override
@@ -177,12 +192,39 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       submitError.value = null;
     }
 
+    // Agents join a DM with its history, as on desktop; adding a person asks.
+    // The relay joins anyone to this DM only with the history tag.
+    Future<bool?> askIncludeHistory(List<MentionCandidate> users) async {
+      if (users.every((user) => user.isAgent)) return true;
+      return showDmHistoryChoice(
+        context: context,
+        title: users.length == 1
+            ? 'Add ${labelFor(users.single)}?'
+            : 'Add ${users.length} members?',
+      );
+    }
+
     Future<void> addSelectedMembers() async {
       if (selectedUsers.value.isEmpty || isSubmitting.value) return;
       final submittedUsers = List<MentionCandidate>.of(selectedUsers.value);
+      final includeHistory = isDm
+          ? await askIncludeHistory(submittedUsers)
+          : null;
+      if (isDm && (includeHistory == null || !context.mounted)) return;
       isSubmitting.value = true;
       submitError.value = null;
       try {
+        if (includeHistory != null) {
+          final dm = await actions.addToDm(
+            channelId: channelId,
+            pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
+            includeHistory: includeHistory,
+          );
+          if (!context.mounted) return;
+          Navigator.of(context).pop(true);
+          if (dm.id != channelId) onMovedTo?.call(dm);
+          return;
+        }
         await actions.addMembers(
           channelId: channelId,
           pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
@@ -206,7 +248,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         submitError.value = error.message;
       } catch (error) {
         if (!context.mounted) return;
-        submitError.value = error.toString();
+        submitError.value = error.toString().replaceFirst('Exception: ', '');
       } finally {
         if (context.mounted) isSubmitting.value = false;
       }

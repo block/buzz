@@ -24,6 +24,7 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import 'channel.dart';
+import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
