@@ -12,8 +12,6 @@ const DEADLINE: Duration = Duration::from_secs(5);
 #[serde(rename_all = "camelCase")]
 pub struct RelayEntryRequirements {
     required: bool,
-    upgrade_url: Option<String>,
-    upgrade_instructions: Option<String>,
 }
 
 fn discovery_url(relay: &str) -> Result<Url, String> {
@@ -34,48 +32,6 @@ fn discovery_url(relay: &str) -> Result<Url, String> {
     url.set_scheme(scheme)
         .map_err(|_| "Invalid community scheme")?;
     Ok(url)
-}
-
-fn configured_upgrade_url(
-    relay: &str,
-    binding: Option<&str>,
-    destination: Option<&str>,
-    supported_platform: bool,
-) -> Option<String> {
-    if !configuration_matches(relay, binding, supported_platform) {
-        return None;
-    }
-    let destination = Url::parse(destination?).ok()?;
-    (destination.scheme() == "https"
-        && destination.host_str().is_some()
-        && destination.username().is_empty()
-        && destination.password().is_none()
-        && destination.fragment().is_none())
-    .then(|| destination.to_string())
-}
-
-fn configuration_matches(relay: &str, binding: Option<&str>, supported_platform: bool) -> bool {
-    supported_platform
-        && binding.is_some_and(|binding| {
-            discovery_url(relay)
-                .ok()
-                .zip(discovery_url(binding).ok())
-                .is_some_and(|(relay, binding)| relay == binding)
-        })
-}
-
-fn configured_upgrade_instructions(
-    relay: &str,
-    binding: Option<&str>,
-    instructions: Option<&str>,
-    supported_platform: bool,
-) -> Option<String> {
-    configuration_matches(relay, binding, supported_platform)
-        .then_some(instructions)
-        .flatten()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
 }
 
 async fn fetch_policy(url: Url, deadline: Duration) -> Result<bool, String> {
@@ -133,29 +89,7 @@ pub async fn fetch_relay_entry_requirements(
     relay_url: String,
 ) -> Result<RelayEntryRequirements, String> {
     let required = fetch_policy(discovery_url(&relay_url)?, DEADLINE).await?;
-    Ok(RelayEntryRequirements {
-        required,
-        upgrade_instructions: required
-            .then(|| {
-                configured_upgrade_instructions(
-                    &relay_url,
-                    option_env!("BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_RELAY"),
-                    option_env!("BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_INSTRUCTIONS"),
-                    cfg!(all(target_os = "macos", target_arch = "aarch64")),
-                )
-            })
-            .flatten(),
-        upgrade_url: required
-            .then(|| {
-                configured_upgrade_url(
-                    &relay_url,
-                    option_env!("BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_RELAY"),
-                    option_env!("BUZZ_BUILD_REQUIRED_AUTH_UPGRADE_URL"),
-                    cfg!(all(target_os = "macos", target_arch = "aarch64")),
-                )
-            })
-            .flatten(),
-    })
+    Ok(RelayEntryRequirements { required })
 }
 
 #[cfg(test)]
@@ -294,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_community_urls_and_build_destination_are_scoped() {
+    fn arbitrary_community_urls_are_scoped() {
         for relay in [
             "wss://community.example",
             "ws://127.0.0.1:3000/tenant",
@@ -310,63 +244,6 @@ mod tests {
             "wss://community.example/#secret",
         ] {
             assert!(discovery_url(relay).is_err(), "{relay}");
-        }
-        let instructions = Some("Open Managed Software Center and install Buzz.");
-        assert_eq!(
-            configured_upgrade_instructions(
-                "wss://community.example",
-                Some("wss://community.example/"),
-                instructions,
-                true
-            )
-            .as_deref(),
-            instructions
-        );
-        assert!(configured_upgrade_instructions(
-            "wss://other.example",
-            Some("wss://community.example"),
-            instructions,
-            true
-        )
-        .is_none());
-        assert!(configured_upgrade_instructions(
-            "wss://community.example",
-            Some("wss://community.example"),
-            instructions,
-            false
-        )
-        .is_none());
-        assert!(
-            configured_upgrade_instructions("wss://community.example", None, None, true).is_none()
-        );
-        let binding = Some("wss://community.example");
-        let destination = Some("https://downloads.example/new.dmg");
-        assert_eq!(
-            configured_upgrade_url("wss://community.example/", binding, destination, true)
-                .as_deref(),
-            destination
-        );
-        for (relay, binding, destination, platform) in [
-            ("wss://other.example", binding, destination, true),
-            ("ws://community.example", binding, destination, true),
-            ("wss://community.example:444", binding, destination, true),
-            ("wss://community.example/tenant", binding, destination, true),
-            ("wss://community.example", binding, destination, false),
-            ("wss://community.example", None, None, true),
-            (
-                "wss://community.example",
-                binding,
-                Some("http://downloads.example/new"),
-                true,
-            ),
-            (
-                "wss://community.example",
-                binding,
-                Some("https://user:secret@downloads.example/new"),
-                true,
-            ),
-        ] {
-            assert!(configured_upgrade_url(relay, binding, destination, platform).is_none());
         }
     }
 }

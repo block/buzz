@@ -278,8 +278,6 @@ type MockBridgeOptions = {
   relayEntryPolicy?: {
     requiredRelay?: string;
     required: boolean;
-    upgradeUrl?: string;
-    upgradeInstructions?: string;
     error?: string;
   };
   channelsReadError?: string;

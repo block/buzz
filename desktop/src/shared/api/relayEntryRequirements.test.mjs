@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 let relay = "wss://a.example/";
-let policy = { required: true, upgradeUrl: null };
+let policy = { required: true };
 let dials = 0;
 let auths = 0;
 let pending;
@@ -125,7 +125,7 @@ test("failed discovery preserves authenticated legacy reconnect and required-hos
     await client.resumeReconnect();
     assert.equal(client.getConnectionState(), "connected");
     await drop(client);
-    policy = { required: false, upgradeUrl: null };
+    policy = { required: false };
     await client.resumeReconnect();
     assert.equal(client.entryRequirements.getSnapshot().verdict, null);
     client.disconnect();
@@ -170,9 +170,9 @@ test("failed discovery preserves authenticated legacy reconnect and required-hos
     pending = undefined;
     client.disconnect();
     relay = "wss://b.example/";
-    policy = { required: true, upgradeUrl: null };
+    policy = { required: true };
     await assert.rejects(client.preconnect(), /newer Buzz/);
-    resolveA({ required: false, upgradeUrl: null });
+    resolveA({ required: false });
     await assert.rejects(stale, /superseded/);
     assert.equal(client.entryRequirements.getSnapshot().relayUrl, relay);
     assert.equal(client.entryRequirements.getSnapshot().verdict, "required");

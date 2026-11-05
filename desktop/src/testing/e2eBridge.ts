@@ -370,8 +370,6 @@ type E2eConfig = {
     relayEntryPolicy?: {
       requiredRelay?: string;
       required: boolean;
-      upgradeUrl?: string;
-      upgradeInstructions?: string;
       error?: string;
     };
     channelsReadError?: string;
@@ -13610,8 +13608,6 @@ export function maybeInstallE2eTauriMocks() {
         if (policy?.error) throw new Error(policy.error);
         return {
           required: policy?.required ?? false,
-          upgradeUrl: policy?.upgradeUrl ?? null,
-          upgradeInstructions: policy?.upgradeInstructions ?? null,
         };
       }
       case "get_relay_ws_url": {

@@ -11,8 +11,6 @@ type PolicyWindow = Window & {
       relayEntryPolicy: {
         required: boolean;
         requiredRelay?: string;
-        upgradeUrl?: string;
-        upgradeInstructions?: string;
         error?: string;
       };
     };
@@ -61,19 +59,9 @@ test("saved desktop community: required, retryable failure, recovery and keys su
   await expect(
     card.getByText("Upgrade Buzz to join this community"),
   ).toBeVisible();
-  // Even stale private-build overrides cannot replace the public destination.
-  await page.evaluate(() => {
-    (window as PolicyWindow).__BUZZ_E2E__.mock.relayEntryPolicy = {
-      required: true,
-      upgradeInstructions: "Use a private installer",
-      upgradeUrl: "https://downloads.example/private.dmg",
-    };
-  });
-  await card.getByRole("button", { name: "Retry community check" }).click();
   await expect(card).toContainText(
     "Download the latest Buzz client at builderlab.xyz to continue.",
   );
-  await expect(card).not.toContainText("private installer");
   await card.getByRole("button", { name: "Download latest Buzz" }).click();
   expect(
     await page.evaluate(() =>

@@ -39,8 +39,7 @@ reset keys or remove saved communities.
 The upgrade card directs public users to `https://builderlab.xyz` to download
 an up-to-date Buzz client. This default applies to every supported desktop
 platform and required community, including unconfigured public release builds.
-The card does not use the older private-host/platform build overrides. If the
-browser cannot open, the card shows the public URL for manual navigation.
+If the browser cannot open, the card shows the public URL for manual navigation.
 Discovery never supplies a trusted download or sign-in origin.
 
 Before release, exercise a native build with disposable identities: join a

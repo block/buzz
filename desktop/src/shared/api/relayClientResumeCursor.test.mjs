@@ -38,7 +38,7 @@ globalThis.window = {
     transformCallback: () => nextCallbackId++,
     async invoke(command, args) {
       if (command === "fetch_relay_entry_requirements")
-        return { required: false, upgradeUrl: null };
+        return { required: false };
       if (command === "plugin:websocket|connect") {
         dials.push(now);
         return 100 + dials.length;
