@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -82,12 +83,18 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static final Map<String, DateTime> _cooldownUntil = {};
   static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
 
-  /// Background refreshes of stale disk bytes under way, per cache and URL.
+  /// Background refreshes of stale disk bytes running or queued, per cache
+  /// and URL.
   static final Set<(MediaDiskCache, String)> _refreshing = {};
+  static final _refreshQueue = Queue<Future<void> Function()>();
+  static var _runningRefreshes = 0;
 
-  /// Most background refreshes at once. A stale image skipped here keeps its
-  /// saved bytes and refreshes on a later load.
+  /// Most background refreshes at once; the rest wait in a queue.
   static const _maxRefreshes = 2;
+
+  /// Most refreshes waiting. A stale image dropped past this keeps its
+  /// saved bytes and refreshes the next time it loads from disk.
+  static const _maxQueuedRefreshes = 64;
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -202,7 +209,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     if (cache == null) return _fetchBytes(fetch.aborted);
     final hit = await cache.read(url);
     if (hit != null) {
-      if (hit.isStale) unawaited(_refresh(cache));
+      if (hit.isStale) _scheduleRefresh(cache);
       return hit.bytes;
     }
     final bytes = await _fetchBytes(fetch.aborted);
@@ -211,11 +218,35 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     return bytes;
   }
 
-  Future<void> _refresh(MediaDiskCache cache) async {
-    final refresh = (cache, url);
-    if (_refreshing.length >= _maxRefreshes || !_refreshing.add(refresh)) {
+  void _scheduleRefresh(MediaDiskCache cache) {
+    final key = (cache, url);
+    if (_refreshQueue.length >= _maxQueuedRefreshes || !_refreshing.add(key)) {
       return;
     }
+    _refreshQueue.add(() async {
+      try {
+        await _refresh(cache);
+      } finally {
+        _refreshing.remove(key);
+      }
+    });
+    _pumpRefreshes();
+  }
+
+  static void _pumpRefreshes() {
+    while (_runningRefreshes < _maxRefreshes && _refreshQueue.isNotEmpty) {
+      final refresh = _refreshQueue.removeFirst();
+      _runningRefreshes++;
+      unawaited(
+        refresh().whenComplete(() {
+          _runningRefreshes--;
+          _pumpRefreshes();
+        }),
+      );
+    }
+  }
+
+  Future<void> _refresh(MediaDiskCache cache) async {
     try {
       // Never aborted: nobody is waiting on it.
       final bytes = await _fetchBytes(Completer<void>().future);
@@ -237,8 +268,6 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     } on Object catch (error) {
       // The stale bytes stay; the next load after the cooldown retries.
       debugPrint('[MediaImageProvider] refresh of $url failed: $error');
-    } finally {
-      _refreshing.remove(refresh);
     }
   }
 

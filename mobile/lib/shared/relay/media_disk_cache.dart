@@ -90,20 +90,34 @@ class MediaDiskCache {
     p.join(communityDirectory(root, communityId).path, 'media', signer),
   );
 
-  /// Deletes every community directory under [root] whose id is not in
-  /// [retainedIds]: a removed community's data, including writes that landed
-  /// after its removal. A failed delete is retried on the next call.
+  /// Keeps only each retained community's cache for its current signer
+  /// (community id to signer pubkey) and deletes every other directory under
+  /// [root]: removed communities and replaced accounts, including writes
+  /// that landed after their removal. A failed delete is retried on the
+  /// next call.
   static Future<void> removeOrphans(
     Directory root,
-    Set<String> retainedIds,
+    Map<String, String?> retained,
   ) async {
     final communities = Directory(p.join(root.path, 'communities'));
-    if (!await communities.exists()) return;
-    final retained = {
-      for (final id in retainedIds) communityDirectory(root, id).path,
+    final keep = {
+      for (final MapEntry(key: id, value: signer) in retained.entries)
+        if (signer != null) directoryFor(root, id, signer).path,
     };
-    await for (final entry in communities.list(followLinks: false)) {
-      if (entry is! Directory || retained.contains(entry.path)) continue;
+    final keepCommunities = {
+      for (final path in keep) p.dirname(p.dirname(path)),
+    };
+    await _deleteExcept(communities, keepCommunities);
+    for (final community in keepCommunities) {
+      await _deleteExcept(Directory(p.join(community, 'media')), keep);
+    }
+  }
+
+  /// Deletes the entries of [parent] whose paths are not in [keep].
+  static Future<void> _deleteExcept(Directory parent, Set<String> keep) async {
+    if (!await parent.exists()) return;
+    await for (final entry in parent.list(followLinks: false)) {
+      if (keep.contains(entry.path)) continue;
       try {
         await entry.delete(recursive: true);
       } on FileSystemException catch (error) {

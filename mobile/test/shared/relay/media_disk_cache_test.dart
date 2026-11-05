@@ -161,28 +161,32 @@ void main() {
       }
       await _settle();
       expect(fetched, _externalUrls.take(2));
-      // The replacements are too large to save, so the old copies go
-      // rather than showing in their place.
+      // The third waits for a slot. The replacements are too large to save,
+      // so the old copies go rather than showing in their place.
       replacement.complete();
       await _settle();
+      expect(fetched, _externalUrls);
     });
     replaceExternal = null;
 
     fetched.clear();
     online = false;
     await launch((cache) async {
-      for (final url in _externalUrls.take(2)) {
+      for (final url in _externalUrls) {
         expect(await show(cache, url), isNotNull, reason: url);
       }
-      expect(await show(cache, _externalUrls.last), isNull);
-      await _settle();
     });
-    // The third, skipped before, retries its refresh.
     expect(fetched, _externalUrls);
 
-    // Removing the community deletes its directory.
+    // A replaced account's directory goes, including writes that land after
+    // its delete; removing the community deletes its directory.
     expect(await directory.exists(), isTrue);
-    await MediaDiskCache.removeOrphans(root, {'community-2'});
+    await MediaDiskCache.removeOrphans(root, {'community-1': 'signer-2'});
+    expect(await directory.exists(), isFalse);
+    await directory.create(recursive: true);
+    await MediaDiskCache.removeOrphans(root, {'community-1': 'signer-1'});
+    expect(await directory.exists(), isTrue);
+    await MediaDiskCache.removeOrphans(root, {'community-2': 'signer-1'});
     expect(
       await MediaDiskCache.communityDirectory(root, 'community-1').exists(),
       isFalse,

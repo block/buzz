@@ -300,7 +300,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
       // The new account has its own image cache; drop the previous one's.
-      if (identityChanged) await _removeMediaCache(existing);
+      if (identityChanged) await _removeOrphanMediaCaches(updatedList);
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
@@ -404,34 +404,16 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     });
   }
 
-  /// Deletes [community]'s image cache for its current account. A failure is
-  /// logged; the cache only costs disk until the community is removed.
-  Future<void> _removeMediaCache(Community community) async {
-    final signer = _channelSnapshotPubkey(community)?.toLowerCase();
-    if (signer == null) return;
-    try {
-      final root = await ref.read(mediaCacheRootProvider.future);
-      if (root == null) return;
-      final directory = MediaDiskCache.directoryFor(root, community.id, signer);
-      if (await directory.exists()) await directory.delete(recursive: true);
-    } catch (error, stackTrace) {
-      developer.log(
-        'Media cache deletion failed',
-        name: 'buzz.community',
-        error: error,
-        stackTrace: stackTrace,
-      );
-    }
-  }
-
-  /// Deletes the image caches of communities no longer in [communities].
-  /// A failure is retried by the sweep on the next launch.
+  /// Deletes the image caches of communities no longer in [communities],
+  /// and of accounts a community no longer signs in as. A failure, or a
+  /// write that lands after the delete, is swept on the next launch.
   Future<void> _removeOrphanMediaCaches(List<Community> communities) async {
     try {
       final root = await ref.read(mediaCacheRootProvider.future);
       if (root == null) return;
       await MediaDiskCache.removeOrphans(root, {
-        for (final community in communities) community.id,
+        for (final community in communities)
+          community.id: _channelSnapshotPubkey(community)?.toLowerCase(),
       });
     } catch (error, stackTrace) {
       developer.log(
