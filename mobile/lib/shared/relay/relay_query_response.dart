@@ -59,15 +59,57 @@ List<NostrEvent> parseRelayQueryEvents(Uint8List bytes, String? contentType) {
 /// passes through. JSON never starts with the gzip magic bytes, so the bytes
 /// decide, not the `Content-Encoding` header a transport may leave behind.
 /// The charset rules are those of [http.Response.body].
-String relayResponseText(Uint8List bytes, String? contentType) {
-  final inflated = _isGzip(bytes)
-      ? Uint8List.fromList(gzip.decode(bytes))
-      : bytes;
+///
+/// With [maxInflatedBytes], a gzip body that expands past it throws a
+/// [FormatException] as soon as it does, so a small compressed body cannot
+/// expand without limit. Transport byte caps only see the compressed size.
+String relayResponseText(
+  Uint8List bytes,
+  String? contentType, {
+  int? maxInflatedBytes,
+}) {
+  final inflated = _isGzip(bytes) ? _inflate(bytes, maxInflatedBytes) : bytes;
   return http.Response.bytes(
     inflated,
     200,
     headers: {'content-type': ?contentType},
   ).body;
+}
+
+Uint8List _inflate(Uint8List bytes, int? maxBytes) {
+  if (maxBytes == null) return Uint8List.fromList(gzip.decode(bytes));
+  final output = BytesBuilder(copy: false);
+  final input = gzip.decoder.startChunkedConversion(
+    _CappedByteSink(output, maxBytes),
+  );
+  // Small input chunks bound how far one chunk can overshoot the cap.
+  const chunk = 4096;
+  for (var start = 0; start < bytes.length; start += chunk) {
+    final end = start + chunk < bytes.length ? start + chunk : bytes.length;
+    input.add(Uint8List.sublistView(bytes, start, end));
+  }
+  input.close();
+  return output.takeBytes();
+}
+
+class _CappedByteSink implements Sink<List<int>> {
+  _CappedByteSink(this._output, this._maxBytes);
+
+  final BytesBuilder _output;
+  final int _maxBytes;
+
+  @override
+  void add(List<int> data) {
+    if (_output.length + data.length > _maxBytes) {
+      throw FormatException(
+        'relay response exceeds $_maxBytes bytes after inflating',
+      );
+    }
+    _output.add(data);
+  }
+
+  @override
+  void close() {}
 }
 
 bool _isGzip(Uint8List bytes) =>

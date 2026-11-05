@@ -151,3 +151,42 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
     RENDERED_ORIGINAL_CONTENT,
   );
 });
+
+// Clearing a draft must close its autocomplete at once. An Enter inside the
+// 120 ms debounce used to pick the stale suggestion instead of submitting, so
+// the delete prompt never appeared. The draft's trailing `#general` opens the
+// channel list on its own; the other triggers are typed after it.
+for (const { trigger, typed, popover } of [
+  { trigger: "#channel", typed: "", popover: "channel-autocomplete" },
+  { trigger: "@mention", typed: " @al", popover: "mention-autocomplete" },
+  { trigger: ":emoji", typed: " :smi", popover: "emoji-autocomplete" },
+]) {
+  test(`an empty edit submits while the ${trigger} autocomplete is open`, async ({
+    page,
+  }) => {
+    const row = page.locator(`[data-message-id="${OWN_MESSAGE_ID}"]`);
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await openMoreActionsMenu(page, OWN_MESSAGE_ID);
+    await page.getByTestId(`edit-message-${OWN_MESSAGE_ID}`).click();
+    await expect(page.getByTestId("edit-target")).toBeVisible({
+      timeout: 5_000,
+    });
+    // The channel list opens only once the caret has landed after `#general`.
+    await expect(page.getByTestId("channel-autocomplete")).toBeVisible({
+      timeout: 5_000,
+    });
+    await page.keyboard.type(typed);
+    await expect(page.getByTestId(popover)).toBeVisible({ timeout: 5_000 });
+
+    // Clear and submit back-to-back, well inside the debounce.
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByRole("alertdialog")).toContainText(
+      "Delete message?",
+      { timeout: 5_000 },
+    );
+    await expect(page.getByTestId("message-input")).toBeEmpty();
+  });
+}

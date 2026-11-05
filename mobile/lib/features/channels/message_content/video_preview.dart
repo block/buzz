@@ -29,8 +29,9 @@ typedef VideoPreviewFrameLoader =
 final videoPreviewFrameLoaderProvider = Provider<VideoPreviewFrameLoader>((
   ref,
 ) {
-  final auth = ref.watch(mediaGetAuthServiceProvider);
-  return (url) => _loadVideoPreviewFrame(url, headers: auth.headersFor(url));
+  // The native player fetches the URL itself, outside the hosted HTTP client.
+  final headersFor = ref.watch(nativeMediaHeadersProvider);
+  return (url) => _loadVideoPreviewFrame(url, headers: headersFor(url));
 });
 
 class _MessageVideoPreview extends HookConsumerWidget {

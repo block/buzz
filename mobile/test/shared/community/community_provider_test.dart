@@ -552,7 +552,7 @@ void main() {
       final newToken = cache.capture(newKeys.public, community.relayUrl);
       await cache.write(newToken, snapshot);
       await communityStorage.saveActiveId(community.id);
-      await notifier.removeActiveCommunityForSignOut();
+      await notifier.removeCommunity(community.id);
       expect(await communityStorage.loadAll(), isEmpty);
       expect(prefs.getKeys(), {'unrelated'});
       expect(await cache.write(newToken, snapshot), isFalse);
@@ -602,7 +602,7 @@ void main() {
           store.failure = failure;
           await container
               .read(communityListProvider.notifier)
-              .removeActiveCommunityForSignOut();
+              .removeCommunity(community.id);
           expect(await communityStorage.loadAll(), isEmpty);
           expect(await communityStorage.loadActiveId(), isNull);
           expect(journaledCommunityIds, [community.id]);
@@ -717,23 +717,6 @@ void main() {
         );
       },
     );
-
-    test('renameCommunity updates name', () async {
-      container = createContainer();
-      await container.read(communityListProvider.future);
-
-      final ws = Community.create(
-        name: 'Original',
-        relayUrl: 'https://test.example.com',
-      );
-      await container.read(communityListProvider.notifier).addCommunity(ws);
-      await container
-          .read(communityListProvider.notifier)
-          .renameCommunity(ws.id, 'Renamed');
-
-      final communities = await container.read(communityListProvider.future);
-      expect(communities.first.name, 'Renamed');
-    });
 
     test('waits for transition teardown before updating active ID', () async {
       container = createContainer();

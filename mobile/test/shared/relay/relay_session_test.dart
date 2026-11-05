@@ -1016,7 +1016,6 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(session.state.status, SessionStatus.disconnected);
-      expect(auth.signOutCount, 0);
     },
   );
 
@@ -2252,16 +2251,9 @@ _QueryHarness _queryHarness({
 }
 
 class _FakeAuthNotifier extends AuthNotifier {
-  int signOutCount = 0;
-
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
-
-  @override
-  Future<void> signOut() async {
-    signOutCount++;
-  }
 }
 
 class _AuthenticatedAuthNotifier extends AuthNotifier {

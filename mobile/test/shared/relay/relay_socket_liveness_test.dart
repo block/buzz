@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/relay/relay_socket.dart';
+import 'package:buzz/shared/relay/relay_websocket.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -40,15 +41,145 @@ Future<ServerSocket> _silentAfterHandshakeServer() async {
   return server;
 }
 
+/// A server that accepts TCP connections and then never answers, like a
+/// stalled TLS or upgrade handshake on a congested network.
+/// Accepts TCP and never answers the upgrade. [closed] completes when the
+/// client drops the connection.
+Future<(ServerSocket server, Future<void> closed)>
+_stalledHandshakeServer() async {
+  final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  final closed = Completer<void>();
+  server.listen(
+    (client) => client.listen(
+      (_) {},
+      onError: (_) {},
+      onDone: () {
+        if (!closed.isCompleted) closed.complete();
+      },
+    ),
+  );
+  return (server, closed.future);
+}
+
 void main() {
   const testPingInterval = Duration(milliseconds: 150);
+  const testConnectTimeout = Duration(milliseconds: 200);
 
   setUp(() {
     RelaySocket.debugPingInterval = testPingInterval;
+    RelaySocket.debugConnectTimeout = testConnectTimeout;
   });
 
   tearDown(() {
     RelaySocket.debugPingInterval = RelaySocket.pingInterval;
+    RelaySocket.debugConnectTimeout = relayWebSocketConnectTimeout;
+  });
+
+  for (final scoped in [false, true]) {
+    test('gives up on a handshake that never completes '
+        '(${scoped ? 'scoped headers' : 'no headers'})', () async {
+      final (server, clientClosed) = await _stalledHandshakeServer();
+
+      final disconnected = Completer<Object?>();
+      final socket = RelaySocket(
+        wsUrl: 'ws://127.0.0.1:${server.port}',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (error) {
+          if (!disconnected.isCompleted) disconnected.complete(error);
+        },
+      );
+      if (scoped) {
+        socket.headers = {'Nostr-Federated-Identity': 'Bearer synthetic'};
+      }
+      unawaited(socket.connect());
+
+      final error = await disconnected.future.timeout(
+        testConnectTimeout * 10,
+        onTimeout: () => fail(
+          'RelaySocket must fail a stalled handshake so the session can '
+          'schedule a reconnect',
+        ),
+      );
+      expect(socket.state, SocketState.disconnected);
+      expect(error.toString(), contains('Relay connection timed out'));
+      // The abandoned handshake is closed, not left for the OS to time out.
+      await clientClosed.timeout(
+        testConnectTimeout * 10,
+        onTimeout: () => fail('the timed-out handshake was left open'),
+      );
+
+      socket.dispose();
+      await server.close();
+    });
+  }
+
+  // Pairing validation disconnects in a finally block after a failed connect;
+  // an unbounded close there stranded pairing until the pairing relay expired.
+  for (final refusal in [401, null]) {
+    test(
+      'disconnect completes after '
+      '${refusal == null ? 'a timed-out handshake' : 'a refused upgrade ($refusal)'}',
+      () async {
+        HttpServer? refusing;
+        ServerSocket? stalled;
+        if (refusal == null) {
+          stalled = (await _stalledHandshakeServer()).$1;
+        } else {
+          refusing = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          refusing.listen((request) async {
+            request.response.statusCode = refusal;
+            await request.response.close();
+          });
+        }
+        final url = 'ws://127.0.0.1:${(refusing?.port ?? stalled!.port)}';
+        Object? reported;
+        final socket = RelaySocket(
+          wsUrl: url,
+          nsec: null,
+          onMessage: (_) {},
+          onConnected: () {},
+          onDisconnected: (error) => reported = error,
+        );
+
+        await socket.connect();
+        expect(socket.state, SocketState.disconnected);
+        if (refusal != null) expect(relayUpgradeRefused(reported), isTrue);
+        await socket.disconnect().timeout(
+          testConnectTimeout * 10,
+          onTimeout: () =>
+              fail('disconnect() hung on a channel that never opened'),
+        );
+
+        await refusing?.close(force: true);
+        await stalled?.close();
+      },
+    );
+  }
+
+  test('disconnect is bounded while the upgrade is still pending', () async {
+    // Pairing's 8s validation deadline can fire before the 10s connect timeout.
+    RelaySocket.debugConnectTimeout = const Duration(seconds: 30);
+    final (server, _) = await _stalledHandshakeServer();
+    final socket = RelaySocket(
+      wsUrl: 'ws://127.0.0.1:${server.port}',
+      nsec: null,
+      onMessage: (_) {},
+      onConnected: () {},
+      onDisconnected: (_) {},
+    );
+    unawaited(socket.connect());
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    await socket.disconnect().timeout(
+      RelaySocket.closeTimeout * 2,
+      onTimeout: () => fail('disconnect() hung on a pending upgrade'),
+    );
+    expect(socket.state, SocketState.disconnected);
+
+    socket.dispose();
+    await server.close();
   });
 
   test('detects a peer that stops answering pings', () async {

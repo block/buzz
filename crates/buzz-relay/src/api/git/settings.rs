@@ -166,6 +166,7 @@ struct SettingsAuth {
 
 async fn authenticate(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     path: &str,
     body: Option<&[u8]>,
@@ -188,7 +189,9 @@ async fn authenticate(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             method,
             url,
@@ -198,18 +201,16 @@ async fn authenticate(
         ),
     )
     .await?;
-    let pubkey = *admission.proven_pubkey();
-    let token_owner = admission.token_owner();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
+    let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
+    let (pubkey, signed_created_at, token_owner) =
+        (caller.pubkey, caller.signed_at, caller.token_owner);
 
-    bridge::enforce_http_admission(state, &tenant, &pubkey)
-        .await
-        .map_err(IntoResponse::into_response)?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes)
+    caller
+        .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(IntoResponse::into_response)?;
     let tag = relay_members::extract_auth_tag_header(headers);
-    relay_members::enforce_relay_membership(
+    let membership = relay_members::enforce_relay_membership(
         state,
         &tenant,
         pubkey.as_bytes(),
@@ -217,11 +218,13 @@ async fn authenticate(
         signed_created_at,
         token_owner,
     )
-    .await
-    .map_err(IntoResponse::into_response)?;
+    .await;
+    caller
+        .check(membership, relay_members::MembershipRefusal::auth_result)
+        .map_err(IntoResponse::into_response)?;
     #[cfg(test)]
     crate::nip_fi_test_hooks::before_http_ban_recheck(tenant.community()).await;
-    deny_banned_git_principal(
+    let ban = deny_banned_git_principal(
         &state.db,
         tenant.community(),
         &pubkey,
@@ -229,17 +232,24 @@ async fn authenticate(
         signed_created_at,
         token_owner,
     )
-    .await
-    .map_err(|legacy| match token_owner {
-        // A verified agent token gets only NIP-FI's fixed denial, as smart
-        // Git transport does, so the response never shows which step refused.
-        Some(_) => crate::nip_fi_core::http_denial(if legacy.status().is_server_error() {
-            buzz_auth::DenialClass::AuthorizationUnavailable
-        } else {
-            buzz_auth::DenialClass::AuthorizationDenied
-        }),
-        None => legacy,
-    })?;
+    .await;
+    caller
+        .admit(ban, |refused| {
+            crate::access::AuthResult::Denied(match refused.status() {
+                StatusCode::FORBIDDEN => crate::access::AuthReason::Banned,
+                _ => crate::access::AuthReason::BanCheckUnavailable,
+            })
+        })
+        .map_err(|legacy| match token_owner {
+            // A verified agent token gets only NIP-FI's fixed denial, as smart
+            // Git transport does, so the response never shows which step refused.
+            Some(_) => crate::nip_fi_core::http_denial(if legacy.status().is_server_error() {
+                buzz_auth::DenialClass::AuthorizationUnavailable
+            } else {
+                buzz_auth::DenialClass::AuthorizationDenied
+            }),
+            None => legacy,
+        })?;
     // Admission ignores kind= restrictions by design (NIP-AA). Repository
     // management must not turn a message-only credential into write authority.
     // This HTTP operation has no event kind: only kind-unrestricted credentials
@@ -331,12 +341,13 @@ async fn authorize_management(
 
 async fn get_default_branch(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((owner, repo)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
-    let auth = authenticate(&state, &headers, &path, None).await?;
+    let auth = authenticate(&state, &slot, &headers, &path, None).await?;
     authorize_git_read(
         &state.db,
         auth.tenant.community(),
@@ -352,13 +363,14 @@ async fn get_default_branch(
 
 async fn set_default_branch(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((owner, repo)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
-    let auth = authenticate(&state, &headers, &path, Some(&body)).await?;
+    let auth = authenticate(&state, &slot, &headers, &path, Some(&body)).await?;
     let announcement = authorize_git_read(
         &state.db,
         auth.tenant.community(),

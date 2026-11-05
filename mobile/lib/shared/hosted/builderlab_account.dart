@@ -1,4 +1,5 @@
 import '../storage/serial_queue.dart';
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -37,10 +38,12 @@ class BuilderlabAccount {
   const BuilderlabAccount({
     required this.subject,
     required this.expiresAt,
+    this.email,
     this.needsAccountSetup = false,
   });
   final bool needsAccountSetup;
   final String subject;
+  final String? email;
   final DateTime expiresAt;
 }
 
@@ -52,17 +55,31 @@ class BuilderlabAccount {
 /// subject is refused until the caller clears the session and every fact it
 /// holds for the previous subject.
 class BuilderlabAccountClient {
+  /// [accountOrigin] defaults to the hosted account environment. An
+  /// organization client uses its own trusted origin and session record.
   BuilderlabAccountClient({
     http.Client? httpClient,
     FlutterSecureStorage? storage,
+    Uri? accountOrigin,
+    this.onSessionChanged,
   }) : _http = httpClient ?? http.Client(),
-       _storage = storage ?? defaultStorage;
+       _storage = storage ?? defaultStorage,
+       accountOrigin = accountOrigin ?? origin;
 
   /// Device-only: the session never syncs or restores onto another device.
   @visibleForTesting
   static const defaultStorage = accountSecureStorage;
 
   static final origin = HostedEnvironment.origin;
+  final Uri accountOrigin;
+
+  /// Receives the session credential each time one is adopted, and null when
+  /// it is cleared or a restore finds no session. Only a trusted owner of
+  /// [accountOrigin]'s session may set it, for example to share the session
+  /// with the notification extension. A failed clear fails the operation that
+  /// cleared, so a signed-out session is never left shared; a failed share of
+  /// an adopted session is retried at the next adopt.
+  final Future<void> Function(String? credential)? onSessionChanged;
   static const _prefix = '/api/goose';
 
   /// Remote-agent registry routes, shared with desktop.
@@ -78,12 +95,21 @@ class BuilderlabAccountClient {
     '/v3/beekeeper/list-agents',
   };
 
+  /// Agent listings carry each agent's instructions (up to 20,000 characters
+  /// apiece), so they get room for many full agents; every other route keeps
+  /// the default bound.
+  static int _responseLimit(String path) =>
+      path == '/v3/beekeeper/list-agents' ? 4 * 1024 * 1024 : 65536;
+
   /// Sessions are scoped per origin so staging never reads production state.
-  static final _storageKey =
-      'buzz_hosted_session_${origin.host.replaceAll('.', '_')}_v1';
+  late final _storageKey =
+      'buzz_hosted_session_${accountOrigin.host.replaceAll('.', '_')}_v1';
   final http.Client _http;
   final FlutterSecureStorage _storage;
   String? _credential;
+  // The adopted credential while the notification extension lacks its copy.
+  String? _unshared;
+  bool _sharing = false;
   BuilderlabAccount? _account;
   final _queue = SerialQueue();
   bool _disposed = false;
@@ -104,9 +130,18 @@ class BuilderlabAccountClient {
     return result;
   }
 
-  Future<BuilderlabAccount?> restore() => _serial(() async {
+  /// Concurrent callers share one restore, so a second one cannot replace the
+  /// account the first adopted while its callers still hold that session.
+  Future<BuilderlabAccount?> restore() =>
+      _restoring ??= _restore().whenComplete(() => _restoring = null);
+  Future<BuilderlabAccount?>? _restoring;
+  Future<BuilderlabAccount?> _restore() => _serial(() async {
     final record = await _readRecord();
-    if (record == null) return null;
+    if (record == null) {
+      // Retries a removal that failed after an earlier sign-out.
+      await _unshare();
+      return null;
+    }
     try {
       final verified = await _verify(record.credential);
       if (verified.subject != record.subject) {
@@ -124,9 +159,12 @@ class BuilderlabAccountClient {
 
   /// Receives a one-use code only from a validated browser callback. PKCE is
   /// verified by Builderlab; state and callback origin are checked by the caller.
+  /// [isCurrent] is checked just before the session is saved, so a caller can
+  /// abandon an exchange without it later replacing a newer session.
   Future<BuilderlabAccount> exchange({
     required String code,
     required String verifier,
+    bool Function()? isCurrent,
   }) => _serial(() async {
     if (code.isEmpty ||
         !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
@@ -153,9 +191,11 @@ class BuilderlabAccountClient {
     if (stored != null && stored.subject != verified.subject) {
       throw AccountFailure.differentAccount;
     }
-    if (_disposed) throw AccountFailure.unavailable;
+    if (_disposed || (isCurrent != null && !isCurrent())) {
+      throw AccountFailure.unavailable;
+    }
     final record = jsonEncode({
-      'origin': origin.toString(),
+      'origin': accountOrigin.toString(),
       'credential': credential,
       'subject': verified.subject,
       'expires_at': verified.expiresAt.toIso8601String(),
@@ -184,7 +224,7 @@ class BuilderlabAccountClient {
     try {
       final value = jsonDecode(saved);
       if (value is Map<String, dynamic> &&
-          value['origin'] == origin.toString() &&
+          value['origin'] == accountOrigin.toString() &&
           value['credential'] is String &&
           value['subject'] is String) {
         return (
@@ -201,8 +241,37 @@ class BuilderlabAccountClient {
   BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
     if (_disposed) throw AccountFailure.unavailable;
     _credential = credential;
+    // Assigned before notifying, so subject listeners see the new account.
+    _account = verified;
     _subject.value = verified.subject;
-    return _account = verified;
+    _unshared = credential;
+    _share();
+    return verified;
+  }
+
+  /// Shares the adopted credential with the notification extension. Sharing is
+  /// push enrichment and must never gate sign-in, so a failure is retried by
+  /// the next account request instead of being thrown.
+  void _share() {
+    final share = onSessionChanged;
+    final credential = _unshared;
+    if (share == null || credential == null || _sharing) return;
+    _sharing = true;
+    unawaited(
+      share(credential)
+          .then((_) {
+            if (_unshared == credential) _unshared = null;
+          })
+          .catchError(
+            (Object error) => debugPrint('Session share failed: $error'),
+          )
+          .whenComplete(() {
+            _sharing = false;
+            // A newer credential adopted while this write was in flight still needs sharing.
+            final pending = _unshared;
+            if (pending != null && pending != credential) _share();
+          }),
+    );
   }
 
   Future<BuilderlabAccount> _verify(String credential) async {
@@ -214,14 +283,11 @@ class BuilderlabAccountClient {
       throw AccountFailure.invalidResponse;
     }
     if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
-    final standing = result['account_standing'];
     final needsSetup =
-        standing is Map &&
-        (standing['details_status'] == 'ACCOUNT_DETAILS_STATUS_MISSING' ||
-            standing['screening_status'] ==
-                'ACCOUNT_SCREENING_STATUS_NOT_SCREENED');
+        result['account_status'] == 'ACCOUNT_STATUS_NEEDS_DETAILS';
     return BuilderlabAccount(
       subject: subject,
+      email: result['email'] is String ? result['email'] as String : null,
       expiresAt: parsed,
       needsAccountSetup: needsSetup,
     );
@@ -270,6 +336,7 @@ class BuilderlabAccountClient {
     return _serial(() async {
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
+      _share();
       if (expectedSubject != null && _account?.subject != expectedSubject) {
         throw AccountFailure.denied;
       }
@@ -317,11 +384,35 @@ class BuilderlabAccountClient {
 
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
-    _credential = null;
-    _account = null;
-    if (!_disposed) _subject.value = null;
+    // Attempt both removals so one failure never leaves the other copy live.
+    var failed = false;
     try {
       await _storage.delete(key: _storageKey);
+    } catch (_) {
+      failed = true;
+    }
+    try {
+      await _unshare();
+    } on AccountFailure {
+      failed = true;
+    }
+    if (failed) {
+      // The account stays signed in, so the extension gets its copy back.
+      _unshared = _credential;
+      _share();
+      throw AccountFailure.storage;
+    }
+    _credential = null;
+    _unshared = null;
+    _account = null;
+    if (!_disposed) _subject.value = null;
+  }
+
+  Future<void> _unshare() async {
+    final share = onSessionChanged;
+    if (share == null) return;
+    try {
+      await share(null);
     } catch (_) {
       throw AccountFailure.storage;
     }
@@ -337,7 +428,7 @@ class BuilderlabAccountClient {
       final request =
           http.Request(
               body == null ? 'GET' : 'POST',
-              origin.replace(path: '$_prefix$path'),
+              accountOrigin.replace(path: '$_prefix$path'),
             )
             ..followRedirects = false
             ..headers['Accept'] = 'application/json';
@@ -346,7 +437,7 @@ class BuilderlabAccountClient {
       }
       if (body != null) {
         request.headers['Content-Type'] = 'application/json';
-        request.headers['Origin'] = origin.toString();
+        request.headers['Origin'] = accountOrigin.toString();
         request.body = jsonEncode(body);
         if (signingKey != null) {
           request.headers['Authorization'] = buildNip98AuthHeader(
@@ -357,10 +448,14 @@ class BuilderlabAccountClient {
           );
         }
       }
-      final response = await boundedHttpResponse(_http, request);
+      final response = await boundedHttpResponse(
+        _http,
+        request,
+        maxBytes: _responseLimit(path),
+      );
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
-          'Builderlab ${origin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
+          'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
         );
       }
       if (response.statusCode == 401) throw AccountFailure.signedOut;

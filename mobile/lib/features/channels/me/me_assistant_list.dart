@@ -23,11 +23,17 @@ class MeAssistantList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final profiles = ref.watch(userCacheProvider);
-    return SizedBox(
-      height: (MediaQuery.sizeOf(context).height * 0.6).clamp(0.0, 400.0),
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.6,
+      ),
       child: choices.isEmpty
-          ? const Center(child: Text('No agents are available.'))
+          ? const Padding(
+              padding: EdgeInsets.all(Grid.gutter),
+              child: Text('No agents are available.'),
+            )
           : ListView(
+              shrinkWrap: true,
               padding: const EdgeInsets.fromLTRB(
                 Grid.gutter,
                 0,

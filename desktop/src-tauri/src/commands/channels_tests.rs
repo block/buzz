@@ -301,6 +301,25 @@ fn duplicate_channel_rejection_is_ensure_success_only() {
     ));
 }
 
+#[test]
+fn permanent_starter_rejection_matches_only_the_relay_refusals() {
+    assert!(is_permanent_starter_rejection(
+        "relay returned 400 Bad Request: invalid: an open channel named \"General\" already exists"
+    ));
+    assert!(is_permanent_starter_rejection(
+        "relay returned 400 Bad Request: invalid: channel is archived"
+    ));
+    assert!(!is_permanent_starter_rejection(
+        "relay rejected event: duplicate: channel already exists"
+    ));
+    assert!(!is_permanent_starter_rejection(
+        "relay returned 400 Bad Request: invalid: channel name too long"
+    ));
+    assert!(!is_permanent_starter_rejection(
+        "invalid: an open channel named \"general\" already exists"
+    ));
+}
+
 // ── compute_channels_hash ─────────────────────────────────────────────────────
 
 fn make_channel(id: &str, name: &str, last_message_at: Option<String>) -> ChannelInfo {

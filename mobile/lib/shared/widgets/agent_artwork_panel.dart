@@ -49,6 +49,7 @@ class AgentArtworkPanel extends StatelessWidget {
                               scale: 2,
                               child: AvatarImageContent(
                                 imageUrl: poster,
+                                preferThumbnail: true,
                                 fallback: const SizedBox.shrink(),
                               ),
                             ),
