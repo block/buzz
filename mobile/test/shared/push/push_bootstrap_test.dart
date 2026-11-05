@@ -5,6 +5,8 @@ import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
@@ -51,6 +53,8 @@ void main() {
       final journal = BuzzPushLeaseRevocationStorage(
         secure: FakeSecureStorage(),
       );
+      final auth = HostedRelayAuth(BuilderlabAccountClient(), enabled: false);
+      addTearDown(auth.dispose);
       var grant = 'opaque-before-revoke';
       var calls = 0;
       var nativeReads = 0;
@@ -96,12 +100,16 @@ void main() {
       });
       final overrides = [
         savedPrefsProvider.overrideWithValue(prefs),
+        hostedRelayAuthProvider.overrideWithValue(auth),
         communityStorageProvider.overrideWithValue(storage),
         communitySnapshotWriterProvider.overrideWithValue((_) async {}),
         buzzPushLeaseRevocationOutboxProvider.overrideWith((ref) {
           final outbox = BuzzPushLeaseRevocationOutbox(
             storage: journal,
-            publisher: publishBuzzPushLeaseRevocation,
+            publisher: (record) => publishBuzzPushLeaseRevocation(
+              record,
+              relayAuth: ref.read(hostedRelayAuthProvider),
+            ),
             now: tester.binding.clock.now,
             jitter: () => 0,
           );
