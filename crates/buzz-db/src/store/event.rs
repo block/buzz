@@ -133,7 +133,8 @@ pub struct EventQuery {
     pub notice_channel_types: Option<Vec<String>>,
     /// Match every event NIP-01 would, never through the narrowed
     /// thread-reply route (see `docs/nips/NIP-CW.md`). Set by reads whose rows
-    /// feed an exact COUNT, which must agree with the SQL COUNT path.
+    /// feed an exact COUNT, which must agree with the SQL COUNT path, and by
+    /// filters with any `#p` value, which NIP-CW keeps on NIP-01 results.
     pub exact_match: bool,
 }
 
