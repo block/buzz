@@ -908,28 +908,59 @@ mod postgres_tests {
     /// btree as an index condition. `channel_id IS NOT DISTINCT FROM $4` cannot,
     /// so a relay channel-state write would filter every live row of its kind
     /// across the community instead of seeking to one channel.
+    ///
+    /// The fixture is that shape: one relay key with a live head of one kind in
+    /// each of many channels, plus one channel-less head, with fresh
+    /// statistics. On an empty table the planner prefers the newest-first
+    /// `(pubkey, kind)` index for `LIMIT 1` and filters the channel, which is
+    /// exactly the walk this guards against once the rows exist.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn replacement_channel_predicate_is_an_index_condition() {
-        let db = setup_db().await;
-        let mut conn = db.pool.acquire().await.expect("acquire connection");
-        let mut tx = conn.begin().await.expect("begin");
-        sqlx::query("SET LOCAL enable_seqscan = off")
-            .execute(&mut *tx)
+        const CHANNELS: i32 = 4_000;
+        let (pool, _scratch) =
+            ScratchDb::migrated(&admin_url().await, "replacement_channel_seek").await;
+        let community = make_community(&pool).await;
+        let relay = [7_u8; 32];
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+                                 channel_id) \
+             SELECT $1, sha256(int4send(g)), $2, now() - make_interval(secs => g), 39000, \
+                    '[]'::jsonb, '', sha256(int4send(g)) || sha256(int4send(g)), \
+                    CASE WHEN g = 0 THEN NULL ELSE gen_random_uuid() END \
+             FROM generate_series(0, $3) g",
+        )
+        .bind(community)
+        .bind(relay.as_slice())
+        .bind(CHANNELS)
+        .execute(&pool)
+        .await
+        .expect("seed one head per channel");
+        sqlx::query("ANALYZE events")
+            .execute(&pool)
             .await
-            .expect("disable sequential scans");
+            .expect("analyze events");
+        let channel: Uuid = sqlx::query_scalar(
+            "SELECT channel_id FROM events WHERE community_id = $1 AND channel_id IS NOT NULL \
+             LIMIT 1",
+        )
+        .bind(community)
+        .fetch_one(&pool)
+        .await
+        .expect("pick a channel");
+
         for in_channel in [true, false] {
             let (head_sql, supersede_sql) = replacement_sql(in_channel);
             for sql in [head_sql, supersede_sql] {
                 let explain = format!("EXPLAIN {sql}");
                 let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(explain))
-                    .bind(Uuid::new_v4())
-                    .bind(10_050_i32)
-                    .bind(vec![0_u8; 32]);
+                    .bind(community)
+                    .bind(39_000_i32)
+                    .bind(relay.as_slice());
                 if in_channel {
-                    query = query.bind(Uuid::new_v4());
+                    query = query.bind(channel);
                 }
-                let plan = query.fetch_all(&mut *tx).await.expect("explain").join("\n");
+                let plan = query.fetch_all(&pool).await.expect("explain").join("\n");
                 let seeks_channel = plan
                     .lines()
                     .any(|line| line.contains("Index Cond:") && line.contains("channel_id"));
@@ -939,7 +970,6 @@ mod postgres_tests {
                 );
             }
         }
-        tx.rollback().await.expect("rollback");
     }
 
     #[tokio::test]

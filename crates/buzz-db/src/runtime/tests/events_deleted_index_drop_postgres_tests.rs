@@ -76,7 +76,14 @@ async fn migration_0084_drops_the_index_within_its_lock_budget() {
     migration::run_migrations(&pool)
         .await
         .expect("the retry drops the index");
-    assert_eq!(ledger_version(&pool).await, BEFORE_DROP + 1);
+    let applied: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1 AND success)",
+    )
+    .bind(BEFORE_DROP + 1)
+    .fetch_one(&pool)
+    .await
+    .expect("read migration ledger");
+    assert!(applied, "0084 is applied");
     assert_eq!(
         index_presence(&pool).await,
         (false, 0),
