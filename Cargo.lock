@@ -1115,6 +1115,7 @@ dependencies = [
  "clap",
  "diffy",
  "dirs",
+ "futures-util",
  "hex",
  "infer",
  "nostr 0.44.7",
