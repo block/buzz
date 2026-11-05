@@ -100,6 +100,8 @@ async fn fixture_with_transport(
         })
         .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
+    // Capacity regression holds eight sends; keep its quota above that lane.
+    let quota = if transport.is_some() { 40 } else { 10 };
     let (app, _) = router(AppState {
         trusted_proxy_cidrs: Vec::new(),
         grant_keyring,
@@ -118,7 +120,7 @@ async fn fixture_with_transport(
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
-        endpoint_quota_max_deliveries: 10,
+        endpoint_quota_max_deliveries: quota,
         now,
         accepting: Arc::new(AtomicBool::new(true)),
     });

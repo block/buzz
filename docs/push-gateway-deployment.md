@@ -408,3 +408,14 @@ those peers overwrite `X-Buzz-Client-IP` with one bare client IP and cannot be
 reached through untrusted peers. Trusted peers must supply exactly one such
 header. NAT clients share a source budget. Delivery permits remain occupied
 until APNs and disposition bookkeeping finish, even after HTTP cancellation.
+
+Delivery also charges a durable destination/relay counter atomically with the
+existing aggregate destination counter and replay fences. One relay can use at
+most half the aggregate window budget (minimum one); renewal or reissue does
+not reset usage. No community/relay enrollment limit is imposed. With an
+operator-configured aggregate ceiling of one, subdivision is impossible and
+the existing one-delivery behavior is retained. These counters are shared by
+all gateway replicas. A 429 carries bounded Retry-After; relays retain their
+stable request ID and honor up to 300 seconds before their existing backoff.
+The additive gateway-only migration preserves existing encrypted grants and
+rows; no relay schema migration or data rewrite is needed.
