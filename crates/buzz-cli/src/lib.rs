@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod federated;
 mod help_tree;
 mod links;
 mod validate;
@@ -335,6 +336,31 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Sign in for NIP-FI relays (NIP-FA), as Buzz Desktop does
+    #[command(subcommand)]
+    Identity(IdentityCmd),
+}
+
+#[derive(Subcommand)]
+pub enum IdentityCmd {
+    /// Sign in through the identity adapter in a browser and save the session on this device
+    Login {
+        /// Adapter base URL, e.g. https://block.builderlab.xyz/api/goose
+        #[arg(long, env = "BUZZ_FI_ADAPTER")]
+        adapter: String,
+        /// Agent-grant dialect: `nip-fa` as specified, or `builderlab` for Builderlab's adapter
+        #[arg(long, value_enum, default_value = "nip-fa")]
+        protocol: federated::Protocol,
+        /// Print the login URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Enroll this agent key (BUZZ_PRIVATE_KEY + BUZZ_AUTH_TAG) under the signed-in owner
+    EnrollAgent,
+    /// Show the saved sign-in and agent enrollments (no secrets)
+    Status,
+    /// Delete the saved sign-in and agent grants from this device (enrollments stay on the adapter)
+    Logout,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2223,6 +2249,61 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
+/// Whether the relay's NIP-11 document says it requires NIP-FI.
+async fn relay_requires_nip_fi(client: &BuzzClient) -> Result<bool, CliError> {
+    let info: serde_json::Value = serde_json::from_str(&client.get_public("/").await?)
+        .map_err(|e| CliError::Other(format!("relay info document is not valid JSON: {e}")))?;
+    Ok(info.get("requires_nip_fi") == Some(&serde_json::Value::Bool(true)))
+}
+
+async fn run_identity(
+    sub: IdentityCmd,
+    keys: &Keys,
+    auth_tag_json: Option<&str>,
+) -> Result<(), CliError> {
+    let store = federated::Store::default_location()?;
+    let output = match sub {
+        IdentityCmd::Login {
+            adapter,
+            protocol,
+            no_browser,
+        } => {
+            federated::login(&store, &adapter, protocol, |url| {
+                eprintln!("Sign in at: {url}");
+                if !no_browser {
+                    let _ = std::process::Command::new(if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    })
+                    .arg(url)
+                    .status();
+                }
+            })
+            .await?
+        }
+        IdentityCmd::EnrollAgent => {
+            let auth_tag_json = auth_tag_json.ok_or_else(|| {
+                CliError::Auth(
+                    "enroll-agent requires BUZZ_AUTH_TAG (the agent's owner attestation)".into(),
+                )
+            })?;
+            let owner = buzz_sdk::nip_oa::parse_auth_tag(auth_tag_json)
+                .ok()
+                .and_then(|t| t.as_slice().get(1).cloned())
+                .ok_or_else(|| CliError::Auth("BUZZ_AUTH_TAG has no owner".into()))?;
+            federated::enroll_agent(&store, keys, &owner, auth_tag_json).await?
+        }
+        IdentityCmd::Status => federated::status(&store)?,
+        IdentityCmd::Logout => {
+            store.logout()?;
+            serde_json::json!({ "signed_out": true })
+        }
+    };
+    println!("{output}");
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -2269,9 +2350,24 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
+    if let Cmd::Identity(sub) = cli.command {
+        return run_identity(sub, &keys, auth_tag_json.as_deref()).await;
+    }
+
+    let owner = auth_tag.as_ref().and_then(|t| t.as_slice().get(1).cloned());
     let mut client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
-    if let Some(ref jws) = cli.federated_identity {
-        client = client.with_federated_identity(jws)?;
+    match cli.federated_identity.as_deref() {
+        Some(jws) if !jws.is_empty() => client = client.with_federated_identity(jws)?,
+        _ => {
+            // Mint through a saved sign-in, when there is one and the relay requires NIP-FI.
+            let store = federated::Store::default_location()?;
+            if store.has_credentials() && relay_requires_nip_fi(&client).await? {
+                let jws =
+                    federated::mint(&store, client.keys(), owner.as_deref(), client.relay_url())
+                        .await?;
+                client = client.with_federated_identity(&jws)?;
+            }
+        }
     }
 
     match cli.command {
@@ -2297,7 +2393,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Identity(_) => unreachable!("handled above"),
     }
 }
 
@@ -2473,6 +2569,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "identity",
             "issues",
             "media",
             "mem",
@@ -2699,6 +2796,7 @@ mod tests {
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),
+            ("identity", 4),
         ];
 
         let cmd = Cli::command();
