@@ -181,6 +181,26 @@ void main() {
     expect(arrived, findsNothing);
     expect(shown, findsOneWidget);
 
+    // Another caller's directory load: its status turns loaded, then it
+    // installs the open channels, which this search shows.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SearchPage)),
+    );
+    final status = container.read(channelDirectoryLoadStatusProvider.notifier);
+    final scope = channelDirectoryScope(
+      'http://community.test',
+      container.read(myPubkeyProvider),
+    );
+    status.markLoaded(scope);
+    channels.state = AsyncData([
+      ...channels.state.requireValue,
+      _channel('team-open', isMember: false),
+    ]);
+    await tester.pump();
+    final open = find.byKey(const ValueKey('search-channel-row-team-open-id'));
+    expect(open, findsOneWidget);
+    expect(arrived, findsOneWidget);
+
     // The next query ranks the current list.
     await tester.enterText(find.byType(TextField), 'team ');
     await tester.pump(const Duration(milliseconds: 300));

@@ -180,6 +180,10 @@ class SearchNotifier extends Notifier<SearchState> {
   // even one with the same text, cannot settle the current spinner.
   int _generation = 0;
 
+  // The directory status turned loaded and its channels are not installed
+  // yet: rank the next list.
+  bool _directoryInstalling = false;
+
   @override
   SearchState build() {
     // Watch relayConfig so search state resets on a community or identity
@@ -192,15 +196,21 @@ class SearchNotifier extends Notifier<SearchState> {
     _directoryAttempted = false;
     // Channel rows are ranked once per query, so live channel events never
     // reorder rows under a finger. They are ranked again only when the list
-    // first loads and when the directory adds open channels; the directory
-    // status for this community also drives the spinner.
+    // first loads and when a directory load installs open channels, which
+    // lands just after its status turns loaded; the directory status for
+    // this community also drives the spinner.
+    _directoryInstalling = false;
     ref.listen(channelsProvider, (previous, next) {
-      if (previous?.asData == null && next.asData != null) _refreshChannels();
+      if (next.asData == null) return;
+      if (previous?.asData == null || _directoryInstalling) {
+        _directoryInstalling = false;
+        _refreshChannels();
+      }
     });
-    ref.listen(
-      channelDirectoryLoadStatusProvider,
-      (_, _) => _refreshChannels(),
-    );
+    ref.listen(channelDirectoryLoadStatusProvider, (_, next) {
+      _directoryInstalling = next.status == ChannelDirectoryLoadStatus.loaded;
+      _refreshChannels();
+    });
     // Offline, a directory load fails at once. Load it again on reconnect, so
     // the failure clears without another query.
     ref.listen(relaySessionProvider, (previous, next) {
