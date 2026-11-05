@@ -220,14 +220,42 @@ async fn ensure_landing_channel(
     let Some(steward) = steward(pool, community_id).await? else {
         return Ok(LandingAdoption::SkippedNoSteward);
     };
+    // No eligible `general` exists, so a listed holder of the name is one
+    // that cannot be adopted (archived, a forum, or with a TTL). Read that
+    // first: the common steady state of such a community is then one read,
+    // not a write transaction that `idx_channels_listed_name` rolls back.
+    if general_name_held(pool, community_id).await? {
+        return Ok(LandingAdoption::SkippedNameTaken);
+    }
     match create_general(pool, community_id, steward).await {
-        // A concurrent creator, or a rename, took the name first: adopt its
-        // channel if it is eligible.
+        // A concurrent creator, or a rename, took the name since the read:
+        // adopt its channel if it is eligible.
         Err(DbError::ChannelNameTaken(_)) => Ok(adopt_general(pool, community_id)
             .await?
             .unwrap_or(LandingAdoption::SkippedNameTaken)),
         created => created,
     }
+}
+
+/// Whether a listed channel holds the name `general`: the predicate of
+/// `idx_channels_listed_name`, which `create_general` would trip.
+async fn general_name_held(pool: &PgPool, community_id: CommunityId) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channels \
+         WHERE community_id = $1 AND lower(name) = $2 \
+           AND visibility = 'open' AND NOT unlisted \
+           AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(LANDING_CHANNEL_NAME)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(held)
 }
 
 /// Designates the oldest eligible `general`, preferring a listed one.
