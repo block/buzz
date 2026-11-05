@@ -106,6 +106,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/row_cache.dart';
 part 'channel_detail_page/placement_route.dart';
 part 'channel_detail_page/empty_messages.dart';
 part 'channel_detail_page/hidden_history_paging.dart';
@@ -308,6 +309,11 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
     final restoreComposerFocus = useRef<VoidCallback?>(null);
+    // Stable, so the message list can keep reusing its rows.
+    final restoreComposerFocusCallback = useCallback(
+      () => restoreComposerFocus.value?.call(),
+      const [],
+    );
     final sendMessage = ref.read(
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
@@ -918,7 +924,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   ? composerFocusNode
                                   : null,
                               restoreComposerFocus: showsComposer
-                                  ? () => restoreComposerFocus.value?.call()
+                                  ? restoreComposerFocusCallback
                                   : null,
                             );
                           },
