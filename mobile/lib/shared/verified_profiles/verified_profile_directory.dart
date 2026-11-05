@@ -123,6 +123,9 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     _checked.clear();
   }
 
+  /// The key that signs verified profiles, while the relay offers them.
+  VerifiedProfileAuthority? get authority => _enabled ? _authority : null;
+
   /// Marks [pubkeys] relevant. Repeated calls coalesce into one scheduling pass.
   void track(Iterable<String> pubkeys) {
     final valid = RegExp(r'^[0-9a-f]{64}$');

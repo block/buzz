@@ -6,6 +6,8 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+import '../../shared/verified_profiles/verified_profile_fixture.dart';
+
 /// Tests for [channelDetailsFromEvent].
 ///
 /// The function maps a kind:39000 metadata event to [ChannelDetails], and is
@@ -179,9 +181,19 @@ void main() {
         content: '{}',
         sig: 'sig',
       ),
-    ]);
+      // Someone with no kind:0 is listed by the relay's verified head.
+      signedProjection(profileTags(subjectA, name: 'Gabi Lilienfeld')),
+      signedProjection(
+        profileTags(subjectB, name: 'Forged'),
+        author: relayKeysOther(),
+      ),
+    ], authority: authority);
 
-    expect(users.map((user) => user.label), ['Alice', 'Bob']);
+    expect(users.map((user) => user.label), [
+      'Alice',
+      'Bob',
+      'Gabi Lilienfeld',
+    ]);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });
