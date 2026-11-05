@@ -1362,7 +1362,11 @@ void main() {
     )..sticky = slot;
     FlutterSecureStorage.setMockInitialValues(keychain);
     await f.tap(tester, 'Choose a different identity');
-    expect(f.flow.stage, HostedFlowStage.blocked);
+    expect(f.flow.problem, HostedFlowProblem.requestRejected);
+    expect(f.flow.canChooseDifferentIdentity, isTrue);
+    expect((await f.store.read())!.pubkey, f.keys.public);
+    await f.tap(tester, 'Choose a different identity');
+    expect(f.flow.canChooseDifferentIdentity, isTrue);
     expect((await f.store.read())!.pubkey, f.keys.public);
     await f.restart(tester);
     await f.flow.signInAccount();

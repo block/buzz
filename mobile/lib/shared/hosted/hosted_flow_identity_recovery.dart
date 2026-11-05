@@ -27,11 +27,28 @@ extension HostedFlowIdentityRecovery on HostedFlow {
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
     return _enqueue(() async {
-      final released = await identity.releaseRejected(
-        rejected.pubkey,
-        subject: rejected.subject,
-        isCurrent: _isCurrent(generation),
-      );
+      final bool released;
+      try {
+        released = await identity.releaseRejected(
+          rejected.pubkey,
+          subject: rejected.subject,
+          isCurrent: _isCurrent(generation),
+        );
+      } catch (_) {
+        if (_disposed ||
+            generation != _generation ||
+            account.account?.subject != rejected.subject) {
+          rethrow;
+        }
+        // The rejection still stands, so the choice can be made again.
+        _rejectedBinding = (
+          subject: rejected.subject,
+          pubkey: rejected.pubkey,
+          generation: generation,
+        );
+        _set(HostedFlowStage.blocked, HostedFlowProblem.requestRejected);
+        return;
+      }
       if (_disposed || generation != _generation) return;
       if (!released) {
         _set(HostedFlowStage.blocked, HostedFlowProblem.requestRejected);
