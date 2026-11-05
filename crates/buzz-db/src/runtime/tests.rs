@@ -2296,17 +2296,15 @@ async fn routed_reads_are_confined_to_the_requested_community() {
 
     // 4. By-ID hydration — ids carry no channel pin, and B's ids are
     //    requested alongside A's. Only A's may hydrate.
-    let ids: Vec<&[u8]> = vec![
-        a_shared.id.as_bytes(),
-        a_replica_only.id.as_bytes(),
-        b_shared.id.as_bytes(),
-        b_replica_only.id.as_bytes(),
-    ];
+    let hits: Vec<([u8; 32], i64)> = [&a_shared, &a_replica_only, &b_shared, &b_replica_only]
+        .iter()
+        .map(|e| (e.id.to_bytes(), e.created_at.as_secs() as i64))
+        .collect();
     let rows = db
-        .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
+        .get_events_by_ids_at_routed("sep_by_ids", cid_a, &hits)
         .await
         .expect("routed by-ids");
-    assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
+    assert_a_only(&rows, "a-replica-only", "get_events_by_ids_at_routed");
 
     // 5-7. All three feed builders, each given BOTH channels as
     //      accessible — so only the community predicate can exclude B.
@@ -3641,6 +3639,7 @@ struct EtagFixture {
     cid: CommunityId,
     channel: Uuid,
     root_hex: String,
+    root_seconds: i64,
     mentioned_hex: String,
 }
 
@@ -3687,6 +3686,7 @@ async fn e_tag_fixture(prefix: &str) -> EtagFixture {
         cid: CommunityId::from_uuid(community),
         channel,
         root_hex: root.id.to_hex(),
+        root_seconds: base as i64,
         mentioned_hex: mentioned.public_key().to_hex(),
     }
 }
@@ -3762,12 +3762,15 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
         db.count_events_routed("t_cxl", &q).await.map(drop),
         "count_events_routed",
     );
-    let root_id = hex::decode(&fx.root_hex).expect("hex");
+    let root_id: [u8; 32] = hex::decode(&fx.root_hex)
+        .expect("hex")
+        .try_into()
+        .expect("32-byte id");
     cancelled(
-        db.get_events_by_ids_routed("t_cxl", fx.cid, &[root_id.as_slice()])
+        db.get_events_by_ids_at_routed("t_cxl", fx.cid, &[(root_id, fx.root_seconds)])
             .await
             .map(drop),
-        "get_events_by_ids_routed",
+        "get_events_by_ids_at_routed",
     );
     // The routed reads with their own SQL (feed, thread, channel window,
     // relay membership) fall back to the writer on replica failure, but not

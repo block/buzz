@@ -75,9 +75,11 @@ impl Db {
     /// not multiply rows; callers retain responsibility for search ordering and
     /// visibility. A stale, missing, deleted or wrong-community key is omitted.
     ///
-    /// Like [`Db::get_events_by_ids_routed`], this is bounded-only replica routing:
-    /// timestamps enable partition pruning, not a channel completeness proof.
-    /// The caller must use a classified search-hydration path.
+    /// Routing is bounded-only: an id list carries no channel pin, so no fence
+    /// floor can prove insert-completeness, and timestamps enable partition
+    /// pruning, not a completeness proof. A missing row degrades to a skipped
+    /// search hit downstream. The caller must use a classified search-hydration
+    /// path (see [`Db::query_events_routed`] for the classification contract).
     #[datastore_span(name = "get_events_by_ids_at_routed", system = "postgresql")]
     pub async fn get_events_by_ids_at_routed(
         &self,

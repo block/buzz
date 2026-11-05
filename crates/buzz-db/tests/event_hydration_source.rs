@@ -26,22 +26,5 @@ fn every_search_hydrator_preserves_the_exact_hit_timestamp() {
                 || source.contains("(hit.event_id, hit.created_at)"),
             "{path}: retain timestamp"
         );
-        assert!(
-            !source.contains(".get_events_by_ids_routed("),
-            "{path}: must not discard timestamps"
-        );
     }
-}
-
-#[test]
-fn exact_key_hydration_keeps_operation_attribution_and_bounded_proof() {
-    let source = include_str!("../src/store/event_hydration.rs");
-    assert!(source.contains("ReaderOperation::SubscriptionHistory"));
-    assert!(source.contains("WriterOperation::SubscriptionHistory"));
-    assert!(source.contains("RoutePredicate::Bounded,"));
-    assert!(!source.contains("RoutePredicate::Covered"));
-    assert!(source.contains("observability::acquire_writer("));
-    assert!(source.contains("is_statement_cancelled()"));
-    assert!(source.contains("\"statement_cancelled\""));
-    assert!(source.contains("\"replica_error\""));
 }

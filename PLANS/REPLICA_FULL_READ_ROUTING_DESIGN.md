@@ -55,7 +55,7 @@ in `crates/buzz-relay/src/api/bridge.rs` (`extract_consistency`).
 Rows below are every `query_events_routed` / `query_events_routed_bounded`
 call site at head, plus the writer-pinned canvas row this change adds. (The
 `count` and feed routed families — `count_events_routed`,
-`get_events_by_ids_routed`, `query_feed_*_routed`, and the `get_channel_window`
+`get_events_by_ids_at_routed`, `query_feed_*_routed`, and the `get_channel_window`
 cursor/head reads — are all display or bounded-count surfaces on the routed
 path; they carry their own soundness notes at their definitions in
 `crates/buzz-db/src/lib.rs` and are out of scope for this table.)
