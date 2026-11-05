@@ -860,11 +860,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
   }
 }
 
-String _channelMemberRoleLabel(String role) {
-  if (role == 'bot') return 'Agent';
-  if (role.isEmpty) return 'Member';
-  return '${role[0].toUpperCase()}${role.substring(1)}';
-}
+String _channelMemberRoleLabel(String role) => memberAccessLabel(role);
 
 IconData _channelDetailsIcon(Channel channel) {
   if (channel.isPrivate) return BuzzIcons.lock;

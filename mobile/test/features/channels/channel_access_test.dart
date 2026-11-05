@@ -1,3 +1,11 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/features/channels/solo_share_sheet.dart';
+import 'package:buzz/features/channels/member_access_controls.dart';
+import 'package:buzz/features/channels/channel_contribution_provider.dart';
+import 'package:buzz/features/channels/access_error_message.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
@@ -23,6 +31,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
+part 'solo_access_recovery_cases.dart';
 
 final _keys = nostr.Keys.generate();
 final _relayKeys = nostr.Keys.generate();
@@ -63,6 +73,11 @@ class _Relay extends RelaySessionNotifier {
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  void connect() => state = const SessionState(status: SessionStatus.connected);
+
+  void disconnect() =>
+      state = const SessionState(status: SessionStatus.disconnected);
 
   NostrEvent event(int kind) => NostrEvent.fromJson(
     signNostrEvent(
@@ -158,21 +173,31 @@ class _Relay extends RelaySessionNotifier {
   }) async => () {};
 }
 
-ProviderContainer _container(_Relay relay, {MeSync? sync}) => ProviderContainer(
+ProviderContainer _container(
+  _Relay relay, {
+  MeSync? sync,
+  Map<String, String>? owners,
+  bool shareChoices = false,
+}) => ProviderContainer(
   retry: (_, _) => null,
   overrides: [
     if (sync != null) meSyncProvider.overrideWithValue(sync),
+    if (owners != null) agentOwnersProvider.overrideWith((ref) async => owners),
     relayConfigProvider.overrideWith(_Config.new),
     relayAuthorProvider(
       'https://access.example',
     ).overrideWith((ref) async => _relayKeys.public),
     relaySessionProvider.overrideWith(() => relay),
     currentPubkeyProvider.overrideWithValue(_keys.public),
-    channelsProvider.overrideWith(_Channels.new),
+    channelsProvider.overrideWith(
+      shareChoices ? _ShareChannels.new : _Channels.new,
+    ),
+    if (shareChoices) meArchivedAgentsProvider.overrideWith((ref) async => {}),
   ],
 );
 
 void main() {
+  soloAccessRecoveryCases();
   test('signed admission, viewer roles and cached models stay independent', () {
     for (final row in <(List<List<String>>, String)>[
       ([], 'member'),
@@ -888,9 +913,16 @@ void main() {
         hasLength(1),
       );
       relay.failGroups = false;
+      relay.visibility = 'private';
+      relay.joinRole = 'member';
+      relay.labels.add('changed.elsewhere');
+      relay.revision++;
       await tester.tap(find.text('Finish conversion'));
       await tester.pumpAndSettle();
       expect(MeChatConversion.pending(sync, _id), isNull);
+      expect(relay.visibility, 'private');
+      expect(relay.joinRole, 'member');
+      expect(relay.labels, contains('changed.elsewhere'));
       expect(
         relay.published.where((event) => event.kind == 9002),
         hasLength(1),

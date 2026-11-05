@@ -121,7 +121,7 @@ class ChannelAccessSheet extends HookConsumerWidget {
             ? 'Only people already added to this $place will be able to read. Existing members keep their access.'
             : '${choice == 'view-only' ? 'Anyone in the community will be able to read the full history of this $place.' : 'Anyone in the community will be able to read the full history, join and participate.'} Existing members keep their individual access.';
       }
-      final confirmed = await showDialog<bool>(
+      final confirmed = await showBuzzDialog<bool>(
         context: context,
         builder: (dialogContext) => AlertDialog(
           title: const Text('Change general access?'),
