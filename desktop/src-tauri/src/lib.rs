@@ -650,6 +650,8 @@ pub fn run() {
             get_canvas,
             get_canvas_history,
             set_canvas,
+            get_thread_titles,
+            set_thread_title,
             get_feed,
             search_messages,
             send_channel_message,
