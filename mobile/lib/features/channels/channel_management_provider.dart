@@ -461,14 +461,21 @@ final channelMembersProvider = FutureProvider.autoDispose
 /// scope instead of dropping it. Another relay or account never sees it.
 List<ChannelMember>? watchLatestChannelMembers(Ref ref, String channelId) {
   final loaded = ref.watch(channelMembersProvider(channelId)).asData?.value;
-  if (loaded != null) return loaded;
-  return ref
+  if (loaded?.isNotEmpty == true) return loaded;
+  final cached = ref
       .read(_channelMembersSnapshotCacheProvider)
       .read(
         relayBaseUrl: ref.watch(relayConfigProvider).baseUrl,
         pubkey: ref.watch(myPubkeyProvider)?.toLowerCase(),
         channelId: channelId,
       );
+  // Offline providers may expose an empty placeholder before any roster was
+  // fetched. Only the scope-local cache distinguishes that from a confirmed
+  // empty roster (including a viewer who has actually been removed).
+  final status = ref.watch(
+    relaySessionProvider.select((session) => session.status),
+  );
+  return status == SessionStatus.connected ? loaded ?? cached : cached;
 }
 
 /// Channel canvas (kind:40100 for the channel).
