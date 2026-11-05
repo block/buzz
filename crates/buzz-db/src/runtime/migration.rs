@@ -898,7 +898,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 83);
+        assert_eq!(migrations.len(), 84);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -918,6 +918,17 @@ mod postgres_tests {
         assert!(crate::test_support::desired_state_schema_sql().contains(
             "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))"
         ));
+        // Landing channel (0084): two nullable community columns, no default,
+        // so neither the deployed relay nor existing rows notice them.
+        assert_eq!(migrations[83].version, 84);
+        let landing = strip_sql_comments(migrations[83].sql.as_str());
+        assert!(landing.contains("SET LOCAL lock_timeout = '5s';"));
+        assert!(landing.contains("ADD COLUMN landing_channel_id UUID"));
+        assert!(landing.contains("ADD COLUMN welcome_message TEXT"));
+        assert!(!landing.contains("UPDATE"));
+        let desired = crate::test_support::desired_state_schema_sql();
+        assert!(desired.contains("landing_channel_id UUID,"));
+        assert!(desired.contains("welcome_message TEXT,"));
         assert!(migrations[70]
             .sql
             .as_str()

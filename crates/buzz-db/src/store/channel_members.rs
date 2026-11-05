@@ -738,6 +738,22 @@ pub async fn put_first_member(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<Option<MemberRecord>> {
+    put_first_member_since(pool, community_id, channel_id, pubkey, None).await
+}
+
+/// [`put_first_member`] for an admission that began at `admitted_at`: a
+/// membership row counts only if it is active or was removed at or after
+/// `admitted_at`. So a person whom the roster admitted again after a
+/// removal joins once more, even into a channel they had left before, while
+/// a leave since this admission keeps them out. With `None`, every row
+/// counts, as in [`put_first_member`].
+pub async fn put_first_member_since(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    admitted_at: Option<DateTime<Utc>>,
+) -> Result<Option<MemberRecord>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community_id,
@@ -747,11 +763,13 @@ pub async fn put_first_member(
     lock_channel_for_member_put(&mut tx, channel_id).await?;
     let seen: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM channel_members \
-         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3)",
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+           AND ($4::timestamptz IS NULL OR removed_at IS NULL OR removed_at >= $4))",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
+    .bind(admitted_at)
     .fetch_one(tx.conn())
     .await?;
     if seen {
@@ -776,6 +794,49 @@ pub async fn put_first_member(
             Err(refused)
         }
     }
+}
+
+/// Whether `pubkey` has entered the community: they hold, or held since
+/// `admitted_at`, a membership in a stream or forum channel. The relay
+/// enrolls a person into the landing channel only until this is true.
+///
+/// A membership counts when it is active or, with `admitted_at` set, began or
+/// ended at or after it. So in roster mode (`admitted_at` is the roster
+/// row's `created_at`) a person admitted again after a removal is a new
+/// entry, while active memberships always count, even ones older than the
+/// roster row. With `None` (roster-free mode), any history counts.
+///
+/// Memberships in deleted channels still count as history. DMs and workflow
+/// and system channels do not, nor private channels the person created
+/// themselves: a client creates those chats for its user at first run, which
+/// can happen before the relay's post-AUTH enrollment.
+pub async fn has_entered_community(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    admitted_at: Option<DateTime<Utc>>,
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let entered: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM channel_members cm \
+             JOIN channels c ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+             WHERE cm.community_id = $1 AND cm.pubkey = $2 \
+               AND c.channel_type IN ('stream', 'forum') \
+               AND NOT (c.visibility = 'private' AND c.created_by = $2) \
+               AND (cm.removed_at IS NULL OR $3::timestamptz IS NULL \
+                    OR cm.joined_at >= $3 OR cm.removed_at >= $3))",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .bind(admitted_at)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(entered)
 }
 
 /// The result of [`Db::put_members_with_event`].
@@ -2299,6 +2360,31 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<MemberRecord>> {
         put_first_member(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Self-joins `pubkey` with the channel's `join_role` unless a membership
+    /// row from this admission exists (see [`put_first_member_since`]).
+    #[datastore_span(name = "put_first_member_since", system = "postgresql")]
+    pub async fn put_first_member_since(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        admitted_at: Option<DateTime<Utc>>,
+    ) -> Result<Option<MemberRecord>> {
+        put_first_member_since(&self.pool, community_id, channel_id, pubkey, admitted_at).await
+    }
+
+    /// Whether `pubkey` has entered the community (see
+    /// [`has_entered_community`]).
+    #[datastore_span(name = "has_entered_community", system = "postgresql")]
+    pub async fn has_entered_community(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+        admitted_at: Option<DateTime<Utc>>,
+    ) -> Result<bool> {
+        has_entered_community(&self.pool, community_id, pubkey, admitted_at).await
     }
 
     /// Stores a kind:9000 `event` and applies its [`put_members`] writes,

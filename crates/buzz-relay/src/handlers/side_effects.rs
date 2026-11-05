@@ -718,7 +718,7 @@ pub async fn validate_admin_event(
                 .any(|t| is_metadata_tag(&t.kind().to_string()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join, landing, welcome)"
                 ));
             }
 
@@ -817,21 +817,35 @@ pub async fn validate_admin_event(
                     }
                 }
             }
-            if sets_auto_join {
+            // `landing` and `welcome` are community settings too, with the
+            // same relay-role authority. Whether the channel may be the
+            // landing channel, and whether `welcome` targets it, is decided
+            // in the write, under the channel row lock.
+            let sets_landing = super::landing::validate_tags(event)?;
+            if sets_auto_join || sets_landing {
                 let relay_role = state
                     .db
                     .get_relay_member(tenant.community(), &event.pubkey.to_hex())
                     .await?
                     .map(|m| m.role);
                 if !matches!(relay_role.as_deref(), Some("owner" | "admin")) {
-                    return Err(anyhow::anyhow!(
+                    return Err(anyhow::anyhow!(if sets_landing {
+                        super::landing::NOT_AUTHORIZED
+                    } else {
                         "actor not authorized: auto_join requires a relay owner or admin"
-                    ));
+                    }));
                 }
                 if channel.channel_type != buzz_db::channel::ChannelType::Stream.as_str() {
-                    return Err(anyhow::anyhow!(
-                        "auto_join is only available on stream channels"
-                    ));
+                    if sets_auto_join {
+                        return Err(anyhow::anyhow!(
+                            "auto_join is only available on stream channels"
+                        ));
+                    }
+                    if event.tags.iter().any(|t| t.kind().to_string() == "landing") {
+                        return Err(anyhow::anyhow!(
+                            "landing is only available on stream channels"
+                        ));
+                    }
                 }
             }
 
@@ -867,8 +881,8 @@ pub async fn validate_admin_event(
 
             // name/about/archived/visibility/ttl/labels/join_role/unlisted
             // require owner/admin; topic/purpose allow any member who may
-            // post; auto_join was decided above by relay role, so an event
-            // carrying only that tag needs neither.
+            // post; auto_join, landing and welcome were decided above by
+            // relay role, so an event carrying only those needs neither.
             let has_member_tag = event
                 .tags
                 .iter()
@@ -922,7 +936,7 @@ pub async fn validate_admin_event(
                 } else {
                     Err(anyhow::anyhow!("only members can change topic or purpose"))
                 }
-            } else if sets_auto_join {
+            } else if sets_auto_join || sets_landing {
                 Ok(())
             } else {
                 // Every recognized tag must be authorized by one of the arms
@@ -994,20 +1008,27 @@ pub async fn validate_admin_event(
             // DELETE_GROUP: owner only, or the owning human of the channel's agent-owner.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
             let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-            match actor_member {
-                Some(m) if m.role == "owner" => Ok(()),
+            let authorized = match actor_member {
+                Some(m) if m.role == "owner" => true,
+                // Allow the owning human of any active owner-role agent in the
+                // channel, even when the human is not a channel member —
+                // diverges from kind:9001 intentionally.
                 _ => {
-                    // Allow the owning human of any active owner-role agent in the
-                    // channel, even when the human is not a channel member —
-                    // diverges from kind:9001 intentionally.
-                    if actor_owns_any_owner_agent(state, tenant.community(), &members, &actor_bytes)
+                    actor_owns_any_owner_agent(state, tenant.community(), &members, &actor_bytes)
                         .await?
-                    {
-                        return Ok(());
-                    }
-                    Err(anyhow::anyhow!("only owner can delete group"))
                 }
+            };
+            if !authorized {
+                return Err(anyhow::anyhow!("only owner can delete group"));
             }
+            // The delete runs after the event is stored, where a refusal is
+            // only logged, so refuse the landing channel here. The store
+            // refuses it again under the channel lock (`soft_delete_on`).
+            let landing = state.db.get_community_landing(tenant.community()).await?;
+            if landing.channel_id == Some(channel_id) {
+                return Err(anyhow::anyhow!(buzz_db::landing::LANDING_PROTECTED));
+            }
+            Ok(())
         }
         9022 => {
             // LEAVE_REQUEST: must be an active member, and cannot be the last owner.
@@ -1465,7 +1486,7 @@ const MEMBER_METADATA_TAGS: &[&str] = &["topic", "purpose"];
 
 /// kind:9002 tags that a relay owner or admin may change, whatever their
 /// channel role.
-const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join"];
+const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join", "landing", "welcome"];
 
 /// True when `kind` is a kind:9002 tag that changes channel metadata.
 fn is_metadata_tag(kind: &str) -> bool {
@@ -1676,6 +1697,10 @@ pub async fn emit_group_discovery_events(
     state: &Arc<AppState>,
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
+    // Read before the replacement lock, so a designation committed before
+    // this emission began is reflected; a move re-emits the previous channel.
+    let landing = state.db.get_community_landing(tenant.community()).await?;
+
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
 
@@ -1686,7 +1711,9 @@ pub async fn emit_group_discovery_events(
         KIND_NIP29_GROUP_METADATA,
         &relay_pubkey_hex,
         |channel, members| {
-            Ok(buzz_db::channel::group_metadata_tags(channel, members)
+            let mut tags = buzz_db::channel::group_metadata_tags(channel, members);
+            tags.extend(landing.group_metadata_tags(channel_id));
+            Ok(tags
                 .into_iter()
                 .map(Tag::parse)
                 .collect::<Result<Vec<_>, _>>()?)
@@ -2381,6 +2408,16 @@ pub(crate) async fn persist_edit_metadata(
                     _ => return Err(anyhow::anyhow!("invalid unlisted value: {val}")),
                 });
             }
+            "landing" => {
+                // Validated during authorization; only "true" is a value.
+                if val != "true" {
+                    return Err(anyhow::anyhow!("invalid landing value: {val}"));
+                }
+                edit.landing = true;
+            }
+            // Validated during authorization; the empty string restores the
+            // default.
+            "welcome" => edit.welcome = Some((!val.is_empty()).then(|| val.to_string())),
             _ => {}
         }
     }
@@ -2498,6 +2535,14 @@ pub(crate) async fn persist_edit_metadata(
     }
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
+    }
+    // The previous landing channel's kind:39000 drops its `landing` and
+    // `welcome` tags. Clients read the designation from NIP-11, so a failed
+    // re-emission leaves only a stale projection.
+    if let Some(previous) = write.previous_landing {
+        if let Err(e) = emit_group_discovery_events(tenant, state, previous).await {
+            warn!(channel = %previous, error = %e, "NIP-29 discovery re-emission for the previous landing channel failed");
+        }
     }
 
     Ok((write.stored, true))
@@ -2929,6 +2974,23 @@ async fn handle_delete_group(
     Ok(())
 }
 
+/// A self-join the channel refuses: it is missing, private or archived.
+/// Displays as the refusal text alone.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct SelfJoinRefused(&'static str);
+
+/// True when `error` is a self-join the channel's state or the person's
+/// standing refuses (a ban, a private, archived or missing channel), as
+/// opposed to a failure that a retry could get past.
+pub(crate) fn is_self_join_refusal(error: &anyhow::Error) -> bool {
+    error.is::<SelfJoinRefused>()
+        || matches!(
+            error.downcast_ref::<buzz_db::DbError>(),
+            Some(buzz_db::DbError::AccessDenied(_) | buzz_db::DbError::ChannelNotFound(_))
+        )
+}
+
 /// What [`join_channel_as_self`] did for the member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SelfJoinOutcome {
@@ -2953,14 +3015,17 @@ pub(crate) async fn join_channel_as_self(
         .db
         .get_channel_for_event_write(tenant.community(), channel_id)
         .await
-        .map_err(|_| anyhow::anyhow!("channel not found"))?;
+        .map_err(|e| match e {
+            buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                anyhow::Error::new(SelfJoinRefused("channel not found"))
+            }
+            other => anyhow::Error::new(other).context("channel not found"),
+        })?;
     if channel.visibility != "open" {
-        return Err(anyhow::anyhow!(
-            "channel is private — request an invitation"
-        ));
+        return Err(SelfJoinRefused("channel is private — request an invitation").into());
     }
     if channel.archived_at.is_some() {
-        return Err(anyhow::anyhow!("channel is archived"));
+        return Err(SelfJoinRefused("channel is archived").into());
     }
 
     // Skip if already an active member — prevents duplicate join notifications.
@@ -2989,7 +3054,7 @@ pub(crate) async fn join_channel_as_self(
 /// The side effects of a committed self-join: the membership cache, the
 /// `member_joined` kind:40099, kind:39000/39002 and kind:44100. Only the
 /// system message is fatal, as for kind:9021.
-async fn announce_self_join(
+pub(crate) async fn announce_self_join(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -3031,22 +3096,28 @@ async fn announce_self_join(
     Ok(())
 }
 
-/// Join a new community member to every effective `auto_join` channel, as
-/// kind:9021 self-joins. Runs inline at the roster write sites (invite
-/// claim, kind:9030) and nowhere else, so a later kind:9022 leave stands. A
-/// community without a roster joins on admission instead
-/// ([`auto_join_never_joined_channels`]).
+/// Join a new community member to the landing channel and then to every
+/// effective `auto_join` channel, as kind:9021 self-joins. Runs inline at
+/// the roster write sites (invite claim, kind:9030), so a later kind:9022
+/// leave stands. A community without a roster joins on admission instead
+/// ([`super::landing::admission_joins_on_auth`]).
 ///
 /// Best effort: the relay membership has already committed, so a channel
-/// that fails is logged and counted, never retried, and never fails the
-/// caller. The `auto_join` tag on kind:39000 is the durable record a client
-/// reconciles against. A channel archived or made private after the list
-/// was read is one such failure: `put_member` refuses it under its locks.
+/// that fails is logged and counted and never fails the caller. The
+/// `auto_join` tag on kind:39000 is the durable record a client reconciles
+/// against. A channel archived or made private after the list was read is
+/// one such failure: `put_member` refuses it under its locks. A landing
+/// join that fails for a reason other than a refusal skips the default
+/// channels too: the person then has no entry evidence, so their next
+/// AUTH joins both.
+///
+/// Agents, by their stored owner link, are not joined to the landing
+/// channel; the default channels apply to them as before.
 ///
 /// `added_by` is the actor of a third-party add (kind:9030), `None` when the
 /// member joined by themselves (an invite claim). A third-party add first
 /// asks the member's `channel_add_policy`, once, as a kind:9000 from the same
-/// actor would; a refusal skips every default channel, logged and counted.
+/// actor would; a refusal skips every channel, logged and counted.
 pub(crate) async fn auto_join_default_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -3057,50 +3128,80 @@ pub(crate) async fn auto_join_default_channels(
         warn!(member = %pubkey_hex, "auto-join skipped: member pubkey is not hex");
         return;
     };
-    let channels = match state.db.list_auto_join_channels(tenant.community()).await {
-        Ok(channels) => channels,
+    // One read of the member's user row serves the policy gate and the
+    // agent check.
+    let user = match state
+        .db
+        .get_agent_channel_policy(tenant.community(), &pubkey)
+        .await
+    {
+        Ok(user) => user,
         Err(e) => {
-            warn!(member = %pubkey_hex, error = %e, "auto-join skipped: listing default channels failed");
+            warn!(member = %pubkey_hex, error = %e, "auto-join skipped: reading the member's channel_add_policy failed");
             metrics::counter!("buzz_auto_join_failures_total").increment(1);
             return;
         }
     };
-    if channels.is_empty() {
-        return;
-    }
     if let Some(actor) = added_by.filter(|actor| *actor != pubkey.as_slice()) {
-        match state
-            .db
-            .get_agent_channel_policy(tenant.community(), &pubkey)
-            .await
-        {
-            Ok(None) => {}
-            Ok(Some((policy, owner))) => {
-                if let Err(denied) =
-                    channel_authz::decide_channel_add_policy(&policy, owner.as_deref(), actor)
-                {
-                    warn!(member = %pubkey_hex, error = %denied, "auto-join skipped: the member's channel_add_policy refuses the actor");
-                    metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                    return;
-                }
-            }
-            Err(e) => {
-                warn!(member = %pubkey_hex, error = %e, "auto-join skipped: reading the member's channel_add_policy failed");
+        if let Some((policy, owner)) = &user {
+            if let Err(denied) =
+                channel_authz::decide_channel_add_policy(policy, owner.as_deref(), actor)
+            {
+                warn!(member = %pubkey_hex, error = %denied, "auto-join skipped: the member's channel_add_policy refuses the actor");
                 metrics::counter!("buzz_auto_join_failures_total").increment(1);
                 return;
             }
         }
     }
+    let is_agent = matches!(&user, Some((_, Some(_))));
+    if !is_agent && !super::landing::join_landing_on_roster_admission(tenant, state, &pubkey).await
+    {
+        return;
+    }
+    join_default_channels(tenant, state, &pubkey, None).await;
+}
+
+/// Join `pubkey` to every effective `auto_join` channel as kind:9021
+/// self-joins, restoring a membership they left. With a `gate`, each
+/// channel's write holds one of the session's effect permits, and the loop
+/// stops when the session ends. Failures are logged and counted.
+pub(crate) async fn join_default_channels(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+    gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
+) {
+    let member = hex::encode(pubkey);
+    let channels = match state.db.list_auto_join_channels(tenant.community()).await {
+        Ok(channels) => channels,
+        Err(e) => {
+            warn!(%member, error = %e, "auto-join skipped: listing default channels failed");
+            metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            return;
+        }
+    };
     for channel in channels {
-        match join_channel_as_self(tenant, state, channel.id, &pubkey).await {
+        let _permit = match gate {
+            Some(gate) => {
+                #[cfg(test)]
+                crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
+                let Ok(permit) = gate.acquire_effect().await else {
+                    info!(channel = %channel.id, %member, "auto-join stopped: the session ended");
+                    return;
+                };
+                Some(permit)
+            }
+            None => None,
+        };
+        match join_channel_as_self(tenant, state, channel.id, pubkey).await {
             Ok(SelfJoinOutcome::Joined) => {
                 metrics::counter!("buzz_auto_join_channels_total").increment(1);
-                info!(channel = %channel.id, member = %pubkey_hex, "auto-joined default channel");
+                info!(channel = %channel.id, %member, "auto-joined default channel");
             }
             Ok(SelfJoinOutcome::AlreadyMember) => {}
             Err(e) => {
                 metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                warn!(channel = %channel.id, member = %pubkey_hex, error = %e, "auto-join of default channel failed");
+                warn!(channel = %channel.id, %member, error = %e, "auto-join of default channel failed");
             }
         }
     }
@@ -3110,7 +3211,8 @@ pub(crate) async fn auto_join_default_channels(
 /// (`require_relay_membership = false`) to every effective `auto_join`
 /// channel they have never been a member of, as kind:9021 self-joins.
 ///
-/// Runs after every human WebSocket admission there, because such a
+/// Runs after every human WebSocket admission there, after the landing join
+/// (both in [`super::landing::admission_joins_on_auth`]), because such a
 /// community has no roster insert to run [`auto_join_default_channels`] at.
 /// "Never a member" is the channel's own membership history: a kind:9022
 /// leave or a kind:9001 removal keeps a removed row, so the person is not
@@ -3123,18 +3225,7 @@ pub(crate) async fn auto_join_default_channels(
 /// task stops at the first refusal. A channel it stops before, or whose
 /// membership write fails, has no row, so the next admission tries it again.
 /// Failures are logged and counted (`buzz_auto_join_failures_total`).
-pub(crate) async fn auto_join_never_joined_channels(
-    tenant: &TenantContext,
-    state: &Arc<AppState>,
-    pubkey: &[u8],
-    gate: &Arc<crate::nip_fi_gate::SessionAdmissionGate>,
-) {
-    join_never_joined_channels(tenant, state, pubkey, gate).await;
-    #[cfg(test)]
-    crate::nip_fi_test_hooks::after_auto_join(tenant.community()).await;
-}
-
-async fn join_never_joined_channels(
+pub(crate) async fn join_never_joined_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     pubkey: &[u8],

@@ -66,6 +66,8 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | `P` | 39000–39002 | Public key that signed the kind:9007 that created the channel. |
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
 | `auto_join` | 39000 | Present (bare, no value) while the relay joins new community members into this channel: the channel's `auto_join` setting is on and it is open and unarchived. |
+| `landing` | 39000 | Present (bare, no value) on the community's landing channel. A projection of the NIP-11 `landing_channel` designation (extension `buzz-landing-channel`), which is authoritative. |
+| `welcome` | 39000 | The community's custom welcome message, on the landing channel only. Plain text; `\n` is a line break. Absent while the client default applies. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
 Later `t` tags are labels.

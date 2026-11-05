@@ -53,11 +53,11 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join`, `landing` and `welcome` tags: relay owner/admin (see [Default channels](#default-channels) and [Landing channel](#landing-channel)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel; `landing`, and `welcome` when customized, on the landing channel |
 | **Unlisted channels** | ✅ | kind:9002 `["unlisted", "true"\|"false"]`, owner/admin, or at creation on kind:9007. An unlisted open channel is left out of every read that does not name it, for non-members: channel lists, kind:39000 without `#d`, messages, COUNT, NIP-50 search and artifact queries. Naming it by `#h` (or `#d` on 39000–39003) reads it, and kind:9021 joins it, as for any open channel. See [Unlisted channels](#unlisted-channels). |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags for all members |
@@ -226,9 +226,11 @@ body of kind:9021, so the channel's `join_role` applies and the channel gets
 its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
 how many channels that is: whatever carries the kind:39000 tag is joined, and
 the work a new member costs grows with the number of channels an owner or
-admin flags. On a community that requires relay membership, the relay does
-this once, at that moment, and never again on login or reconnect, so a later
-kind:9022 leave stands. A kind:9030 add is
+admin flags. The [landing channel](#landing-channel) is joined first. On a
+community that requires relay membership, the relay does this at that
+moment; a login or reconnect repeats it only for a person with no entry
+evidence (see [Landing channel](#landing-channel)), so a later kind:9022
+leave stands. A kind:9030 add is
 made by someone else, so the new member's `channel_add_policy` applies first,
 as it would to that actor's kind:9000: if it refuses them, no default channel
 is joined. The claim response waits for the joins, and a claimer who
@@ -254,6 +256,129 @@ with a NIP-OA owner, a NIP-FI agent token, or a stored agent owner joins
 nothing. A membership write that fails leaves no row, so the next admission
 tries that channel again.
 
+### Landing channel
+
+Every community has at most one **landing channel**: the open stream a
+person is joined to first when they enter the community, and the channel a
+client opens when it has nothing better to show. Its kind:39000 also carries
+the community's custom welcome message, if one is set.
+
+**Designation.** The relay stores the designation on the community, so there
+is never more than one. Clients read it from NIP-11:
+
+```json
+{
+  "supported_extensions": ["…", "buzz-landing-channel"],
+  "landing_channel": "6f1c2a4e-0b7d-4c1e-9a52-2f0d8b3c7e11"
+}
+```
+
+- `buzz-landing-channel` in `supported_extensions` means the relay implements
+  everything in this section. Without it, send none of these tags.
+- `landing_channel` is a lowercase hyphenated UUID, omitted (never `null` or
+  `""`) when no channel is designated. It is read live (`Cache-Control:
+  no-store`), so a GET after an accepted write reflects it. NIP-11 is
+  unauthenticated, so the id is public; the welcome text is not published
+  there.
+- The relay-signed kind:39000 whose `d` is the landing channel carries a bare
+  `["landing"]` tag, and `["welcome", "<text>"]` while a custom message is
+  set. These are a projection of the stored designation, re-signed whenever
+  it moves; NIP-11 is the authoritative read. A failed re-emission can leave a
+  stale tag on the previous landing channel, so a client takes the landing
+  channel from NIP-11 and ignores `welcome` on any other channel's 39000. The
+  welcome text is plain text: `\n` is a line break and nothing else is
+  interpreted. With no custom message, clients show their own default text.
+
+**Adoption.** With no designation, the relay adopts the oldest open,
+unarchived stream named `general` (case-insensitive) without a TTL,
+preferring a listed one. If there is none, it creates a listed, open
+`general` owned by the community's earliest relay owner, else its earliest
+admin; that person gets the channel-creation kind:44100. A private `general`
+is never adopted. Nothing is created when the community has no owner or
+admin, or when `general` is taken by a channel that cannot be adopted (an
+archived `general`, or a forum). The relay tries at community provisioning,
+at boot for the deployment community, and at every person's AUTH, so an
+existing community converges at its first connection after an upgrade.
+
+**Changing it.** A kind:9002 on the target channel, from a *relay* owner or
+admin (the NIP-43 roster role; the actor need not be a channel member; API
+tokens need the `AdminChannels` scope):
+
+| Tag | Meaning |
+|---|---|
+| `["landing", "true"]` | Make this channel the landing channel |
+| `["welcome", "<text>"]` | Set the custom welcome message |
+| `["welcome", ""]` | Restore the client default |
+
+```json
+{"kind":9002,"content":"","tags":[["h","<new id>"],["landing","true"]]}
+{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome","Hi all!\nIntroduce yourself here."]]}
+{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome",""]]}
+```
+
+- `landing` moves the designation in one transaction; the previous landing
+  channel loses its tags and its protections. Nobody is added or removed.
+  It is idempotent: `landing` on the current landing channel changes
+  nothing, so a client may always send the full state (`landing` plus
+  `welcome`).
+- `landing` needs a stream that the event leaves open, unarchived and
+  without a TTL, decided under the channel's lock.
+- `welcome` is community configuration. It is accepted on the current
+  landing channel, or with `landing` in the same event, and moves with the
+  designation. The text is 1–1000 Unicode scalar values, not blank, with no
+  control characters other than `\n`. The relay stores exactly what it
+  receives.
+- The designation cannot be turned off, only moved.
+
+Refusals (`accepted: false`):
+
+| Condition | `message` |
+|---|---|
+| Sender is not a relay owner or admin | `invalid: actor not authorized: landing and welcome require a relay owner or admin` |
+| `landing` on a non-stream channel | `invalid: landing is only available on stream channels` |
+| `["landing", "false"]` | `invalid: landing cannot be turned off; make another channel the landing channel` |
+| Any other `landing` value | `invalid: invalid landing value: <v> (must be "true")` |
+| `landing` with no value | `invalid: landing tag must have a value` |
+| `welcome` with no value | `invalid: welcome tag must have a value (text, or empty to restore the default)` |
+| More than one `landing` or `welcome` tag | `invalid: kind:9002 may include at most one landing and one welcome tag` |
+| Whitespace-only text | `invalid: welcome message must not be blank` |
+| More than 1000 characters | `invalid: welcome message is too long (max 1000 characters)` |
+| Control characters other than `\n` | `invalid: welcome message must be plain text (line breaks only)` |
+| Ineligible target channel | `invalid: landing requires an open, unarchived channel without a ttl` |
+| `welcome` on another channel without `landing` | `invalid: welcome can only be set on the landing channel` |
+| A protected operation (below) | `invalid: this is the community's landing channel; make another channel the landing channel first` |
+
+An `error: …` message means the outcome is uncertain: read back before
+retrying.
+
+**Protections.** While a channel is the landing channel, the relay refuses
+to archive it, make it private, give it a TTL (kind:9002 `archived`,
+`visibility` or `ttl`) or delete it (kind:9008), with the protected-operation
+message. Renames, `about`, `topic`, `purpose`, labels, `unlisted`,
+`join_role`, `auto_join`, and member adds, removals and moderation stay
+allowed.
+
+**Enrollment.** People are joined to the landing channel first, then to the
+[default channels](#default-channels), as kind:9021 self-joins (the
+channel's `join_role`, `member_joined` kind:40099, kind:39002 and kind:44100).
+Agents (NIP-OA, a NIP-FI agent token, or a stored agent owner) are not
+joined to it.
+
+- On a community that requires relay membership, this happens at the invite
+  claim or kind:9030 add. A person's AUTH joins them only if they have no
+  entry evidence since their roster row was created: no channel membership
+  in a shared (stream or forum) channel, other than private channels they
+  created themselves. That recovers an admission whose joins did not finish,
+  and it joins the default channels too. After a kind:9031 removal, the next
+  admission is a first entry again.
+- On a community without a roster, a person's AUTH joins them to the landing
+  channel if they have no such evidence at all; then the default channels
+  they have never been in follow, as before.
+- Reconnects, new devices and moving the designation never re-enroll anyone.
+  A person who left the landing channel stays out. A landing join that fails
+  for a reason other than a refusal (a ban, a channel that cannot be joined)
+  skips the default channels too, so the next AUTH retries both.
+
 ### Group Discovery
 
 The relay emits NIP-29 group state events when channels are created, updated, or membership changes.
@@ -263,7 +388,7 @@ All discovery events include a `d` tag set to the channel UUID (NIP-29 addressab
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>`, `join_role` (always); `public` or `private`; `restricted` (private channels, and `join_role=guest`); `closed` (private channels only); `unlisted` (unlisted channels); `about` (if description non-empty); `hidden` (DM channels and private system channels); `auto_join` (open, unarchived channels with the setting on, see [Default channels](#default-channels)) | Group metadata. The access flags follow the channel settings (see [Announce channels](#announce-channels)). |
+| **39000** | `d=<uuid>`, `name`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>`, `join_role` (always); `public` or `private`; `restricted` (private channels, and `join_role=guest`); `closed` (private channels only); `unlisted` (unlisted channels); `about` (if description non-empty); `hidden` (DM channels and private system channels); `auto_join` (open, unarchived channels with the setting on, see [Default channels](#default-channels)); `landing` and `welcome` (the landing channel only, see [Landing channel](#landing-channel)) | Group metadata. The access flags follow the channel settings (see [Announce channels](#announce-channels)). |
 | **39001** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags with role label (`owner`, `admin`) | Admin list |
 | **39002** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags for all members | Member list |
 

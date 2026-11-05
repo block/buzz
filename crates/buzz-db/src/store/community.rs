@@ -34,6 +34,15 @@ pub struct EnsuredCommunityRecord {
     pub created: bool,
 }
 
+/// The community-scoped decorations of a NIP-11 document.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommunityDiscovery {
+    /// Workspace icon (NIP-11 `icon`), if set.
+    pub icon: Option<String>,
+    /// Landing channel (NIP-11 `landing_channel`), if designated.
+    pub landing_channel_id: Option<Uuid>,
+}
+
 /// Community row returned by an atomic create-with-owner operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedCommunityRecord {
@@ -468,6 +477,26 @@ impl Db {
             .transpose()?
             .flatten()
             .filter(|icon| !icon.is_empty()))
+    }
+
+    /// Returns the community's workspace icon and landing channel in one
+    /// read, for its NIP-11 document. Read live, so a fresh document reflects
+    /// a committed kind:9002 `landing` or kind:9033.
+    #[datastore_span(name = "get_community_discovery", system = "postgresql")]
+    pub async fn get_community_discovery(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<CommunityDiscovery> {
+        let row: Option<(Option<String>, Option<Uuid>)> =
+            sqlx::query_as("SELECT icon, landing_channel_id FROM communities WHERE id = $1")
+                .bind(community_id.as_uuid())
+                .fetch_optional(&self.pool)
+                .await?;
+        let (icon, landing_channel_id) = row.unwrap_or_default();
+        Ok(CommunityDiscovery {
+            icon: icon.filter(|icon| !icon.is_empty()),
+            landing_channel_id,
+        })
     }
 
     /// Sets or clears (`None`) the community's workspace icon.
@@ -1006,6 +1035,7 @@ mod postgres_tests {
             "list_communities_owned_by",
             "lookup_community_host",
             "get_community_icon",
+            "get_community_discovery",
             "set_community_icon",
             "ensure_configured_community",
             "create_community_with_owner",

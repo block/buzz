@@ -351,7 +351,7 @@ pub(crate) async fn create_channel_with_event(
 
 /// Inserts the channel row, its owner and its initial members on `tx`.
 /// Returns `false`, having written nothing, when `channel_id` already exists.
-async fn insert_channel_rows(
+pub(crate) async fn insert_channel_rows(
     tx: &mut crate::AdmittedTx,
     channel_id: Uuid,
     channel: NewChannel<'_>,
@@ -1309,6 +1309,11 @@ async fn update_channel_on(
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
     let community_id = tx.community();
+    if updates.visibility.as_deref() == Some(ChannelVisibility::Private.as_str())
+        || matches!(updates.ttl_seconds, Some(Some(_)))
+    {
+        crate::landing::refuse_if_landing(tx, channel_id).await?;
+    }
     if let Some(name) = updates.name.as_mut() {
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
         if name.is_empty() {
@@ -1555,12 +1560,16 @@ pub async fn unarchive_channel(
 }
 
 /// Archives (`archive = true`) or restores the channel on `tx`. Refuses with
-/// `AccessDenied` when the channel is already in that state. Restoring an
-/// ephemeral channel restarts its TTL deadline.
+/// `AccessDenied` when the channel is already in that state, or when it would
+/// archive the community's landing channel. Restoring an ephemeral channel
+/// restarts its TTL deadline.
 async fn set_archived_on(w: &mut ChannelSettingsWriter<'_>, archive: bool) -> Result<()> {
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
     let community_id = tx.community();
+    if archive {
+        crate::landing::refuse_if_landing(tx, channel_id).await?;
+    }
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
@@ -1623,6 +1632,14 @@ pub struct ChannelMetadataEdit {
     /// Set when the actor is the channel's owner or admin. An operator rename
     /// without it applies only to a listed channel.
     pub channel_authority: bool,
+    /// Make the channel the community's landing channel. Decided under the
+    /// row lock on the state the event leaves behind; a no-op when it already
+    /// is.
+    pub landing: bool,
+    /// Set the community's welcome message (`Some(Some(text))`) or restore
+    /// the default (`Some(None)`). Accepted only on the landing channel, or
+    /// with `landing`.
+    pub welcome: Option<Option<String>>,
 }
 
 /// The result of [`Db::apply_channel_metadata_event`].
@@ -1634,6 +1651,9 @@ pub struct ChannelMetadataWrite {
     pub inserted: bool,
     /// The channel's visibility before this event (`"open"` or `"private"`).
     pub previous_visibility: String,
+    /// The channel that stopped being the landing channel when this event
+    /// moved the designation here. Its kind:39000 needs re-emitting.
+    pub previous_landing: Option<Uuid>,
 }
 
 pub(crate) async fn apply_channel_metadata_event(
@@ -1672,6 +1692,7 @@ pub(crate) async fn apply_channel_metadata_event(
             stored,
             inserted,
             previous_visibility,
+            previous_landing: None,
         });
     }
     // Decide the archive state and an operator's right to rename here,
@@ -1716,6 +1737,33 @@ pub(crate) async fn apply_channel_metadata_event(
             ));
         }
     }
+    // `landing` and `welcome` are community settings on the `communities`
+    // row, locked after this channel's row. Eligibility is decided here,
+    // under the row lock, on the state this event leaves behind, so one
+    // event cannot designate a channel and archive it. The protections
+    // (archive, private, TTL) are enforced by the writes below.
+    let mut previous_landing = None;
+    if edit.landing || edit.welcome.is_some() {
+        if edit.landing && !landing_eligible_after(&mut locked, &edit).await? {
+            return Err(DbError::AccessDenied(
+                crate::landing::LANDING_INELIGIBLE.to_string(),
+            ));
+        }
+        let current = crate::landing::lock_designation(locked.tx()).await?;
+        if edit.landing {
+            if current != Some(channel_id) {
+                crate::landing::set_designation(locked.tx(), channel_id).await?;
+                previous_landing = current;
+            }
+        } else if current != Some(channel_id) {
+            return Err(DbError::AccessDenied(
+                crate::landing::WELCOME_NOT_LANDING.to_string(),
+            ));
+        }
+        if let Some(welcome) = &edit.welcome {
+            crate::landing::set_welcome(locked.tx(), welcome.as_deref()).await?;
+        }
+    }
     crate::insert_mentions_in_transaction(locked.tx(), event, Some(channel_id)).await?;
 
     let ChannelMetadataEdit {
@@ -1725,6 +1773,8 @@ pub(crate) async fn apply_channel_metadata_event(
         archived,
         operator_rename: _,
         channel_authority: _,
+        landing: _,
+        welcome: _,
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {
@@ -1753,7 +1803,36 @@ pub(crate) async fn apply_channel_metadata_event(
         stored,
         inserted,
         previous_visibility,
+        previous_landing,
     })
+}
+
+/// Whether the locked channel may be the landing channel once `edit`
+/// applies: an open, unarchived stream without a TTL.
+async fn landing_eligible_after(
+    locked: &mut ChannelSettingsWriter<'_>,
+    edit: &ChannelMetadataEdit,
+) -> Result<bool> {
+    let channel_id = locked.channel_id;
+    let community_id = locked.tx.community();
+    let (channel_type, ttl_seconds): (String, Option<i32>) = sqlx::query_as(
+        "SELECT channel_type::text, ttl_seconds FROM channels WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(locked.tx.conn())
+    .await?;
+    let visibility = edit
+        .columns
+        .visibility
+        .as_deref()
+        .unwrap_or(locked.previous_visibility());
+    let archived = edit.archived.unwrap_or(locked.archived());
+    let ttl_seconds = edit.columns.ttl_seconds.unwrap_or(ttl_seconds);
+    Ok(channel_type == ChannelType::Stream.as_str()
+        && visibility == ChannelVisibility::Open.as_str()
+        && !archived
+        && ttl_seconds.is_none())
 }
 
 /// Soft-delete a channel by setting `deleted_at = NOW()`.
@@ -1833,6 +1912,9 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
     }
     let channel_id = w.channel_id;
     let community_id = w.tx.community();
+    // Every delete path ends here, so the landing channel is kept even when
+    // its designation lands between a caller's check and this write.
+    crate::landing::refuse_if_landing(w.tx, channel_id).await?;
     sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
         .bind(community_id.as_uuid())
         .bind(channel_id)
