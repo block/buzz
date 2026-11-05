@@ -97,6 +97,14 @@ impl TenantContext {
     }
 }
 
+/// Longest host a community can have, in characters: `communities.host` is
+/// `VARCHAR(255)`. A longer host maps to no community.
+///
+/// Provisioning checks count bytes instead, which is stricter for non-ASCII
+/// input and identical for the ASCII authorities they accept. Keep both: the
+/// lookup side must not refuse any host the column can store.
+pub const MAX_HOST_LEN: usize = 255;
+
 /// Normalize a connection `Host` into the canonical form used as the community
 /// lookup key.
 ///

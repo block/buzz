@@ -13,7 +13,7 @@ class OnboardingLoadingPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = Theme.of(context);
     final safe = MediaQuery.paddingOf(context);
     return PopScope(
       canPop: false,

@@ -130,22 +130,30 @@ async fn ephemeral_events_leave_human_and_agent_message_budgets_untouched() {
         for stored_kind in [0, 1, 9, 19999, 30000, 40002] {
             let (conn, mut rx) = connection(agent);
             for kind in ephemeral_kinds {
-                assert!(enforce_ws_admission(&event(kind), &conn, &state).await);
+                assert!(enforce_ws_admission(&event(kind), &conn, &state)
+                    .await
+                    .is_ok());
             }
             assert_eq!(counter(&state, &conn, LimitType::Messages).await, None);
             assert_eq!(counter(&state, &conn, LimitType::WsEvents).await, Some(5));
             for expected in 1..=limit {
-                assert!(enforce_ws_admission(&event(stored_kind), &conn, &state).await);
+                assert!(enforce_ws_admission(&event(stored_kind), &conn, &state)
+                    .await
+                    .is_ok());
                 assert_eq!(
                     counter(&state, &conn, LimitType::Messages).await,
                     Some(expected)
                 );
             }
             let rejected = event(stored_kind);
-            assert!(!enforce_ws_admission(&rejected, &conn, &state).await);
+            assert!(enforce_ws_admission(&rejected, &conn, &state)
+                .await
+                .is_err());
             assert_quota_frame(&read_frame(&mut rx), &rejected, 60);
             for kind in ephemeral_kinds {
-                assert!(enforce_ws_admission(&event(kind), &conn, &state).await);
+                assert!(enforce_ws_admission(&event(kind), &conn, &state)
+                    .await
+                    .is_ok());
             }
             assert_eq!(
                 counter(&state, &conn, LimitType::Messages).await,
@@ -173,11 +181,11 @@ async fn ws_flood_budget_is_shared_by_ephemeral_stored_req_and_count() {
         req.clone(),
         count.clone(),
     ] {
-        assert!(enforce_ws_admission(&msg, &conn, &state).await);
+        assert!(enforce_ws_admission(&msg, &conn, &state).await.is_ok());
     }
     assert_eq!(counter(&state, &conn, LimitType::Messages).await, Some(1));
     for msg in [event(24200), event(9), req, count] {
-        assert!(!enforce_ws_admission(&msg, &conn, &state).await);
+        assert!(enforce_ws_admission(&msg, &conn, &state).await.is_err());
         assert_quota_frame(&read_frame(&mut rx), &msg, 5);
     }
     assert_eq!(counter(&state, &conn, LimitType::Messages).await, Some(1));
@@ -223,7 +231,7 @@ async fn ephemeral_and_http_admission_still_fail_closed_when_redis_is_unavailabl
     let _guard = metrics::set_default_local_recorder(&recorder);
     let (conn, mut rx) = connection(false);
     let msg = event(20002);
-    assert!(!enforce_ws_admission(&msg, &conn, &state).await);
+    assert!(enforce_ws_admission(&msg, &conn, &state).await.is_err());
     let ClientMessage::Event(event) = msg else {
         unreachable!()
     };

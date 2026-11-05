@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
 
 /// Uses the server catalog for both menus, including model-specific efforts.
@@ -46,31 +47,41 @@ class AgentModelPicker extends StatelessWidget {
         : null;
     final enabled = !loading && !controller.busy;
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        BuzzSettingMenu<String>(
-          controlKey: const Key('agent-model'),
-          enabled: enabled,
-          label: 'Model',
-          onSelected: (value) => onChanged(value, null),
-          options: [
-            for (final model in models)
-              BuzzSettingMenuOption(label: model.name, value: model.id),
+        SheetActionSection(
+          dividerIndent: Grid.xs,
+          children: [
+            BuzzSettingMenu<String>(
+              controlKey: const Key('agent-model'),
+              enabled: enabled,
+              label: 'Model',
+              grouped: true,
+              trailingIcon: Icons.unfold_more,
+              onSelected: (value) => onChanged(value, null),
+              options: [
+                for (final model in models)
+                  BuzzSettingMenuOption(label: model.name, value: model.id),
+              ],
+              value: selected?.id,
+              valueLabel: loading ? 'Loading…' : selected?.name ?? 'Choose',
+            ),
+
+            BuzzSettingMenu<String>(
+              controlKey: const Key('agent-effort'),
+              enabled: enabled && selected != null,
+              label: 'Thinking',
+              grouped: true,
+              trailingIcon: Icons.unfold_more,
+              onSelected: (value) => onChanged(selected!.id, value),
+              options: [
+                for (final value in selected?.efforts ?? <String>[])
+                  BuzzSettingMenuOption(label: value, value: value),
+              ],
+              value: validEffort,
+              valueLabel: loading ? 'Loading…' : validEffort ?? 'Choose',
+            ),
           ],
-          value: selected?.id,
-          valueLabel: loading ? 'Loading…' : selected?.name ?? 'Choose',
-        ),
-        const SizedBox(height: Grid.xs),
-        BuzzSettingMenu<String>(
-          controlKey: const Key('agent-effort'),
-          enabled: enabled && selected != null,
-          label: 'Reasoning effort',
-          onSelected: (value) => onChanged(selected!.id, value),
-          options: [
-            for (final value in selected?.efforts ?? <String>[])
-              BuzzSettingMenuOption(label: value, value: value),
-          ],
-          value: validEffort,
-          valueLabel: loading ? 'Loading…' : validEffort ?? 'Choose',
         ),
         if (modelId != null && selected == null ||
             effort != null && validEffort == null)
@@ -106,3 +117,27 @@ bool validAgentModelSelection(
           (entry) => entry.id == model && entry.efforts.contains(effort),
         ) ==
         true;
+
+/// The model and effort a new agent starts with, so the easy path is a
+/// capable but affordable choice rather than a blank (or the priciest) one.
+/// A draft's own model wins when the catalog offers it; otherwise the first
+/// Sonnet model, at medium effort when supported. Anything the catalog
+/// doesn't offer is left for the user to choose.
+(String?, String?) startingAgentModel(
+  List<RemoteAgentModel> catalog, {
+  String? draftModel,
+  String? draftEffort,
+}) {
+  final drafted = catalog.where((entry) => entry.id == draftModel).firstOrNull;
+  if (drafted != null) {
+    return (
+      drafted.id,
+      drafted.efforts.contains(draftEffort) ? draftEffort : null,
+    );
+  }
+  final fallback = catalog
+      .where((entry) => entry.id.toLowerCase().contains('sonnet'))
+      .firstOrNull;
+  if (fallback == null) return (null, null);
+  return (fallback.id, fallback.efforts.contains('medium') ? 'medium' : null);
+}
