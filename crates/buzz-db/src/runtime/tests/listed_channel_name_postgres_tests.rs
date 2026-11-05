@@ -505,18 +505,6 @@ async fn ledger_version(pool: &PgPool) -> i64 {
         .expect("read migration ledger")
 }
 
-/// Whether migration `version` is recorded as applied. Later migrations also
-/// run, so the ledger's maximum is not 0083's.
-async fn applied(pool: &PgPool, version: i64) -> bool {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1 AND success)",
-    )
-    .bind(version)
-    .fetch_one(pool)
-    .await
-    .expect("read migration ledger")
-}
-
 async fn index_oid(pool: &PgPool) -> Option<i64> {
     sqlx::query_scalar("SELECT to_regclass('public.idx_channels_listed_name')::oid::bigint")
         .fetch_one(pool)
@@ -568,7 +556,7 @@ async fn migration_schema_listed_name_index_needs_the_renames_then_builds_inline
     migration::run_migrations(&pool)
         .await
         .expect("migrate a populated table after the renames");
-    assert!(applied(&pool, BEFORE_INDEX + 1).await, "0083 is applied");
+    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
     let mut expected = vec![
         (kept, "square-ios".to_owned()),
         renamed(newer, "Square-iOS"),
@@ -645,6 +633,6 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
         .await
         .expect("accept the prebuild without waiting for channel writers");
     writer.rollback().await.unwrap();
-    assert!(applied(&pool, BEFORE_INDEX + 1).await, "0083 is applied");
+    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
     assert_eq!(index_oid(&pool).await, oid, "the prebuild is not replaced");
 }

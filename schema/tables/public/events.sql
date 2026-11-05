@@ -51,6 +51,7 @@ CREATE INDEX idx_events_community_pubkey_kind_created
     ON events (community_id, pubkey, kind, created_at DESC, id);
 CREATE INDEX idx_events_community_kind_created
     ON events (community_id, kind, created_at DESC, id);
+CREATE INDEX idx_events_community_deleted ON events (community_id, deleted_at);
 -- Addressable (replaceable) and NIP-33 parameterized lookups.
 CREATE INDEX idx_events_addressable
     ON events (community_id, kind, pubkey, channel_id, deleted_at);

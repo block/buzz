@@ -4212,9 +4212,6 @@ mod thread_window_postgres_tests;
 #[path = "tests/listed_channel_name_postgres_tests.rs"]
 mod listed_channel_name_postgres_tests;
 
-#[path = "tests/events_deleted_index_drop_postgres_tests.rs"]
-mod events_deleted_index_drop_postgres_tests;
-
 #[path = "tests/reader_pool_postgres_tests.rs"]
 mod reader_pool_postgres_tests;
 
