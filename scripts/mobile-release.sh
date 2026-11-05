@@ -8,8 +8,8 @@ usage:
 
 candidate  Publish the next immutable mobile-vX.Y.Z-rc.N candidate tag at the
            selected commit in source history (defaults to the current source tip).
-           You push the annotated tag yourself, so you must be in the mobile
-           release team that bypasses the mobile tag ruleset.
+           You push the annotated tag yourself, so you must be a bypass actor
+           of the mobile tag ruleset (currently the mobile release managers).
 USAGE
   exit 2
 }
@@ -156,9 +156,9 @@ case "$command" in
     done <<< "$remote_tags"
 
     tag="mobile-v${version}-rc.${next}"
-    # Candidate tags are pushed by the operator, whose bypass of the mobile tag
-    # ruleset comes from membership in the mobile release team. No GitHub App
-    # or workflow is involved. Check before creating anything locally.
+    # Candidate tags are pushed by the operator, who must be a bypass actor of
+    # the mobile tag ruleset (the mobile release managers). No GitHub App or
+    # workflow is involved. Check before creating anything locally.
     require_mobile_release_tag_ruleset || exit 1
     # Annotated, never forced; the operator's own tag signing config applies.
     git tag -a -m "Buzz Mobile $version release candidate $next" "$tag" "$source_sha" || \
@@ -166,7 +166,7 @@ case "$command" in
     # --no-verify: the release must not depend on development pre-push hooks.
     if ! git push --no-verify origin "refs/tags/$tag"; then
       git tag -d "$tag" >/dev/null
-      fail "could not push $tag; you must be a member of the mobile release team (@block/buzz-mobile-release), the only bypass of the mobile tag ruleset. The local tag was removed so a retry starts clean"
+      fail "could not push $tag; you must be a bypass actor of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (currently the mobile release managers). The local tag was removed so a retry starts clean"
     fi
 
     published_sha="$(remote_tag_commit_sha "refs/tags/$tag")" || \

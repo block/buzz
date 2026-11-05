@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 
-# Tag ruleset that protects refs/tags/mobile-v*. Its only bypass actor must be
-# the mobile release-manager team (@block/buzz-mobile-release), never the
-# buzz-release-bot App: operators push candidate tags themselves.
-# PLACEHOLDER: an administrator creates the ruleset and replaces this value with
-# its numeric ID. Until then every mobile candidate publication fails loudly.
-readonly MOBILE_RELEASE_TAG_RULESET_ID=UNSET_REPLACE_WITH_MOBILE_TAG_RULESET_ID
+# Tag ruleset ("Restrict Mobile Tags") that protects mobile candidate tags. Its
+# bypass actors are the mobile release managers, never the buzz-release-bot App:
+# operators push candidate tags themselves.
+readonly MOBILE_RELEASE_TAG_RULESET_ID=26588677
 
 fail_release_ruleset() {
   echo "Error: $*" >&2
@@ -30,7 +28,7 @@ require_mobile_release_tag_ruleset() {
   local ruleset_endpoint state can_bypass rule_types includes excludes
 
   [[ "$MOBILE_RELEASE_TAG_RULESET_ID" =~ ^[0-9]+$ ]] || \
-    fail_release_ruleset "MOBILE_RELEASE_TAG_RULESET_ID in scripts/release-rulesets.sh is still a placeholder ('$MOBILE_RELEASE_TAG_RULESET_ID'); an administrator must create the mobile tag ruleset and record its ID" || return 1
+    fail_release_ruleset "MOBILE_RELEASE_TAG_RULESET_ID in scripts/release-rulesets.sh must be numeric (got '$MOBILE_RELEASE_TAG_RULESET_ID')" || return 1
   command -v gh >/dev/null 2>&1 || fail_release_ruleset "gh is required" || return 1
   ruleset_endpoint="repos/block/buzz/rulesets/$MOBILE_RELEASE_TAG_RULESET_ID"
 
@@ -42,7 +40,7 @@ require_mobile_release_tag_ruleset() {
   can_bypass="$(gh api "$ruleset_endpoint" --jq .current_user_can_bypass)" || \
     fail_release_ruleset "could not verify your bypass of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID" || return 1
   [[ "$can_bypass" == "always" ]] || \
-    fail_release_ruleset "you cannot bypass mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (reported '$can_bypass'); you must be a member of the mobile release team (@block/buzz-mobile-release)" || return 1
+    fail_release_ruleset "you cannot bypass mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (reported '$can_bypass'); you must be a bypass actor of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (currently the mobile release managers)" || return 1
 
   rule_types="$(gh api "$ruleset_endpoint" --jq '[.rules[].type] | sort | join(",")')" || \
     fail_release_ruleset "could not verify mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID rules" || return 1
@@ -51,8 +49,9 @@ require_mobile_release_tag_ruleset() {
 
   includes="$(gh api "$ruleset_endpoint" --jq '[.conditions.ref_name.include[]] | sort | join(",")')" || \
     fail_release_ruleset "could not verify mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID scope" || return 1
-  [[ ",$includes," == *",refs/tags/mobile-v*,"* ]] || \
-    fail_release_ruleset "mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID does not include refs/tags/mobile-v*" || return 1
+  # Either pattern covers every mobile-vX.Y.Z-rc.N candidate tag.
+  [[ ",$includes," == *",refs/tags/mobile-*,"* || ",$includes," == *",refs/tags/mobile-v*,"* ]] || \
+    fail_release_ruleset "mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID must include refs/tags/mobile-* or refs/tags/mobile-v*" || return 1
 
   excludes="$(gh api "$ruleset_endpoint" --jq '[.conditions.ref_name.exclude[]] | sort | join(",")')" || \
     fail_release_ruleset "could not verify mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID exclusions" || return 1

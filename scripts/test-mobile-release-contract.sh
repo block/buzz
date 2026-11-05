@@ -4,20 +4,17 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-# The checked-in ruleset ID is a placeholder until an administrator creates the
-# mobile tag ruleset. Exercise a copy with a numeric ID, and keep the real file
-# under test for the placeholder contract below.
-test_ruleset_id=424242
+# The stub gh answers for the real mobile tag ruleset ID, so the checked-in ID
+# is exercised unchanged. Keep the line so the numeric-guard case below can
+# rewrite it in a copy.
 id_line='readonly MOBILE_RELEASE_TAG_RULESET_ID='
-grep -q "^$id_line" "$repo_root/scripts/release-rulesets.sh" || {
-  echo "release-rulesets.sh no longer defines MOBILE_RELEASE_TAG_RULESET_ID" >&2
+grep -Eq "^${id_line}26588677\$" "$repo_root/scripts/release-rulesets.sh" || {
+  echo "release-rulesets.sh must define MOBILE_RELEASE_TAG_RULESET_ID=26588677" >&2
   exit 1
 }
 mkdir -p "$tmp/scripts"
-cp "$repo_root/scripts/mobile-release.sh" "$repo_root/scripts/mobile-release-source.sh" "$tmp/scripts/"
-sed "s/^$id_line.*/$id_line$test_ruleset_id/" "$repo_root/scripts/release-rulesets.sh" \
-  > "$tmp/scripts/release-rulesets.sh"
-grep -Fq "$id_line$test_ruleset_id" "$tmp/scripts/release-rulesets.sh"
+cp "$repo_root/scripts/mobile-release.sh" "$repo_root/scripts/mobile-release-source.sh" \
+  "$repo_root/scripts/release-rulesets.sh" "$tmp/scripts/"
 script="$tmp/scripts/mobile-release.sh"
 remote="$tmp/remote.git"
 work="$tmp/work"
@@ -33,15 +30,15 @@ case "${1:-}:${2:-}" in
   --version:*) printf 'gh version %s (test)\n' "${GH_VERSION:-2.94.0}" ;;
   api:repos/block/buzz/rulesets/19321162)
     [[ "${GH_BRANCH_POLICY_FAIL:-}" != 1 ]] || exit 1
-    policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[],"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
+    policy='{"target":"branch","enforcement":"active","current_user_can_bypass":"always","conditions":{"ref_name":{"include":["refs/heads/mobile-v*"],"exclude":[]}},"bypass_actors":[{"actor_type":"User","bypass_mode":"always"}],"rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"require_last_push_approval":true,"required_review_thread_resolution":true}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Mobile"},{"context":"DCO Check"}]}}]}'
     printf '%s\n' "${GH_BRANCH_POLICY:-$policy}" | jq -r "$4"
     ;;
-  api:repos/block/buzz/rulesets/424242)
+  api:repos/block/buzz/rulesets/26588677)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
       *'.current_user_can_bypass'*) printf '%s\n' "${GH_CURRENT_USER_CAN_BYPASS-always}" ;;
       *'[.rules[].type]'*) printf '%s\n' "${GH_TAG_RULE_TYPES:-creation,deletion,non_fast_forward,update}" ;;
-      *'.conditions.ref_name.include[]'*) printf '%s\n' "${GH_TAG_INCLUDES:-refs/tags/mobile-v*}" ;;
+      *'.conditions.ref_name.include[]'*) printf '%s\n' "${GH_TAG_INCLUDES:-refs/tags/mobile-*}" ;;
       *'.conditions.ref_name.exclude[]'*) printf '%s\n' "${GH_TAG_EXCLUDES:-}" ;;
       *) exit 2 ;;
     esac
@@ -206,7 +203,7 @@ assert_no_candidate_tag() {
 if GH_CURRENT_USER_CAN_BYPASS=never run_release "$operator" candidate 9.9.7 > "$tmp/no-bypass-output" 2>&1; then
   fail "candidate succeeded without bypass of the mobile tag ruleset"
 fi
-grep -Fq '@block/buzz-mobile-release' "$tmp/no-bypass-output"
+grep -Fq 'bypass actor of mobile tag ruleset 26588677' "$tmp/no-bypass-output"
 assert_no_candidate_tag 9.9.7
 if GH_CURRENT_USER_CAN_BYPASS='' run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
   fail "candidate succeeded with an empty bypass report"
@@ -221,26 +218,27 @@ if GH_TAG_RULE_TYPES=creation,deletion run_release "$operator" candidate 9.9.7 >
   fail "candidate succeeded with weakened mobile tag rules"
 fi
 if GH_TAG_INCLUDES='refs/tags/desktop-v*' run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
-  fail "candidate succeeded with a ruleset that does not cover mobile-v*"
+  fail "candidate succeeded with a ruleset that does not cover mobile tags"
 fi
 if GH_TAG_EXCLUDES='refs/tags/mobile-v9*' run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
   fail "candidate succeeded with a ruleset that excludes mobile tags"
 fi
 assert_no_candidate_tag 9.9.7
 
-# The checked-in ruleset ID is a placeholder until an administrator records the
-# real one. It must fail loudly, never silently pass.
-mkdir -p "$tmp/placeholder-scripts"
-cp "$tmp/scripts/mobile-release.sh" "$tmp/scripts/mobile-release-source.sh" "$tmp/placeholder-scripts/"
-sed "s/^$id_line.*/${id_line}UNSET_PLACEHOLDER/" "$repo_root/scripts/release-rulesets.sh" \
-  > "$tmp/placeholder-scripts/release-rulesets.sh"
-if (cd "$operator" && "$tmp/placeholder-scripts/mobile-release.sh" candidate 9.9.7 > "$tmp/placeholder-output" 2>&1); then
-  fail "candidate succeeded with a placeholder mobile tag ruleset ID"
+# The narrower refs/tags/mobile-v* include also covers candidate tags.
+GH_TAG_INCLUDES='refs/tags/mobile-v*' run_release "$operator" candidate 9.9.8 >/dev/null
+[[ "$(git --git-dir="$remote" cat-file -t refs/tags/mobile-v9.9.8-rc.1)" == tag ]]
+
+# A non-numeric ruleset ID fails loudly before any tag is created.
+mkdir -p "$tmp/garbage-scripts"
+cp "$tmp/scripts/mobile-release.sh" "$tmp/scripts/mobile-release-source.sh" "$tmp/garbage-scripts/"
+sed "s/^$id_line.*/${id_line}not-a-number/" "$repo_root/scripts/release-rulesets.sh" \
+  > "$tmp/garbage-scripts/release-rulesets.sh"
+if (cd "$operator" && "$tmp/garbage-scripts/mobile-release.sh" candidate 9.9.7 > "$tmp/garbage-output" 2>&1); then
+  fail "candidate succeeded with a non-numeric mobile tag ruleset ID"
 fi
-grep -Fq 'placeholder' "$tmp/placeholder-output"
+grep -Fq 'must be numeric' "$tmp/garbage-output"
 assert_no_candidate_tag 9.9.7
-# The real script must either carry a numeric ID or the placeholder; never blank.
-grep -Eq "^${id_line}([0-9]+|UNSET_[A-Z_]+)\$" "$repo_root/scripts/release-rulesets.sh"
 
 # A rejected push (the operator is not in the bypass team) fails, explains why,
 # and removes the local tag so a retry is clean.
@@ -255,7 +253,7 @@ chmod +x "$remote/hooks/pre-receive"
 if run_release "$operator" candidate 9.9.6 > "$tmp/push-rejected-output" 2>&1; then
   fail "candidate succeeded despite a rejected tag push"
 fi
-grep -Fq 'mobile release team' "$tmp/push-rejected-output"
+grep -Fq 'bypass actor of mobile tag ruleset 26588677' "$tmp/push-rejected-output"
 assert_no_candidate_tag 9.9.6
 rm "$remote/hooks/pre-receive"
 # The retry after the rejection is clean and gets the same candidate number.

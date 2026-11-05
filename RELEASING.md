@@ -34,7 +34,7 @@ just release-relay
 just release-relay 0.4.0
 
 # Publish the next mobile candidate from the exact current remote main commit
-# (requires membership in the mobile release team, see Mobile below)
+# (requires bypass of the mobile tag ruleset, see Mobile below)
 scripts/mobile-release.sh candidate 0.5.0
 ```
 
@@ -102,16 +102,15 @@ Every push to `main` continues to publish the rolling relay `:main` and
    remote tags for that marketing version, and publishes an annotated
    `mobile-vX.Y.Z-rc.N` tag at that snapshot with `git tag -a` (your own tag
    signing configuration applies) and pushes exactly that one tag to `origin`.
-   The push is allowed only because you are a member of the mobile release team
-   (placeholder name `@block/buzz-mobile-release`, to be confirmed by a
-   repository administrator), which is the sole bypass actor of the dedicated
-   mobile tag ruleset for `refs/tags/mobile-v*`. The `buzz-release-bot` App and
-   its key are not involved in mobile. The script never uses the operator's
+   The push is allowed only because you are a bypass actor of the dedicated
+   mobile tag ruleset [`26588677`](https://github.com/block/buzz/rules/26588677)
+   for `refs/tags/mobile-*`; bypass is granted to the mobile release managers.
+   The `buzz-release-bot` App and its key are not involved in mobile. The script never uses the operator's
    checked-out commit and never moves an existing candidate. To select a
    historical commit, add `--commit FULL_SHA`. The script requires that commit
    to be in the selected source branch's history. Later branch advances do not
    change or invalidate the tag. If the push is rejected, the script deletes
-   the local tag and fails; check your team membership.
+   the local tag and fails; check that you are a bypass actor of the ruleset.
 2. **Build the exact tag.** Enter the candidate tag as `mobile_ref` in the
    private Buzz mobile Buildkite pipeline. OSS CI deliberately cannot trigger
    that private pipeline. The tag supplies both source commit and release
@@ -327,25 +326,24 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
   | `TAURI_SIGNING_PRIVATE_KEY` | Secret | Tauri updater private key |
   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Secret | Password for the private key |
 
-Mobile candidate publication requires membership in the mobile release team
-(placeholder name `@block/buzz-mobile-release`) and a dedicated tag ruleset for
-`refs/tags/mobile-v*`. The ruleset must be active, with creation, update,
-deletion, and non-fast-forward protections, no exclusions, and that team as its
-only bypass actor. The `buzz-release-bot` App must not be a bypass actor.
-An administrator creates the ruleset and records its numeric ID as
-`MOBILE_RELEASE_TAG_RULESET_ID` in `scripts/release-rulesets.sh`; until then,
-`scripts/mobile-release.sh candidate` fails loudly on the placeholder. On every
-publication the script checks the public policy and that the caller's effective
-`current_user_can_bypass` is `always`; GitHub hides the bypass actor list from
-non-admin tokens, so an administrator audits that list.
-Stable sources additionally require active branch ruleset `19321162` covering
-`refs/heads/mobile-v*`, with no exclusions or bypass actors, deletion and
-force-push prevention, at least one approval, stale-approval dismissal, last-push
-approval, resolved review threads, and strict required `Mobile` and `DCO Check`
-checks. An administrator must configure and audit the empty bypass list; GitHub
-hides that list from non-admin tokens. The script verifies the
-public policy and the caller's effective lack of branch bypass on every
-publication.
+Mobile candidate publication requires being a bypass actor of the mobile tag
+ruleset [`26588677`](https://github.com/block/buzz/rules/26588677) ("Restrict
+Mobile Tags"), recorded as `MOBILE_RELEASE_TAG_RULESET_ID` in
+`scripts/release-rulesets.sh`. Bypass is granted to the mobile release
+managers. The ruleset must be active for `refs/tags/mobile-*` (or the narrower
+`refs/tags/mobile-v*`), with creation, update, deletion, and non-fast-forward
+protections and no exclusions. The `buzz-release-bot` App must not be a bypass
+actor. On every publication the script checks the public policy and that the
+caller's effective `current_user_can_bypass` is `always`; GitHub hides the bypass
+actor list from non-admin tokens, so an administrator audits that list.
+Stable sources additionally require active branch ruleset
+[`19321162`](https://github.com/block/buzz/rules/19321162) covering
+`refs/heads/mobile-v*`, with no exclusions, deletion and force-push prevention,
+at least one approval, stale-approval dismissal, last-push approval, resolved
+review threads, and strict required `Mobile` and `DCO Check` checks. The mobile
+release managers are also its bypass actors, so they can publish from a stable
+branch; the ruleset still forces review and checks on everyone else. The script
+verifies the public policy on every publication but does not check bypass.
 
 ---
 
@@ -389,18 +387,11 @@ increasing remote identities.
 
 ### A mobile candidate publication is rejected by repository rules
 
-Confirm you are a member of the mobile release team (placeholder
-`@block/buzz-mobile-release`), the only bypass actor of the active `mobile-v*`
-tag ruleset. The script removes its local tag after a rejected push, so retry
-after fixing membership. Do not add yourself or other individuals to the bypass
-list, grant the App bypass, or weaken update or deletion protection. Existing
+Confirm you are a bypass actor of the active mobile tag ruleset `26588677`
+(the mobile release managers). The script removes its local tag after a rejected
+push, so retry after an administrator fixes your access. Do not add yourself to
+the bypass list, grant the App bypass, or weaken update or deletion protection. Existing
 candidate tags must remain immutable.
-
-### Mobile candidate fails on the ruleset ID placeholder
-
-An administrator has not yet recorded the mobile tag ruleset's numeric ID in
-`MOBILE_RELEASE_TAG_RULESET_ID` in `scripts/release-rulesets.sh`. Do not bypass
-the check.
 
 ### Auto-updater reports "no update available"
 Verify that the `buzz-desktop-latest` release exists and contains a
