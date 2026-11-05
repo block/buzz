@@ -210,6 +210,48 @@ class ChannelActions {
     }
   }
 
+  /// Adds [pubkeys] to the DM [channelId] (kind:41011) and returns the DM
+  /// they ended up in. With [includeHistory] they join this DM and can read
+  /// it, unless the grown group already has a DM, which is returned instead.
+  /// Without it, they start a new DM of everyone.
+  Future<Channel> addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required bool includeHistory,
+  }) async {
+    _ensureCommunityValid();
+    final NostrEvent result;
+    try {
+      result = await _signedEventRelay.submit(
+        kind: 41011,
+        content: '',
+        tags: [
+          ['h', channelId],
+          for (final pubkey in pubkeys) ['p', pubkey],
+          if (includeHistory) ['history', 'include'],
+        ],
+      );
+    } on StateError {
+      rethrow;
+    } catch (_) {
+      // Retrying cannot help the most common refusal, a DM that is full.
+      throw Exception(dmAdditionFailedMessage);
+    }
+    _ensureCommunityValid();
+    final id = parseCommandResponse(result.content)?['channel_id'] as String?;
+    if (id == null || id.isEmpty) {
+      throw Exception('Relay did not return a DM channel id');
+    }
+    await _refreshChannelState(channelId);
+    if (id == channelId) {
+      return (await _ref.read(channelsProvider.future)).firstWhere(
+        (channel) => channel.id == channelId,
+        orElse: () => throw Exception('DM is not visible yet'),
+      );
+    }
+    return _refreshChannelsAndRead(id);
+  }
+
   void _ensureCommunityValid() {
     if (_isCommunityValid?.call() == false) {
       throw StateError(
