@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
@@ -83,7 +85,7 @@ void main() {
   testWidgets('a failed attempt stays blocked until the retry delay', (
     tester,
   ) async {
-    final gate = BuzzPushAttemptGate();
+    final gate = BuzzPushAttemptGate(jitter: () => 1);
     addTearDown(gate.dispose);
     var retries = 0;
     expect(gate.tryBegin('attempt'), isTrue);
@@ -95,6 +97,79 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect(retries, 1);
     expect(gate.tryBegin('attempt'), isTrue);
+  });
+
+  /// Fails [attempt] once more and returns how long its retry took to fire.
+  Future<Duration> failAndTimeRetry(
+    WidgetTester tester,
+    BuzzPushAttemptGate gate,
+    String attempt,
+  ) async {
+    expect(gate.tryBegin(attempt), isTrue);
+    var fired = false;
+    gate.failed(attempt, retry: () => fired = true);
+    var waited = Duration.zero;
+    while (!fired) {
+      await tester.pump(const Duration(milliseconds: 500));
+      waited += const Duration(milliseconds: 500);
+    }
+    return waited;
+  }
+
+  testWidgets('repeated failures back off exponentially up to a cap', (
+    tester,
+  ) async {
+    for (final jitter in [0.0, 1.0]) {
+      final gate = BuzzPushAttemptGate(jitter: () => jitter);
+      final delays = [
+        for (var i = 0; i < 12; i++)
+          await failAndTimeRetry(tester, gate, 'attempt'),
+      ];
+      gate.dispose();
+
+      // Each delay lies between half and all of 5 s doubled per prior
+      // failure, capped at 15 minutes.
+      for (final (index, delay) in delays.indexed) {
+        final ceiling = min(5000 * (1 << index), 15 * 60 * 1000);
+        expect(
+          delay.inMilliseconds,
+          inInclusiveRange(ceiling ~/ 2, ceiling),
+          reason: 'failure $index with jitter $jitter',
+        );
+      }
+      expect(delays.last, lessThanOrEqualTo(const Duration(minutes: 15)));
+      expect(delays.last, greaterThan(const Duration(minutes: 7)));
+    }
+  });
+
+  testWidgets('a success ends the failure streak', (tester) async {
+    final gate = BuzzPushAttemptGate(jitter: () => 1);
+    addTearDown(gate.dispose);
+    for (var i = 0; i < 4; i++) {
+      await failAndTimeRetry(tester, gate, 'attempt');
+    }
+
+    expect(gate.tryBegin('attempt'), isTrue);
+    gate.retryAfter('attempt', delay: Duration.zero, retry: () {});
+    await tester.pump(const Duration(milliseconds: 1));
+
+    expect(
+      await failAndTimeRetry(tester, gate, 'attempt'),
+      const Duration(seconds: 5),
+    );
+  });
+
+  testWidgets('a different attempt starts its own backoff', (tester) async {
+    final gate = BuzzPushAttemptGate(jitter: () => 1);
+    addTearDown(gate.dispose);
+    for (var i = 0; i < 4; i++) {
+      await failAndTimeRetry(tester, gate, 'old');
+    }
+
+    expect(
+      await failAndTimeRetry(tester, gate, 'new'),
+      const Duration(seconds: 5),
+    );
   });
 
   test('a new attempt cancels an obsolete scheduled retry', () async {
