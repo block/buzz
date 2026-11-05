@@ -151,11 +151,13 @@ pub async fn converge_landing_channel(tenant: &TenantContext, state: &Arc<AppSta
 /// The landing join at a roster write (invite claim, kind:9030), as a
 /// kind:9021 self-join: an earlier landing membership is restored, as the
 /// default channels' are. Returns whether the default channels should
-/// follow: `false` only when the join failed in a way a retry could get
-/// past, so the person keeps no entry evidence and their next AUTH joins
-/// the landing channel and then the defaults
+/// follow: `false` only when the membership write failed in a way a retry
+/// could get past, so the person keeps no entry evidence and their next
+/// AUTH joins the landing channel and then the defaults
 /// ([`admission_joins_on_auth`]). A refusal (a ban, or a designation left
-/// unusable) is final, so the defaults follow it.
+/// unusable) is final, so the defaults follow it. So does a committed row
+/// whose announcement failed: the row is entry evidence, so no AUTH would
+/// recover the defaults if they were skipped here.
 pub(crate) async fn join_landing_on_roster_admission(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -171,10 +173,13 @@ pub(crate) async fn join_landing_on_roster_admission(
             return false;
         }
     };
-    match side_effects::join_channel_as_self(tenant, state, landing, pubkey).await {
+    match side_effects::put_member_as_self(tenant, state, landing, pubkey).await {
         Ok(SelfJoinOutcome::Joined) => {
             metrics::counter!("buzz_landing_joins_total").increment(1);
             info!(channel = %landing, %member, "joined the landing channel");
+            if let Err(e) = side_effects::announce_self_join(tenant, state, landing, pubkey).await {
+                warn!(channel = %landing, %member, error = %e, "landing join announcement failed");
+            }
             true
         }
         Ok(SelfJoinOutcome::AlreadyMember) => true,
@@ -185,7 +190,7 @@ pub(crate) async fn join_landing_on_roster_admission(
         }
         Err(e) => {
             metrics::counter!("buzz_landing_join_failures_total").increment(1);
-            warn!(channel = %landing, %member, error = %e, "landing join failed; default channels wait for the next admission");
+            warn!(channel = %landing, %member, error = %e, "landing membership write failed; default channels wait for the next admission");
             false
         }
     }
@@ -201,15 +206,23 @@ pub(crate) async fn join_landing_on_roster_admission(
 ///    re-admission after kind:9031 is a first entry again; without a roster
 ///    any history counts.
 /// 3. In roster mode, the same person is then joined to the default
-///    channels: the recovery for a roster write whose joins did not complete
-///    ([`join_landing_on_roster_admission`]). Without a roster, the default
-///    channels they have never been in follow on every admission
+///    channels they have not been in since admission
+///    ([`side_effects::join_default_channels_since`]): the recovery for a
+///    roster write whose joins did not complete
+///    ([`join_landing_on_roster_admission`]), and the enrollment of a
+///    `buzz-admin add-member` row. Without a roster, the default channels
+///    they have never been in follow on every admission
 ///    ([`side_effects::join_never_joined_channels`]).
 ///
-/// Every write holds one of the socket's effect permits, so nothing is
-/// joined after the session ends. A leave that commits first stands:
-/// `put_first_member_since` writes nothing over a row removed since
-/// admission. Failures are logged and counted.
+/// Every write is a `put_first_member_since` under one of the socket's
+/// effect permits, announced only when it wrote a row, so nothing is joined
+/// after the session ends, two admissions racing each other announce once,
+/// and a leave that commits first stands. The person's `channel_add_policy`
+/// is not consulted: an admission join is their own act, as a kind:9021 is,
+/// and the policy restricts who else may add them (the kind:9030 path checks
+/// it against that actor). Failures are logged and counted; a landing
+/// membership write that fails skips the defaults, so the next admission
+/// retries both, while a failed announcement of a committed row does not.
 pub(crate) async fn admission_joins_on_auth(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -236,8 +249,9 @@ async fn admission_joins(
             return;
         }
     };
-    let roster = state.config.require_relay_membership;
-    let admitted_at = if roster {
+    // `Some` in roster mode, where the roster row's `created_at` bounds the
+    // evidence and the default-channel history.
+    let admitted_at = if state.config.require_relay_membership {
         match state.db.get_relay_member(tenant.community(), &member).await {
             Ok(Some(row)) => Some(row.created_at),
             // Removed from the roster since admission: the session is
@@ -295,16 +309,17 @@ async fn admission_joins(
                 }
                 Err(e) => {
                     metrics::counter!("buzz_landing_join_failures_total").increment(1);
-                    warn!(channel = %landing, %member, error = %e, "landing join on admission failed; default channels wait for the next admission");
+                    warn!(channel = %landing, %member, error = %e, "landing membership write on admission failed; default channels wait for the next admission");
                     return;
                 }
             }
         }
-        if roster {
-            side_effects::join_default_channels(tenant, state, pubkey, Some(gate)).await;
+        if let Some(admitted_at) = admitted_at {
+            side_effects::join_default_channels_since(tenant, state, pubkey, admitted_at, gate)
+                .await;
         }
     }
-    if !roster {
+    if admitted_at.is_none() {
         side_effects::join_never_joined_channels(tenant, state, pubkey, gate).await;
     }
 }

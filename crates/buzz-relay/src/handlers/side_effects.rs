@@ -3010,6 +3010,24 @@ pub(crate) async fn join_channel_as_self(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> anyhow::Result<SelfJoinOutcome> {
+    let outcome = put_member_as_self(tenant, state, channel_id, pubkey).await?;
+    if outcome == SelfJoinOutcome::Joined {
+        announce_self_join(tenant, state, channel_id, pubkey).await?;
+    }
+    Ok(outcome)
+}
+
+/// The membership write of [`join_channel_as_self`] alone: the channel
+/// checks and `put_member`, with no announcement. A caller that must know
+/// whether the row committed before it announces (the landing join at a
+/// roster write) uses this, then [`announce_self_join`] on
+/// [`SelfJoinOutcome::Joined`].
+pub(crate) async fn put_member_as_self(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> anyhow::Result<SelfJoinOutcome> {
     // Only open channels allow self-join via kind:9021.
     let channel = state
         .db
@@ -3047,7 +3065,6 @@ pub(crate) async fn join_channel_as_self(
         .db
         .put_member(tenant.community(), channel_id, pubkey, None, None)
         .await?;
-    announce_self_join(tenant, state, channel_id, pubkey).await?;
     Ok(SelfJoinOutcome::Joined)
 }
 
@@ -3107,9 +3124,11 @@ pub(crate) async fn announce_self_join(
 /// `auto_join` tag on kind:39000 is the durable record a client reconciles
 /// against. A channel archived or made private after the list was read is
 /// one such failure: `put_member` refuses it under its locks. A landing
-/// join that fails for a reason other than a refusal skips the default
-/// channels too: the person then has no entry evidence, so their next
-/// AUTH joins both.
+/// membership write that fails for a reason other than a refusal skips the
+/// default channels too: the person then has no entry evidence, so their
+/// next AUTH joins both. Once the landing row has committed, the person has
+/// entry evidence, so the defaults always follow it, even if its
+/// announcement failed.
 ///
 /// Agents, by their stored owner link, are not joined to the landing
 /// channel; the default channels apply to them as before.
@@ -3158,18 +3177,16 @@ pub(crate) async fn auto_join_default_channels(
     {
         return;
     }
-    join_default_channels(tenant, state, &pubkey, None).await;
+    join_default_channels(tenant, state, &pubkey).await;
 }
 
 /// Join `pubkey` to every effective `auto_join` channel as kind:9021
-/// self-joins, restoring a membership they left. With a `gate`, each
-/// channel's write holds one of the session's effect permits, and the loop
-/// stops when the session ends. Failures are logged and counted.
+/// self-joins, restoring a membership they left. Failures are logged and
+/// counted.
 pub(crate) async fn join_default_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     pubkey: &[u8],
-    gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
 ) {
     let member = hex::encode(pubkey);
     let channels = match state.db.list_auto_join_channels(tenant.community()).await {
@@ -3181,18 +3198,6 @@ pub(crate) async fn join_default_channels(
         }
     };
     for channel in channels {
-        let _permit = match gate {
-            Some(gate) => {
-                #[cfg(test)]
-                crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
-                let Ok(permit) = gate.acquire_effect().await else {
-                    info!(channel = %channel.id, %member, "auto-join stopped: the session ended");
-                    return;
-                };
-                Some(permit)
-            }
-            None => None,
-        };
         match join_channel_as_self(tenant, state, channel.id, pubkey).await {
             Ok(SelfJoinOutcome::Joined) => {
                 metrics::counter!("buzz_auto_join_channels_total").increment(1);
@@ -3225,6 +3230,10 @@ pub(crate) async fn join_default_channels(
 /// task stops at the first refusal. A channel it stops before, or whose
 /// membership write fails, has no row, so the next admission tries it again.
 /// Failures are logged and counted (`buzz_auto_join_failures_total`).
+///
+/// The person's `channel_add_policy` is not consulted: an admission join is
+/// their own act, as a kind:9021 or a self kind:9000 is, and the policy
+/// restricts who else may add them. Agents never reach this path.
 pub(crate) async fn join_never_joined_channels(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -3245,32 +3254,89 @@ pub(crate) async fn join_never_joined_channels(
         }
     };
     for channel_id in channels {
-        #[cfg(test)]
-        crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
-        let Ok(_permit) = gate.acquire_effect().await else {
-            info!(channel = %channel_id, %member, "auto-join stopped: the session ended");
+        if !join_default_on_admission(tenant, state, channel_id, pubkey, None, gate).await {
             return;
-        };
-        let joined = match state
-            .db
-            .put_first_member(tenant.community(), channel_id, pubkey)
-            .await
-        {
-            Ok(None) => continue,
-            Ok(Some(_)) => announce_self_join(tenant, state, channel_id, pubkey).await,
-            Err(e) => Err(e.into()),
-        };
-        match joined {
-            Ok(()) => {
-                metrics::counter!("buzz_auto_join_channels_total").increment(1);
-                info!(channel = %channel_id, %member, "auto-joined default channel on admission");
-            }
-            Err(e) => {
-                metrics::counter!("buzz_auto_join_failures_total").increment(1);
-                warn!(channel = %channel_id, %member, error = %e, "auto-join of default channel on admission failed");
-            }
         }
     }
+}
+
+/// Join a person admitted to a community with a membership roster to every
+/// effective `auto_join` channel they have not been a member of since
+/// `admitted_at`, their roster row's `created_at`: the recovery for a roster
+/// write whose joins did not finish ([`auto_join_default_channels`]), run
+/// from [`super::landing::admission_joins_on_auth`] for a person with no
+/// entry evidence since admission.
+///
+/// Each channel's write is [`buzz_db::Db::put_first_member_since`] under one
+/// of the socket's effect permits, announced only when a row was written, so
+/// two admissions of the same person join and announce once, and a kind:9022
+/// leave since admission stands. The person's `channel_add_policy` is not
+/// consulted, as in [`join_never_joined_channels`]. Failures are logged and
+/// counted (`buzz_auto_join_failures_total`).
+pub(crate) async fn join_default_channels_since(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+    admitted_at: chrono::DateTime<chrono::Utc>,
+    gate: &Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+) {
+    let member = hex::encode(pubkey);
+    let channels = match state.db.list_auto_join_channels(tenant.community()).await {
+        Ok(channels) => channels,
+        Err(e) => {
+            warn!(%member, error = %e, "auto-join skipped: listing default channels failed");
+            metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            return;
+        }
+    };
+    for channel in channels {
+        if !join_default_on_admission(tenant, state, channel.id, pubkey, Some(admitted_at), gate)
+            .await
+        {
+            return;
+        }
+    }
+}
+
+/// One default-channel join on admission: `put_first_member_since` under an
+/// effect permit from `gate`, announced as a self-join only when it wrote a
+/// row. Returns `false` when the session has ended and the caller should
+/// stop; a failed channel is logged and counted and returns `true`.
+async fn join_default_on_admission(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    admitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    gate: &Arc<crate::nip_fi_gate::SessionAdmissionGate>,
+) -> bool {
+    let member = hex::encode(pubkey);
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
+    let Ok(_permit) = gate.acquire_effect().await else {
+        info!(channel = %channel_id, %member, "auto-join stopped: the session ended");
+        return false;
+    };
+    let joined = match state
+        .db
+        .put_first_member_since(tenant.community(), channel_id, pubkey, admitted_at)
+        .await
+    {
+        Ok(None) => return true,
+        Ok(Some(_)) => announce_self_join(tenant, state, channel_id, pubkey).await,
+        Err(e) => Err(e.into()),
+    };
+    match joined {
+        Ok(()) => {
+            metrics::counter!("buzz_auto_join_channels_total").increment(1);
+            info!(channel = %channel_id, %member, "auto-joined default channel on admission");
+        }
+        Err(e) => {
+            metrics::counter!("buzz_auto_join_failures_total").increment(1);
+            warn!(channel = %channel_id, %member, error = %e, "auto-join of default channel on admission failed");
+        }
+    }
+    true
 }
 
 async fn handle_join_request(

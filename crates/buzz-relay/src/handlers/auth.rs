@@ -3189,10 +3189,12 @@ mod tests {
         }
 
         /// With a roster, a roster write that did not join the person (here,
-        /// a bare roster insert) is recovered at AUTH: the landing channel,
-        /// then the default channels. Once they have left both, an admission
-        /// joins nothing; after a kind:9031 removal, re-admission is a first
-        /// entry again and restores both.
+        /// a bare roster insert, as `buzz-admin add-member` makes) is
+        /// recovered at AUTH: the landing channel, then the default channels
+        /// they have not been in since admission. Once they have left both,
+        /// an admission joins nothing; after a kind:9031 removal,
+        /// re-admission is a first entry again and restores both, through
+        /// `put_first_member_since` with the new roster row's `created_at`.
         ///
         /// Mutations: use `None` for `admitted_at` in roster mode → the
         /// re-admission joins nothing (RED); drop the roster-mode defaults

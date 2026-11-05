@@ -226,22 +226,37 @@ body of kind:9021, so the channel's `join_role` applies and the channel gets
 its `member_joined` kind:40099, kind:39002 and kind:44100. There is no cap on
 how many channels that is: whatever carries the kind:39000 tag is joined, and
 the work a new member costs grows with the number of channels an owner or
-admin flags. The [landing channel](#landing-channel) is joined first. On a
-community that requires relay membership, the relay does this at that
-moment; a login or reconnect repeats it only for a person with no entry
-evidence (see [Landing channel](#landing-channel)), so a later kind:9022
-leave stands. A kind:9030 add is
-made by someone else, so the new member's `channel_add_policy` applies first,
-as it would to that actor's kind:9000: if it refuses them, no default channel
-is joined. The claim response waits for the joins, and a claimer who
-disconnects before it arrives does not cut them short. A channel that fails
-to join, or an add the member's policy refuses, is logged and counted
-(`buzz_auto_join_failures_total`), not retried: the kind:39000 tag is the
-record a client reconciles against. That includes a channel archived or made
-private while the join runs: the membership write decides both again under
-the channel's locks, so the member is not added and nothing is announced.
-`buzz-admin add-member` writes the roster row only and
-does not join default channels.
+admin flags. The [landing channel](#landing-channel) is joined first. A
+kind:9030 add is made by someone else, so the new member's
+`channel_add_policy` applies first, as it would to that actor's kind:9000:
+if it refuses them, no default channel is joined at the add. The claim
+response waits for the joins, and a claimer who disconnects before it
+arrives does not cut them short. A channel that fails to join, or an add the
+member's policy refuses, is logged and counted
+(`buzz_auto_join_failures_total`) and not retried at the roster write: the
+kind:39000 tag is the record a client reconciles against. That includes a
+channel archived or made private while the join runs: the membership write
+decides both again under the channel's locks, so the member is not added and
+nothing is announced.
+
+On a community that requires relay membership, a person's WebSocket AUTH
+also enrolls them, after the OK, when they have **no entry evidence since
+their roster row was created**: no membership, active or ended since then,
+in any shared (stream or forum) channel other than a private channel they
+created themselves (see [Landing channel](#landing-channel)). Such a person
+is joined to the landing channel and then to every effective default channel
+they have not been a member of since the roster row was created. This is
+the recovery for a roster write whose joins did not finish, and it is how a
+member added with `buzz-admin add-member` is enrolled: that command writes
+the roster row only, and the person's first AUTH does the joins. A person
+with any such evidence is never joined at AUTH, so a kind:9022 leave stands
+and a reconnect or new device changes nothing; a member whose kind:9030 add
+their `channel_add_policy` refused is enrolled at their first AUTH all the
+same, because an admission join is their own act (as a kind:9021 is) and the
+policy restricts who else may add them. Each channel's write checks its
+membership history again under the channel's lock and is announced only when
+it wrote a row, so two admissions racing each other join and announce once.
+Agents are never enrolled at AUTH.
 
 A community that does not require relay membership has no roster insert to
 join people at, so there the relay joins a person when it admits their
@@ -251,10 +266,11 @@ history: a kind:9022 leave or a kind:9001 removal keeps the row, so the
 person is not joined back, and a new device or another relay pod finds the
 row and does nothing. The check runs again under the channel's membership
 lock, so two admissions of the same person join them once. A channel flagged
-later is joined on each person's next admission. Agents are skipped: an AUTH
-with a NIP-OA owner, a NIP-FI agent token, or a stored agent owner joins
-nothing. A membership write that fails leaves no row, so the next admission
-tries that channel again.
+later is joined on each person's next admission. `channel_add_policy` is not
+consulted, for the reason above. Agents are skipped: an AUTH with a NIP-OA
+owner, a NIP-FI agent token, or a stored agent owner joins nothing. A
+membership write that fails leaves no row, so the next admission tries that
+channel again.
 
 ### Landing channel
 
@@ -283,11 +299,16 @@ is never more than one. Clients read it from NIP-11:
 - The relay-signed kind:39000 whose `d` is the landing channel carries a bare
   `["landing"]` tag, and `["welcome", "<text>"]` while a custom message is
   set. These are a projection of the stored designation, re-signed whenever
-  it moves; NIP-11 is the authoritative read. A failed re-emission can leave a
-  stale tag on the previous landing channel, so a client takes the landing
-  channel from NIP-11 and ignores `welcome` on any other channel's 39000. The
-  welcome text is plain text: `\n` is a line break and nothing else is
-  interpreted. With no custom message, clients show their own default text.
+  it moves; NIP-11 is the authoritative read. The re-emission runs after the
+  designation has committed, so a failed one, or two moves whose
+  re-emissions race, can leave a stale `landing` or `welcome` tag on a
+  channel that is no longer the landing channel, or a `landing` tag missing
+  from the one that is, until that channel's next kind:39000. When the tags
+  and NIP-11 disagree, NIP-11 is right: a client takes the landing channel
+  from NIP-11 and ignores `landing` and `welcome` on any other channel's
+  39000. The welcome text is plain text: `\n` is a line break and nothing
+  else is interpreted. With no custom message, clients show their own default
+  text.
 
 **Adoption.** With no designation, the relay adopts the oldest open,
 unarchived stream named `general` (case-insensitive) without a TTL,
@@ -366,18 +387,22 @@ joined to it.
 
 - On a community that requires relay membership, this happens at the invite
   claim or kind:9030 add. A person's AUTH joins them only if they have no
-  entry evidence since their roster row was created: no channel membership
-  in a shared (stream or forum) channel, other than private channels they
-  created themselves. That recovers an admission whose joins did not finish,
-  and it joins the default channels too. After a kind:9031 removal, the next
-  admission is a first entry again.
+  entry evidence since their roster row was created: no membership, active
+  or ended since then, in a shared (stream or forum) channel, other than
+  private channels they created themselves. That recovers an admission whose
+  joins did not finish and enrolls a `buzz-admin add-member` row, and it
+  joins the default channels they have not been in since then too (see
+  [Default channels](#default-channels)). After a kind:9031 removal, the
+  next admission is a first entry again.
 - On a community without a roster, a person's AUTH joins them to the landing
   channel if they have no such evidence at all; then the default channels
   they have never been in follow, as before.
 - Reconnects, new devices and moving the designation never re-enroll anyone.
-  A person who left the landing channel stays out. A landing join that fails
-  for a reason other than a refusal (a ban, a channel that cannot be joined)
-  skips the default channels too, so the next AUTH retries both.
+  A person who left the landing channel stays out. A landing membership
+  write that fails for a reason other than a refusal (a ban, a channel that
+  cannot be joined) skips the default channels too, so the next AUTH retries
+  both; once the row has committed, the default channels follow even if its
+  announcement failed, because the row is entry evidence.
 
 ### Group Discovery
 
