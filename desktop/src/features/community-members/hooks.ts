@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   addRelayMember,
   changeRelayMemberRole,
@@ -43,10 +44,11 @@ export function useMyRelayMembershipLookupQuery() {
 
 export function useAddRelayMemberMutation() {
   const queryClient = useQueryClient();
+  const relayUrl = useCommunities().activeCommunity?.relayUrl;
 
   return useMutation({
     mutationFn: ({ pubkey, role }: { pubkey: string; role: string }) =>
-      addRelayMember(pubkey, role),
+      addRelayMember(pubkey, role, relayUrl),
     onMutate: async ({ pubkey, role }) => {
       await queryClient.cancelQueries({ queryKey: relayMembersQueryKey });
       const previous =
@@ -83,9 +85,10 @@ export function useAddRelayMemberMutation() {
 
 export function useRemoveRelayMemberMutation() {
   const queryClient = useQueryClient();
+  const relayUrl = useCommunities().activeCommunity?.relayUrl;
 
   return useMutation({
-    mutationFn: (pubkey: string) => removeRelayMember(pubkey),
+    mutationFn: (pubkey: string) => removeRelayMember(pubkey, relayUrl),
     onMutate: async (pubkey) => {
       await queryClient.cancelQueries({ queryKey: relayMembersQueryKey });
       const previous =
@@ -116,6 +119,7 @@ export function useRemoveRelayMemberMutation() {
 
 export function useChangeRelayMemberRoleMutation() {
   const queryClient = useQueryClient();
+  const relayUrl = useCommunities().activeCommunity?.relayUrl;
 
   return useMutation({
     mutationFn: ({
@@ -126,7 +130,7 @@ export function useChangeRelayMemberRoleMutation() {
       pubkey: string;
       role?: string;
       newRole?: string;
-    }) => changeRelayMemberRole(pubkey, role ?? newRole ?? "member"),
+    }) => changeRelayMemberRole(pubkey, role ?? newRole ?? "member", relayUrl),
     onMutate: async ({ pubkey, role, newRole }) => {
       const nextRole = (role ?? newRole ?? "member") as RelayMember["role"];
       await queryClient.cancelQueries({ queryKey: relayMembersQueryKey });

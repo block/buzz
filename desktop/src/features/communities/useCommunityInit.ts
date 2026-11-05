@@ -388,6 +388,9 @@ export function useCommunityInit(
       }
 
       if (!cancelled) {
+        // A relay call between resetCommunityState() and this point read the
+        // previous override and may have connected to the outgoing relay.
+        relayClient.bindRelayUrl(activeCommunity.relayUrl);
         // Refresh relay-derived media state only after the backend has installed
         // this community's relay override. On cold launch, mediaUrl.ts may have
         // eagerly cached the default relay origin before applyCommunity ran;
