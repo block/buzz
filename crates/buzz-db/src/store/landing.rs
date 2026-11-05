@@ -1,0 +1,1434 @@
+//! The community's landing channel and its welcome message.
+//!
+//! Both live on the community's `communities` row (`landing_channel_id`,
+//! `welcome_message`), so a community has at most one landing channel by
+//! construction and a move is a single-row update. NIP-11 `landing_channel`
+//! is the authoritative read; the landing channel's kind:39000 carries a
+//! projection of it ([`CommunityLanding::group_metadata_tags`]).
+//!
+//! Lock order: a writer that locks both a channel row and the `communities`
+//! row locks the channel row first. Moving the designation to a channel
+//! therefore needs that channel's row lock, which every write that could
+//! make the channel ineligible also holds.
+
+use buzz_core::CommunityId;
+use buzz_datastore_tracing::datastore_span;
+use sqlx::{PgConnection, PgPool};
+use uuid::Uuid;
+
+use crate::channel::{ChannelType, ChannelUpdate, ChannelVisibility, NewChannel};
+use crate::{AdmittedTx, Db, DbError, Result};
+
+/// Refusal for archiving, making private, expiring or deleting the landing
+/// channel.
+pub const LANDING_PROTECTED: &str =
+    "this is the community's landing channel; make another channel the landing channel first";
+
+/// Refusal for designating a channel that is not an open, unarchived stream
+/// without a TTL, judged on the state the request leaves behind.
+pub const LANDING_INELIGIBLE: &str = "landing requires an open, unarchived channel without a ttl";
+
+/// Refusal for a welcome message sent to a channel that is not, and does not
+/// become, the landing channel.
+pub const WELCOME_NOT_LANDING: &str = "welcome can only be set on the landing channel";
+
+/// The longest welcome message, in Unicode scalar values.
+pub const WELCOME_MAX_CHARS: usize = 1000;
+
+/// The name of the landing channel the relay adopts or creates.
+pub const LANDING_CHANNEL_NAME: &str = "general";
+
+/// A community's landing designation and custom welcome message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommunityLanding {
+    /// The landing channel, if one is designated.
+    pub channel_id: Option<Uuid>,
+    /// The custom welcome message; `None` means the client default.
+    pub welcome: Option<String>,
+}
+
+impl CommunityLanding {
+    /// The kind:39000 tags for `channel_id`: a bare `["landing"]` while it is
+    /// the landing channel, then `["welcome", text]` while a custom message
+    /// is set. Empty for every other channel, so a re-emission after a move
+    /// drops both from the previous landing channel.
+    pub fn group_metadata_tags(&self, channel_id: Uuid) -> Vec<Vec<String>> {
+        if self.channel_id != Some(channel_id) {
+            return Vec::new();
+        }
+        let mut tags = vec![vec!["landing".to_owned()]];
+        if let Some(welcome) = self.welcome.as_deref().filter(|w| !w.is_empty()) {
+            tags.push(vec!["welcome".to_owned(), welcome.to_owned()]);
+        }
+        tags
+    }
+}
+
+/// Why `text` cannot be a custom welcome message, or `None` when it can.
+/// The caller handles the empty string, which restores the default.
+pub fn welcome_message_error(text: &str) -> Option<&'static str> {
+    if text.trim().is_empty() {
+        Some("welcome message must not be blank")
+    } else if text.chars().count() > WELCOME_MAX_CHARS {
+        Some("welcome message is too long (max 1000 characters)")
+    } else if text.chars().any(|c| c.is_control() && c != '\n') {
+        Some("welcome message must be plain text (line breaks only)")
+    } else {
+        None
+    }
+}
+
+/// What [`Db::ensure_landing_channel`] found or did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandingAdoption {
+    /// A channel was already designated.
+    Existing(Uuid),
+    /// An eligible channel named `general` became the landing channel.
+    Reused(Uuid),
+    /// The relay created `general`, owned by `steward`, as the landing
+    /// channel.
+    Created {
+        /// The new channel.
+        channel_id: Uuid,
+        /// Its owner: the community's earliest owner, else earliest admin.
+        steward: [u8; 32],
+    },
+    /// No eligible `general` exists and the community has no owner or admin
+    /// to own a new one. The designation stays empty.
+    SkippedNoSteward,
+    /// No eligible `general` exists and the name is held by a channel that
+    /// cannot be the landing channel (archived, or a forum).
+    SkippedNameTaken,
+}
+
+impl LandingAdoption {
+    /// The landing channel after the call, if any.
+    pub fn channel_id(&self) -> Option<Uuid> {
+        match *self {
+            Self::Existing(id) | Self::Reused(id) => Some(id),
+            Self::Created { channel_id, .. } => Some(channel_id),
+            Self::SkippedNoSteward | Self::SkippedNameTaken => None,
+        }
+    }
+
+    /// The `outcome` label of `buzz_landing_adoption_total`, or `None` when
+    /// a designation already existed.
+    pub fn outcome(&self) -> Option<&'static str> {
+        match self {
+            Self::Existing(_) => None,
+            Self::Reused(_) => Some("reused"),
+            Self::Created { .. } => Some("created"),
+            Self::SkippedNoSteward => Some("skipped_no_steward"),
+            Self::SkippedNameTaken => Some("skipped_name_taken"),
+        }
+    }
+}
+
+async fn read_landing(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+) -> Result<CommunityLanding> {
+    let row: Option<(Option<Uuid>, Option<String>)> =
+        sqlx::query_as("SELECT landing_channel_id, welcome_message FROM communities WHERE id = $1")
+            .bind(community_id.as_uuid())
+            .fetch_optional(conn)
+            .await?;
+    let (channel_id, welcome) = row.unwrap_or_default();
+    Ok(CommunityLanding {
+        channel_id,
+        welcome: welcome.filter(|w| !w.is_empty()),
+    })
+}
+
+/// Locks the community row on `tx` and returns its landing channel. Taken
+/// after any channel row lock (see the module docs).
+pub(crate) async fn lock_designation(tx: &mut AdmittedTx) -> Result<Option<Uuid>> {
+    let community_id = tx.community();
+    Ok(sqlx::query_scalar(
+        "SELECT landing_channel_id FROM communities WHERE id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .fetch_one(tx.conn())
+    .await?)
+}
+
+/// Makes `channel_id` the landing channel on `tx`, which holds the community
+/// row lock ([`lock_designation`]).
+pub(crate) async fn set_designation(tx: &mut AdmittedTx, channel_id: Uuid) -> Result<()> {
+    let community_id = tx.community();
+    sqlx::query("UPDATE communities SET landing_channel_id = $2 WHERE id = $1")
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// Sets (or, with `None`, clears) the welcome message on `tx`, which holds
+/// the community row lock ([`lock_designation`]).
+pub(crate) async fn set_welcome(tx: &mut AdmittedTx, welcome: Option<&str>) -> Result<()> {
+    let community_id = tx.community();
+    sqlx::query("UPDATE communities SET welcome_message = $2 WHERE id = $1")
+        .bind(community_id.as_uuid())
+        .bind(welcome)
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// Refuses with [`LANDING_PROTECTED`] when `channel_id` is the landing
+/// channel. `tx` holds the channel's row lock, so the designation cannot
+/// move to the channel meanwhile; a plain read is enough.
+pub(crate) async fn refuse_if_landing(tx: &mut AdmittedTx, channel_id: Uuid) -> Result<()> {
+    let community_id = tx.community();
+    let landing: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT landing_channel_id FROM communities WHERE id = $1")
+            .bind(community_id.as_uuid())
+            .fetch_optional(tx.conn())
+            .await?;
+    if landing.flatten() == Some(channel_id) {
+        return Err(DbError::AccessDenied(LANDING_PROTECTED.to_string()));
+    }
+    Ok(())
+}
+
+/// SQL that is true for a channel that may be the landing channel.
+const ELIGIBLE_SQL: &str = "channel_type = 'stream' AND visibility = 'open' \
+     AND archived_at IS NULL AND deleted_at IS NULL AND ttl_seconds IS NULL";
+
+/// See [`Db::ensure_landing_channel`].
+async fn ensure_landing_channel(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<LandingAdoption> {
+    let current = {
+        let mut connection = crate::observability::acquire_writer(
+            pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        read_landing(&mut connection, community_id)
+            .await?
+            .channel_id
+    };
+    if let Some(channel_id) = current {
+        return Ok(LandingAdoption::Existing(channel_id));
+    }
+    if let Some(adopted) = adopt_general(pool, community_id).await? {
+        return Ok(adopted);
+    }
+    let Some(steward) = steward(pool, community_id).await? else {
+        return Ok(LandingAdoption::SkippedNoSteward);
+    };
+    match create_general(pool, community_id, steward).await {
+        // A concurrent creator, or a rename, took the name first: adopt its
+        // channel if it is eligible.
+        Err(DbError::ChannelNameTaken(_)) => Ok(adopt_general(pool, community_id)
+            .await?
+            .unwrap_or(LandingAdoption::SkippedNameTaken)),
+        created => created,
+    }
+}
+
+/// Designates the oldest eligible `general`, preferring a listed one.
+/// `None` when there is none.
+async fn adopt_general(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<Option<LandingAdoption>> {
+    let candidate: Option<Uuid> = {
+        let mut connection = crate::observability::acquire_writer(
+            pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT id FROM channels WHERE community_id = $1 AND lower(name) = $2 \
+             AND {ELIGIBLE_SQL} ORDER BY unlisted ASC, created_at ASC, id ASC LIMIT 1"
+        )))
+        .bind(community_id.as_uuid())
+        .bind(LANDING_CHANNEL_NAME)
+        .fetch_optional(&mut *connection)
+        .await?
+    };
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let mut locked = match crate::channel::lock_channel_for_settings_write(
+        &mut tx,
+        candidate,
+        &ChannelUpdate::default(),
+    )
+    .await
+    {
+        Ok(locked) => locked,
+        Err(DbError::ChannelNotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    // Under the row lock: still eligible, and still named `general`.
+    let eligible: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 \
+         AND lower(name) = $3 AND {ELIGIBLE_SQL})"
+    )))
+    .bind(community_id.as_uuid())
+    .bind(candidate)
+    .bind(LANDING_CHANNEL_NAME)
+    .fetch_one(locked.tx().conn())
+    .await?;
+    if !eligible {
+        return Ok(None);
+    }
+    if let Some(existing) = lock_designation(locked.tx()).await? {
+        return Ok(Some(LandingAdoption::Existing(existing)));
+    }
+    set_designation(locked.tx(), candidate).await?;
+    tx.commit().await?;
+    Ok(Some(LandingAdoption::Reused(candidate)))
+}
+
+/// The community's earliest owner, else its earliest admin.
+async fn steward(pool: &PgPool, community_id: CommunityId) -> Result<Option<[u8; 32]>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let pubkey: Option<String> = sqlx::query_scalar(
+        "SELECT pubkey FROM relay_members \
+         WHERE community_id = $1 AND role IN ('owner', 'admin') \
+         ORDER BY role = 'owner' DESC, created_at ASC, pubkey ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    pubkey
+        .map(|hex_key| {
+            hex::decode(&hex_key)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                .ok_or_else(|| {
+                    DbError::InvalidData(format!(
+                        "relay member pubkey is not 32-byte hex: {hex_key}"
+                    ))
+                })
+        })
+        .transpose()
+}
+
+/// Creates a listed, open `general` stream owned by `steward` and designates
+/// it, unless a designation appeared meanwhile.
+async fn create_general(
+    pool: &PgPool,
+    community_id: CommunityId,
+    steward: [u8; 32],
+) -> Result<LandingAdoption> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    // The community row first: the new channel row is no one else's lock
+    // yet, so this keeps the channel-then-community order for every
+    // existing channel.
+    if let Some(existing) = lock_designation(&mut tx).await? {
+        return Ok(LandingAdoption::Existing(existing));
+    }
+    let channel_id = Uuid::new_v4();
+    crate::channel::insert_channel_rows(
+        &mut tx,
+        channel_id,
+        NewChannel {
+            name: LANDING_CHANNEL_NAME,
+            channel_type: ChannelType::Stream,
+            visibility: ChannelVisibility::Open,
+            description: None,
+            created_by: &steward,
+            ttl_seconds: None,
+            labels: &[],
+            unlisted: false,
+            members: &[],
+        },
+    )
+    .await?;
+    set_designation(&mut tx, channel_id).await?;
+    tx.commit().await?;
+    Ok(LandingAdoption::Created {
+        channel_id,
+        steward,
+    })
+}
+
+impl Db {
+    /// Returns the community's landing channel and welcome message.
+    #[datastore_span(name = "get_community_landing", system = "postgresql")]
+    pub async fn get_community_landing(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<CommunityLanding> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        read_landing(&mut connection, community_id).await
+    }
+
+    /// Makes sure the community has a landing channel and returns what it
+    /// found or did. Idempotent; costs one primary-key read once a channel
+    /// is designated.
+    ///
+    /// With no designation, the oldest eligible (open, unarchived stream
+    /// without a TTL) channel named `general` is adopted, a listed one before
+    /// an unlisted one. With none, a listed, open `general` is created, owned
+    /// by the community's earliest owner, else earliest admin
+    /// ([`LandingAdoption::SkippedNoSteward`] when there is neither). If the
+    /// name is held by a channel that cannot be adopted (an archived
+    /// `general`, or a forum), nothing is created
+    /// ([`LandingAdoption::SkippedNameTaken`]). A private `general` is never
+    /// adopted and does not hold the name.
+    ///
+    /// A NULL designation is the retry record: every call that finds one
+    /// tries again.
+    #[datastore_span(name = "ensure_landing_channel", system = "postgresql")]
+    pub async fn ensure_landing_channel(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<LandingAdoption> {
+        ensure_landing_channel(&self.pool, community_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn landing_tags_mark_only_the_landing_channel() {
+        let (landing, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let tag = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let custom = CommunityLanding {
+            channel_id: Some(landing),
+            welcome: Some("Hi all!\nSay hello.".to_string()),
+        };
+        assert_eq!(
+            custom.group_metadata_tags(landing),
+            vec![tag(&["landing"]), tag(&["welcome", "Hi all!\nSay hello."])]
+        );
+        assert!(custom.group_metadata_tags(other).is_empty());
+        let default_text = CommunityLanding {
+            channel_id: Some(landing),
+            welcome: None,
+        };
+        assert_eq!(
+            default_text.group_metadata_tags(landing),
+            vec![tag(&["landing"])]
+        );
+        assert!(CommunityLanding::default()
+            .group_metadata_tags(landing)
+            .is_empty());
+    }
+
+    #[test]
+    fn welcome_message_rules() {
+        let at_limit = "a".repeat(WELCOME_MAX_CHARS);
+        let over_limit = "é".repeat(WELCOME_MAX_CHARS + 1);
+        let cases: &[(&str, Option<&str>)] = &[
+            ("Welcome!", None),
+            ("Hi all!\nIntroduce yourself here.", None),
+            (" padded ", None),
+            (&at_limit, None),
+            ("   ", Some("welcome message must not be blank")),
+            ("\n\n", Some("welcome message must not be blank")),
+            (
+                &over_limit,
+                Some("welcome message is too long (max 1000 characters)"),
+            ),
+            (
+                "tab\there",
+                Some("welcome message must be plain text (line breaks only)"),
+            ),
+            (
+                "windows\r\nline",
+                Some("welcome message must be plain text (line breaks only)"),
+            ),
+            (
+                "bell\u{7}",
+                Some("welcome message must be plain text (line breaks only)"),
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(welcome_message_error(text), *expected, "{text:?}");
+        }
+        // The limit counts scalar values, not bytes: 1000 multi-byte
+        // characters fit.
+        assert_eq!(welcome_message_error(&"é".repeat(WELCOME_MAX_CHARS)), None);
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+    use crate::channel::{ChannelMetadataEdit, ChannelMetadataWrite};
+    use chrono::{DateTime, Duration, Utc};
+    use nostr::Keys;
+
+    async fn setup() -> (Db, CommunityId) {
+        let pool = PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect to test DB");
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("landing-test-{}.example", id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+        (Db::from_pool(pool), CommunityId::from_uuid(id))
+    }
+
+    fn key() -> Vec<u8> {
+        Keys::generate().public_key().to_bytes().to_vec()
+    }
+
+    async fn channel(
+        db: &Db,
+        community: CommunityId,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+    ) -> Uuid {
+        db.create_channel(
+            community,
+            name,
+            channel_type,
+            visibility,
+            None,
+            created_by,
+            ttl_seconds,
+        )
+        .await
+        .expect("create channel")
+        .id
+    }
+
+    async fn open_stream(db: &Db, community: CommunityId, name: &str) -> Uuid {
+        let creator = key();
+        channel(
+            db,
+            community,
+            name,
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            &creator,
+            None,
+        )
+        .await
+    }
+
+    /// Applies `edit` as a kind:9002 on `channel_id`, signed by a fresh key.
+    async fn apply(
+        db: &Db,
+        community: CommunityId,
+        channel_id: Uuid,
+        edit: ChannelMetadataEdit,
+    ) -> Result<ChannelMetadataWrite> {
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9002), "")
+            .tags([nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign kind:9002");
+        db.apply_channel_metadata_event(community, channel_id, &event, edit, &[])
+            .await
+    }
+
+    fn designate() -> ChannelMetadataEdit {
+        ChannelMetadataEdit {
+            landing: true,
+            ..Default::default()
+        }
+    }
+
+    /// The client's full-state form: `landing` plus `welcome` (`""`
+    /// restores the default).
+    fn full_state(welcome: &str) -> ChannelMetadataEdit {
+        ChannelMetadataEdit {
+            landing: true,
+            welcome: Some((!welcome.is_empty()).then(|| welcome.to_string())),
+            ..Default::default()
+        }
+    }
+
+    fn refusal<T>(result: Result<T>) -> String {
+        match result {
+            Err(DbError::AccessDenied(reason)) => reason,
+            Err(other) => panic!("expected a refusal, got {other:?}"),
+            Ok(_) => panic!("expected a refusal, got success"),
+        }
+    }
+
+    fn landing(channel_id: Uuid, welcome: Option<&str>) -> CommunityLanding {
+        CommunityLanding {
+            channel_id: Some(channel_id),
+            welcome: welcome.map(str::to_string),
+        }
+    }
+
+    /// Seeds a relay member with `role`, added `seconds_ago`.
+    async fn relay_member(
+        db: &Db,
+        community: CommunityId,
+        role: &str,
+        seconds_ago: i64,
+    ) -> Vec<u8> {
+        let pubkey = key();
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, created_at, updated_at) \
+             VALUES ($1, $2, $3, now() - make_interval(secs => $4), now())",
+        )
+        .bind(community.as_uuid())
+        .bind(hex::encode(&pubkey))
+        .bind(role)
+        .bind(seconds_ago as f64)
+        .execute(db.pool())
+        .await
+        .expect("insert relay member");
+        pubkey
+    }
+
+    /// A kind:9002 `landing` designates the channel and moves the
+    /// designation, carrying the welcome message; the full-state form on
+    /// the current landing channel is idempotent; `welcome` elsewhere and
+    /// every ineligible post-state are refused and change nothing.
+    ///
+    /// Mutations: report `previous_landing` on a re-designation → RED;
+    /// check eligibility on the pre-state → the same-event archive, private
+    /// and ttl rows are accepted → RED; drop the welcome landing check →
+    /// the welcome on `b` is accepted → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn kind_9002_moves_the_designation_and_accepts_the_full_state_form() {
+        let (db, community) = setup().await;
+        let a = open_stream(&db, community, "lobby").await;
+        let b = open_stream(&db, community, "town-square").await;
+
+        let write = apply(&db, community, a, full_state("Hi all"))
+            .await
+            .expect("designate a");
+        assert_eq!(write.previous_landing, None);
+        assert_eq!(
+            db.get_community_landing(community).await.expect("landing"),
+            landing(a, Some("Hi all"))
+        );
+
+        let write = apply(&db, community, a, full_state(""))
+            .await
+            .expect("full state on the landing channel");
+        assert!(write.inserted);
+        assert_eq!(write.previous_landing, None, "re-designating is not a move");
+        assert_eq!(
+            db.get_community_landing(community).await.expect("landing"),
+            landing(a, None),
+            "an empty welcome restores the default"
+        );
+
+        apply(
+            &db,
+            community,
+            a,
+            ChannelMetadataEdit {
+                welcome: Some(Some("Second".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("welcome alone on the landing channel");
+        assert_eq!(
+            refusal(
+                apply(
+                    &db,
+                    community,
+                    b,
+                    ChannelMetadataEdit {
+                        welcome: Some(Some("Elsewhere".into())),
+                        ..Default::default()
+                    },
+                )
+                .await
+            ),
+            WELCOME_NOT_LANDING
+        );
+        assert_eq!(
+            db.get_community_landing(community).await.expect("landing"),
+            landing(a, Some("Second"))
+        );
+
+        let write = apply(&db, community, b, designate())
+            .await
+            .expect("move to b");
+        assert_eq!(write.previous_landing, Some(a));
+        assert_eq!(
+            db.get_community_landing(community).await.expect("landing"),
+            landing(b, Some("Second")),
+            "the welcome moves with the designation"
+        );
+
+        let private = channel(
+            &db,
+            community,
+            "private-room",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            &key(),
+            None,
+        )
+        .await;
+        let ephemeral = channel(
+            &db,
+            community,
+            "ephemeral-room",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            &key(),
+            Some(3600),
+        )
+        .await;
+        let ineligible = [
+            (
+                a,
+                ChannelMetadataEdit {
+                    archived: Some(true),
+                    ..designate()
+                },
+                "archived by the same event",
+            ),
+            (
+                a,
+                ChannelMetadataEdit {
+                    columns: ChannelUpdate {
+                        visibility: Some("private".into()),
+                        ..Default::default()
+                    },
+                    ..designate()
+                },
+                "made private by the same event",
+            ),
+            (
+                a,
+                ChannelMetadataEdit {
+                    columns: ChannelUpdate {
+                        ttl_seconds: Some(Some(3600)),
+                        ..Default::default()
+                    },
+                    ..designate()
+                },
+                "given a ttl by the same event",
+            ),
+            (private, designate(), "a private channel"),
+            (ephemeral, designate(), "a channel with a ttl"),
+        ];
+        for (target, edit, label) in ineligible {
+            assert_eq!(
+                refusal(apply(&db, community, target, edit).await),
+                LANDING_INELIGIBLE,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            db.get_community_landing(community).await.expect("landing"),
+            landing(b, Some("Second")),
+            "a refused move changes nothing"
+        );
+        let a_after = db.get_channel(community, a).await.expect("a");
+        assert!(
+            a_after.archived_at.is_none(),
+            "the refused archive rolled back"
+        );
+        assert_eq!(a_after.visibility, "open");
+        assert_eq!(a_after.ttl_seconds, None);
+    }
+
+    /// The landing channel cannot be archived, made private, given a TTL or
+    /// deleted on any path, while other edits stay allowed; after a move
+    /// the previous landing channel can be.
+    ///
+    /// Mutations: drop the backstop in `set_archived_on`, `update_channel_on`
+    /// or `soft_delete_on` → that row is accepted → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn the_landing_channel_is_protected_on_every_path() {
+        let (db, community) = setup().await;
+        let lobby = open_stream(&db, community, "lobby").await;
+        let other = open_stream(&db, community, "other").await;
+        apply(&db, community, lobby, designate())
+            .await
+            .expect("designate");
+
+        for (edit, label) in [
+            (
+                ChannelMetadataEdit {
+                    archived: Some(true),
+                    ..Default::default()
+                },
+                "kind:9002 archived",
+            ),
+            (
+                ChannelMetadataEdit {
+                    columns: ChannelUpdate {
+                        visibility: Some("private".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "kind:9002 visibility",
+            ),
+            (
+                ChannelMetadataEdit {
+                    columns: ChannelUpdate {
+                        ttl_seconds: Some(Some(60)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "kind:9002 ttl",
+            ),
+        ] {
+            assert_eq!(
+                refusal(apply(&db, community, lobby, edit).await),
+                LANDING_PROTECTED,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            refusal(db.archive_channel(community, lobby).await),
+            LANDING_PROTECTED,
+            "archive_channel"
+        );
+        assert_eq!(
+            refusal(
+                db.update_channel(
+                    community,
+                    lobby,
+                    ChannelUpdate {
+                        visibility: Some("private".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            ),
+            LANDING_PROTECTED,
+            "update_channel visibility"
+        );
+        assert_eq!(
+            refusal(
+                db.update_channel(
+                    community,
+                    lobby,
+                    ChannelUpdate {
+                        ttl_seconds: Some(Some(60)),
+                        ..Default::default()
+                    },
+                )
+                .await
+            ),
+            LANDING_PROTECTED,
+            "update_channel ttl"
+        );
+        assert_eq!(
+            refusal(db.soft_delete_channel(community, lobby).await),
+            LANDING_PROTECTED,
+            "soft_delete_channel"
+        );
+
+        db.update_channel(
+            community,
+            lobby,
+            ChannelUpdate {
+                name: Some("lobby-renamed".into()),
+                unlisted: Some(true),
+                auto_join: Some(true),
+                ttl_seconds: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("rename, unlisted, auto_join and clearing a ttl stay allowed");
+        let after = db.get_channel(community, lobby).await.expect("lobby");
+        assert!(after.archived_at.is_none() && after.deleted_at.is_none());
+        assert_eq!(after.visibility, "open");
+        assert_eq!(after.ttl_seconds, None);
+
+        apply(&db, community, other, designate())
+            .await
+            .expect("move away");
+        db.archive_channel(community, lobby)
+            .await
+            .expect("the previous landing channel can be archived");
+        assert!(db
+            .soft_delete_channel(community, lobby)
+            .await
+            .expect("and deleted"));
+    }
+
+    struct Seed {
+        name: &'static str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        unlisted: bool,
+        archived: bool,
+        ttl_seconds: Option<i32>,
+    }
+
+    const fn general() -> Seed {
+        Seed {
+            name: "general",
+            channel_type: ChannelType::Stream,
+            visibility: ChannelVisibility::Open,
+            unlisted: false,
+            archived: false,
+            ttl_seconds: None,
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Expect {
+        /// The seed at this index is adopted.
+        Reused(usize),
+        /// A new `general` is created, owned by the relay member at this
+        /// index.
+        Created(usize),
+        NoSteward,
+        NameTaken,
+    }
+
+    /// `ensure_landing_channel`'s rules: which `general` is adopted, when
+    /// one is created and by whom it is owned, and when nothing is done.
+    /// A second call returns the same designation.
+    ///
+    /// Mutations: drop `unlisted ASC` from the candidate order → "listed
+    /// before an older unlisted" adopts the unlisted one → RED; adopt
+    /// without the eligibility predicate → the archived, forum, ttl and
+    /// private rows adopt them → RED; order the steward by `created_at`
+    /// alone → "owner before an earlier admin" → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ensure_landing_channel_rules() {
+        let owner = || vec![("owner", 10)];
+        let cases: Vec<(&str, Vec<Seed>, Vec<(&str, i64)>, Expect)> = vec![
+            ("listed general", vec![general()], vec![], Expect::Reused(0)),
+            (
+                "name is case-insensitive",
+                vec![Seed {
+                    name: "General",
+                    ..general()
+                }],
+                vec![],
+                Expect::Reused(0),
+            ),
+            (
+                "unlisted general is reused, not duplicated",
+                vec![Seed {
+                    unlisted: true,
+                    ..general()
+                }],
+                owner(),
+                Expect::Reused(0),
+            ),
+            (
+                "listed before an older unlisted",
+                vec![
+                    Seed {
+                        unlisted: true,
+                        ..general()
+                    },
+                    general(),
+                ],
+                vec![],
+                Expect::Reused(1),
+            ),
+            (
+                "an archived general holds the name",
+                vec![Seed {
+                    archived: true,
+                    ..general()
+                }],
+                owner(),
+                Expect::NameTaken,
+            ),
+            (
+                "a forum general holds the name",
+                vec![Seed {
+                    channel_type: ChannelType::Forum,
+                    ..general()
+                }],
+                owner(),
+                Expect::NameTaken,
+            ),
+            (
+                "a general with a ttl holds the name",
+                vec![Seed {
+                    ttl_seconds: Some(3600),
+                    ..general()
+                }],
+                owner(),
+                Expect::NameTaken,
+            ),
+            (
+                "a private general is left alone",
+                vec![Seed {
+                    visibility: ChannelVisibility::Private,
+                    ..general()
+                }],
+                owner(),
+                Expect::Created(0),
+            ),
+            (
+                "other channels do not count",
+                vec![Seed {
+                    name: "random",
+                    ..general()
+                }],
+                owner(),
+                Expect::Created(0),
+            ),
+            ("no owner or admin", vec![], vec![], Expect::NoSteward),
+            (
+                "a member is not a steward",
+                vec![],
+                vec![("member", 10)],
+                Expect::NoSteward,
+            ),
+            (
+                "an admin stewards without an owner",
+                vec![],
+                vec![("member", 100), ("admin", 10)],
+                Expect::Created(1),
+            ),
+            (
+                "the owner before an earlier admin",
+                vec![],
+                vec![("admin", 100), ("owner", 10)],
+                Expect::Created(1),
+            ),
+            (
+                "the earliest owner",
+                vec![],
+                vec![("owner", 10), ("owner", 100)],
+                Expect::Created(1),
+            ),
+        ];
+
+        for (label, seeds, members, expect) in cases {
+            let (db, community) = setup().await;
+            let mut seeded = Vec::new();
+            for seed in &seeds {
+                let id = channel(
+                    &db,
+                    community,
+                    seed.name,
+                    seed.channel_type,
+                    seed.visibility,
+                    &key(),
+                    seed.ttl_seconds,
+                )
+                .await;
+                if seed.unlisted {
+                    db.update_channel(
+                        community,
+                        id,
+                        ChannelUpdate {
+                            unlisted: Some(true),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("unlist seed");
+                }
+                if seed.archived {
+                    db.archive_channel(community, id)
+                        .await
+                        .expect("archive seed");
+                }
+                seeded.push(id);
+            }
+            let mut stewards = Vec::new();
+            for (role, seconds_ago) in members {
+                stewards.push(relay_member(&db, community, role, seconds_ago).await);
+            }
+
+            let adoption = db
+                .ensure_landing_channel(community)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            match (expect, adoption) {
+                (Expect::Reused(index), LandingAdoption::Reused(id)) => {
+                    assert_eq!(id, seeded[index], "{label}")
+                }
+                (
+                    Expect::Created(index),
+                    LandingAdoption::Created {
+                        channel_id,
+                        steward,
+                    },
+                ) => {
+                    assert_eq!(steward.as_slice(), stewards[index].as_slice(), "{label}");
+                    assert!(!seeded.contains(&channel_id), "{label}: a new channel");
+                    let created = db
+                        .get_channel(community, channel_id)
+                        .await
+                        .expect("created");
+                    assert_eq!(created.name, "general", "{label}");
+                    assert_eq!(
+                        (created.channel_type.as_str(), created.visibility.as_str()),
+                        ("stream", "open"),
+                        "{label}"
+                    );
+                    assert!(!created.unlisted, "{label}: listed");
+                    assert_eq!(created.created_by, stewards[index], "{label}");
+                    assert_eq!(
+                        db.get_member_role(community, channel_id, &stewards[index])
+                            .await
+                            .expect("steward role")
+                            .as_deref(),
+                        Some("owner"),
+                        "{label}: the steward owns it"
+                    );
+                }
+                (Expect::NoSteward, LandingAdoption::SkippedNoSteward)
+                | (Expect::NameTaken, LandingAdoption::SkippedNameTaken) => {}
+                (expect, got) => panic!("{label}: expected {expect:?}, got {got:?}"),
+            }
+
+            let designated = db
+                .get_community_landing(community)
+                .await
+                .expect("landing")
+                .channel_id;
+            assert_eq!(designated, adoption.channel_id(), "{label}");
+            if let Some(id) = designated {
+                assert_eq!(
+                    db.ensure_landing_channel(community).await.expect("again"),
+                    LandingAdoption::Existing(id),
+                    "{label}: a second call keeps it"
+                );
+            }
+            for (seed, id) in seeds.iter().zip(&seeded) {
+                let after = db.get_channel(community, *id).await.expect("seed");
+                assert_eq!(
+                    after.visibility,
+                    seed.visibility.to_string(),
+                    "{label}: seed untouched"
+                );
+            }
+        }
+    }
+
+    /// Concurrent ensures on a community with no `general` create exactly
+    /// one and agree on it.
+    ///
+    /// Mutation: drop both the locked designation re-check in
+    /// `create_general` and the `ChannelNameTaken` fallback → a racing
+    /// creator fails on the name index → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_ensures_designate_one_general() {
+        let (db, community) = setup().await;
+        relay_member(&db, community, "owner", 10).await;
+        let runs = (0..8).map(|_| {
+            let db = db.clone();
+            tokio::spawn(async move { db.ensure_landing_channel(community).await })
+        });
+        let mut adoptions = Vec::new();
+        for run in runs.collect::<Vec<_>>() {
+            adoptions.push(run.await.expect("join").expect("ensure"));
+        }
+        let ids: std::collections::HashSet<_> =
+            adoptions.iter().map(LandingAdoption::channel_id).collect();
+        assert_eq!(ids.len(), 1, "every caller agrees: {adoptions:?}");
+        assert!(ids.iter().all(Option::is_some));
+        assert_eq!(
+            adoptions
+                .iter()
+                .filter(|a| matches!(a, LandingAdoption::Created { .. }))
+                .count(),
+            1,
+            "{adoptions:?}"
+        );
+        let generals: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM channels WHERE community_id = $1 AND lower(name) = 'general'",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(db.pool())
+        .await
+        .expect("count generals");
+        assert_eq!(generals, 1);
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Shape {
+        OpenStream,
+        Forum,
+        Dm,
+        PrivateOwn,
+        PrivateOther,
+        DeletedStream,
+    }
+
+    /// Creates a channel of `shape` with a `person` membership row joined
+    /// at `joined` and removed at `removed`.
+    async fn membership(
+        db: &Db,
+        community: CommunityId,
+        person: &[u8],
+        shape: Shape,
+        joined: DateTime<Utc>,
+        removed: Option<DateTime<Utc>>,
+    ) -> Uuid {
+        let other = key();
+        let (channel_type, visibility, creator) = match shape {
+            Shape::OpenStream | Shape::DeletedStream => (
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                other.as_slice(),
+            ),
+            Shape::Forum => (
+                ChannelType::Forum,
+                ChannelVisibility::Open,
+                other.as_slice(),
+            ),
+            Shape::Dm => (
+                ChannelType::Dm,
+                ChannelVisibility::Private,
+                other.as_slice(),
+            ),
+            Shape::PrivateOwn => (ChannelType::Stream, ChannelVisibility::Private, person),
+            Shape::PrivateOther => (
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                other.as_slice(),
+            ),
+        };
+        let name = format!("evidence-{}", Uuid::new_v4().simple());
+        let id = channel(
+            db,
+            community,
+            &name,
+            channel_type,
+            visibility,
+            creator,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at, removed_at) \
+             VALUES ($1, $2, $3, 'member', $4, $5) \
+             ON CONFLICT (community_id, channel_id, pubkey) \
+             DO UPDATE SET joined_at = EXCLUDED.joined_at, removed_at = EXCLUDED.removed_at",
+        )
+        .bind(community.as_uuid())
+        .bind(id)
+        .bind(person)
+        .bind(joined)
+        .bind(removed)
+        .execute(db.pool())
+        .await
+        .expect("seed membership");
+        if matches!(shape, Shape::DeletedStream) {
+            sqlx::query(
+                "UPDATE channels SET deleted_at = now() WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .expect("delete channel");
+        }
+        id
+    }
+
+    /// `has_entered_community`: which memberships are entry evidence, with
+    /// a roster admission time (roster mode) and without (roster-free).
+    ///
+    /// Mutations: drop the channel-type filter → the DM row counts → RED;
+    /// drop the own-private exclusion → the Solo row counts → RED; ignore
+    /// `admitted_at` → "left before admission" counts in roster mode → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn entry_evidence_rules() {
+        let admitted = Utc::now() - Duration::hours(1);
+        let (before, after) = (
+            admitted - Duration::hours(1),
+            admitted + Duration::minutes(10),
+        );
+        // (label, membership, roster-mode evidence, roster-free evidence)
+        let cases: &[(
+            &str,
+            Option<(Shape, DateTime<Utc>, Option<DateTime<Utc>>)>,
+            bool,
+            bool,
+        )] = &[
+            ("no memberships", None, false, false),
+            (
+                "active, joined before admission",
+                Some((Shape::OpenStream, before, None)),
+                true,
+                true,
+            ),
+            (
+                "left before admission",
+                Some((Shape::OpenStream, before, Some(before))),
+                false,
+                true,
+            ),
+            (
+                "left after admission",
+                Some((Shape::OpenStream, before, Some(after))),
+                true,
+                true,
+            ),
+            (
+                "joined and left after admission",
+                Some((Shape::OpenStream, after, Some(after))),
+                true,
+                true,
+            ),
+            (
+                "forum member",
+                Some((Shape::Forum, before, None)),
+                true,
+                true,
+            ),
+            ("DM only", Some((Shape::Dm, after, None)), false, false),
+            (
+                "own private chat (Solo)",
+                Some((Shape::PrivateOwn, after, None)),
+                false,
+                false,
+            ),
+            (
+                "someone else's private channel",
+                Some((Shape::PrivateOther, after, None)),
+                true,
+                true,
+            ),
+            (
+                "a deleted channel is still history",
+                Some((Shape::DeletedStream, after, None)),
+                true,
+                true,
+            ),
+        ];
+        for (label, seed, roster, roster_free) in cases {
+            let (db, community) = setup().await;
+            let person = key();
+            if let Some((shape, joined, removed)) = seed {
+                membership(&db, community, &person, *shape, *joined, *removed).await;
+            }
+            let entered = |admitted_at| {
+                let db = db.clone();
+                let person = person.clone();
+                async move {
+                    db.has_entered_community(community, &person, admitted_at)
+                        .await
+                        .expect("evidence")
+                }
+            };
+            assert_eq!(
+                entered(Some(admitted)).await,
+                *roster,
+                "{label}: roster mode"
+            );
+            assert_eq!(entered(None).await, *roster_free, "{label}: roster-free");
+        }
+    }
+
+    /// `put_first_member_since` writes only when no row stands for this
+    /// admission: none at all, or one removed before the roster admission.
+    /// A leave since admission stands, and so does any earlier leave
+    /// without an admission time.
+    ///
+    /// Mutation: drop the `removed_at >= $4` arm → "left after admission"
+    /// is re-joined → RED; drop the `$4 IS NULL` arm → roster-free
+    /// re-joins a leave → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn put_first_member_since_rules() {
+        let admitted = Utc::now() - Duration::hours(1);
+        let (before, after) = (
+            admitted - Duration::hours(1),
+            admitted + Duration::minutes(10),
+        );
+        // (label, existing row (joined, removed), admitted_at, writes)
+        let cases: &[(
+            &str,
+            Option<(DateTime<Utc>, Option<DateTime<Utc>>)>,
+            Option<DateTime<Utc>>,
+            bool,
+        )] = &[
+            ("no row, roster", None, Some(admitted), true),
+            ("no row, roster-free", None, None, true),
+            ("active row", Some((before, None)), Some(admitted), false),
+            (
+                "left before admission: re-admission restores",
+                Some((before, Some(before))),
+                Some(admitted),
+                true,
+            ),
+            (
+                "left after admission: the leave stands",
+                Some((before, Some(after))),
+                Some(admitted),
+                false,
+            ),
+            (
+                "left, roster-free: the leave stands",
+                Some((before, Some(before))),
+                None,
+                false,
+            ),
+        ];
+        for (label, row, admitted_at, writes) in cases {
+            let (db, community) = setup().await;
+            let person = key();
+            let lobby = open_stream(&db, community, "lobby").await;
+            if let Some((joined, removed)) = row {
+                sqlx::query(
+                    "INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at, removed_at) \
+                     VALUES ($1, $2, $3, 'member', $4, $5)",
+                )
+                .bind(community.as_uuid())
+                .bind(lobby)
+                .bind(&person)
+                .bind(joined)
+                .bind(removed)
+                .execute(db.pool())
+                .await
+                .expect("seed row");
+            }
+            let wrote = db
+                .put_first_member_since(community, lobby, &person, *admitted_at)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"))
+                .is_some();
+            assert_eq!(wrote, *writes, "{label}");
+            let active = db
+                .get_member_role(community, lobby, &person)
+                .await
+                .expect("role")
+                .is_some();
+            assert_eq!(
+                active,
+                *writes || row.is_some_and(|(_, removed)| removed.is_none()),
+                "{label}"
+            );
+        }
+    }
+}

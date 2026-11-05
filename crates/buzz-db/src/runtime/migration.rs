@@ -1036,7 +1036,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations.len(), 106);
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -1142,6 +1142,17 @@ mod postgres_tests {
                 "0095 must run {statement}"
             );
         }
+        // Landing channel (0106): two nullable community columns, no default,
+        // so neither the deployed relay nor existing rows notice them.
+        assert_eq!(migrations[105].version, 106);
+        let landing = strip_sql_comments(migrations[105].sql.as_str());
+        assert!(landing.contains("SET LOCAL lock_timeout = '5s';"));
+        assert!(landing.contains("ADD COLUMN landing_channel_id UUID"));
+        assert!(landing.contains("ADD COLUMN welcome_message TEXT"));
+        assert!(!landing.contains("UPDATE"));
+        let desired = crate::test_support::desired_state_schema_sql();
+        assert!(desired.contains("landing_channel_id UUID,"));
+        assert!(desired.contains("welcome_message TEXT,"));
         assert!(migrations[70]
             .sql
             .as_str()
