@@ -180,6 +180,8 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
+    /// Opt-in NIP-CL compact membership projection; dark by default.
+    pub membership_snapshot_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
@@ -1453,6 +1455,8 @@ impl Config {
             auth,
             require_auth_token,
             buzz_v1_enabled,
+            membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
+                .is_ok_and(|v| v == "true"),
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,

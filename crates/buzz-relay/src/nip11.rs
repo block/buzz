@@ -37,6 +37,9 @@ pub struct RelayInfo {
     /// Host-bound atomic read-state snapshot capability; absent on unresolved hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_state_snapshot: Option<serde_json::Value>,
+    /// Opt-in host-bound signed compact membership discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub membership_snapshot: Option<serde_json::Value>,
     /// Opt-in, host-bound private accessory API; separate from legacy NIP-RS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buzz_v1: Option<BuzzV1Descriptor>,
@@ -285,6 +288,7 @@ impl RelayInfo {
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             read_state_snapshot: None,
+            membership_snapshot: None,
             buzz_v1: None,
             artifacts: serde_json::json!({
                 "version": 1, "revision_kind": 45010, "removal_kind": 45011,
@@ -481,6 +485,16 @@ pub(crate) async fn nip11_document(
                 max_intents: MAX_INTENTS,
                 eligible_kinds: ELIGIBLE_KINDS,
             });
+        }
+        if state.config.membership_snapshot_enabled {
+            info.membership_snapshot = Some(serde_json::json!({
+                "version": 1,
+                "community_id": tenant.community().as_uuid(),
+                "pubkey": state.relay_keypair.public_key().to_hex(),
+                "kind": buzz_core::kind::KIND_MEMBERSHIP_SNAPSHOT,
+                "max_channels": buzz_db::membership_snapshot::MAX_CHANNELS,
+                "max_response_bytes": buzz_db::membership_snapshot::MAX_RESPONSE_BYTES,
+            }));
         }
         info.read_state_snapshot = Some(serde_json::json!({
             "version": 1,
