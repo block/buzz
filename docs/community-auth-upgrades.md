@@ -309,5 +309,8 @@ while new acceptances are disabled.
 Required sessions admitted under global Shadow are real enforced FI sessions.
 The existing global-Shadow admin disconnect path still only observes would-close;
 BUZZ-512 must close these enforced sessions independently of global rollout mode,
-while preserving the separate optional-shadow registry. Do not enable production
-upgrades until this activation/control gap is verified closed.
+while preserving the separate optional-shadow registry. Before enabling upgrade
+acceptance for any serving community in Shadow, deploy and verify BUZZ-512's local
+and cross-pod disconnect behavior, including real Redis propagation. Keep upgrade
+acceptance disabled until that prerequisite is met; admission tests alone do not
+establish it. Production also requires the baseline-verifier gate above.
