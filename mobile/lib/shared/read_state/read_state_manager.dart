@@ -546,6 +546,39 @@ class ReadStateManager {
     }
   }
 
+  /// Whether a publish would send anything: a pending event to retry, or a
+  /// slot whose packed contexts differ from what was last published. Mirrors
+  /// the packing in [_publishOnce] without changing any state.
+  bool _hasUnpublishedState() {
+    if (_pending.isNotEmpty) return true;
+    final primary = <String, int>{..._carriedOverrides};
+    for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
+      if (_effectiveState[key] case final value?) primary[key] = value;
+    }
+    final horizon = _now() - readStateHorizonSeconds;
+    final List<Map<String, int>> placement;
+    try {
+      placement = packReadStateContexts(
+        {
+          for (final entry in _localContexts.entries)
+            if (entry.value >= horizon) entry.key: entry.value,
+        },
+        clientId: _clientId,
+        previous: _placement,
+        primary: primary,
+      );
+    } on StateError {
+      // Let the real publish surface the capacity error.
+      return true;
+    }
+    if (placement.length > _slots.length) return true;
+    for (var index = 0; index < placement.length; index++) {
+      final published = _published[_slots[index]] ?? const <String, int>{};
+      if (!mapEquals(published, placement[index])) return true;
+    }
+    return false;
+  }
+
   Future<void> _publishOnce(
     SignedEventRelay signedEventRelay, {
     required bool allowDisposed,
@@ -553,6 +586,10 @@ class ReadStateManager {
     try {
       if (!_servesThisCommunity || !_ownsJournal) return;
       await _persistLocalState();
+      // The snapshot below is the whole read state (megabytes on a busy
+      // account), so skip it when there is nothing to send. Each resume
+      // schedules a publish after its re-sync whether or not anything changed.
+      if (!_hasUnpublishedState()) return;
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
