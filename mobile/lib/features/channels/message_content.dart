@@ -690,10 +690,18 @@ class MessageContent extends HookConsumerWidget {
           )
         : linkTextWidget;
 
-    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
-    // instead of exposing a control whose tap cannot do anything.
+    final highlightColor = (baseStyle.color ?? context.colors.primary)
+        .withValues(alpha: 0.2);
+
+    // Mobile has no repo/PR/issue destination yet, so these chips have no tap
+    // and no Open action, but a hold still copies or shares the link.
     if (buzzLink is EntityDeepLink) {
-      return IgnorePointer(child: renderedLink);
+      return _LinkLongPress(
+        url: url,
+        onOpen: null,
+        highlightColor: highlightColor,
+        child: renderedLink,
+      );
     }
 
     Future<void> openLink() async {
@@ -742,9 +750,7 @@ class MessageContent extends HookConsumerWidget {
     return _LinkLongPress(
       url: url,
       onOpen: canOpen ? () => unawaited(openLink()) : null,
-      highlightColor: (baseStyle.color ?? context.colors.primary).withValues(
-        alpha: 0.2,
-      ),
+      highlightColor: highlightColor,
       child: GestureDetector(onTap: openLink, child: renderedLink),
     );
   }

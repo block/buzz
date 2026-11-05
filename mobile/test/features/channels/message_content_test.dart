@@ -3010,20 +3010,31 @@ Photos
             find.bySemanticsLabel('Pull request cdcdcdcd in repository buzz'),
             findsOneWidget,
           );
+          // Repo, PR and issue chips have no destination, so a hold offers
+          // only Copy and Share for the exact URL.
+          final clipboard = <String>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'Clipboard.setData') {
+                clipboard.add((call.arguments as Map)['text'] as String);
+              }
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
           for (final url in urls.skip(2)) {
-            final chipKey = ValueKey('buzz-link-chip:$url');
-            final ignoredChip = find.ancestor(
-              of: find.byKey(chipKey),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is IgnorePointer && widget.ignoring,
-              ),
-            );
-            expect(ignoredChip, findsOneWidget, reason: url);
-            expect(
-              tester.widget<IgnorePointer>(ignoredChip).ignoring,
-              isTrue,
-              reason: url,
-            );
+            await tester.longPress(find.byKey(ValueKey('buzz-link-chip:$url')));
+            await tester.pumpAndSettle();
+            expect(find.text(url), findsOneWidget, reason: url);
+            expect(find.text('Share link'), findsOneWidget, reason: url);
+            expect(find.text('Open link'), findsNothing, reason: url);
+            await tester.tap(find.text('Copy link'));
+            await tester.pumpAndSettle();
+            expect(clipboard.last, url);
           }
         },
       );
