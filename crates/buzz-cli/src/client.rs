@@ -96,6 +96,8 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_SIGN_IN_ATTEMPTS: u32 = 3;
 /// Times an HTTP proof is signed while its NIP-FI assertion keeps expiring.
 const AUTHORIZE_ROUNDS: u32 = 3;
+/// How old an HTTP proof may be when sent, well inside the relay's 60 s.
+const PROOF_MAX_AGE_SECS: u64 = 30;
 const RETRY_MAX_ATTEMPTS: u32 = 3;
 
 /// Base sleep durations for full-jitter exponential backoff.
@@ -606,13 +608,16 @@ impl BuzzClient {
         // Evidence first: a refresh may wait out adapter retries, and the
         // proof must be signed after it, just before sending, to stay fresh.
         // Signing may wait out throttling in turn, so evidence that is due
-        // for refresh by then is fetched again and the proof re-signed.
+        // for refresh by then is fetched again, and the proof re-signed when
+        // the assertion changed or that fetch aged the proof.
         let mut assertion = self.evidence().await?;
         let mut round = 1;
         let authorization = loop {
             let authorization = self.proof(&proof).await?;
+            let signed_at = crate::cached_assertion::unix_now();
             let current = self.evidence().await?;
-            if current == assertion {
+            let age = crate::cached_assertion::unix_now().saturating_sub(signed_at);
+            if current == assertion && age < PROOF_MAX_AGE_SECS {
                 break authorization;
             }
             if round == AUTHORIZE_ROUNDS {
@@ -3497,7 +3502,7 @@ mod desktop_throttle_tests {
     async fn desktop(
         relay: &str,
         keys: &nostr::Keys,
-        lifetime: u64,
+        assertion: impl Fn() -> String + Send + Sync + 'static,
         sign: impl Fn(&nostr::UnsignedEvent) -> Option<serde_json::Value> + Send + Sync + 'static,
     ) -> (BuzzClient, super::ws_deadline_tests::Log) {
         let signed: super::ws_deadline_tests::Log = Default::default();
@@ -3506,7 +3511,7 @@ mod desktop_throttle_tests {
         let (endpoint, _) =
             dp::provider(move |version, request| match request["method"].as_str() {
                 Some("federated_identity") => {
-                    serde_json::json!({ "result": dp::assertion(lifetime) })
+                    serde_json::json!({ "result": assertion() })
                 }
                 Some("sign_event") => {
                     let unsigned = <nostr::UnsignedEvent as nostr::JsonUtil>::from_json(
@@ -3546,7 +3551,7 @@ mod desktop_throttle_tests {
         let (relay, conns, _, bearers) =
             deadline_relay(std::time::Duration::from_millis(200)).await;
         let last = std::sync::Mutex::new(std::time::Instant::now());
-        let (c, signed) = desktop(&relay, &keys, 40, move |_| {
+        let (c, signed) = desktop(&relay, &keys, || dp::assertion(40), move |_| {
             let mut last = last.lock().unwrap();
             if last.elapsed() < std::time::Duration::from_millis(300) {
                 crate::cached_assertion::test_clock::advance(60);
@@ -3575,10 +3580,8 @@ mod desktop_throttle_tests {
         );
     }
 
-    /// A NIP-98 signature that outlives the assertion goes out with a fresh
-    /// one, signed after it.
-    #[tokio::test]
-    async fn a_slow_http_signature_goes_out_with_fresh_evidence() {
+    /// An HTTP relay logging each request's NIP-FI assertion.
+    async fn logging_relay() -> (String, super::ws_deadline_tests::Log) {
         let seen: super::ws_deadline_tests::Log = Default::default();
         let log = seen.clone();
         let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
@@ -3591,21 +3594,91 @@ mod desktop_throttle_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let keys = nostr::Keys::generate();
-        let slow = std::sync::atomic::AtomicBool::new(true);
-        let (c, _) = desktop(&relay, &keys, 40, move |_| {
-            if slow.swap(false, Ordering::SeqCst) {
-                crate::cached_assertion::test_clock::advance(60);
-            }
-            None
-        })
+        (relay, seen)
+    }
+
+    /// A NIP-98 signature that outlives the assertion is signed again after
+    /// fresh evidence, and goes out with both current.
+    #[tokio::test]
+    async fn a_slow_http_signature_goes_out_with_fresh_evidence() {
+        let (relay, seen) = logging_relay().await;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(
+            &relay,
+            &nostr::Keys::generate(),
+            || dp::assertion(40),
+            move |_| {
+                if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                    crate::cached_assertion::test_clock::advance(60);
+                }
+                None
+            },
+        )
         .await;
         c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(signs.load(Ordering::SeqCst), 2, "the proof is signed again");
         let sent = crate::cached_assertion::jws_exp(&seen.lock().unwrap()[0]).unwrap();
         assert!(
             sent > crate::cached_assertion::unix_now(),
             "the assertion sent is current"
         );
+    }
+
+    /// A post-sign refresh that waits and returns the same assertion still
+    /// gets a proof signed after it.
+    #[tokio::test]
+    async fn a_slow_refresh_of_the_same_assertion_re_signs_the_proof() {
+        let (relay, seen) = logging_relay().await;
+        let exp = crate::cached_assertion::unix_now() + 600;
+        let fetches = AtomicUsize::new(0);
+        let same = move || {
+            if fetches.fetch_add(1, Ordering::SeqCst) == 1 {
+                // The desktop waits out throttling before it answers.
+                crate::cached_assertion::test_clock::advance(45);
+            }
+            dp::assertion(exp - crate::cached_assertion::unix_now())
+        };
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(&relay, &nostr::Keys::generate(), same, move |_| {
+            if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                crate::cached_assertion::test_clock::advance(310);
+            }
+            None
+        })
+        .await;
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            signs.load(Ordering::SeqCst),
+            2,
+            "the aged proof is signed again"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// Evidence that keeps expiring while the proof is signed ends retryable
+    /// after three rounds, sending nothing.
+    #[tokio::test]
+    async fn evidence_that_keeps_expiring_ends_retryable() {
+        let (relay, seen) = logging_relay().await;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(
+            &relay,
+            &nostr::Keys::generate(),
+            || dp::assertion(40),
+            move |_| {
+                n.fetch_add(1, Ordering::SeqCst);
+                crate::cached_assertion::test_clock::advance(60);
+                None
+            },
+        )
+        .await;
+        let err = c.query(&serde_json::json!({})).await.unwrap_err();
+        assert!(matches!(err, CliError::Unavailable(_)), "{err:?}");
+        assert_eq!(signs.load(Ordering::SeqCst), 3);
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// An HTTP relay answering every query with no events.
