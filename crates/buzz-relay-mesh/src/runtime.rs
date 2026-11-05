@@ -41,12 +41,13 @@ use crate::{InboundHandler, MeshDatagram, MeshError, MeshStream, RelayPeerTransp
 
 /// How often the reconcile loop rescans the registry and dials missing peers.
 pub const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-/// Every Nth reconcile pass also runs the full-keyspace legacy SCAN, so peers
+/// How often a reconcile pass also runs the full-keyspace legacy SCAN, so peers
 /// running a relay that predates the ready-record index stay in the table
 /// during a mixed-version rollout (membership peer records expire after five
-/// minutes; 12 passes at the default interval is one minute). Delete with
-/// [`ReadyRegistry::legacy_scan_ready`].
-pub const LEGACY_SCAN_EVERY_PASSES: u64 = 12;
+/// minutes). Measured in elapsed time, not passes: a pass waits on its dials,
+/// so a pass count would stretch exactly while peers are unreachable. Delete
+/// with [`ReadyRegistry::legacy_scan_ready`].
+pub const LEGACY_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// How often each side sends a gossip digest on every control stream.
 pub const DEFAULT_GOSSIP_INTERVAL: Duration = Duration::from_secs(2);
 /// Bound on queued control-stream frames per peer before backpressure.
@@ -348,12 +349,11 @@ enum RegistryRead {
 }
 
 impl RegistryRead {
-    /// Steady-state cadence: the legacy scan every
-    /// [`LEGACY_SCAN_EVERY_PASSES`] passes, the index otherwise. Pass 0 is
-    /// the loop's first tick, which races `reconcile_now`'s boot-time scan, so
-    /// it reads the index.
-    fn for_pass(pass: u64) -> Self {
-        if pass > 0 && pass.is_multiple_of(LEGACY_SCAN_EVERY_PASSES) {
+    /// Steady-state choice for a pass starting `since_last_scan` after the
+    /// previous legacy scan: the legacy scan once [`LEGACY_SCAN_INTERVAL`] has
+    /// elapsed, the index otherwise.
+    fn due(since_last_scan: Duration) -> Self {
+        if since_last_scan >= LEGACY_SCAN_INTERVAL {
             Self::LegacyScan
         } else {
             Self::Index
@@ -376,10 +376,14 @@ async fn refresh_from_registry(inner: &Arc<Inner>, read: RegistryRead) {
 }
 
 async fn reconcile_loop(inner: Arc<Inner>) {
-    let mut pass: u64 = 0;
+    // `reconcile_now` scans at boot, so the clock starts with the loop.
+    let mut last_scan = Instant::now();
     loop {
-        reconcile_once(&inner, RegistryRead::for_pass(pass)).await;
-        pass = pass.wrapping_add(1);
+        let read = RegistryRead::due(last_scan.elapsed());
+        if read == RegistryRead::LegacyScan {
+            last_scan = Instant::now();
+        }
+        reconcile_once(&inner, read).await;
         tokio::time::sleep(inner.reconcile_interval).await;
     }
 }
@@ -707,24 +711,29 @@ mod tests {
     }
 
     #[test]
-    fn steady_state_reads_the_index_and_scans_once_per_cadence() {
+    fn steady_state_reads_the_index_and_scans_on_elapsed_time() {
         let cases = [
-            (0, RegistryRead::Index),
-            (1, RegistryRead::Index),
-            (LEGACY_SCAN_EVERY_PASSES - 1, RegistryRead::Index),
-            (LEGACY_SCAN_EVERY_PASSES, RegistryRead::LegacyScan),
-            (LEGACY_SCAN_EVERY_PASSES + 1, RegistryRead::Index),
-            (2 * LEGACY_SCAN_EVERY_PASSES, RegistryRead::LegacyScan),
+            (Duration::ZERO, RegistryRead::Index),
+            (DEFAULT_RECONCILE_INTERVAL, RegistryRead::Index),
+            (
+                LEGACY_SCAN_INTERVAL - Duration::from_millis(1),
+                RegistryRead::Index,
+            ),
+            (LEGACY_SCAN_INTERVAL, RegistryRead::LegacyScan),
+            // One pass that sat on slow dials past the interval: the very next
+            // pass scans, however few passes have run.
+            (2 * LEGACY_SCAN_INTERVAL, RegistryRead::LegacyScan),
         ];
-        for (pass, want) in cases {
-            assert_eq!(RegistryRead::for_pass(pass), want, "pass {pass}");
+        for (since_last_scan, want) in cases {
+            assert_eq!(
+                RegistryRead::due(since_last_scan),
+                want,
+                "{since_last_scan:?} since the last scan"
+            );
         }
-        // One legacy scan per cadence keeps pre-index peers fresher than the
+        // A legacy scan per interval keeps pre-index peers fresher than the
         // membership peer-record TTL.
-        assert!(
-            DEFAULT_RECONCILE_INTERVAL * (LEGACY_SCAN_EVERY_PASSES as u32)
-                < crate::membership::DEFAULT_PEER_RECORD_TTL
-        );
+        assert!(LEGACY_SCAN_INTERVAL < crate::membership::DEFAULT_PEER_RECORD_TTL);
     }
 
     const RECONCILE_INTERVAL: Duration = Duration::from_millis(200);

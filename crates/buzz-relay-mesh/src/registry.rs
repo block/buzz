@@ -308,8 +308,7 @@ impl ReadyRegistry {
     /// Full-keyspace SCAN for ready records, including those published by
     /// relays that predate [`READY_INDEX_KEY`]. Cost is O(total Redis keys),
     /// so the runtime runs it only at boot, on an unknown inbound peer, and
-    /// once every [`crate::runtime::LEGACY_SCAN_EVERY_PASSES`] reconcile
-    /// passes. Mixed-version compatibility only: delete it (and those call
+    /// once every [`crate::runtime::LEGACY_SCAN_INTERVAL`]. Mixed-version compatibility only: delete it (and those call
     /// sites) once every deployed relay writes the index.
     pub async fn legacy_scan_ready(&self) -> Result<Vec<ReadyRecord>, MeshError> {
         let mut conn = self.redis.clone();
