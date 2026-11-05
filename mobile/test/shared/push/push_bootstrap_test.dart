@@ -195,6 +195,37 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  test('a new pending tombstone changes the tombstone attempt', () {
+    Community pending(String name, int generation) =>
+        Community.create(name: name, relayUrl: 'wss://$name.example').copyWith(
+          pushNotificationsEnabled: false,
+          pushSubscriptionState: const BuzzPushLeaseSubscriptionState.desired(
+            desired: [],
+          ).withPendingTombstone(generation),
+        );
+    final a = pending('a', 4);
+    final b = pending('b', 2);
+
+    // A failing pass keeps its key, and so its backoff, until the work
+    // changes; new work gets a new key and runs at once.
+    expect(buzzPushTombstoneAttemptKey([a]), buzzPushTombstoneAttemptKey([a]));
+    expect(
+      buzzPushTombstoneAttemptKey([a, b]),
+      isNot(buzzPushTombstoneAttemptKey([a])),
+    );
+    // Each pass advances the generation; that keeps the backoff.
+    expect(
+      buzzPushTombstoneAttemptKey([
+        a.copyWith(
+          pushSubscriptionState: a.pushSubscriptionState.withPendingTombstone(
+            5,
+          ),
+        ),
+      ]),
+      buzzPushTombstoneAttemptKey([a]),
+    );
+  });
+
   testWidgets('a different attempt starts its own backoff', (tester) async {
     final gate = BuzzPushAttemptGate(jitter: () => 1);
     addTearDown(gate.dispose);

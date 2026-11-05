@@ -132,6 +132,14 @@ String buzzPushPublicationAttemptKey({
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
 
+/// Identifies a pass over pending opt-out tombstones by the communities it
+/// covers, so a community whose tombstone appears while another is backing
+/// off runs now instead of waiting out that delay. Not by generation: each
+/// pass advances it, and that must not restart the backoff.
+@visibleForTesting
+String buzzPushTombstoneAttemptKey(Iterable<Community> pending) =>
+    [for (final community in pending) community.id].join('|');
+
 @visibleForTesting
 bool buzzPushLifecycleEnabled({
   required Community? community,
@@ -376,7 +384,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
             pendingCommunities.isEmpty) {
           return null;
         }
-        const attempt = 'pending-tombstones';
+        final attempt = buzzPushTombstoneAttemptKey(pendingCommunities);
         if (!tombstoneAttempt.tryBegin(attempt)) return null;
         unawaited(() async {
           try {
