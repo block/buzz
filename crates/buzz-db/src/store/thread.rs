@@ -2547,11 +2547,27 @@ mod postgres_tests {
     /// the deadline waiting, and holds the oldest partition, which only the
     /// older pass plans, for good. The window must be cancelled once the whole
     /// deadline has passed, not a full deadline after its older pass starts.
-    /// This goes through the production writer entry, whose own session
-    /// timeout is longer.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_window_passes_share_one_deadline() {
+        window_cancelled_within_the_read_deadline(Some(std::time::Duration::from_secs(8))).await;
+    }
+
+    /// A writer window's first pass already runs under the read deadline, not
+    /// the writer session's longer timeout: with the newest partition held
+    /// for good, the window is cancelled in its recent pass.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_window_first_pass_runs_under_the_read_deadline() {
+        window_cancelled_within_the_read_deadline(None).await;
+    }
+
+    /// Read a split window through the production writer entry, whose own
+    /// session timeout is longer than the read deadline, while other sessions
+    /// lock the newest partition (released after `hold`, or never) and the
+    /// oldest one, which only the older pass plans (never released). The
+    /// window must be cancelled within the read deadline of its start.
+    async fn window_cancelled_within_the_read_deadline(hold: Option<std::time::Duration>) {
         let pool = setup_pool().await;
         let author = Keys::generate();
         let (channel, community) = create_test_channel(
@@ -2627,14 +2643,17 @@ mod postgres_tests {
         .await;
         assert!(waiting.is_ok(), "the recent pass never waited on the lock");
         // Spend part of the deadline in the recent pass, then let it finish.
-        let hold = std::time::Duration::from_secs(8);
-        tokio::time::sleep(hold).await;
-        newest_lock
-            .rollback()
-            .await
-            .expect("release the newest partition");
+        if let Some(hold) = hold {
+            tokio::time::sleep(hold).await;
+            newest_lock
+                .rollback()
+                .await
+                .expect("release the newest partition");
+        }
 
-        let result = tokio::time::timeout(crate::event::READ_DEADLINE + hold * 2, &mut task).await;
+        let margin = std::time::Duration::from_secs(4);
+        let result =
+            tokio::time::timeout(crate::event::READ_DEADLINE + margin * 4, &mut task).await;
         let elapsed = started.elapsed();
         drop(oldest_lock);
         let Ok(result) = result else {
@@ -2643,14 +2662,14 @@ mod postgres_tests {
         };
         let err = result
             .expect("window task")
-            .expect_err("the older pass must be cancelled");
+            .expect_err("the window must be cancelled");
         assert!(
             err.is_statement_cancelled(),
             "cancelled by the deadline: {err}"
         );
         assert!(
-            elapsed < crate::event::READ_DEADLINE + hold / 2,
-            "the older pass got only what the recent pass left; took {elapsed:?}"
+            elapsed < crate::event::READ_DEADLINE + margin,
+            "the window got more than one read deadline; took {elapsed:?}"
         );
     }
 
