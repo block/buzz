@@ -147,8 +147,13 @@ macro_rules! purge_retention_free_sql {
     };
 }
 
-// Shared with pruning tests: these are the statements executed in production,
-// not test-only approximations of the deletion predicates.
+// The known-target statements below are executed in production and referenced
+// directly by the pruning tests. They run with `.persistent(false)`: a cached
+// prepared statement may switch to a generic plan after five executions, and on
+// PostgreSQL 16 a generic plan takes `AccessShareLock` on every `events`
+// partition (and its indexes) during plan validation, before runtime pruning.
+// An unnamed statement is always planned with its bound parameters, so only the
+// partition selected by `created_at` is locked.
 const SELECT_KNOWN_EVENT_SQL: &str = "SELECT kind, channel_id, created_at FROM events \
      WHERE community_id = $1 AND id = $2 AND created_at = $3";
 const SOFT_DELETE_KNOWN_EVENT_SQL: &str = concat!(
@@ -197,6 +202,7 @@ async fn purge_retention_free_events(
             created_at,
         } => {
             sqlx::query_scalar(PURGE_KNOWN_EVENT_SQL)
+                .persistent(false)
                 .bind(community_id.as_uuid())
                 .bind(event_id)
                 .bind(created_at)
@@ -299,6 +305,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     let target: Option<(i32, Option<Uuid>, DateTime<Utc>)> = match created_at {
         Some(created_at) => {
             sqlx::query_as(SELECT_KNOWN_EVENT_SQL)
+                .persistent(false)
                 .bind(community_id.as_uuid())
                 .bind(event_id)
                 .bind(created_at)
@@ -355,6 +362,7 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
         0
     };
     let result = sqlx::query(SOFT_DELETE_KNOWN_EVENT_SQL)
+        .persistent(false)
         .bind(community_id.as_uuid())
         .bind(event_id)
         .bind(created_at)

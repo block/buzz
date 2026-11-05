@@ -401,67 +401,131 @@ async fn production_known_target_statements_prune_to_one_month() {
     db.insert_deletion_event(community, &deletion, None, None, &[target(&ev)])
         .await
         .expect("exercise production statements");
-    // Capture the actual SQL prepared by production on this single-connection
-    // pool, then explain it with its real bindings. This fails if production
-    // stops using the timestamp even when test constants remain unchanged.
-    let statements: Vec<String> = sqlx::query_scalar(
-        "SELECT statement FROM pg_prepared_statements WHERE statement LIKE '%events%' AND statement NOT LIKE '%pg_prepared_statements%' AND (statement LIKE 'SELECT kind, channel_id,%' OR statement LIKE 'UPDATE events SET deleted_at%' OR statement LIKE 'WITH purged AS%')")
-        .fetch_all(&db.pool).await.expect("production prepared SQL");
-    assert_eq!(
-        statements.len(),
-        3,
-        "canonical read, soft delete and purge: {statements:?}"
-    );
-    for statement in statements {
+    // Explain the exact statements production executes, with their real
+    // bindings. Production runs them unnamed (`.persistent(false)`), so they
+    // are planned with the bound parameters; the lock test below covers the
+    // generic-plan hazard of a cached prepared statement. ANALYZE executes the
+    // real statement, but every EXPLAIN is rolled back.
+    for statement in [
+        SELECT_KNOWN_EVENT_SQL,
+        SOFT_DELETE_KNOWN_EVENT_SQL,
+        PURGE_KNOWN_EVENT_SQL,
+    ] {
         assert!(
             statement.contains("created_at = $3"),
             "missing partition key: {statement}"
         );
-        // Both custom and generic prepared-plan modes must prune. ANALYZE
-        // executes the real statement, but every EXPLAIN is rolled back.
-        for mode in ["force_custom_plan", "force_generic_plan"] {
-            let mut tx = crate::begin_community_event_write_transaction(
-                &db.pool,
-                community,
-                crate::observability::WriterOperation::EventWrite,
-            )
-            .await
-            .expect("admit explain");
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SET LOCAL plan_cache_mode = {mode}"
-            )))
+        let mut tx = crate::begin_community_event_write_transaction(
+            &db.pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("admit explain");
+        sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
             .execute(tx.conn())
             .await
             .expect("plan mode");
-            // PREPARE/EXECUTE makes force_generic_plan test a real generic
-            // parameterized plan, including execution-time partition pruning.
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "PREPARE deletion_pruning_probe (uuid, bytea, timestamptz) AS {statement}"
-            )))
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PREPARE deletion_pruning_probe (uuid, bytea, timestamptz) AS {statement}"
+        )))
+        .execute(tx.conn())
+        .await
+        .expect("prepare production SQL");
+        let explain = format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE deletion_pruning_probe ('{}', decode('{}', 'hex'), '{}')",
+            community.as_uuid(), ev.id.to_hex(), timestamp(&ev).to_rfc3339()
+        );
+        let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
+            .fetch_one(tx.conn())
+            .await
+            .expect("production EXPLAIN");
+        let mut relations = vec![];
+        event_relations(&plan, &mut relations);
+        assert!(!relations.is_empty(), "no event access: {plan}");
+        assert!(
+            relations.iter().all(|name| name == "events_p2026_01"),
+            "unrelated monthly partitions: {plan}"
+        );
+        sqlx::query("DEALLOCATE deletion_pruning_probe")
             .execute(tx.conn())
             .await
-            .expect("prepare production SQL");
-            let explain = format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE deletion_pruning_probe ('{}', decode('{}', 'hex'), '{}')",
-                community.as_uuid(), ev.id.to_hex(), timestamp(&ev).to_rfc3339()
-            );
-            let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain))
-                .fetch_one(tx.conn())
-                .await
-                .expect("production EXPLAIN");
-            let mut relations = vec![];
-            event_relations(&plan, &mut relations);
-            assert!(!relations.is_empty(), "no event access: {plan}");
-            assert!(
-                relations.iter().all(|name| name == "events_p2026_01"),
-                "unrelated monthly partitions in {mode}: {plan}"
-            );
-            sqlx::query("DEALLOCATE deletion_pruning_probe")
-                .execute(tx.conn())
-                .await
-                .expect("deallocate probe");
-            tx.rollback().await.expect("rollback explain");
-        }
+            .expect("deallocate probe");
+        tx.rollback().await.expect("rollback explain");
+    }
+}
+
+/// Monthly `events` partitions (not their indexes) this backend holds a
+/// relation lock on right now.
+async fn locked_event_partitions(tx: &mut AdmittedTx) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT c.relname::text FROM pg_locks l \
+         JOIN pg_class c ON c.oid = l.relation \
+         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
+         AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%' ORDER BY 1",
+    )
+    .fetch_all(tx.conn())
+    .await
+    .expect("observe partition locks")
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn production_known_target_deletion_locks_one_partition() {
+    let (db, community, channel) = fixture().await;
+    let slot = format!("read-state:{}", "b".repeat(32));
+    let ev = event(
+        30078,
+        JAN,
+        vec![
+            Tag::parse(["d", &slot]).expect("d"),
+            Tag::parse(["t", "read-state"]).expect("t"),
+        ],
+    );
+    db.replace_parameterized_event(community, &ev, &slot, Some(channel))
+        .await
+        .expect("insert");
+    // The assertion is only meaningful if other partitions exist to be locked.
+    let partitions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_inherits WHERE inhparent = 'events'::regclass")
+            .fetch_one(&db.pool)
+            .await
+            .expect("partition count");
+    assert!(partitions > 1, "need several partitions, got {partitions}");
+
+    // The fixture pool has one connection, so every round reuses its
+    // statement cache. A persistent prepared statement is custom-planned for
+    // its first five executions and may then flip to a generic plan, which
+    // locks every partition during plan validation; the production statements
+    // are unnamed and must lock only the target month in every round.
+    for round in 0..10 {
+        let mut tx = crate::begin_community_event_write_transaction(
+            &db.pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("admit deletion");
+        // Known-target select, purge and soft delete all run on the production
+        // path (read-state events are retention-free).
+        let deleted = soft_delete_event_and_update_thread_in_tx(
+            &mut tx,
+            ev.id.as_bytes(),
+            Some(timestamp(&ev)),
+            None,
+            None,
+        )
+        .await
+        .expect("production deletion");
+        assert!(deleted, "round {round}");
+        let locked = locked_event_partitions(&mut tx).await;
+        // Roll back so the next round deletes the same row again.
+        tx.rollback().await.expect("rollback");
+        assert_eq!(
+            locked,
+            ["events_p2026_01"],
+            "round {round}: known-target deletion must lock only the target month"
+        );
     }
 }
 
