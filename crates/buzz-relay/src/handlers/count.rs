@@ -264,7 +264,7 @@ pub async fn handle_count(
             } else {
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
-                super::req::apply_count_fallback_limit(&mut q);
+                super::req::prepare_count_fallback(&mut q);
                 match state
                     .db
                     .query_events_routed_bounded("count_req_fallback", &q)
@@ -353,7 +353,7 @@ pub async fn handle_count(
                 }
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
-                super::req::apply_count_fallback_limit(&mut query);
+                super::req::prepare_count_fallback(&mut query);
                 match state
                     .db
                     .query_events_routed_bounded("count_req_fallback", &query)
