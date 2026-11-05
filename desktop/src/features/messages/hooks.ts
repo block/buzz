@@ -811,6 +811,12 @@ export function useDeleteMessageMutation(channel: Channel | null) {
         channelMessagesKey(channel.id),
         (current = []) => current.filter((message) => message.id !== eventId),
       );
+      // Thread panels opened outside the channel (Threads view, project
+      // conversations) read only the thread-replies cache.
+      queryClient.setQueriesData<RelayEvent[]>(
+        { queryKey: ["thread-replies", channel.id] },
+        (current) => current?.filter((message) => message.id !== eventId),
+      );
     },
     onError: (error) => {
       toast.error(`Failed to delete message: ${error.message}`);

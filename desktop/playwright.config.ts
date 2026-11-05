@@ -35,6 +35,7 @@ export default defineConfig({
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",
         "**/auxiliary-pane-close-visibility.spec.ts",
+        "**/thread-titles.spec.ts",
         "**/channel-composer-overflow.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",

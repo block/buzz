@@ -57,6 +57,7 @@ import {
 } from "@/shared/api/customEmoji";
 import {
   KIND_AGENT_OBSERVER_FRAME,
+  KIND_ARTIFACT,
   KIND_CHANNEL_THREAD_SUMMARY,
   KIND_CHANNEL_WINDOW_BOUNDS,
   KIND_DM_VISIBILITY,
@@ -1318,6 +1319,13 @@ declare global {
       pubkey: string;
       status: PresenceStatus;
     }) => void;
+    /** Another user titles a thread: store it and emit the artifact live. */
+    __BUZZ_E2E_SET_REMOTE_THREAD_TITLE__?: (input: {
+      channelName: string;
+      rootId: string;
+      title: string;
+      pubkey?: string;
+    }) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
@@ -1524,6 +1532,7 @@ declare global {
       channelId: string;
       turnId: string;
       kind?: "turn_started" | "turn_completed";
+      threadRootEventId?: string;
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -3426,6 +3435,18 @@ type MockCanvasRevision = {
   author: string;
 };
 let mockCanvasRevisions = new Map<string, MockCanvasRevision[]>();
+
+type MockThreadTitle = {
+  title: string;
+  channel: string;
+  root: string;
+  revision: string;
+  author: string;
+  updated_at: number;
+  last_activity_at: number;
+};
+/** Keyed by `${channel}:${root}`; mirrors the list/get/set thread title commands. */
+let mockThreadTitles = new Map<string, MockThreadTitle>();
 
 // The canvas UI reaches the mock via the starter "general" channel in specs.
 const DEFAULT_STARTER_CANVAS_CHANNEL = STARTER_GENERAL_CHANNEL_ID;
@@ -11542,6 +11563,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockTeamCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockCanvasRevisions(config);
+  mockThreadTitles = new Map();
   resetMockPendingCommunityDeepLinks(config);
   resetMockPendingNavigationDeepLinks(config);
   resetMockPendingEntityDeepLinks(config);
@@ -11703,6 +11725,42 @@ export function maybeInstallE2eTauriMocks() {
       pending,
       id,
     );
+  };
+  window.__BUZZ_E2E_SET_REMOTE_THREAD_TITLE__ = ({
+    channelName,
+    rootId,
+    title,
+    pubkey,
+  }) => {
+    const channel = mockChannels.find(
+      (candidate) => candidate.name === channelName,
+    );
+    if (!channel) {
+      throw new Error(`Mock channel ${channelName} not found.`);
+    }
+    const root = rootId.toLowerCase();
+    const author = pubkey ?? ALICE_PUBKEY;
+    const event = createMockEvent(
+      KIND_ARTIFACT,
+      title,
+      [
+        ["h", channel.id],
+        ["type", "buzz.thread-title"],
+        ["root", root],
+        ["title", title],
+      ],
+      author,
+    );
+    mockThreadTitles.set(`${channel.id}:${root}`, {
+      title,
+      channel: channel.id,
+      root,
+      revision: event.id,
+      author,
+      updated_at: event.created_at,
+      last_activity_at: event.created_at,
+    });
+    emitMockLiveEvent(channel.id, event);
   };
   window.__BUZZ_E2E_SET_MOCK_USER_STATUS__ = ({
     text,
@@ -12007,6 +12065,7 @@ export function maybeInstallE2eTauriMocks() {
     channelId,
     turnId,
     kind = "turn_started",
+    threadRootEventId,
   }) => {
     seedTurnSeq += 1;
     const event = {
@@ -12017,7 +12076,7 @@ export function maybeInstallE2eTauriMocks() {
       channelId,
       sessionId: null,
       turnId,
-      payload: null,
+      payload: threadRootEventId ? { threadRootEventId } : null,
     };
     syncAgentTurnsFromEvents(agentPubkey, [event]);
     syncAgentObserverEvents(agentPubkey, [event]);
@@ -14982,6 +15041,67 @@ export function maybeInstallE2eTauriMocks() {
         };
         mockCanvasRevisions.set(req.channelId, [revision, ...stream]);
         return { ok: true, event_id: revision.eventId, verified: true };
+      }
+      case "list_thread_titles": {
+        // Mirror the command: activity is the later of the title and the
+        // newest reply; ties keep newest-revision-first.
+        return [...mockThreadTitles.values()]
+          .reverse()
+          .map((entry) => ({
+            ...entry,
+            last_activity_at: getMockMessageStore(entry.channel).reduce(
+              (latest, event) =>
+                event.tags.some(
+                  (tag) => tag[0] === "e" && tag[1] === entry.root,
+                )
+                  ? Math.max(latest, event.created_at)
+                  : latest,
+              entry.last_activity_at,
+            ),
+          }))
+          .sort((a, b) => b.last_activity_at - a.last_activity_at);
+      }
+      case "get_thread_titles": {
+        const req = payload as { rootIds: string[] };
+        const roots = new Set(req.rootIds.map((id) => id.toLowerCase()));
+        return [...mockThreadTitles.values()]
+          .filter((entry) => roots.has(entry.root))
+          .map(({ last_activity_at: _activity, ...entry }) => entry);
+      }
+      case "set_thread_title": {
+        const req = payload as {
+          channelId: string;
+          rootId: string;
+          title: string | null;
+          expectedRevision: string | null;
+        };
+        const root = req.rootId.toLowerCase();
+        const key = `${req.channelId}:${root}`;
+        // Mirror the command's compare-and-set: edits apply only to the
+        // revision they started from.
+        if (
+          (mockThreadTitles.get(key)?.revision ?? null) !== req.expectedRevision
+        ) {
+          throw new Error(
+            "conflict: someone else changed this thread's title while you were editing",
+          );
+        }
+        const title = req.title?.trim() ?? "";
+        if (!title) {
+          mockThreadTitles.delete(key);
+          return { title: null, revision: null };
+        }
+        const now = Math.floor(Date.now() / 1000);
+        mockThreadTitles.set(key, {
+          title,
+          channel: req.channelId,
+          root,
+          revision: mockEventId(),
+          author: DEFAULT_MOCK_IDENTITY.pubkey,
+          updated_at: now,
+          last_activity_at: now,
+        });
+        return { title, revision: mockThreadTitles.get(key)?.revision ?? null };
       }
       case "get_canvas": {
         const canvasReadError = activeConfig?.mock?.canvasReadError;

@@ -9,6 +9,8 @@ import { getThreadViewMode } from "@/features/channels/lib/threadViewModePrefere
 import { cn } from "@/shared/lib/cn";
 
 type FocusThreadDrawerProps = {
+  /** Names the scrim's click target. Defaults to `Back to #<channelName>`. */
+  backLabel?: string;
   channelName: string;
   children: React.ReactNode;
   /** Prevent a covered drawer from handling Escape before its overlay. */
@@ -184,6 +186,7 @@ function useViewportRightInsetPx(
  * isolated.
  */
 export function FocusThreadDrawer({
+  backLabel,
   channelName,
   children,
   escapeEnabled = true,
@@ -256,7 +259,7 @@ export function FocusThreadDrawer({
     >
       <motion.button
         animate={{ opacity: 1 }}
-        aria-label={`Back to #${channelName}`}
+        aria-label={backLabel ?? `Back to #${channelName}`}
         className={cn(
           "absolute inset-0 cursor-pointer transition-colors duration-150",
           FOCUS_SCRIM_CLASS,
