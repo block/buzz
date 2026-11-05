@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::store::recent_pass::Range;
+
 use buzz_datastore_tracing::datastore_span;
 
 use buzz_core::CommunityId;
@@ -651,20 +653,54 @@ pub(crate) async fn get_channel_window_on(
         }
     }
 
-    sql.push_str(&format!(
-        " ORDER BY e.created_at DESC, e.id ASC LIMIT ${param_idx}"
-    ));
-
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(community_id.as_uuid())
-        .bind(channel_id);
-    if let Some((ts, id)) = &cursor {
-        q = q.bind(*ts).bind(id.clone());
-    }
+    // Recent-first (see `recent_pass`): the newest partitions answer a window
+    // that fills there (with its +1 probe row); older rows are read only for
+    // what is still missing.
+    let kinds: Option<Vec<i32>> =
+        kind_filter.map(|ks| ks.iter().filter_map(|&k| i32::try_from(k).ok()).collect());
+    let floor = crate::store::recent_pass::floor_for(
+        Utc::now(),
+        kinds.as_deref(),
+        None,
+        cursor.as_ref().map(|(ts, _)| *ts),
+    );
     // The +1 probe row is the server-internal has_more evidence.
-    q = q.bind(limit as i64 + 1);
-
-    let mut db_rows = q.fetch_all(&mut *conn).await?;
+    let probe_limit = i64::from(limit) + 1;
+    let pass_query = |range: Range, pass_limit: i64| {
+        let mut pass_sql = sql.clone();
+        if let Some(bound) = range.predicate("e.created_at") {
+            pass_sql.push_str(&bound);
+        }
+        pass_sql.push_str(&format!(
+            " ORDER BY e.created_at DESC, e.id ASC LIMIT ${param_idx}"
+        ));
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(pass_sql))
+            .bind(community_id.as_uuid())
+            .bind(channel_id);
+        if let Some((ts, id)) = &cursor {
+            q = q.bind(*ts).bind(id.clone());
+        }
+        q.bind(pass_limit)
+    };
+    let mut db_rows = match floor {
+        None => {
+            pass_query(Range::All, probe_limit)
+                .fetch_all(&mut *conn)
+                .await?
+        }
+        Some(floor) => {
+            // One snapshot for both passes (see `ReadTransaction`).
+            let mut read = crate::event::ReadTransaction::begin(conn, None).await?;
+            let mut rows = Vec::new();
+            let mut pass = Some((Range::Recent(floor), probe_limit));
+            while let Some((range, pass_limit)) = pass {
+                rows.extend(read.fetch(pass_query(range, pass_limit)).await?);
+                pass = crate::store::recent_pass::next(range, rows.len(), probe_limit);
+            }
+            read.finish().await?;
+            rows
+        }
+    };
 
     let has_more = db_rows.len() > limit as usize;
     db_rows.truncate(limit as usize);
@@ -2250,6 +2286,187 @@ mod postgres_tests {
             "exact-multiple final page must report exhausted despite rows == limit"
         );
         assert!(page2.next_cursor.is_none(), "no cursor past the last row");
+    }
+
+    /// The window is split at the floor: a recent pass that fills the page
+    /// and its +1 probe row answers alone; otherwise the older pass reads the
+    /// missing rows, so `has_more` still sees rows before the floor.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_split_matches_the_unsplit_read() {
+        use nostr::Timestamp;
+
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-recent-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let now = Utc::now().timestamp() as u64;
+        let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
+        // Two rows inside the recent window and two before it, newest first.
+        let mut newest_first = Vec::new();
+        for at in [now - 10, now - 20, floor - 86_400, floor - 2 * 86_400] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign");
+            insert_root(&pool, community, channel.id, &event).await;
+            newest_first.push(event.id);
+        }
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let prepared = |like: &'static str| {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pg_prepared_statements WHERE statement LIKE $1",
+            )
+            .bind(like)
+        };
+        let recent = "%FROM events e%created_at >= '%::timestamptz%";
+        let older = "%FROM events e%created_at < '%::timestamptz%";
+        let all = "%FROM events e%";
+        let ids = |w: &ChannelWindow| {
+            w.rows
+                .iter()
+                .map(|r| r.stored_event.event.id)
+                .collect::<Vec<_>>()
+        };
+
+        // Limit 1: two recent rows fill the page and its probe row.
+        let window = get_channel_window_on(&mut conn, community, channel.id, 1, None, None)
+            .await
+            .expect("recent window");
+        assert_eq!(ids(&window), newest_first[..1]);
+        assert!(window.has_more);
+        let recent_count = prepared(recent).fetch_one(&mut *conn).await.expect("count");
+        let all_count = prepared(all).fetch_one(&mut *conn).await.expect("count");
+        assert_eq!((recent_count, all_count), (1, 1), "recent pass alone");
+
+        // Limit 2: the recent pass has no probe row, so the older pass reads
+        // it and `has_more` sees the rows before the floor.
+        let window = get_channel_window_on(&mut conn, community, channel.id, 2, None, None)
+            .await
+            .expect("split window");
+        assert_eq!(ids(&window), newest_first[..2]);
+        assert!(window.has_more, "older rows lie before the floor");
+        let older_count = prepared(older).fetch_one(&mut *conn).await.expect("count");
+        let all_count = prepared(all).fetch_one(&mut *conn).await.expect("count");
+        assert_eq!((older_count, all_count), (1, 2), "older pass ran");
+
+        // The whole channel, then a cursor page below the floor.
+        let window = get_channel_window_on(&mut conn, community, channel.id, 4, None, None)
+            .await
+            .expect("whole window");
+        assert_eq!(ids(&window), newest_first);
+        assert!(!window.has_more);
+        let cursor = get_channel_window_on(&mut conn, community, channel.id, 2, None, None)
+            .await
+            .expect("first page")
+            .next_cursor
+            .expect("cursor");
+        let window = get_channel_window_on(&mut conn, community, channel.id, 2, Some(cursor), None)
+            .await
+            .expect("older page");
+        assert_eq!(ids(&window), newest_first[2..]);
+        assert!(!window.has_more);
+
+        // A failed older pass fails the window; it never reports the recent
+        // rows as the whole channel. Another session locks the partition of a
+        // root from before every dated monthly, which only the older pass
+        // plans (the recent rows' partition can hold rows below the floor too).
+        let ancient = EventBuilder::new(Kind::Custom(9), "ancient")
+            .custom_created_at(Timestamp::from(1_748_736_000)) // 2025-06-01
+            .sign_with_keys(&author)
+            .expect("sign");
+        insert_root(&pool, community, channel.id, &ancient).await;
+        let partition_of = |id: nostr::EventId| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT tableoid::regclass::text FROM events WHERE id = $1",
+                )
+                .bind(id.as_bytes().to_vec())
+                .fetch_one(&pool)
+                .await
+                .expect("partition")
+            }
+        };
+        let old_partition = partition_of(ancient.id).await;
+        assert_ne!(old_partition, partition_of(newest_first[0]).await);
+        let mut locker = pool.begin().await.expect("begin locker");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {old_partition} IN ACCESS EXCLUSIVE MODE"
+        )))
+        .execute(&mut *locker)
+        .await
+        .expect("lock old partition");
+        sqlx::query("SET lock_timeout = '200ms'")
+            .execute(&mut *conn)
+            .await
+            .expect("set lock_timeout");
+        let window = get_channel_window_on(&mut conn, community, channel.id, 1, None, None)
+            .await
+            .expect("a full recent window never touches the old partition");
+        assert_eq!(ids(&window), newest_first[..1]);
+        let failed = get_channel_window_on(&mut conn, community, channel.id, 2, None, None).await;
+        assert!(
+            failed.is_err(),
+            "a failed older pass must fail the window, got {:?}",
+            failed.map(|w| (w.rows.len(), w.has_more))
+        );
+        locker.rollback().await.expect("release lock");
+        sqlx::query("RESET lock_timeout")
+            .execute(&mut *conn)
+            .await
+            .expect("reset lock_timeout");
+    }
+
+    /// The window's passes share one snapshot: a replacement that commits
+    /// between them neither drops the row it replaces nor shows the row it
+    /// adds.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_passes_share_one_snapshot() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-snapshot-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let channel_id = channel.id;
+        let (window, expected) = crate::test_support::replace_between_passes(
+            &pool,
+            community,
+            channel_id,
+            move |mut conn| async move {
+                get_channel_window_on(&mut conn, community, channel_id, 10, None, None)
+                    .await
+                    .expect("split window")
+                    .rows
+                    .iter()
+                    .map(|row| row.stored_event.event.id)
+                    .collect::<Vec<_>>()
+            },
+        )
+        .await;
+        assert_eq!(window, expected);
     }
 
     /// Rows with replies carry a thread summary (counts + batched

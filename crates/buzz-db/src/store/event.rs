@@ -17,6 +17,7 @@ use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 
 use crate::error::{DbError, Result};
+use crate::store::recent_pass::Range;
 use crate::{AdmittedTx, Db};
 
 // Compatibility exports preserve the pre-extraction public event-store paths.
@@ -582,11 +583,32 @@ pub(crate) async fn query_events_on(
     // Thread-reply reads must be planned with their root: a cached generic
     // plan sorts every reply of a large thread. Tag matches likewise.
     let persistent = !has_tag_values(q) && root.is_none();
-    let mut qb = match root {
-        Some(root) => build_thread_reply_sql(q, root),
-        None => build_query_events_sql(q),
+    let limit = page_limit(q);
+    // Recent-first (see `recent_pass`): the newest partitions answer a page
+    // that fills there; older rows are read only for what is still missing.
+    // A thread-reply read is a `#e` lookup, which is never split.
+    let rows = match (root, recent_pass_floor(q, Utc::now())) {
+        (Some(root), _) => {
+            let mut qb = build_thread_reply_sql(q, root);
+            fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?
+        }
+        (None, None) => {
+            let mut qb = build_query_events_sql(q, Range::All, limit);
+            fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?
+        }
+        (None, Some(floor)) => {
+            let mut read = ReadTransaction::begin(conn, Some(deadline)).await?;
+            let mut rows = Vec::new();
+            let mut pass = Some((Range::Recent(floor), limit));
+            while let Some((range, pass_limit)) = pass {
+                let mut qb = build_query_events_sql(q, range, pass_limit);
+                rows.extend(read.fetch(qb.build().persistent(persistent)).await?);
+                pass = crate::store::recent_pass::next(range, rows.len(), limit);
+            }
+            read.finish().await?;
+            rows
+        }
     };
-    let rows = fetch_with_read_deadline(conn, &mut qb, persistent, deadline).await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -625,6 +647,25 @@ pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent
     matches_nothing.then(|| Ok(vec![]))
 }
 
+/// The floor to split `q` at ([`crate::store::recent_pass`]), or `None` to
+/// read it whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
+/// reads (`max_limit`, the COUNT fallback) match a fixed set of rows wherever
+/// they sit, so a recent pass rarely fills their page. An `OFFSET` skips rows
+/// on both sides of the floor, so its split point is unknown.
+fn recent_pass_floor(q: &EventQuery, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let lookup = q.offset.is_some_and(|o| o > 0)
+        || q.ids.is_some()
+        || q.e_tags.is_some()
+        || q.d_tag.is_some()
+        || q.d_tags.is_some()
+        || q.d_tag_values.is_some()
+        || q.max_limit.is_some();
+    if lookup {
+        return None;
+    }
+    crate::store::recent_pass::floor_for(now, q.kinds.as_deref(), q.since, q.until)
+}
+
 /// The `LIMIT` [`query_events_on`] applies: the requested page, clamped.
 fn page_limit(q: &EventQuery) -> i64 {
     q.limit
@@ -632,9 +673,14 @@ fn page_limit(q: &EventQuery) -> i64 {
         .min(q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT))
 }
 
-/// Generic SQL for [`query_events_on`], after [`answer_without_db`].
-fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
-    let limit_val = page_limit(q);
+/// Generic SQL for [`query_events_on`], after [`answer_without_db`]: the rows
+/// of `q` inside `range` (see [`crate::store::recent_pass`]), at most
+/// `limit_val`.
+fn build_query_events_sql(
+    q: &EventQuery,
+    range: Range,
+    limit_val: i64,
+) -> QueryBuilder<sqlx::Postgres> {
     let offset_val = q.offset.unwrap_or(0);
 
     // e-tag reads filter inside a MATERIALIZED CTE and sort/limit outside it.
@@ -656,7 +702,7 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
              FROM events e \
              INNER JOIN event_mentions m ON ",
         );
-        push_mention_join(&mut b, q, p_hex);
+        push_mention_join(&mut b, q, p_hex, range);
         b
     } else {
         let mut b = QueryBuilder::new(if e_tag_fence {
@@ -676,6 +722,9 @@ fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
     push_event_filters(&mut qb, col_prefix, q);
+    if let Some(bound) = range.predicate(&format!("{col_prefix}created_at")) {
+        qb.push(bound);
+    }
 
     // Composite ordering for deterministic pagination across ALL callers of
     // query_events (WebSocket REQ, REST endpoints, canvas, notes, etc.).
@@ -968,7 +1017,12 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
 /// produced (all of its mentions) × (channel rows since `since`) work; on
 /// bb-public one such REQ ran for over 45 minutes. `until` is a superset bound
 /// for the keyset cursor, whose exact `(created_at, id)` test stays on `e`.
-fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex: &str) {
+fn push_mention_join(
+    b: &mut QueryBuilder<sqlx::Postgres>,
+    q: &EventQuery,
+    p_hex: &str,
+    range: Range,
+) {
     b.push(
         "e.community_id = m.community_id AND e.id = m.event_id \
          AND e.created_at = m.event_created_at \
@@ -981,6 +1035,9 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
     b.push_bind(p_hex.to_ascii_lowercase());
     if let Some(s) = q.since {
         b.push(" AND m.event_created_at >= ").push_bind(s);
+    }
+    if let Some(bound) = range.predicate("m.event_created_at") {
+        b.push(bound);
     }
     if let Some(u) = q.until {
         b.push(" AND m.event_created_at <= ").push_bind(u);
@@ -998,11 +1055,11 @@ fn push_mention_join(b: &mut QueryBuilder<sqlx::Postgres>, q: &EventQuery, p_hex
     }
 }
 
-/// [`READ_STATEMENT_TIMEOUT`] as a literal, so [`BEGIN_WITH_READ_DEADLINE_SQL`]
-/// can splice it into a static statement.
-macro_rules! read_statement_timeout {
+/// [`READ_STATEMENT_TIMEOUT`] in seconds, as a literal, so
+/// [`BEGIN_WITH_READ_DEADLINE_SQL`] can splice it into a static statement.
+macro_rules! read_statement_timeout_secs {
     () => {
-        "20s"
+        20
     };
 }
 
@@ -1012,8 +1069,14 @@ macro_rules! read_statement_timeout {
 /// once no client can still be waiting for it. It only ever tightens the
 /// effective `statement_timeout`: a shorter operator or caller cap is kept,
 /// and a disabled (`0`) or longer one is lowered to 20 s. The limit is per
-/// statement, not per request.
-pub const READ_STATEMENT_TIMEOUT: &str = read_statement_timeout!();
+/// read, not per request: the passes of a split read share one (see
+/// [`ReadTransaction`]).
+pub const READ_STATEMENT_TIMEOUT: &str = concat!(read_statement_timeout_secs!(), "s");
+
+/// [`READ_STATEMENT_TIMEOUT`] as a duration, for the budget a split read's
+/// later passes run under.
+const READ_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(read_statement_timeout_secs!());
 
 /// Lower `statement_timeout` to `$1` unless it is already tighter; `$2`
 /// selects transaction-local (`true`) or session (`false`) scope.
@@ -1022,17 +1085,22 @@ pub(crate) const TIGHTEN_STATEMENT_TIMEOUT_SQL: &str = "SELECT set_config('state
             OR current_setting('statement_timeout')::interval > $1::text::interval \
           THEN $1::text ELSE current_setting('statement_timeout') END, $2)";
 
-/// `BEGIN` plus the [`TIGHTEN_STATEMENT_TIMEOUT_SQL`] tighten to
+/// Opens a [`ReadTransaction`]: `REPEATABLE READ, READ ONLY`, so every
+/// statement in it reads one snapshot.
+const BEGIN_READ_SQL: &str = "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY";
+
+/// [`BEGIN_READ_SQL`] plus the [`TIGHTEN_STATEMENT_TIMEOUT_SQL`] tighten to
 /// [`READ_STATEMENT_TIMEOUT`], transaction-local, as one simple-query message:
 /// one round trip instead of two.
 const BEGIN_WITH_READ_DEADLINE_SQL: &str = concat!(
-    "BEGIN; SELECT set_config('statement_timeout', \
+    "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY; \
+     SELECT set_config('statement_timeout', \
      CASE WHEN current_setting('statement_timeout')::interval = interval '0' \
             OR current_setting('statement_timeout')::interval > interval '",
-    read_statement_timeout!(),
-    "' THEN '",
-    read_statement_timeout!(),
-    "' ELSE current_setting('statement_timeout') END, true)"
+    read_statement_timeout_secs!(),
+    "s' THEN '",
+    read_statement_timeout_secs!(),
+    "s' ELSE current_setting('statement_timeout') END, true)"
 );
 
 /// How an event read runs under [`READ_STATEMENT_TIMEOUT`].
@@ -1062,14 +1130,96 @@ pub async fn tighten_session_read_statement_timeout(
         .map(|_| ())
 }
 
-/// Run an event read under [`READ_STATEMENT_TIMEOUT`] without changing the
-/// deadline for anything else on `conn`. Inside an open transaction the read
-/// takes a savepoint, so a failed or cancelled read leaves the transaction
-/// usable and the read's locks are released when it ends. With
-/// [`ReadDeadline::PerRead`] the savepoint tightens the deadline, and an
-/// autocommit connection opens a transaction whose `BEGIN` carries the
-/// transaction-local tighten. Rolling either back (the read has no writes to
-/// keep) reverts the tighten.
+/// The statements of one event read, in one transaction that reads one
+/// snapshot under one deadline.
+///
+/// A read split at the recent-pass floor (see `recent_pass`) runs its passes
+/// as separate statements, and they must see the same rows: under
+/// `READ COMMITTED` a replacement that commits between them (a replaceable
+/// event, an artifact head) can move a live row from below the floor to
+/// above it, out of both passes. Outside a transaction this opens
+/// `REPEATABLE READ, READ ONLY`, whose snapshot every statement reads. Inside
+/// one it takes a savepoint, so a failed or cancelled statement leaves the
+/// transaction usable and its locks are released when the read ends; the
+/// callers that read inside a transaction are routed replica reads, already
+/// `REPEATABLE READ`.
+///
+/// With a [`ReadDeadline`] the read runs under [`READ_STATEMENT_TIMEOUT`]
+/// without changing the deadline for anything else on the connection, and
+/// its statements share it: each after the first runs under what the earlier
+/// ones left. [`ReadDeadline::PerRead`] tightens the deadline in the
+/// transaction or savepoint. Rolling it back (the read has no writes to keep)
+/// reverts every tighten.
+pub(crate) struct ReadTransaction<'c> {
+    tx: sqlx::Transaction<'c, sqlx::Postgres>,
+    deadline_from: Option<std::time::Instant>,
+    statements: usize,
+}
+
+impl<'c> ReadTransaction<'c> {
+    /// Open the read on `conn`; `deadline` `None` leaves `statement_timeout`
+    /// as it is.
+    pub(crate) async fn begin(
+        conn: &'c mut sqlx::PgConnection,
+        deadline: Option<ReadDeadline>,
+    ) -> Result<Self> {
+        use sqlx::Connection as _;
+        let per_read = deadline == Some(ReadDeadline::PerRead);
+        let tx = if conn.is_in_transaction() {
+            let mut tx = conn.begin().await?;
+            if per_read {
+                tighten_read_deadline(&mut tx, READ_STATEMENT_TIMEOUT).await?;
+            }
+            tx
+        } else if per_read {
+            conn.begin_with(BEGIN_WITH_READ_DEADLINE_SQL).await?
+        } else {
+            conn.begin_with(BEGIN_READ_SQL).await?
+        };
+        Ok(Self {
+            tx,
+            deadline_from: deadline.map(|_| std::time::Instant::now()),
+            statements: 0,
+        })
+    }
+
+    /// Run one statement of the read.
+    pub(crate) async fn fetch(
+        &mut self,
+        query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    ) -> Result<Vec<sqlx::postgres::PgRow>> {
+        if let Some(from) = self.deadline_from.filter(|_| self.statements > 0) {
+            let left = READ_DEADLINE
+                .saturating_sub(from.elapsed())
+                .max(std::time::Duration::from_millis(1));
+            tighten_read_deadline(&mut self.tx, &format!("{}ms", left.as_millis())).await?;
+        }
+        self.statements += 1;
+        Ok(query.fetch_all(&mut *self.tx).await?)
+    }
+
+    /// End the read, rolling back everything it set.
+    pub(crate) async fn finish(self) -> Result<()> {
+        Ok(self.tx.rollback().await?)
+    }
+}
+
+/// Lower the transaction-local `statement_timeout` to `timeout`.
+async fn tighten_read_deadline(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    timeout: &str,
+) -> Result<()> {
+    sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
+        .bind(timeout)
+        .bind(true)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Run a single-statement event read as a [`ReadTransaction`], except on an
+/// autocommit session already under the deadline, where the statement alone
+/// is the read.
 async fn fetch_with_read_deadline(
     conn: &mut sqlx::PgConnection,
     qb: &mut QueryBuilder<sqlx::Postgres>,
@@ -1077,29 +1227,12 @@ async fn fetch_with_read_deadline(
     deadline: ReadDeadline,
 ) -> Result<Vec<sqlx::postgres::PgRow>> {
     use sqlx::Connection as _;
-    let mut tx = match (conn.is_in_transaction(), deadline) {
-        (false, ReadDeadline::Session) => {
-            return Ok(qb.build().persistent(persistent).fetch_all(conn).await?);
-        }
-        (false, ReadDeadline::PerRead) => conn.begin_with(BEGIN_WITH_READ_DEADLINE_SQL).await?,
-        (true, _) => {
-            let mut tx = conn.begin().await?;
-            if deadline == ReadDeadline::PerRead {
-                sqlx::query(TIGHTEN_STATEMENT_TIMEOUT_SQL)
-                    .bind(READ_STATEMENT_TIMEOUT)
-                    .bind(true)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            tx
-        }
-    };
-    let rows = qb
-        .build()
-        .persistent(persistent)
-        .fetch_all(&mut *tx)
-        .await?;
-    tx.rollback().await?;
+    if !conn.is_in_transaction() && deadline == ReadDeadline::Session {
+        return Ok(qb.build().persistent(persistent).fetch_all(conn).await?);
+    }
+    let mut read = ReadTransaction::begin(conn, Some(deadline)).await?;
+    let rows = read.fetch(qb.build().persistent(persistent)).await?;
+    read.finish().await?;
     Ok(rows)
 }
 
@@ -1353,7 +1486,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
             "SELECT COUNT(*) as cnt FROM events e \
              INNER JOIN event_mentions m ON ",
         );
-        push_mention_join(&mut b, q, p_hex);
+        push_mention_join(&mut b, q, p_hex, Range::All);
         b
     } else {
         let mut b = QueryBuilder::new("SELECT COUNT(*) as cnt FROM events WHERE community_id = ");
@@ -3161,7 +3294,7 @@ mod e_tag_filter_shape_tests {
         let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
         q.kinds = Some(vec![7]);
         q.e_tags = Some((0..188).map(|i| format!("{i:064x}")).collect());
-        let qb = build_query_events_sql(&q);
+        let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
         let sql = qb.sql().as_str().to_owned();
 
         assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
@@ -3215,7 +3348,10 @@ mod e_tag_filter_shape_tests {
             let mut q = routed();
             change(&mut q);
             assert!(thread_reply_root(&q).is_none(), "{label}");
-            let sql = build_query_events_sql(&q).sql().as_str().to_owned();
+            let sql = build_query_events_sql(&q, Range::All, page_limit(&q))
+                .sql()
+                .as_str()
+                .to_owned();
             assert!(!sql.contains("thread_metadata"), "{label}");
         }
     }
@@ -3223,8 +3359,81 @@ mod e_tag_filter_shape_tests {
     #[test]
     fn non_e_tag_query_is_not_fenced() {
         let q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
-        let qb = build_query_events_sql(&q);
+        let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
         assert!(!qb.sql().as_str().contains("MATERIALIZED"));
+    }
+
+    /// Each pass bounds `created_at` with a literal so Postgres prunes
+    /// partitions while planning; a `#p` read bounds the mention side too.
+    /// An unsplit read and the COUNT carry no bound.
+    #[test]
+    fn split_passes_bound_created_at_with_a_literal() {
+        let floor = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 1, 0, 0, 0).unwrap();
+        let lit = "'2026-10-01T00:00:00Z'::timestamptz";
+        let sql = |q: &EventQuery, range| {
+            build_query_events_sql(q, range, 7)
+                .sql()
+                .as_str()
+                .to_owned()
+        };
+        let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+        q.kinds = Some(vec![9]);
+        let recent = sql(&q, Range::Recent(floor));
+        assert!(
+            recent.contains(&format!(" AND created_at >= {lit}")),
+            "{recent}"
+        );
+        let older = sql(&q, Range::Older(floor));
+        assert!(
+            older.contains(&format!(" AND created_at < {lit}")),
+            "{older}"
+        );
+        let whole = sql(&q, Range::All);
+        assert!(!whole.contains("::timestamptz"), "{whole}");
+
+        q.p_tag_hex = Some("ab".repeat(32));
+        for (range, op) in [(Range::Recent(floor), ">="), (Range::Older(floor), "<")] {
+            let mention = sql(&q, range);
+            for column in ["e.created_at", "m.event_created_at"] {
+                let bound = format!(" AND {column} {op} {lit}");
+                assert!(mention.contains(&bound), "{mention}");
+            }
+        }
+        let count = count_events_sql(&q).sql().as_str().to_owned();
+        assert!(!count.contains("::timestamptz"), "{count}");
+    }
+
+    /// Which reads are split: page reads are; offset reads, lookups that
+    /// match a fixed row set and fetch-everything reads are not.
+    #[test]
+    fn recent_pass_skips_lookups() {
+        let now = Utc::now();
+        let base = || {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.kinds = Some(vec![9]);
+            q
+        };
+        assert!(recent_pass_floor(&base(), now).is_some(), "page read");
+        let mut first_page = base();
+        first_page.offset = Some(0);
+        assert!(recent_pass_floor(&first_page, now).is_some(), "offset 0");
+        type Narrow = fn(&mut EventQuery);
+        let lookups: [(&str, Narrow); 7] = [
+            ("offset", |q| q.offset = Some(1)),
+            ("ids", |q| q.ids = Some(vec![vec![0; 32]])),
+            ("e tags", |q| q.e_tags = Some(vec!["00".repeat(32)])),
+            ("d tag", |q| q.d_tag = Some("x".into())),
+            ("d tags", |q| q.d_tags = Some(vec!["x".into()])),
+            ("artifact d tags", |q| {
+                q.d_tag_values = Some(vec!["x".into()])
+            }),
+            ("max limit", |q| q.max_limit = Some(10_000)),
+        ];
+        for (label, set) in lookups {
+            let mut q = base();
+            set(&mut q);
+            assert!(recent_pass_floor(&q, now).is_none(), "{label}");
+        }
     }
 
     /// `#p` reads bound the mention side (bb-public runaway REQ): the join
@@ -3238,7 +3447,10 @@ mod e_tag_filter_shape_tests {
         q.since = Some(Utc::now());
         q.until = Some(Utc::now());
         q.kinds = Some(vec![9]);
-        let select = build_query_events_sql(&q).sql().as_str().to_owned();
+        let select = build_query_events_sql(&q, Range::All, page_limit(&q))
+            .sql()
+            .as_str()
+            .to_owned();
         let count = count_events_sql(&q).sql().as_str().to_owned();
         for (label, sql) in [("select", select), ("count", count)] {
             assert!(
@@ -3259,7 +3471,10 @@ mod e_tag_filter_shape_tests {
         q.since = None;
         q.until = None;
         q.kinds = None;
-        let unbounded = build_query_events_sql(&q).sql().as_str().to_owned();
+        let unbounded = build_query_events_sql(&q, Range::All, page_limit(&q))
+            .sql()
+            .as_str()
+            .to_owned();
         assert!(!unbounded.contains("m.event_created_at >="));
         assert!(!unbounded.contains("m.event_created_at <="));
         assert!(!unbounded.contains("m.event_kind"));
@@ -3278,7 +3493,10 @@ mod e_tag_filter_shape_tests {
             q.channel_ids = Some((0..n).map(|_| uuid::Uuid::new_v4()).collect());
             q.channel_ids_include_global = include_global;
             (
-                build_query_events_sql(&q).sql().as_str().to_owned(),
+                build_query_events_sql(&q, Range::All, page_limit(&q))
+                    .sql()
+                    .as_str()
+                    .to_owned(),
                 count_events_sql(&q).sql().as_str().to_owned(),
             )
         };
@@ -3432,10 +3650,12 @@ mod postgres_tests {
                 .await
                 .expect("mention read");
         }
+        // Each read is a recent pass (empty here) and then the older pass: one
+        // statement of each, shared by every channel count.
         assert_eq!(
             prepared_like(&mut conn, "%JOIN event_mentions%").await,
-            1,
-            "one statement for every channel count"
+            2,
+            "one recent and one older statement for every channel count"
         );
         drop(conn);
 
@@ -3498,6 +3718,242 @@ mod postgres_tests {
                     "{n} channels, include_global={include_global}: count"
                 );
             }
+        }
+    }
+
+    /// A newest-first page read split at the floor returns the rows the
+    /// unsplit read returns: the recent pass alone when it fills the page,
+    /// otherwise followed by the older pass for just the missing rows.
+    /// Prepared statements show which passes ran.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn split_page_reads_match_the_unsplit_read() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let db = crate::Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let now = Utc::now().timestamp() as u64;
+        let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
+        // Three rows inside the recent window, two before it, newest first.
+        let mut newest_first = Vec::new();
+        for at in [
+            now - 10,
+            now - 20,
+            now - 30,
+            floor - 86_400,
+            floor - 2 * 86_400,
+        ] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel))
+                .await
+                .expect("insert");
+            newest_first.push(event.id);
+        }
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let read = |limit: i64, offset: i64| EventQuery {
+            kinds: Some(vec![9]),
+            channel_id: Some(channel),
+            limit: Some(limit),
+            offset: Some(offset),
+            ..EventQuery::for_community(community)
+        };
+        let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
+        let recent = "%FROM events WHERE%created_at >= '%::timestamptz%";
+        let older = "%FROM events WHERE%created_at < '%::timestamptz%";
+        let all = "%FROM events WHERE%";
+
+        // Full recent page: answered by the recent pass alone.
+        let page = query_events_on(&mut conn, &read(3, 0), ReadDeadline::PerRead)
+            .await
+            .expect("recent page");
+        assert_eq!(ids(page), newest_first[..3]);
+        assert_eq!(prepared_like(&mut conn, recent).await, 1, "recent pass ran");
+        assert_eq!(prepared_like(&mut conn, all).await, 1, "nothing else ran");
+
+        // Short recent pages: the older pass adds only the missing rows.
+        for limit in [4, 5, 6] {
+            let page = query_events_on(&mut conn, &read(limit, 0), ReadDeadline::PerRead)
+                .await
+                .expect("split page");
+            let expected = &newest_first[..newest_first.len().min(limit as usize)];
+            assert_eq!(ids(page), expected, "limit {limit}");
+        }
+        assert_eq!(prepared_like(&mut conn, older).await, 1, "older pass ran");
+        assert_eq!(prepared_like(&mut conn, all).await, 2, "no unsplit read");
+
+        // An offset spans the floor, so the read is not split.
+        let page = query_events_on(&mut conn, &read(2, 1), ReadDeadline::PerRead)
+            .await
+            .expect("offset page");
+        assert_eq!(ids(page), newest_first[1..3]);
+        let page = query_events_on(&mut conn, &read(3, 2), ReadDeadline::PerRead)
+            .await
+            .expect("offset page across the floor");
+        assert_eq!(ids(page), newest_first[2..5]);
+        assert_eq!(prepared_like(&mut conn, all).await, 3, "unsplit read ran");
+
+        // A cursor below the floor is not split either: still exact.
+        let mut below = read(5, 0);
+        below.until = Some(DateTime::from_timestamp((floor - 1) as i64, 0).expect("until"));
+        let page = query_events_on(&mut conn, &below, ReadDeadline::PerRead)
+            .await
+            .expect("cursor page");
+        assert_eq!(ids(page), newest_first[3..]);
+
+        // A failed older pass fails the read; it never passes the recent rows
+        // off as a short page. Another session locks the partition of a row
+        // from before every dated monthly, which only the older pass plans
+        // (the recent rows' partition can hold rows below the floor too).
+        let ancient = EventBuilder::new(Kind::Custom(9), "ancient")
+            .custom_created_at(nostr::Timestamp::from(1_748_736_000)) // 2025-06-01
+            .sign_with_keys(&author)
+            .expect("sign");
+        db.insert_event(community, &ancient, Some(channel))
+            .await
+            .expect("insert ancient");
+        let partition_of = |id: nostr::EventId| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT tableoid::regclass::text FROM events WHERE id = $1",
+                )
+                .bind(id.as_bytes().to_vec())
+                .fetch_one(&pool)
+                .await
+                .expect("partition")
+            }
+        };
+        let old_partition = partition_of(ancient.id).await;
+        assert_ne!(old_partition, partition_of(newest_first[0]).await);
+        let mut locker = pool.begin().await.expect("begin locker");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {old_partition} IN ACCESS EXCLUSIVE MODE"
+        )))
+        .execute(&mut *locker)
+        .await
+        .expect("lock old partition");
+        sqlx::query("SET lock_timeout = '200ms'")
+            .execute(&mut *conn)
+            .await
+            .expect("set lock_timeout");
+        let page = query_events_on(&mut conn, &read(3, 0), ReadDeadline::PerRead)
+            .await
+            .expect("a full recent page never touches the old partition");
+        assert_eq!(ids(page), newest_first[..3]);
+        let failed = query_events_on(&mut conn, &read(5, 0), ReadDeadline::PerRead).await;
+        assert!(
+            failed.is_err(),
+            "a failed older pass must fail the read, got {:?} rows",
+            failed.map(|rows| rows.len())
+        );
+        locker.rollback().await.expect("release lock");
+        sqlx::query("RESET lock_timeout")
+            .execute(&mut *conn)
+            .await
+            .expect("reset lock_timeout");
+    }
+
+    /// The passes of a split read share one snapshot: a replacement that
+    /// commits between them neither drops the row it replaces nor shows the
+    /// row it adds. Both deadline modes open the read the same way.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn split_read_passes_share_one_snapshot() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        for deadline in [ReadDeadline::PerRead, ReadDeadline::Session] {
+            let channel = make_test_channel(&pool, community_uuid, None).await;
+            let q = EventQuery {
+                kinds: Some(vec![9]),
+                channel_id: Some(channel),
+                limit: Some(10),
+                ..EventQuery::for_community(community)
+            };
+            let (page, expected) = crate::test_support::replace_between_passes(
+                &pool,
+                community,
+                channel,
+                move |mut conn| async move {
+                    query_events_on(&mut conn, &q, deadline)
+                        .await
+                        .expect("split read")
+                        .into_iter()
+                        .map(|stored| stored.event.id)
+                        .collect::<Vec<_>>()
+                },
+            )
+            .await;
+            assert_eq!(page, expected, "{deadline:?}");
+        }
+    }
+
+    /// The statements of one read share its deadline: each after the first
+    /// runs under what the earlier ones left, and ending the read restores
+    /// the connection's own.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn read_statements_share_one_deadline() {
+        use sqlx::Connection as _;
+        let pool = setup_pool().await;
+        let timeout_ms = || {
+            sqlx::query(
+                "SELECT (EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval) \
+                 * 1000)::float8",
+            )
+        };
+        let full = READ_DEADLINE.as_millis() as f64;
+        for case in ["per read", "session", "inside a transaction"] {
+            let mut conn = pool.acquire().await.expect("acquire").detach();
+            let deadline = match case {
+                "session" => {
+                    tighten_session_read_statement_timeout(&mut conn)
+                        .await
+                        .expect("session deadline");
+                    ReadDeadline::Session
+                }
+                _ => ReadDeadline::PerRead,
+            };
+            let mut outer = None;
+            let conn: &mut sqlx::PgConnection = if case == "inside a transaction" {
+                outer = Some(conn.begin().await.expect("begin outer"));
+                outer.as_mut().expect("outer")
+            } else {
+                &mut conn
+            };
+            let before: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *conn)
+                .await
+                .expect("show timeout");
+            let mut read = ReadTransaction::begin(&mut *conn, Some(deadline))
+                .await
+                .expect("begin read");
+            let first: f64 = read.fetch(timeout_ms()).await.expect("first")[0].get(0);
+            let second: f64 = read.fetch(timeout_ms()).await.expect("second")[0].get(0);
+            read.finish().await.expect("finish");
+            assert_eq!(
+                first, full,
+                "{case}: the first statement gets the whole deadline"
+            );
+            assert!(
+                (1.0..full).contains(&second),
+                "{case}: the second gets what is left, got {second} ms"
+            );
+            let after: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *conn)
+                .await
+                .expect("show timeout");
+            assert_eq!(after, before, "{case}: restored");
+            drop(outer);
         }
     }
 
