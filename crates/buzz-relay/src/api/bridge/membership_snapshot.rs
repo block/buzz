@@ -150,19 +150,19 @@ pub(super) async fn query(
     .map_err(|_| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "membership_snapshot timed out",
+            &format!("{mode} timed out"),
         )
     })?
     .map_err(|error| match error {
         buzz_db::DbError::MembershipSnapshotTooLarge => api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "membership_snapshot exceeds limit",
+            &format!("{mode} exceeds limit"),
         ),
         _ => {
-            tracing::error!(error_kind = %error.kind(), "membership snapshot failed");
+            tracing::error!(mode, error_kind = %error.kind(), "membership projection failed");
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "membership_snapshot unavailable",
+                &format!("{mode} unavailable"),
             )
         }
     })?;
@@ -178,25 +178,20 @@ pub(super) async fn query(
         snapshot_id: &snapshot.snapshot_id,
         channels: &snapshot.channels,
     };
-    let wire_content = if public {
-        json!({
+    let serialized = if public {
+        serde_json::to_string(&json!({
             "version": 1, "scope": "public", "community_id": content.community_id,
             "host": content.host, "requester": viewer.to_hex(), "subject": subject.to_hex(),
             "request_id": content.request_id, "types": content.types, "complete": true,
             "snapshot_id": content.snapshot_id, "channels": content.channels,
-        })
+        }))
     } else {
-        serde_json::to_value(&content).map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "membership_snapshot encoding failed",
-            )
-        })?
-    };
-    let serialized = serde_json::to_string(&wire_content).map_err(|_| {
+        serde_json::to_string(&content)
+    }
+    .map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "membership_snapshot encoding failed",
+            &format!("{mode} encoding failed"),
         )
     })?;
     let tags = [
@@ -209,7 +204,7 @@ pub(super) async fn query(
     .map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "membership_snapshot tags failed",
+            &format!("{mode} tags failed"),
         )
     })?;
     let event = nostr::EventBuilder::new(
@@ -225,7 +220,7 @@ pub(super) async fn query(
     .map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "membership_snapshot signing failed",
+            &format!("{mode} signing failed"),
         )
     })?;
     let envelope = json!({(mode):1, "event":event});
@@ -233,19 +228,20 @@ pub(super) async fn query(
         .map_err(|_| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "membership_snapshot encoding failed",
+                &format!("{mode} encoding failed"),
             )
         })?
         .len();
     if bytes > MAX_RESPONSE_BYTES {
         return Err(api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "membership_snapshot exceeds limit",
+            &format!("{mode} exceeds limit"),
         ));
     }
-    metrics::histogram!("buzz_membership_snapshot_encode_sign_seconds")
+    metrics::histogram!("buzz_membership_snapshot_encode_sign_seconds", "mode" => mode)
         .record(started.elapsed().as_secs_f64());
-    metrics::histogram!("buzz_membership_snapshot_response_bytes").record(bytes as f64);
+    metrics::histogram!("buzz_membership_snapshot_response_bytes", "mode" => mode)
+        .record(bytes as f64);
     Ok(Json(envelope))
 }
 

@@ -128,7 +128,7 @@ impl Db {
             .bind(public)
             .fetch_all(&mut *conn)
             .await?;
-        metrics::histogram!("buzz_membership_snapshot_query_seconds")
+        metrics::histogram!("buzz_membership_snapshot_query_seconds", "mode" => if public {"membership_public"} else {"membership_snapshot"})
             .record(started.elapsed().as_secs_f64());
         if rows.len() > MAX_CHANNELS {
             return Err(DbError::MembershipSnapshotTooLarge);

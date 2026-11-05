@@ -262,6 +262,7 @@ async fn membership_snapshot_468_channels_size_independent_of_other_members_and_
     .bind(viewer.public_key().to_bytes().to_vec())
     .bind(all_types())
     .bind((MAX_CHANNELS + 1) as i64)
+    .bind(false)
     .fetch_one(&pool)
     .await
     .unwrap();

@@ -147,6 +147,9 @@ async fn membership_snapshot_router_signature_scope_strict_auth_replay_and_owner
     signed.verify().unwrap();
     assert_eq!(signed.pubkey, state.relay_keypair.public_key());
     assert_eq!(signed.kind, Kind::Custom(39008));
+    assert!(signed
+        .content
+        .starts_with("{\"version\":1,\"community_id\":"));
     let content: Value = serde_json::from_str(&signed.content).unwrap();
     assert_eq!(content["request_id"], event.id.to_hex());
     assert!(signed
