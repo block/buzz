@@ -1211,6 +1211,31 @@ pub struct PendingDefaultChannelJoin {
     pub added_by: Option<String>,
 }
 
+async fn pending_default_channel_join(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Option<PendingDefaultChannelJoin>> {
+    let mut conn =
+        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    pending_default_channel_join_on(&mut conn, community, pubkey).await
+}
+
+async fn pending_default_channel_join_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Option<PendingDefaultChannelJoin>> {
+    Ok(sqlx::query_as(
+        "SELECT auto_join_pending AS token, added_by FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending IS NOT NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(conn)
+    .await?)
+}
+
 impl Db {
     /// Read unfinished default-channel work and its original adding actor.
     #[datastore_span(name = "pending_default_channel_join", system = "postgresql")]
@@ -1219,19 +1244,50 @@ impl Db {
         community: CommunityId,
         pubkey: &str,
     ) -> Result<Option<PendingDefaultChannelJoin>> {
-        let mut conn = observability::acquire_writer(
-            &self.pool,
-            observability::WriterOperation::Authorization,
-        )
-        .await?;
-        Ok(sqlx::query_as(
-            "SELECT auto_join_pending AS token, added_by FROM relay_members \
-             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending IS NOT NULL",
-        )
-        .bind(community.as_uuid())
-        .bind(pubkey)
-        .fetch_optional(&mut *conn)
-        .await?)
+        pending_default_channel_join(&self.pool, community, pubkey).await
+    }
+
+    /// [`Db::pending_default_channel_join`] on the bounded replica arm, for
+    /// the retry that runs on every AUTH. A stale answer is safe: it can only
+    /// defer the work to a later admission or carry an old token, and every
+    /// write re-checks the token on the writer. Falls back to the writer as
+    /// [`Db::is_relay_member`] does.
+    #[datastore_span(name = "pending_default_channel_join_routed", system = "postgresql")]
+    pub async fn pending_default_channel_join_routed(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<Option<PendingDefaultChannelJoin>> {
+        let path = "pending_default_channel_join";
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::Authorization,
+            )
+            .await?
+        {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match pending_default_channel_join_on(&mut tx, community, pubkey).await {
+                    Ok(pending) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(pending)
+                    }
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        pending_default_channel_join(&self.pool, community, pubkey).await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                pending_default_channel_join(&self.pool, community, pubkey).await
+            }
+        }
     }
 
     /// Finish only the admission generation that was actually processed.

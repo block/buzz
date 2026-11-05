@@ -3052,11 +3052,24 @@ async fn finish_default_channel_joins(
     pubkey_hex: &str,
     gate: Option<&Arc<crate::nip_fi_gate::SessionAdmissionGate>>,
 ) -> anyhow::Result<()> {
-    let Some(admission) = state
-        .db
-        .pending_default_channel_join(tenant.community(), pubkey_hex)
-        .await?
-    else {
+    // A socket's AUTH retry runs on every admission, so it reads the replica
+    // and keeps the writer pool free. A roster write (no gate) reads the
+    // writer, where it has just committed the token.
+    let pending = match gate {
+        Some(_) => {
+            state
+                .db
+                .pending_default_channel_join_routed(tenant.community(), pubkey_hex)
+                .await?
+        }
+        None => {
+            state
+                .db
+                .pending_default_channel_join(tenant.community(), pubkey_hex)
+                .await?
+        }
+    };
+    let Some(admission) = pending else {
         return Ok(());
     };
     let pubkey = hex::decode(pubkey_hex)?;
