@@ -412,6 +412,19 @@ async fn announce_dm_created(
     }
 }
 
+/// Whether `event` carries `["history", "include"]`: the caller has agreed to
+/// share an existing DM's history with whoever joins it. Without it, DM
+/// commands behave as before members could join in place.
+fn history_opt_in(event: &Event) -> Result<bool, IngestError> {
+    match extract_tag(event, "history").as_deref() {
+        None => Ok(false),
+        Some("include") => Ok(true),
+        Some(other) => Err(IngestError::Rejected(format!(
+            "invalid: history must be \"include\", got \"{other}\""
+        ))),
+    }
+}
+
 /// Why the relay's moderation DM cannot take anyone else.
 const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
 
@@ -455,6 +468,7 @@ async fn handle_dm_open(
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
+    let include_history = history_opt_in(event)?;
 
     // 1. Decode the other participants from `p` tags (deduplicated).
     let mut others: Vec<Vec<u8>> = Vec::new();
@@ -509,15 +523,15 @@ async fn handle_dm_open(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 3. Execute: open the DM of these people, then add any named agents it
-    //    does not hold yet.
+    // 3. Execute. With history, open the DM of these people and add any named
+    //    agents it does not hold yet; without, the DM of exactly these members.
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
     let (channel, was_created) = state
         .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
+        .open_dm(tenant.community(), &all_refs, &self_bytes, include_history)
         .await
         .map_err(dm_write_error)?;
-    let added = if was_created {
+    let added = if was_created || !include_history {
         Vec::new()
     } else {
         grow_with_agents(tenant, state, channel.id, &self_bytes, &agents).await?
@@ -582,12 +596,11 @@ async fn grow_with_agents(
 
 /// kind:41011: add people and agents to a DM.
 ///
-/// Agents always join in place, with the DM's history. People join in place
-/// too when the event carries `["history", "include"]`; the DM's identity then
-/// moves to the grown set of people, or, if a DM of those people already
-/// exists, that DM is returned instead and nothing changes here. Without the
-/// tag, people start a new DM of everyone (no history), as before. An agent
-/// cannot send the tag, and its adds always start a new DM of everyone.
+/// With `["history", "include"]`, people and agents join in place, with the
+/// DM's history. People move the DM's identity to the grown set of people, or,
+/// if a DM of those people already exists, that DM is returned instead and
+/// nothing changes here. Without the tag, everyone starts a new DM of exactly
+/// its members (no history), as before. An agent cannot send the tag.
 async fn handle_dm_add_member(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -608,15 +621,7 @@ async fn handle_dm_add_member(
             "invalid: must specify at least 1 new participant in p tags".into(),
         ));
     }
-    let include_history = match extract_tag(event, "history").as_deref() {
-        None => false,
-        Some("include") => true,
-        Some(other) => {
-            return Err(IngestError::Rejected(format!(
-                "invalid: history must be \"include\", got \"{other}\""
-            )));
-        }
-    };
+    let include_history = history_opt_in(event)?;
 
     // 2. Validate caller is member of existing DM
     let is_member = state
@@ -665,8 +670,7 @@ async fn handle_dm_add_member(
     }
     let agents = dm_agents(tenant, state, &additions).await?;
     check_dm_agent_policies(&agents, &self_bytes)?;
-    let adds_people = additions.iter().any(|pk| !agents.contains_key(pk));
-    // Only people grow a DM or share its history. An agent's add starts a new
+    // Only people grow a DM or share its history. Any other add starts a new
     // DM of everyone, as every add did before.
     let actor_is_agent = !dm_agents(tenant, state, std::slice::from_ref(&self_bytes))
         .await?
@@ -676,7 +680,6 @@ async fn handle_dm_add_member(
             "forbidden: only people can share a DM's history".into(),
         ));
     }
-    let in_place = !actor_is_agent && (include_history || !adds_people);
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {
@@ -692,7 +695,7 @@ async fn handle_dm_add_member(
 
     // 5. Execute.
     let addition_refs: Vec<&[u8]> = additions.iter().map(Vec::as_slice).collect();
-    let (target, was_created, added, moved_elsewhere) = if in_place {
+    let (target, was_created, added, moved_elsewhere) = if include_history {
         // Grow this DM in place.
         match state
             .db
@@ -714,15 +717,10 @@ async fn handle_dm_add_member(
         let all_refs: Vec<&[u8]> = all_bytes.iter().map(Vec::as_slice).collect();
         let (channel, created) = state
             .db
-            .open_dm(tenant.community(), &all_refs, &self_bytes)
+            .open_dm(tenant.community(), &all_refs, &self_bytes, false)
             .await
             .map_err(dm_write_error)?;
-        let added = if created {
-            Vec::new()
-        } else {
-            grow_with_agents(tenant, state, channel.id, &self_bytes, &agents).await?
-        };
-        (channel.id, created, added, !created)
+        (channel.id, created, Vec::new(), !created)
     };
 
     // Finalize the idempotency record after the separate mutation succeeds.
