@@ -395,7 +395,7 @@ void main() {
   );
 
   testWidgets(
-    'native reaction sheet refreshes an assertion inside its refresh margin',
+    'native reaction sheet opens at once and resends media auth after a refresh',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -462,13 +462,21 @@ void main() {
         'Nostr-Federated-Identity': 'Bearer token-1',
       });
       final payloads = <Map<Object?, Object?>>[];
-      final completion = Completer<Map<String, Object?>>();
+      final reactionUpdates = <List<Object?>>[];
+      final profileUpdates = <Map<Object?, Object?>>[];
+      var completion = Completer<Map<String, Object?>>();
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         NativeMessagePresentation.channel,
         (call) async {
-          if (call.method == 'reactions') {
-            payloads.add(call.arguments as Map<Object?, Object?>);
-            return completion.future;
+          final args = call.arguments as Map<Object?, Object?>;
+          switch (call.method) {
+            case 'reactions':
+              payloads.add(args);
+              return completion.future;
+            case 'updateReactions':
+              reactionUpdates.add(args['reactions'] as List<Object?>);
+            case 'updateProfiles':
+              profileUpdates.add(args['profiles'] as Map<Object?, Object?>);
           }
           return <String, Object?>{};
         },
@@ -522,43 +530,70 @@ void main() {
       // Rendering the row may itself fetch media through the hosted client,
       // so enter the margin only now (120s lifetime, 30s margin): the socket
       // is still valid, but the synchronous cache reads as empty.
+      String? authOf(Object? item) =>
+          ((item as Map)['headers'] as Map?)?['Nostr-Federated-Identity']
+              as String?;
       final issuedBeforeSheet = issued;
       clock = clock.add(const Duration(seconds: 100));
       expect(auth.cachedHeaders(config), isNull);
-      await tester.longPress(
-        find.byKey(const ValueKey('reaction-pill-$_fire')),
-      );
-      await tester.pumpAndSettle();
-
-      expect(issued, issuedBeforeSheet + 1);
-      final payload = payloads.single;
-      final avatar = (payload['profiles'] as Map)[_alice] as Map;
-      expect(
-        (avatar['headers'] as Map)['Nostr-Federated-Identity'],
-        'Bearer token-$issued',
-      );
-      final reaction = (payload['reactions'] as List).single as Map;
-      expect(
-        (reaction['headers'] as Map)['Nostr-Federated-Identity'],
-        'Bearer token-$issued',
-      );
-      completion.complete(<String, Object?>{});
-      await tester.pumpAndSettle();
-
-      // Unmounting while a slow issuer is pending presents nothing: the row's
-      // cleanup empties and disposes its reactions before auth completes.
+      // A stalled issuer must not hold the sheet back: cached names and
+      // emoji show at once, and media gets the assertion when it arrives.
       issuerGate = Completer<void>();
-      clock = clock.add(const Duration(seconds: 200));
-      expect(auth.cachedHeaders(config), isNull);
       await tester.longPress(
         find.byKey(const ValueKey('reaction-pill-$_fire')),
       );
       await tester.pump();
-      await tester.pumpWidget(const SizedBox());
-      await tester.pumpAndSettle();
+      final payload = payloads.single;
+      final initialProfiles = payload['profiles'] as Map;
+      expect((initialProfiles[_alice] as Map)['name'], 'Honey');
+      expect(authOf(initialProfiles[_alice]), isNull);
+      expect(authOf((payload['reactions'] as List).single), isNull);
+      expect(issued, issuedBeforeSheet);
+
       issuerGate.complete();
       await tester.pumpAndSettle();
-      expect(payloads, hasLength(1));
+      expect(issued, issuedBeforeSheet + 1);
+      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
+      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+
+      // A fresh assertion needs no refresh, so nothing is resent.
+      reactionUpdates.clear();
+      completion = Completer<Map<String, Object?>>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      expect(payloads, hasLength(2));
+      expect(
+        authOf((payloads.last['reactions'] as List).single),
+        'Bearer token-$issued',
+      );
+      expect(reactionUpdates, isEmpty);
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+
+      // Unmounting while a slow issuer is pending sends nothing afterwards:
+      // the sheet's cleanup marks it disposed before auth completes.
+      issuerGate = Completer<void>();
+      clock = clock.add(const Duration(seconds: 200));
+      expect(auth.cachedHeaders(config), isNull);
+      completion = Completer<Map<String, Object?>>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pump();
+      expect(payloads, hasLength(3));
+      await tester.pumpWidget(const SizedBox());
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      reactionUpdates.clear();
+      profileUpdates.clear();
+      issuerGate.complete();
+      await tester.pumpAndSettle();
+      expect(reactionUpdates, isEmpty);
+      expect(profileUpdates, isEmpty);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     },

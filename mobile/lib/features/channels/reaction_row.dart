@@ -729,21 +729,7 @@ Future<bool> _showNativeReactionDetails(
   final handled = await NativeMessagePresentation.withLease(() async {
     final container = ProviderScope.containerOf(context, listen: false);
     final theme = Theme.of(context);
-    // The native headers read the cached assertion synchronously, and that
-    // cache reads as empty inside its refresh margin while the live socket is
-    // still valid. Refresh it first so avatars and custom emoji are not refused.
-    try {
-      await container
-          .read(hostedRelayAuthProvider)
-          .headers(container.read(relayConfigProvider));
-    } on AccountFailure {
-      // Send without the assertion; the relay decides, and sign-in is offered
-      // elsewhere.
-    }
-    // The row can unmount while auth is pending, which empties and disposes
-    // `reactions`; there is then nothing to present. Check mounted first so a
-    // disposed notifier is never read or listened to.
-    if (!context.mounted || reactions.value.isEmpty) return true;
+    if (reactions.value.isEmpty) return true;
     final nativeMediaHeaders = container.read(nativeMediaHeadersProvider);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     List<String> pubkeys() =>
@@ -855,6 +841,26 @@ Future<bool> _showNativeReactionDetails(
     }
 
     reactions.addListener(updateReactions);
+    // Native headers read the cached assertion synchronously, and that cache
+    // reads as empty inside its refresh margin while the live socket is still
+    // valid. Present at once with what is cached, refresh in the background,
+    // and resend the media rows if the refresh produced a new assertion, so a
+    // stalled issuer never delays the sheet.
+    final config = container.read(relayConfigProvider);
+    final auth = container.read(hostedRelayAuthProvider);
+    final cachedAuth = auth.cachedHeaders(config);
+    unawaited(() async {
+      try {
+        await auth.headers(config);
+      } on AccountFailure {
+        // Send without the assertion; the relay decides, and sign-in is
+        // offered elsewhere.
+        return;
+      }
+      if (disposed || mapEquals(auth.cachedHeaders(config), cachedAuth)) return;
+      sent.clear();
+      updateReactions();
+    }());
     try {
       final sheetColors = utilitySurfaceThemeData(theme).colorScheme;
       final pending = NativeMessagePresentation.present('reactions', {
