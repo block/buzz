@@ -1870,9 +1870,7 @@ pub(crate) async fn get_events_by_ids_with_operation(
     get_events_by_ids_on(&mut conn, community_id, ids).await
 }
 
-/// [`get_events_by_ids`] on a specific session — the replica-routing path
-/// runs the query on the exact reader connection whose heartbeat
-/// observation proved its predicate.
+/// [`get_events_by_ids`] on a specific session.
 pub(crate) async fn get_events_by_ids_on(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
@@ -2822,68 +2820,6 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await
-    }
-
-    /// [`Db::get_events_by_ids`] with replica routing — same contract and
-    /// classification-table requirement as [`Db::query_events_routed`].
-    ///
-    /// By-id fetches route on the BOUNDED arm only: an id list carries no
-    /// channel pin, so no fence floor can prove insert-completeness — the
-    /// covered arm is structurally unavailable. Used for FTS hit hydration,
-    /// where a missing row degrades to a skipped search hit downstream.
-    #[datastore_span(name = "get_events_by_ids_routed", system = "postgresql")]
-    pub async fn get_events_by_ids_routed(
-        &self,
-        path: &'static str,
-        community_id: CommunityId,
-        ids: &[&[u8]],
-    ) -> Result<Vec<StoredEvent>> {
-        match self
-            .route_read(
-                path,
-                crate::RoutePredicate::Bounded,
-                crate::observability::ReaderOperation::SubscriptionHistory,
-            )
-            .await?
-        {
-            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
-                    Ok(events) => {
-                        Self::record_route(path, "replica", reason);
-                        Ok(events)
-                    }
-                    // Surface a cancel instead of re-running it on the writer; see
-                    // `DbError::is_statement_cancelled` for the trade-off.
-                    Err(e) if e.is_statement_cancelled() => {
-                        Self::record_route(path, "replica", "statement_cancelled");
-                        Err(e)
-                    }
-                    Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
-                        Self::record_route(path, "writer", "replica_error");
-                        // Release the reader and its history permit before the
-                        // writer re-run, so a replica-error burst can't fill the cap.
-                        drop(tx);
-                        crate::event::get_events_by_ids_with_operation(
-                            &self.pool,
-                            community_id,
-                            ids,
-                            crate::observability::WriterOperation::SubscriptionHistory,
-                        )
-                        .await
-                    }
-                }
-            }
-            crate::RouteDecision::Writer => {
-                crate::event::get_events_by_ids_with_operation(
-                    &self.pool,
-                    community_id,
-                    ids,
-                    crate::observability::WriterOperation::SubscriptionHistory,
-                )
-                .await
-            }
-        }
     }
 
     /// Atomically insert an event AND its thread metadata in a single transaction.
