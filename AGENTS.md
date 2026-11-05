@@ -72,25 +72,23 @@ confirmation, not app runs.
 - Agents post reviews as comments, never Request Changes. Humans decide which
   findings must be fixed.
 
+## Open-source boundary
+
+This repository is public and contains the relay, NIP specifications, legacy desktop app, and mobile clients. Never commit values that only make sense inside Block: the employee-only bb-block community and its hosts (`block.builderlab.xyz`, `buzz.block.builderlab.xyz`, `*.communities.block.xyz`), private GitHub organizations or repositories, organization-specific SSH users, internal hosts, cloud accounts, IAM roles or buckets, internal ticket keys, `go/` links, internal Slack channels, or real employees' names and personal setups. Public Builderlab (`app.builderlab.xyz`, `*.communities.builderlab.xyz`) is supported and fine.
+
+Distributor-specific values belong in the relevant release configuration: build-time settings for clients and deployment configuration for the relay. If a setting is missing, add a generic one; never hardcode a Block-only value or special-case a host or organization.
+
+Tests, fixtures, docs, and examples use example values (`example.org`, `example-org`, fictional names).
+
+Reviewers treat a violation as a blocking finding.
+
 ## Ecosystem
 
-Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+This repository (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. Block's internal builds and deployments live in private repositories.
 
 | Repo | Purpose |
 |------|---------|
 | [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
-| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
-| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
-| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
-
-```
-block/buzz (source)
-  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
-  ├─► sprout-oss         (relay Docker image → ECR)
-  │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
-  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
-```
 
 See [RELEASING.md](RELEASING.md) for the desktop release flow and
 [CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
