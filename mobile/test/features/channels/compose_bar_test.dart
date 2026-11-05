@@ -4140,6 +4140,23 @@ void main() {
       expect(controller.text, 'see ${urls[2]} ');
       expect(controller.selection.baseOffset, controller.text.length);
       expect(linkChips(), findsOneWidget);
+      // A paste that already has a boundary after it, such as punctuation
+      // ending a sentence, leaves the surrounding text alone.
+      await setValue('See word. ', 4);
+      controller.selection = const TextSelection(
+        baseOffset: 4,
+        extentOffset: 8,
+      );
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'See ${urls[2]}. ',
+          selection: TextSelection.collapsed(offset: 4 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'See ${urls[2]}. ');
+      await setValue('see ${urls[2]} ', 5 + urls[2].length);
 
       // Undo after typing at the end of a revealed link restores it rather
       // than deleting the link.

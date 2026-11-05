@@ -44,6 +44,10 @@ class _MarkdownEditingController extends TextEditingController {
   );
   static final _linkTrailingPunctuation = RegExp(r'[.,!?:;)\]}*]+$');
 
+  /// Text that already ends a link: whitespace, or closing punctuation and
+  /// Markdown delimiters followed by whitespace or the end of the text.
+  static final _existingBoundary = RegExp(r'[.,!?:;)\]}*_~]*(?:\s|$)');
+
   /// Snaps a selection that would land inside a chip out to the chip's
   /// edges, so a chip is always wholly inside or outside the selection. A
   /// caret inside a chip moves to its nearer edge; at a link's end the link
@@ -227,8 +231,9 @@ class _MarkdownEditingController extends TextEditingController {
   ) => _spaceAfterPastedLink(oldValue, expandChipDeletion(oldValue, newValue));
 
   /// Adds a space after a link pasted on its own, so it becomes a chip
-  /// straight away. Pasted text with anything besides one link, and Undo or
-  /// Redo back to an earlier value, is unchanged.
+  /// straight away. Pasted text with anything besides one link, a link that
+  /// already has a boundary after it, and Undo or Redo back to an earlier
+  /// value are unchanged.
   TextEditingValue _spaceAfterPastedLink(
     TextEditingValue oldValue,
     TextEditingValue newValue,
@@ -254,7 +259,8 @@ class _MarkdownEditingController extends TextEditingController {
     if (match == null ||
         match.end != inserted.length ||
         _linkTrailingPunctuation.hasMatch(inserted) ||
-        (insertedEnd < newText.length && newText[insertedEnd].trim().isEmpty)) {
+        (insertedEnd < newText.length &&
+            _existingBoundary.matchAsPrefix(newText, insertedEnd) != null)) {
       return newValue;
     }
     return TextEditingValue(
