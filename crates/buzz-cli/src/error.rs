@@ -52,10 +52,10 @@ pub enum CliError {
     #[error("rate limited: {0}")]
     Throttled(String),
 
-    /// The relay could not be reached in a usable state (e.g. it kept
-    /// closing the WebSocket before sign-in). Nothing was sent, so a later
-    /// re-run is safe.
-    #[error("relay unavailable: {0}")]
+    /// The relay or the Buzz desktop could not be used now (the relay kept
+    /// closing the WebSocket before sign-in, or the desktop's same-user check
+    /// timed out). Nothing was sent, so a later re-run is safe.
+    #[error("unavailable: {0}")]
     Unavailable(String),
 
     /// Catch-all for unexpected failures
@@ -150,7 +150,7 @@ pub fn print_error(e: &CliError) {
         CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Adapter(_) => "adapter_error",
         CliError::Throttled(_) => "rate_limited",
-        CliError::Unavailable(_) => "relay_unavailable",
+        CliError::Unavailable(_) => "unavailable",
         CliError::Other(_) => "error",
     };
     let obj = serde_json::json!({

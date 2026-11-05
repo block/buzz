@@ -29,7 +29,8 @@ const VERSION_HEADER: &str = "Buzz-Credential-Provider";
 /// Methods the provider may hold open for a person's decision (up to 120s).
 pub(crate) const HELD_TIMEOUT: Duration = Duration::from_secs(150);
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
-const SAME_USER_TIMEOUT: Duration = Duration::from_secs(1);
+/// `lsof` can take seconds on a busy Mac.
+const SAME_USER_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// `rate_limited` refuses before acting, so the same envelope is re-sent:
@@ -64,6 +65,8 @@ pub enum ProviderError {
     },
     /// The provider could not be reached or answered outside the contract.
     Transport(String),
+    /// The same-user check ran out of time before anything was sent.
+    Unconfirmed,
 }
 
 impl ProviderError {
@@ -103,6 +106,9 @@ impl ProviderError {
                 }
             }
             Self::Transport(why) => CliError::Auth(format!("Buzz desktop: {why}")),
+            Self::Unconfirmed => CliError::Unavailable(
+                "Buzz desktop: the same-user check timed out; nothing was sent".into(),
+            ),
         }
     }
 }
@@ -279,18 +285,23 @@ async fn connect(port: u16, check: bool) -> Result<TcpStream, ProviderError> {
             .local_addr()
             .map_err(|_| ProviderError::Transport("no local address".into()))?
             .port();
-        let confirmed = tokio::time::timeout(SAME_USER_TIMEOUT, server_side_uid(port, local))
-            .await
-            .ok()
-            .flatten()
-            == Some(current_uid());
-        if !confirmed {
-            return Err(ProviderError::Transport(
-                "could not confirm the provider runs as this user; nothing was sent".into(),
-            ));
-        }
+        confirm_same_user(server_side_uid(port, local)).await?;
     }
     Ok(stream)
+}
+
+/// Refuse unless `owner` finds this user's UID. A lookup that runs out of
+/// time decided nothing, so it is retryable; any other answer is final.
+async fn confirm_same_user(
+    owner: impl std::future::Future<Output = Option<u32>>,
+) -> Result<(), ProviderError> {
+    match tokio::time::timeout(SAME_USER_TIMEOUT, owner).await {
+        Ok(Some(uid)) if uid == current_uid() => Ok(()),
+        Ok(_) => Err(ProviderError::Transport(
+            "could not confirm the provider runs as this user; nothing was sent".into(),
+        )),
+        Err(_) => Err(ProviderError::Unconfirmed),
+    }
 }
 
 fn current_uid() -> u32 {
@@ -1480,6 +1491,28 @@ pub(crate) mod tests {
         assert_eq!(signed.created_at, content.created_at);
         assert_eq!(signed.id, id);
         assert!(seen.lock().unwrap().len() >= 5);
+    }
+
+    /// A same-user lookup that runs out of time is retryable; a wrong or
+    /// missing owner stays a refusal.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_same_user_check_is_retryable_and_a_mismatch_is_not() {
+        let slow = async {
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            Some(current_uid())
+        };
+        assert!(
+            confirm_same_user(slow).await.is_ok(),
+            "4 s is within the budget"
+        );
+
+        let err = confirm_same_user(std::future::pending()).await.unwrap_err();
+        assert!(crate::error::is_retryable_error(&err.into_cli("describe")));
+
+        for owner in [Some(current_uid() + 1), None] {
+            let err = confirm_same_user(async { owner }).await.unwrap_err();
+            assert!(!crate::error::is_retryable_error(&err.into_cli("describe")));
+        }
     }
 
     #[tokio::test]
