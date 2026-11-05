@@ -10,6 +10,11 @@ import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
 import 'local_message_send_animation_provider.dart';
+import 'local_send_status_provider.dart';
+import 'pending_local_messages_provider.dart';
+
+/// Relays reject events dated more than 15 minutes from their clock.
+const _republishWindowSeconds = 10 * 60;
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
@@ -22,6 +27,13 @@ class SendMessage {
   _markLocalMessageForAnimation;
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
+  final void Function(String channelId, String eventId)? _failLocalMessage;
+  final NostrEvent? Function(String channelId, String eventId)
+  _readPendingLocalMessage;
+  final void Function(String channelId, String eventId) _trackLocalMessage;
+  final void Function(String channelId, String eventId) _retryLocalMessage;
+  final void Function(String channelId, String eventId) _forgetLocalMessage;
+  final Future<void> Function(NostrEvent event)? _publishSigned;
   final bool Function()? _isDeliveryValid;
 
   SendMessage({
@@ -35,6 +47,13 @@ class SendMessage {
     required void Function(String channelId, String eventId)
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
+    NostrEvent? Function(String channelId, String eventId)?
+    readPendingLocalMessage,
+    void Function(String channelId, String eventId)? trackLocalMessage,
+    void Function(String channelId, String eventId)? failLocalMessage,
+    void Function(String channelId, String eventId)? retryLocalMessage,
+    void Function(String channelId, String eventId)? forgetLocalMessage,
+    Future<void> Function(NostrEvent event)? publishSigned,
     bool Function()? isDeliveryValid,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
@@ -44,6 +63,12 @@ class SendMessage {
            markLocalMessageForAnimation ?? ((_, _) {}),
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
+       _readPendingLocalMessage = readPendingLocalMessage ?? ((_, _) => null),
+       _trackLocalMessage = trackLocalMessage ?? ((_, _) {}),
+       _failLocalMessage = failLocalMessage,
+       _retryLocalMessage = retryLocalMessage ?? ((_, _) {}),
+       _forgetLocalMessage = forgetLocalMessage ?? ((_, _) {}),
+       _publishSigned = publishSigned,
        _isDeliveryValid = isDeliveryValid;
 
   /// Send a text message to a channel.
@@ -113,6 +138,14 @@ class SendMessage {
         if (!isReference(tag)) tag,
     ];
 
+    await _sendSigned(channelId, content, tags);
+  }
+
+  Future<void> _sendSigned(
+    String channelId,
+    String content,
+    List<List<String>> tags,
+  ) async {
     _ensureDeliveryValid();
     NostrEvent? localMessage;
     try {
@@ -123,6 +156,7 @@ class SendMessage {
         onSigned: (event) {
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
+          _trackLocalMessage(channelId, event.id);
           _addLocalMessage(channelId, event);
         },
       );
@@ -130,9 +164,57 @@ class SendMessage {
       if (event != null) _completeLocalMessage(channelId, event.id);
     } catch (_) {
       final event = localMessage;
-      if (event != null) _removeLocalMessage(channelId, event.id);
-      rethrow;
+      if (event == null) rethrow;
+      final fail = _failLocalMessage;
+      if (fail == null) {
+        _removeLocalMessage(channelId, event.id);
+        rethrow;
+      }
+      // The signed bubble stays in the conversation as the retry record:
+      // the user can resend these exact bytes or delete it.
+      fail(channelId, event.id);
     }
+  }
+
+  /// Resends a failed message.
+  ///
+  /// A recent failure republishes the exact signed event, so a publish the
+  /// relay already accepted (an acknowledgement lost to a timeout)
+  /// deduplicates instead of repeating. The relay rejects events dated far
+  /// from its clock, so an older failure is signed again as a new message at
+  /// the end of the conversation, replacing the failed bubble.
+  Future<void> retry({
+    required String channelId,
+    required String eventId,
+  }) async {
+    final event = _readPendingLocalMessage(channelId, eventId);
+    // Delivered meanwhile (a relay echo arrived), or already deleted.
+    if (event == null) return;
+    final publish = _publishSigned;
+    if (publish == null) {
+      throw StateError('This sender cannot republish signed messages.');
+    }
+    final ageSeconds =
+        DateTime.now().millisecondsSinceEpoch ~/ 1000 - event.createdAt;
+    if (ageSeconds > _republishWindowSeconds) {
+      discard(channelId: channelId, eventId: eventId);
+      await _sendSigned(channelId, event.content, event.tags);
+      return;
+    }
+    _retryLocalMessage(channelId, eventId);
+    try {
+      _ensureDeliveryValid();
+      await publish(event);
+      _completeLocalMessage(channelId, eventId);
+    } catch (_) {
+      (_failLocalMessage ?? _removeLocalMessage)(channelId, eventId);
+    }
+  }
+
+  /// Deletes a failed message that was never delivered.
+  void discard({required String channelId, required String eventId}) {
+    _removeLocalMessage(channelId, eventId);
+    _forgetLocalMessage(channelId, eventId);
   }
 
   /// Resolve every identity that is actually a current member of this DM.
@@ -272,8 +354,13 @@ SendMessage _sender(Ref ref, {bool personal = false}) {
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,
     ),
-    fetchMembers: (channelId) =>
-        ref.read(channelMembersProvider(channelId).future),
+    // A loaded member list is enough to build tags. Waiting on a refresh
+    // here would hold the outgoing bubble back until the network answers.
+    fetchMembers: (channelId) {
+      final members = ref.read(channelMembersProvider(channelId));
+      if (members.hasValue) return Future.value(members.requireValue);
+      return ref.read(channelMembersProvider(channelId).future);
+    },
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) =>
         ref.read(messages(channelId).notifier).addLocalMessage(event),
@@ -284,6 +371,19 @@ SendMessage _sender(Ref ref, {bool personal = false}) {
         ref.read(messages(channelId).notifier).completeLocalMessage(eventId),
     removeLocalMessage: (channelId, eventId) =>
         ref.read(messages(channelId).notifier).removeLocalMessage(eventId),
+    publishSigned: (event) =>
+        ref.read(relaySessionProvider.notifier).publish(event),
+    readPendingLocalMessage: (channelId, eventId) =>
+        ref.read(pendingLocalMessagesProvider(channelId))[eventId],
+    trackLocalMessage: (channelId, eventId) => ref
+        .read(localSendStatusProvider(channelId).notifier)
+        .track(eventId, personal: personal),
+    failLocalMessage: (channelId, eventId) =>
+        ref.read(localSendStatusProvider(channelId).notifier).fail(eventId),
+    retryLocalMessage: (channelId, eventId) =>
+        ref.read(localSendStatusProvider(channelId).notifier).retrying(eventId),
+    forgetLocalMessage: (channelId, eventId) =>
+        ref.read(localSendStatusProvider(channelId).notifier).forget(eventId),
     isDeliveryValid: () {
       final currentConfig = ref.read(relayConfigProvider);
       return currentConfig.baseUrl == config.baseUrl &&

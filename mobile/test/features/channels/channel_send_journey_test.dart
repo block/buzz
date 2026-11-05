@@ -26,7 +26,7 @@ final _channel = Channel(
 
 void main() {
   testWidgets('a sent message shows at once, settles, and a rejected one '
-      'comes back to the composer', (tester) async {
+      'stays as a failed bubble to retry or delete', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     tester.view.physicalSize = const Size(390, 844);
@@ -84,18 +84,51 @@ void main() {
     expect(sent.single.content, 'hello team');
     expect(sent.single.getTagValue('h'), _channelId);
 
+    expect(find.text('Sending…'), findsOneWidget);
+
     ok.complete();
     await tester.pumpAndSettle();
     expect(find.text('hello team'), findsOneWidget);
     expect(find.bySemanticsLabel('Sending message'), findsNothing);
+    expect(find.text('Sent'), findsOneWidget);
     expect(find.byType(SnackBar), findsNothing);
 
+    // A rejected send keeps its bubble, marked, instead of restoring the
+    // draft: the composer is free for the next message.
     relay.rejectNext('blocked: not allowed here');
     await send('nope');
     await tester.pumpAndSettle();
-    expect(find.text('nope'), findsOneWidget, reason: 'only the draft');
-    expect(draft(), 'nope');
-    expect(find.byType(SnackBar), findsOneWidget);
+    expect(find.text('nope'), findsOneWidget, reason: 'only the bubble');
+    expect(draft(), isEmpty);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(find.text('Not Delivered'), findsOneWidget);
+    expect(find.text('Sent'), findsNothing, reason: 'status follows latest');
+    final failed = sent.last;
+    expect(failed.content, 'nope');
+
+    // Try Again republishes the same signed event and settles it.
+    await tester.tap(
+      find.bySemanticsLabel('Message not delivered. Show options'),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Try Again'));
+    await tester.pumpAndSettle();
+    expect(sent.last.id, failed.id);
+    expect(find.text('Not Delivered'), findsNothing);
+    expect(find.text('Sent'), findsOneWidget);
+    expect(find.text('nope'), findsOneWidget);
+
+    // Delete removes a failed bubble that was never delivered.
+    relay.rejectNext('blocked: not allowed here');
+    await send('discard me');
+    await tester.pumpAndSettle();
+    expect(find.text('Not Delivered'), findsOneWidget);
+    await tester.tap(find.text('Not Delivered'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete Message'));
+    await tester.pumpAndSettle();
+    expect(find.text('discard me'), findsNothing);
+    expect(find.text('Not Delivered'), findsNothing);
     expect(find.text('hello team'), findsOneWidget);
   });
 }
