@@ -1566,10 +1566,9 @@ mod postgres_tests {
     /// A default channel archived after the auto-join listed it is skipped:
     /// no membership row, no kind:39002 roster entry, no kind:44100 and no
     /// `member_joined` notice. The test holds an uncommitted archive of the
-    /// listed channel, so the auto-join passes the list and the shared join
-    /// body's open/unarchived check on the committed state and then waits in
-    /// `put_member`; the archive commits and the join resumes on an archived
-    /// channel. Mutation: drop the channel row lock or the archived refusal
+    /// listed channel, so the auto-join reads the committed channel state and
+    /// then waits for the membership write's channel row lock. The archive
+    /// commits and the join resumes on an archived channel. Mutation: drop the channel row lock or the archived refusal
     /// from `put_members` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
@@ -1597,20 +1596,28 @@ mod postgres_tests {
         let tenant = buzz_core::TenantContext::resolved(community, &host);
         let joiner = Keys::generate();
         let joiner_hex = joiner.public_key().to_hex();
-        for (keys, role) in [(&owner, "owner"), (&joiner, "member")] {
-            state
-                .db
-                .add_relay_member(
-                    community,
-                    &keys.public_key().to_hex(),
-                    role,
-                    None,
-                    &Keys::generate(),
-                )
-                .await
-                .map(|write| write.outcome)
-                .expect("seed relay member");
-        }
+        state
+            .db
+            .add_relay_member(
+                community,
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .expect("seed relay owner");
+        state
+            .db
+            .add_relay_member_with_default_channels(
+                community,
+                &joiner_hex,
+                "member",
+                &joiner_hex,
+                &Keys::generate(),
+            )
+            .await
+            .expect("seed pending default-channel admission");
         let starter = create_channel(&state, &tenant, &owner, &[]).await;
         edit_channel(&state, &tenant, &owner, starter, &[&["auto_join", "true"]])
             .await
@@ -1636,8 +1643,8 @@ mod postgres_tests {
             async move { auto_join_default_channels(&tenant, &state, &joiner_hex, None).await }
         });
         // Wait until the join is blocked on the channel row lock in
-        // `put_member`, behind the archive, so it has already listed the
-        // channel and passed the join body's check.
+        // the membership write, behind the archive, so it has already listed
+        // the channel.
         wait_for_put_member_behind(&pool, archive_pid, &auto_join).await;
         archive.commit().await.expect("commit archive");
         tokio::time::timeout(Duration::from_secs(10), auto_join)
