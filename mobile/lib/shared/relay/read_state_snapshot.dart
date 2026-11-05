@@ -5,10 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'nostr_models.dart';
+import 'relay_query_response.dart';
 
 /// Snapshot bytes and the authenticated scope they must match.
 typedef ReadStateSnapshotInput = ({
-  String text,
+  Uint8List bytes,
+  String? contentType,
   String viewer,
   String community,
 });
@@ -24,6 +26,9 @@ Future<List<NostrEvent>> decodeReadStateSnapshot(
 
 /// Hard bounds of the version-1 atomic snapshot protocol.
 const readStateSnapshotMaxBytes = 8 * 1024 * 1024;
+
+/// The events plus room for the snapshot envelope around them.
+const readStateSnapshotMaxEnvelopeBytes = readStateSnapshotMaxBytes + 4096;
 const readStateSnapshotMaxEvents = 4096;
 final _hex64 = RegExp(r'^[0-9a-f]{64}$');
 final _hex128 = RegExp(r'^[0-9a-f]{128}$');
@@ -45,7 +50,13 @@ String readStateSnapshotCommunity(Object? descriptor) {
 /// Validates the entire snapshot atomically, on a worker isolate via compute.
 /// No decryption or read-state namespace selection occurs in this transport.
 List<NostrEvent> validateReadStateSnapshot(ReadStateSnapshotInput input) {
-  final raw = jsonDecode(input.text);
+  final raw = jsonDecode(
+    relayResponseText(
+      input.bytes,
+      input.contentType,
+      maxInflatedBytes: readStateSnapshotMaxEnvelopeBytes,
+    ),
+  );
   if (raw is! Map<String, dynamic> ||
       raw['read_state_snapshot'] != 1 ||
       raw['complete'] != true ||
