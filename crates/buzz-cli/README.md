@@ -71,7 +71,10 @@ buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
 buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
+buzz users set-status --text "lunch" --emoji "🥪" --expires 1h  # clears itself; also a unix time
 buzz users set-status --clear                 # remove your status
+buzz users status                       # your visible status: [{pubkey, text, emoji, expires_at, updated_at}]
+buzz users status --pubkey <hex|npub|name>  # repeatable, max 100; expired or cleared users are omitted
 
 # DMs
 buzz dms open --pubkey <hex>
@@ -156,7 +159,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
-| | `set-status` | Set or clear your NIP-38 profile status |
+| | `set-status` | Set or clear your NIP-38 profile status; `--expires` takes a unix time or `30m`/`2h`/`1d`/`1w` |
+| | `status` | Read NIP-38 statuses (default: yours); expired or cleared are omitted |
 | `workflows` | `list` | List workflows |
 | | `get` | Get workflow definition |
 | | `create` | Create a workflow |
