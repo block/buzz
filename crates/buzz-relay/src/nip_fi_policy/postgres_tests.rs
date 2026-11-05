@@ -10,6 +10,250 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without_invalidation() {
+    use buzz_db::community_auth::{UpgradeOutcome, UpgradeRequest};
+    let base = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .unwrap();
+    let owner = Keys::generate().public_key().to_hex();
+    let issuer = "https://lease-issuer.example";
+    for notify in [false, true] {
+        let host = format!("lease-{}.example:8443", uuid::Uuid::new_v4().simple());
+        let created = base
+            .db
+            .create_community_with_owner_and_nip_fi_issuers(
+                &host,
+                &owner,
+                &[issuer.into()],
+                &Keys::generate(),
+            )
+            .await
+            .unwrap();
+        let buzz_db::CreateCommunityWithOwnerResult::Created(row) = created.outcome else {
+            panic!("fixture creation");
+        };
+        let mut pod_a = (*base).clone();
+        Arc::make_mut(&mut pod_a.config).nip_fi.mode = NipFiMode::Shadow;
+        Arc::make_mut(&mut pod_a.config)
+            .nip_fi
+            .max_connection_lifetime_secs = 3600;
+        Arc::make_mut(&mut pod_a.config).nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
+        let key = Keys::generate().public_key();
+        pod_a.nip_fi_verifier = Some(Arc::new(crate::nip_fi_core::tests::ScriptedVerifier::new(
+            Ok(Some(key)),
+        )));
+        pod_a.nip_fi_deny_map = Some(Arc::new(buzz_auth::NipFiDenyMap::new(100, vec![])));
+        pod_a.nip_fi_policy = Arc::new(base.db.clone());
+        pod_a.tenant_host_cache = Arc::new(crate::host_cache::HostCache::new());
+        let mut pod_b = pod_a.clone();
+        // One connection proves rollback after a refused lease leaves THAT
+        // connection reusable, rather than checking an unrelated pool slot.
+        pod_b.db = buzz_db::Db::from_pool(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&crate::test_support::database_url())
+                .await
+                .unwrap(),
+        );
+        pod_b.nip_fi_policy = Arc::new(pod_b.db.clone());
+        pod_b.tenant_host_cache = Arc::new(crate::host_cache::HostCache::new());
+        pod_b.tenant_host_reads = Arc::new(crate::shared_reads::SharedReads::new(
+            10_000,
+            std::time::Duration::from_millis(500),
+        ));
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, host.to_uppercase().parse().unwrap());
+        assert!(!resolve(&pod_b, &h).await.unwrap().stored_required);
+        assert!(pod_b.tenant_host_cache.policy(&host).is_some());
+        assert!(
+            crate::nip_fi_http::admit_nip_fi_http_on_state(
+                &pod_b,
+                &h,
+                &crate::access::AccessSlot::default(),
+                || Ok(crate::nip_fi_http::Nip98Proof::new(key, ())),
+            )
+            .await
+            .is_ok(),
+            "optional community must retain legacy admission"
+        );
+        // The deletion lock is a deterministic barrier AFTER the lease wait
+        // but BEFORE the row lock. It also lets this test remap the host while
+        // acceptance is pending, without racing a timer.
+        let mut barrier = base.db.pool().begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+            .bind(row.id.as_uuid())
+            .execute(&mut *barrier)
+            .await
+            .unwrap();
+        let request = UpgradeRequest {
+            operation_id: uuid::Uuid::new_v4(),
+            community_id: *row.id.as_uuid(),
+            expected_host: host.clone(),
+            actor_pubkey: owner.clone(),
+            expected_owner_pubkey: owner.clone(),
+            expected_issuer: issuer.into(),
+            operator_pubkey: owner.clone(),
+        };
+        let acceptance = {
+            let db = pod_a.db.clone();
+            let request = request.clone();
+            tokio::spawn(async move { db.enable_community_nip_fi(&request, Ok(())).await })
+        };
+        // Observe the production exclusive host lock. This condition is held
+        // until our deletion barrier is released, independent of scheduling.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let held: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+                     AND classid = $1::int::oid AND objid = hashtext($2)::oid
+                     AND objsubid = 2 AND mode = 'ExclusiveLock' AND granted)",
+                )
+                .bind(0x4649504ci32)
+                .bind(&host)
+                .fetch_one(base.db.pool())
+                .await
+                .unwrap();
+                if held {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // A new fill through another pod cannot obtain an optional lease while
+        // acceptance owns the host lock. Its connection remains reusable.
+        assert!(pod_b
+            .db
+            .community_auth_policy_lease_for_host(&host.to_uppercase())
+            .await
+            .is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(pod_b.db.pool())
+                .await
+                .unwrap(),
+            1
+        );
+        if notify {
+            // The normal mutation invalidates locally and the cross-pod
+            // consumer applies exactly this message. No Redis is required for
+            // consistency: the false branch deliberately drops it entirely.
+            pod_a.invalidate_community_host(&buzz_core::TenantContext::resolved(row.id, &host));
+            pod_b.apply_cache_invalidation(
+                row.id,
+                buzz_pubsub::cache_invalidation::CacheInvalidation::CommunityHost {
+                    host: host.clone(),
+                },
+            );
+        }
+        barrier.commit().await.unwrap();
+        let UpgradeOutcome::Accepted(_) = acceptance.await.unwrap().unwrap() else {
+            panic!("acceptance");
+        };
+        assert!(
+            pod_b.tenant_host_cache.policy(&host).is_none(),
+            "optional lease survived commit"
+        );
+        assert!(resolve(&pod_b, &h).await.unwrap().stored_required);
+        assert_eq!(
+            crate::nip_fi_http::admit_nip_fi_http_on_state(
+                &pod_b,
+                &h,
+                &crate::access::AccessSlot::default(),
+                || Ok(crate::nip_fi_http::Nip98Proof::new(key, ())),
+            )
+            .await
+            .err()
+            .unwrap()
+            .status(),
+            StatusCode::UNAUTHORIZED,
+            "a post-commit admission on another pod must require FI"
+        );
+
+        // A distinct optional target remapped while acceptance holds only the
+        // host lease lock must refuse, rather than commit under the wrong key.
+        let host2 = format!("remap-{}.example", uuid::Uuid::new_v4().simple());
+        let created = base
+            .db
+            .create_community_with_owner_and_nip_fi_issuers(
+                &host2,
+                &owner,
+                &[issuer.into()],
+                &Keys::generate(),
+            )
+            .await
+            .unwrap();
+        let buzz_db::CreateCommunityWithOwnerResult::Created(row2) = created.outcome else {
+            panic!("fixture");
+        };
+        let mut barrier = base.db.pool().begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
+            .bind(row2.id.as_uuid())
+            .execute(&mut *barrier)
+            .await
+            .unwrap();
+        let barrier_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *barrier)
+            .await
+            .unwrap();
+        let request2 = UpgradeRequest {
+            operation_id: uuid::Uuid::new_v4(),
+            community_id: *row2.id.as_uuid(),
+            expected_host: host2.clone(),
+            ..request.clone()
+        };
+        let remapped = format!("new-{host2}");
+        let acceptance = {
+            let db = pod_a.db.clone();
+            tokio::spawn(async move { db.enable_community_nip_fi(&request2, Ok(())).await })
+        };
+        // Reaching the deletion-lock wait proves the exclusive lease lock was
+        // acquired and the full lease interval elapsed, before mutable checks.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+                    AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(barrier_pid)
+                .fetch_one(base.db.pool())
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sqlx::query("UPDATE communities SET host = $2 WHERE id = $1")
+            .bind(row2.id.as_uuid())
+            .bind(&remapped)
+            .execute(base.db.pool())
+            .await
+            .unwrap();
+        barrier.commit().await.unwrap();
+        assert_eq!(
+            acceptance.await.unwrap().unwrap(),
+            UpgradeOutcome::Refused("host_conflict")
+        );
+        assert!(
+            !pod_b
+                .db
+                .community_auth_policy_for_host(&remapped)
+                .await
+                .unwrap()
+                .unwrap()
+                .requires_nip_fi
+        );
+    }
+}
+
 struct Replay(Mutex<HashSet<[u8; 32]>>);
 impl buzz_auth::Nip98ReplayGuard for Replay {
     fn try_mark_in_scope<'a>(

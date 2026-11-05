@@ -56,6 +56,11 @@ pub fn parse_cache_invalidation_channel(channel: &str) -> Option<CommunityId> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op")]
 pub enum CacheInvalidation {
+    /// Drop a serving-host snapshot after policy or binding/lifecycle changes.
+    CommunityHost {
+        /// Normalized host whose routing and policy snapshot changed.
+        host: String,
+    },
     /// Drop the `(channel_id, pubkey)` membership entry and the user's
     /// accessible-channels entry. Mirrors `invalidate_membership`.
     Membership {
@@ -235,6 +240,9 @@ mod tests {
     #[test]
     fn unit_variants_roundtrip_through_json() {
         for msg in [
+            CacheInvalidation::CommunityHost {
+                host: "a.example".into(),
+            },
             CacheInvalidation::AccessibleAll,
             CacheInvalidation::ChannelDeleted,
             CacheInvalidation::Visibility {

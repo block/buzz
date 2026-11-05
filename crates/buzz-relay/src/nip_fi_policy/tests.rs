@@ -386,10 +386,10 @@ async fn discovery_is_host_specific_compatible_uncached_and_consistent() {
                 assert_eq!(docs[0], docs[1]);
             }
         }
-        // One primary policy query per discovery request, no cross-host policy reuse.
+        // Serving hosts share a policy snapshot; unmapped results are not cached.
         assert_eq!(
             source.calls.load(Ordering::SeqCst),
-            if global.is_off() { 0 } else { 6 }
+            if global.is_off() { 0 } else { 4 }
         );
     }
 }
@@ -414,6 +414,11 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
                         .max_connection_lifetime_secs = 0
                 }
                 _ => {
+                    if !global.is_off() {
+                        // This case exercises an unavailable COLD policy
+                        // source, independent of the preceding valid leases.
+                        state.tenant_host_cache.invalidate("required.example");
+                    }
                     state.nip_fi_policy = Arc::new(Source {
                         required: AtomicBool::new(true),
                         calls: AtomicUsize::new(0),
@@ -469,12 +474,13 @@ async fn missing_dependencies_fail_closed_and_repair_precedes_evidence() {
 }
 
 #[tokio::test]
-async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries() {
+async fn request_scope_retains_its_snapshot_without_overwriting_newer_policy() {
     let (state, source, key, _) = fixture(NipFiMode::Shadow).await;
     let h = headers("required.example", true);
     source.required.store(false, Ordering::SeqCst);
     let earlier = resolve(&state, &h).await.unwrap();
     source.required.store(true, Ordering::SeqCst);
+    state.tenant_host_cache.invalidate("required.example");
     let newer = resolve(&state, &h).await.unwrap();
     assert!(!earlier.required);
     assert!(newer.required);
@@ -500,6 +506,97 @@ async fn request_scope_reuses_one_read_without_publishing_optional_cache_entries
     })
     .await;
     assert_eq!(source.calls.load(Ordering::SeqCst), before);
+}
+
+struct PausedSource {
+    read: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    calls: AtomicUsize,
+}
+impl PolicySource for PausedSource {
+    fn lookup<'a>(
+        &'a self,
+        host: &'a str,
+    ) -> BoxFuture<'a, Result<Option<CommunityAuthPolicy>, ()>> {
+        async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.read.notify_one();
+                self.resume.notified().await;
+            }
+            if host == "unknown.example" {
+                return Ok(None);
+            }
+            Ok(Some(CommunityAuthPolicy {
+                community_id: uuid::Uuid::nil(),
+                requires_nip_fi: false,
+                policy_generation: 0,
+            }))
+        }
+        .boxed()
+    }
+}
+
+#[tokio::test]
+async fn concurrent_fills_share_one_read_and_a_drop_fences_publication_only() {
+    let (base, _, _, _) = fixture(NipFiMode::Shadow).await;
+    for (host, invalidated_host) in [
+        ("team.example", None),
+        ("team.example", Some("team.example")),
+        ("team.example", Some("other.example")),
+        ("unknown.example", None),
+    ] {
+        let invalidate = invalidated_host.is_some();
+        let source = Arc::new(PausedSource {
+            read: Default::default(),
+            resume: Default::default(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut state = (*base).clone();
+        state.tenant_host_cache = Arc::new(crate::host_cache::HostCache::new());
+        state.nip_fi_policy = source.clone();
+        let state = Arc::new(state);
+        let leader = {
+            let state = state.clone();
+            tokio::spawn(async move { cached_lookup(&state, host).await })
+        };
+        source.read.notified().await;
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let mut waiter = Box::pin(cached_lookup(&state, host));
+            assert!(futures_util::poll!(&mut waiter).is_pending());
+            waiters.push(waiter);
+        }
+        if let Some(invalidated_host) = invalidated_host {
+            state.apply_cache_invalidation(
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
+                buzz_pubsub::cache_invalidation::CacheInvalidation::CommunityHost {
+                    host: invalidated_host.into(),
+                },
+            );
+        }
+        source.resume.notify_one();
+        let result = leader.await.unwrap().unwrap();
+        assert_eq!(result.is_none(), host == "unknown.example");
+        assert_eq!(
+            state.tenant_host_cache.policy(host).is_none(),
+            invalidate || result.is_none()
+        );
+        for waiter in waiters {
+            assert_eq!(waiter.await.unwrap().is_none(), result.is_none());
+        }
+        let expected_reads = if result.is_none() {
+            9
+        } else if invalidate {
+            2
+        } else {
+            1
+        };
+        assert_eq!(source.calls.load(Ordering::SeqCst), expected_reads);
+        assert_eq!(
+            state.tenant_host_cache.policy(host).is_none(),
+            result.is_none()
+        );
+    }
 }
 
 #[tokio::test]

@@ -11,6 +11,15 @@ use uuid::Uuid;
 
 use crate::{Db, Result};
 
+/// Fleet protocol bound for a cached host's policy, measured before checkout.
+/// Increasing this requires a coordinated acceptance-writer rollout first.
+pub const POLICY_LEASE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+// Allow clock-rate drift between pods. Never shorten below the fleet lease bound.
+const POLICY_LEASE_DRAIN: std::time::Duration =
+    POLICY_LEASE_MAX_AGE.saturating_add(std::time::Duration::from_millis(100));
+// Two-int advisory key space, separate from the existing bigint lock protocols.
+const POLICY_LEASE_NAMESPACE: i32 = 0x4649504c;
+
 /// Canonical request tuple, with the authenticated operator added by the relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeRequest {
@@ -109,6 +118,49 @@ const RECEIPT: &str = "SELECT u.*, true AS requires_nip_fi,
     WHERE u.operation_id = $1";
 
 impl Db {
+    /// Read a cacheable serving policy under the host's shared lease lock.
+    ///
+    /// Callers must anchor expiry BEFORE invoking this method and refuse an
+    /// expired result. Acceptance excludes new leases and drains old ones before
+    /// committing. The lock and row read MUST be separate READ COMMITTED
+    /// statements: a snapshot from before lock acquisition is not a lease.
+    /// Contention refuses immediately; it never leaves a server-side lock wait.
+    pub async fn community_auth_policy_lease_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<CommunityAuthPolicy>> {
+        let host = buzz_core::tenant::normalize_host(host);
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '400ms'")
+            .execute(&mut *tx)
+            .await?;
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1, hashtext($2))")
+                .bind(POLICY_LEASE_NAMESPACE)
+                .bind(&host)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !acquired {
+            return Err(crate::DbError::AccessDenied(
+                "community policy transition".into(),
+            ));
+        }
+        let policy = sqlx::query_as(super::community::SERVING_HOST_QUERY)
+            .bind(&host)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(policy)
+    }
+
     /// Bind a serving host and its authentication policy from one writer row.
     /// A lifecycle transition between earlier checks and this lookup cannot
     /// supply a tenant with another snapshot's optional policy.
@@ -234,6 +286,25 @@ impl Db {
         }
         if let Err(code) = configured_trust {
             return Ok(UpgradeOutcome::Refused(code));
+        }
+        // Lease protocol: stop new fills before waiting out every existing
+        // optional lease on every pod. Only the advisory/idempotency locks are
+        // held during the wait; lifecycle, host, owner and issuer are validated
+        // afterwards under their existing locks. A remap during this wait must
+        // still fail the exact host precondition below.
+        let lease_host = buzz_core::tenant::normalize_host(&request.expected_host);
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(POLICY_LEASE_NAMESPACE)
+            .bind(&lease_host)
+            .execute(&mut *tx)
+            .await?;
+        let was_required: Option<bool> =
+            sqlx::query_scalar("SELECT requires_nip_fi FROM communities WHERE id = $1")
+                .bind(request.community_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if was_required == Some(false) {
+            tokio::time::sleep(POLICY_LEASE_DRAIN).await;
         }
         let community = CommunityId::from_uuid(request.community_id);
         crate::deletion::lock_community_deletion_shared(&mut tx, community).await?;

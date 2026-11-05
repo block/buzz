@@ -1347,7 +1347,8 @@ pub const RESTRICTION_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::
 /// How long a pod serves a cached host → community mapping after the
 /// database read that produced it began, at its connection checkout (see
 /// [`AppState::tenant_host_cache`]).
-pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration =
+    buzz_db::community_auth::POLICY_LEASE_MAX_AGE;
 
 /// How long a cache miss waits for a shared read's statement, beyond the
 /// writer pool's acquire timeout that its holder may spend waiting for a
@@ -1580,7 +1581,7 @@ pub struct AppState {
     /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its
     /// read's connection checkout: a host remapped, archived or deleted
     /// elsewhere resolves to its old community for at most that long.
-    pub tenant_host_cache: Arc<moka::sync::Cache<String, (CommunityId, Instant)>>,
+    pub tenant_host_cache: Arc<crate::host_cache::HostCache>,
     /// Lets concurrent misses on [`Self::tenant_host_cache`] share one read.
     pub(crate) tenant_host_reads: Arc<crate::shared_reads::SharedReads<String>>,
 
@@ -1889,12 +1890,7 @@ impl AppState {
                 100_000,
                 shared_read_wait,
             )),
-            tenant_host_cache: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
-                    .build(),
-            ),
+            tenant_host_cache: Arc::new(crate::host_cache::HostCache::new()),
             tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(
                 10_000,
                 shared_read_wait,
@@ -2209,6 +2205,9 @@ impl AppState {
         invalidation: CacheInvalidation,
     ) {
         match invalidation {
+            CacheInvalidation::CommunityHost { host } => {
+                self.tenant_host_cache.invalidate(&host);
+            }
             CacheInvalidation::Membership { channel_id, pubkey } => {
                 self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
@@ -2222,6 +2221,18 @@ impl AppState {
                 self.invalidate_channel_deleted_local(community_id);
             }
         }
+    }
+
+    /// Drop the host's policy/routing snapshot locally and best-effort on peers.
+    /// Lease expiry, not notification delivery, protects acceptance consistency.
+    pub fn invalidate_community_host(&self, tenant: &TenantContext) {
+        self.tenant_host_cache.invalidate(tenant.host());
+        self.spawn_cache_invalidation(
+            tenant,
+            CacheInvalidation::CommunityHost {
+                host: tenant.host().to_owned(),
+            },
+        );
     }
 
     /// Close everything `pubkey` has open in `community` on this pod: root
@@ -2503,6 +2514,7 @@ impl AppState {
         community_id: CommunityId,
         archived_at: Option<DateTime<Utc>>,
     ) -> Result<Option<usize>, buzz_db::DbError> {
+        self.tenant_host_cache.invalidate_community(community_id);
         match archived_at {
             Some(archived_at) => {
                 self.db

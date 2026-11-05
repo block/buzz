@@ -1,6 +1,6 @@
-//! Request-scoped community policy. Each request reads the writer once; no
-//! cross-request policy cache can publish a stale optional generation over an
-//! observed requirement. Existing requests/sessions are drained by BUZZ-512.
+//! Host policy uses short primary-read leases, shared with tenant routing.
+//! Acceptance excludes new leases and drains old ones before commit. Request
+//! scopes retain one snapshot; existing work is drained separately by BUZZ-512.
 
 use axum::{
     body::Body,
@@ -26,7 +26,7 @@ impl PolicySource for buzz_db::Db {
         host: &'a str,
     ) -> BoxFuture<'a, Result<Option<CommunityAuthPolicy>, ()>> {
         async move {
-            self.community_auth_policy_for_host(host)
+            self.community_auth_policy_lease_for_host(host)
                 .await
                 .map_err(|_| ())
         }
@@ -85,6 +85,49 @@ pub(crate) fn effective(global: NipFiMode, required: bool) -> NipFiMode {
     global.with_requirement(required)
 }
 
+/// One bounded policy fill. Its serving row also supplies ordinary routing.
+/// Misses, errors, expired reads and invalidated in-flight results are not cached.
+pub(crate) async fn cached_lookup(
+    state: &crate::state::AppState,
+    host: &str,
+) -> Result<Option<CommunityAuthPolicy>, ()> {
+    tokio::time::timeout(POLICY_READ_BUDGET, async {
+        if let Some(policy) = state.tenant_host_cache.policy(host) {
+            metrics::counter!("buzz_nip_fi_policy_cache_hits_total").increment(1);
+            return Ok(Some(policy));
+        }
+        let _turn = state.tenant_host_reads.turn(host.to_owned()).await;
+        if let Some(policy) = state.tenant_host_cache.policy(host) {
+            metrics::counter!("buzz_nip_fi_policy_cache_hits_total").increment(1);
+            return Ok(Some(policy));
+        }
+        // Misses and errors are not cached. A waiter with no shared result
+        // retries rather than inventing a 503 for an unmapped host.
+        metrics::counter!("buzz_nip_fi_policy_cache_misses_total").increment(1);
+        let epoch = state.tenant_host_cache.epoch();
+        // Anchor before checkout, not at query completion or cache insertion.
+        let read_at = std::time::Instant::now();
+        metrics::counter!("buzz_nip_fi_policy_reads_total").increment(1);
+        let result = state.nip_fi_policy.lookup(host).await;
+        metrics::histogram!("buzz_nip_fi_policy_read_seconds")
+            .record(read_at.elapsed().as_secs_f64());
+        match result? {
+            // Invalidation prevents publication, not the use of a snapshot
+            // already read before commit. Such a request is in flight, just
+            // like an uncached primary reader; activation fences its work.
+            Some(policy) => Ok(Some(
+                state
+                    .tenant_host_cache
+                    .publish(host.to_owned(), policy, read_at, epoch)
+                    .unwrap_or(policy),
+            )),
+            None => Ok(None),
+        }
+    })
+    .await
+    .map_err(|_| ())?
+}
+
 #[allow(clippy::result_large_err)] // Axum responses are the ingress error contract.
 pub(crate) async fn resolve(
     state: &crate::state::AppState,
@@ -99,16 +142,12 @@ pub(crate) async fn resolve(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
     let host = buzz_core::tenant::normalize_host(host);
-    if host.is_empty() {
+    if host.is_empty() || host.chars().count() > buzz_core::tenant::MAX_HOST_LEN {
         return Err(not_found());
     }
-    let start = std::time::Instant::now();
-    let read = tokio::time::timeout(POLICY_READ_BUDGET, state.nip_fi_policy.lookup(&host)).await;
-    metrics::histogram!("buzz_nip_fi_policy_read_seconds").record(start.elapsed().as_secs_f64());
-    metrics::counter!("buzz_nip_fi_policy_reads_total").increment(1);
-    let policy = match read {
-        Ok(Ok(Some(policy))) => policy,
-        Ok(Ok(None)) => return Err(not_found()),
+    let policy = match cached_lookup(state, &host).await {
+        Ok(Some(policy)) => policy,
+        Ok(None) => return Err(not_found()),
         _ => {
             return Err(crate::nip_fi_core::http_denial(
                 DenialClass::AuthorizationUnavailable,

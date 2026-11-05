@@ -6,6 +6,7 @@
 pub(crate) mod access;
 mod admission;
 mod build_info;
+mod host_cache;
 mod rejection;
 
 /// Shared NIP-FI assertion evaluation, denial rendering, and key pairing.

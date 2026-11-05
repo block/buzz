@@ -207,22 +207,75 @@ Relay mode controls the effective requirement without changing durable storage:
 communities; `enforce` requires FI everywhere. `deny_protected` remains an
 unconditional repair refusal. Off ignores missing FI policy, verifier, deny map
 and issuer dependencies; ordinary tenant routing and Nostr authorization remain.
-Outside Off, each protected request reads its normalized Host's active policy
-from the primary database with a 500 ms budget.
+Outside Off, protected requests resolve their normalized Host's active policy
+through a bounded primary-read lease cache, with a 500 ms budget on misses.
 Existing Nostr proof, key pairing, deny map, membership and resource checks remain.
 Discovery, pairing, enrollment and operator exceptions keep their own authentication.
 
-The router shares the policy read with HTTP handlers for that request. Root and
-audio WebSocket admission use the same policy source. There is no cross-request
-policy cache, positive or negative: an older read cannot overwrite a newer cached
-generation. This adds one writer query per protected request or discovery request;
-`buzz_nip_fi_policy_reads_total` and `buzz_nip_fi_policy_read_seconds` measure it.
-Protected HTTP handlers use the immutable tenant ID from the same primary row
-that supplied the request's policy. They do not resolve tenant-scoped data from
-another host-cache snapshot. NIP-11 uses that policy tenant for its descriptors
-and optional decorations too, so a remapped host cannot combine one community's
-optional policy with another community's data. Exempt and unguarded routes keep
-their existing host-cache behavior.
+The router shares one policy snapshot with HTTP handlers for that request. Git
+also scopes its extractor to one policy and tenant snapshot, retaining its
+existing header, signed-URL and denial ordering. Routing and policy share one
+host cache capped at 10,000 entries. A serving entry carries immutable tenant ID,
+requirement, generation and original read time from the same row. It is usable
+for strictly less than one second from before the read's connection checkout;
+neither a slow read nor a cache hit renews its lifetime. Concurrent fills for a
+host share a successful read. Misses, errors and timeouts are never cached. A late result
+after invalidation is usable once by its in-flight request but never published,
+and an older generation cannot replace a newer
+observed generation for the same community. Off retains ordinary routing-only
+cache population and does no FI-policy fills.
+
+Cache fills take a shared transaction-scoped advisory lock keyed by normalized
+host in a dedicated namespace. Lock acquisition and the serving-row SELECT are
+separate statements in an explicit READ COMMITTED transaction. A contended fill
+refuses immediately; a statement has a 400 ms server-side timeout inside the
+500 ms overall budget. Waiters on the per-host fill share its successful result;
+when no result was cached, each waiter makes at most one lease read of its own
+inside that same budget, with no retry loop. Unmapped hosts remain 404.
+Each cold policy fill uses six database statements: BEGIN, isolation setup,
+statement-timeout setup, try-lock, row SELECT and COMMIT. Ordinary routing keeps
+its single plain serving-row query and a routing-only snapshot in the same
+bounded host cache. That snapshot cannot supply FI policy. A routing refresh
+preserves a fresh policy for the same tenant without extending its lease.
+
+Acceptance takes the corresponding exclusive host lock and waits 1.1 seconds
+before locking and checking lifecycle, host, owner and issuer. This drains every
+optional one-second lease across all pods BEFORE commit, without relying on
+Redis delivery or synchronized wall clocks. The extra 100 ms is a clock-rate
+margin. Lease duration and acceptance wait are compile-time fleet protocol
+constants; increasing the lease requires a coordinated writer rollout first.
+Existing receipt recovery skips this wait. Already-required targets need no
+lease drain. A host remapped during the wait fails the subsequent exact host
+precondition; the transaction cannot accept under a different lock key.
+
+Policy resolutions that start after acceptance commits therefore cannot use an
+optional lease for that community, even on a pod that missed invalidation.
+Admissions that resolved policy before commit can still be in flight, exactly
+as with primary reads; their completion and cancellation belong to BUZZ-512's
+generation-registration and drain fence. Cache expiry is not activation evidence.
+The acceptance wait blocks only new policy fills and competing acceptance for
+the host. Ordinary routing, archive and remap writers remain unblocked during
+the wait. Cold policy requests during that transition may return 503; upgrade
+acceptance is rare and this avoids allowing stale optional leases after commit.
+
+Relay acceptance, provisioning and archive/unarchive writes drop the local host
+snapshot and publish a best-effort Redis invalidation to other pods. An epoch
+fences fills that began before a local or received drop. Direct administrative
+database writes and missed notifications retain the one-second routing bound.
+Host remap, archive and deletion do not drain leases: cached tenant binding can
+lag those changes by up to one second, as ordinary host routing already does.
+Policy and tenant data always use the same cached row, including NIP-11
+descriptors and decorations. Issuer-binding and JWKS freshness keep their own
+existing bounds and checks; cached status never substitutes for those checks.
+
+`buzz_nip_fi_policy_cache_hits_total` and `buzz_nip_fi_policy_cache_misses_total`
+measure cache use; `buzz_nip_fi_policy_reads_total` counts fill attempts and
+`buzz_nip_fi_policy_read_seconds` measures completed source reads. A warm ordinary
+protected request or discovery request performs no policy writer read. Root and
+audio upgrades intentionally keep a final uncached authoritative tenant/policy
+binding after the early evidence gate: one read on a cache hit, two on a cold
+successful upgrade. Its optional-to-required recheck preserves the unarchive and
+host-remap race fence, as well as early refusal and deadline ordering.
 
 Issuer-binding/JWKS caches keep their existing bounds; unavailable dependencies
 refuse required admission, rather than treating it as optional.
@@ -261,13 +314,24 @@ activation; the operator receipt remains pending until that evidence is recorded
 ### Staging and containment
 
 Outside Off, this changes every serving host, including free hosts: protected
-routes and discovery require a primary policy read. Off retains ordinary routing. Unmapped discovery previously could
+routes and discovery require a valid primary policy lease. Off retains ordinary routing. Unmapped discovery previously could
 return a generic document; it now returns 404. Policy failures return 503.
 Database-source startup loads its FI binding snapshot only in evaluating modes;
 Off does not load it. A failed load still fails startup in Shadow or Enforce. The local dependency gauge
 `buzz_nip_fi_required_admission_ready` must be 1 before accepting any upgrade;
 it covers verifier, deny map and finite lifetime, not fleet baseline verification.
 Binding and JWKS readiness must also be verified through a signed request.
+
+Keep `BUZZ_NIP_FI_UPGRADES_ENABLED=false` throughout a mixed-version rollout
+until EVERY acceptance path implements the host-lock lease-drain protocol.
+Uncached serving pods can coexist with caching pods, but an old acceptance
+writer cannot safely coexist with cached optional leases. Before rolling an
+acceptance writer back or removing this protocol, disable new acceptance on
+every writer and verify that disablement; keep the lease-aware writers until
+in-flight acceptance has finished. Disabling new calls does not undo existing
+requirements. Existing required-community enforcement and BUZZ-512 activation
+and revocation prerequisites still apply. Never enable an older acceptance path
+while any caching pod serves optional communities.
 
 Keep `BUZZ_NIP_FI_UPGRADES_ENABLED=false` during the initial staging rollout.
 Start with zero required rows and record a 30-minute baseline using representative
