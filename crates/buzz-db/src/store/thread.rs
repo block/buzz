@@ -661,7 +661,7 @@ pub(crate) async fn get_channel_window_on(
     // what is still missing.
     let kinds: Option<Vec<i32>> =
         kind_filter.map(|ks| ks.iter().filter_map(|&k| i32::try_from(k).ok()).collect());
-    let floor = crate::store::recent_pass::floor_for(
+    let split = crate::store::recent_pass::split_for(
         Utc::now(),
         kinds.as_deref(),
         None,
@@ -685,7 +685,7 @@ pub(crate) async fn get_channel_window_on(
         }
         q.bind(pass_limit)
     };
-    let mut db_rows = match floor {
+    let mut db_rows = match split {
         None => {
             crate::event::fetch_with_read_deadline(
                 &mut *conn,
@@ -694,12 +694,12 @@ pub(crate) async fn get_channel_window_on(
             )
             .await?
         }
-        Some(floor) => {
+        Some(split) => {
             // One snapshot and one deadline for both passes (see
             // `ReadTransaction`).
             let mut read = crate::event::ReadTransaction::begin(conn, deadline).await?;
             let mut rows = Vec::new();
-            let mut pass = Some((Range::Recent(floor), probe_limit));
+            let mut pass = Some((Range::Recent(split), probe_limit));
             while let Some((range, pass_limit)) = pass {
                 rows.extend(read.fetch(pass_query(range, pass_limit)).await?);
                 pass = crate::store::recent_pass::next(range, rows.len(), probe_limit);
