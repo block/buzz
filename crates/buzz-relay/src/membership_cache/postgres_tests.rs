@@ -181,6 +181,17 @@ async fn oversized_membership_reads_are_bounded_and_point_checks_fail_closed() {
         .bind(community.as_uuid()).bind(&channels).bind(&user).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey) SELECT $1, id, $3 FROM unnest($2::uuid[]) AS id")
         .bind(community.as_uuid()).bind(&channels[..MAX_MEMBERSHIPS]).bind(&user).execute(&pool).await.unwrap();
+    // The isolated database starts without planner statistics. Refresh them
+    // after bulk seeding so a quadratic join plan does not consume the
+    // snapshot's freshness window before this cache-boundary assertion.
+    sqlx::query("ANALYZE channels")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE channel_members")
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(state
         .is_member_cached(community, channels[0], &user)
         .await
