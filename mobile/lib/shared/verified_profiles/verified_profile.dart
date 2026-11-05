@@ -294,22 +294,26 @@ VerifiedProfile? parseVerifiedProfile(
   );
 }
 
+/// The verified names besides the display name that the relay's profile
+/// search matches: the full name, when there is one, and the username.
+List<String> verifiedAliases(VerifiedProfile profile) => [
+  ?profile.fullName,
+  profile.username,
+];
+
 /// One person a profile search found: their newest kind:0, or, for someone
-/// with none, the display name of their verified profile.
+/// with none, their verified profile.
 typedef SearchedPerson = ({
   String pubkey,
   NostrEvent? profile,
-  String? verifiedName,
+  VerifiedProfile? verified,
 });
 
 /// The people a profile search page found, in the relay's order: each
 /// person's newest kind:0, and for a person with none, the head [authority]
 /// signed, when it is an active verified profile. Any other event finds
-/// nobody.
-///
-/// Like the kind:0 events beside it, a head here is the relay's own answer
-/// and its signature is not checked, so its name is a plain name. The
-/// verified mark comes only from [parseVerifiedProfile] over a proven head.
+/// nobody. Callers must have verified each head's id and signature
+/// ([VerifiedProfilesNotifier.searched] does).
 List<SearchedPerson> searchedPeople(
   List<NostrEvent> events,
   VerifiedProfileAuthority? authority,
@@ -335,9 +339,9 @@ List<SearchedPerson> searchedPeople(
   return [
     for (final pubkey in order)
       if (profiles[pubkey] case final profile?)
-        (pubkey: pubkey, profile: profile, verifiedName: null)
+        (pubkey: pubkey, profile: profile, verified: null)
       else if (parseVerifiedProfile(heads[pubkey]!, authority!, checked: false)
           case final verified?)
-        (pubkey: pubkey, profile: null, verifiedName: verified.displayName),
+        (pubkey: pubkey, profile: null, verified: verified),
   ];
 }

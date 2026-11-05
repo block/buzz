@@ -49,15 +49,17 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
 
       // Each person once, by their newest kind:0; someone with none, by
       // their verified head.
-      final authority = ref.read(verifiedProfilesProvider.notifier).authority;
+      final found = await ref
+          .read(verifiedProfilesProvider.notifier)
+          .searched(events);
       final people = [
-        for (final person in searchedPeople(events, authority))
+        for (final person in found)
           if (person.profile case final profile?)
             _profileFromEvent(profile)
           else
             UserProfile(
               pubkey: person.pubkey,
-              displayName: person.verifiedName,
+              displayName: person.verified?.displayName,
             ),
       ];
       // A search that outlived its query or community is not kept.
@@ -314,7 +316,7 @@ List<MentionCandidate> _chooserCandidates(
   candidates = [
     for (final candidate in candidates)
       switch (verified[candidate.pubkey.toLowerCase()]) {
-        final profile? => candidate.withVerifiedName(profile.displayName),
+        final profile? => candidate.withVerifiedName(profile),
         null => candidate,
       },
   ];
@@ -357,7 +359,7 @@ List<UserProfile> verifiedMentionMatches(
           pubkey: key,
           name: value.displayName,
           label: value.displayName,
-          aliases: [value.displayName],
+          aliases: [value.displayName, ...verifiedAliases(value)],
           member: false,
         ),
       ], query).isNotEmpty)

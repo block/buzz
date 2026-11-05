@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -5,7 +7,8 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/verified_profiles/verified_profile.dart';
-import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_discovery_fetch.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_proof.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -42,16 +45,6 @@ class _VerifiedOnlySession extends RecipientDirectorySession {
     int limit = 50,
     Duration timeout = const Duration(seconds: 8),
   }) async => heads;
-}
-
-final _relayAuthority = authority;
-
-class _Verified extends VerifiedProfilesNotifier {
-  @override
-  Map<String, VerifiedProfile> build() => const {};
-
-  @override
-  VerifiedProfileAuthority? get authority => _relayAuthority;
 }
 
 class _Actions extends Fake implements ChannelActions {
@@ -118,16 +111,31 @@ void main() {
   });
 
   testWidgets(
-    'finds a verified person with no profile by verified name and adds them',
+    'finds a verified person with no profile by full name once discovery ends',
     (tester) async {
+      // The real shape: the display name is the username.
       final gabi = signedProjection(
-        profileTags(subjectA, name: 'Gabi Lilienfeld', username: 'glilienfeld'),
+        profileTags(
+          subjectA,
+          name: 'glilienfeld',
+          username: 'glilienfeld',
+          fullName: 'Gabi Lilienfeld',
+        ),
       );
-      // Another key's head for subjectB names nobody.
-      final forged = signedProjection(
-        profileTags(subjectB, name: 'Gabi Forged'),
+      // Neither of these finds anyone: another key's head, and a head that
+      // claims the relay key with a signature it never made.
+      final otherKey = signedProjection(
+        profileTags(subjectB, name: 'gabi_other'),
         author: relayKeysOther(),
       );
+      final claimed = signedProjection(
+        profileTags('c' * 64, name: 'gabi_forged'),
+      );
+      final forged = NostrEvent.fromJson({
+        ...claimed.toJson(),
+        'sig': '0' * 128,
+      });
+      final discovery = Completer<VerifiedProfileDiscovery>();
       final actions = _Actions();
       await tester.pumpWidget(
         ProviderScope(
@@ -136,9 +144,17 @@ void main() {
             channelActionsProvider.overrideWithValue(actions),
             channelMembersProvider('channel').overrideWith((ref) async => []),
             relaySessionProvider.overrideWith(
-              () => _VerifiedOnlySession([gabi, forged]),
+              () => _VerifiedOnlySession([gabi, otherKey, forged]),
             ),
-            verifiedProfilesProvider.overrideWith(_Verified.new),
+            verifiedProfileDiscoveryFetchProvider.overrideWith(
+              (ref) =>
+                  () => discovery.future,
+            ),
+            verifiedProfileProofCheckerProvider.overrideWithValue(
+              (events) async => [
+                for (final e in events) hasVerifiedEventProof(e),
+              ],
+            ),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -158,11 +174,14 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
+      // The search waits for the relay to say who signs verified profiles.
+      expect(find.text('glilienfeld'), findsNothing);
+      discovery.complete(VerifiedProfilesEnabled(authority));
       await tester.pumpAndSettle();
 
-      expect(find.text('Gabi Lilienfeld'), findsOneWidget);
-      expect(find.text('Gabi Forged'), findsNothing);
-      await tester.tap(find.text('Gabi Lilienfeld'));
+      expect(find.text('glilienfeld'), findsOneWidget);
+      expect(find.textContaining('gabi_'), findsNothing);
+      await tester.tap(find.text('glilienfeld'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Add member'));
       await tester.pumpAndSettle();

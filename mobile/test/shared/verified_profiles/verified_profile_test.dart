@@ -239,7 +239,7 @@ void main() {
     ];
     String row(SearchedPerson person) =>
         '${person.pubkey[0]}:'
-        '${person.verifiedName ?? 'kind0 ${person.profile!.content}'}';
+        '${person.verified?.displayName ?? 'kind0 ${person.profile!.content}'}';
     expect(searchedPeople(events, authority).map(row), [
       'c:Gabi Lilienfeld',
       'a:kind0 {"name":"Ada"}',

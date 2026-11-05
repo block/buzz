@@ -273,18 +273,15 @@ List<String> relayMemberPubkeysFromEvents(List<NostrEvent> events) {
   return pubkeys.toList();
 }
 
-/// Converts profile search events into a deduplicated people directory.
+/// Converts the people a profile search found into a directory.
 ///
 /// The directory listing is alphabetized. Search results pass
 /// [alphabetize] false to keep the relay's order, which ranks the best name
-/// match first; each person keeps the place of their first result. With
-/// [authority], a person with no kind:0 is found by the verified head it
-/// signed ([searchedPeople]).
+/// match first.
 @visibleForTesting
-List<DirectoryUser> directoryUsersFromProfileEvents(
-  List<NostrEvent> events, {
+List<DirectoryUser> directoryUsersFromSearch(
+  List<SearchedPerson> people, {
   bool alphabetize = true,
-  VerifiedProfileAuthority? authority,
 }) {
   DirectoryUser fromProfile(String pubkey, NostrEvent event) {
     final profile = ProfileData.fromEvent(event);
@@ -298,11 +295,14 @@ List<DirectoryUser> directoryUsersFromProfileEvents(
   }
 
   final users = [
-    for (final person in searchedPeople(events, authority))
+    for (final person in people)
       if (person.profile case final event?)
         fromProfile(person.pubkey, event)
       else
-        DirectoryUser(pubkey: person.pubkey, displayName: person.verifiedName),
+        DirectoryUser(
+          pubkey: person.pubkey,
+          displayName: person.verified?.displayName,
+        ),
   ];
   if (alphabetize) {
     users.sort((a, b) {

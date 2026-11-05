@@ -70,6 +70,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   bool _discoveryFresh = false;
   bool _connected = false;
   bool _discoveryInFlight = false;
+  Completer<void>? _discoveryDone;
   bool _scheduled = false;
   int _generation = 0;
   int _interest = 0;
@@ -123,8 +124,44 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     _checked.clear();
   }
 
-  /// The key that signs verified profiles, while the relay offers them.
-  VerifiedProfileAuthority? get authority => _enabled ? _authority : null;
+  /// The people a profile search found ([searchedPeople]). Waits for
+  /// discovery when the relay's authority is not known yet, and keeps only
+  /// heads with a valid signature. A kept head also names its subject here,
+  /// so the search's rows show their verified names at once.
+  Future<List<SearchedPerson>> searched(List<NostrEvent> events) {
+    final heads = [
+      for (final event in events)
+        if (event.kind == verifiedProfileKind) event,
+    ];
+    // Without heads there is nothing to wait for or prove: answer at once.
+    if (heads.isEmpty) return SynchronousFuture(searchedPeople(events, null));
+    return _searchedWithHeads(events, heads);
+  }
+
+  Future<List<SearchedPerson>> _searchedWithHeads(
+    List<NostrEvent> events,
+    List<NostrEvent> heads,
+  ) async {
+    final generation = _generation;
+    if (_authority == null && !_discoveryFresh) {
+      unawaited(_refreshDiscovery(generation));
+      await _discoveryDone?.future;
+    }
+    final authority = _enabled ? _authority : null;
+    if (authority == null) return searchedPeople(events, null);
+    final proven = Set<NostrEvent>.identity()..addAll(await _prove(heads));
+    if (generation == _generation && authority == _authority && ref.mounted) {
+      track([
+        for (final head in proven) ?verifiedProfileSubject(head, authority),
+      ]);
+      _accept(proven.toList(), authority);
+      _publish();
+    }
+    return searchedPeople([
+      for (final event in events)
+        if (event.kind != verifiedProfileKind || proven.contains(event)) event,
+    ], authority);
+  }
 
   /// Marks [pubkeys] relevant. Repeated calls coalesce into one scheduling pass.
   void track(Iterable<String> pubkeys) {
@@ -175,6 +212,7 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
   Future<void> _refreshDiscovery(int generation) async {
     if (_discoveryInFlight || generation != _generation || !_connected) return;
     _discoveryInFlight = true;
+    final done = _discoveryDone = Completer<void>();
     try {
       final result = await ref.read(verifiedProfileDiscoveryFetchProvider)();
       if (generation != _generation) return;
@@ -199,6 +237,8 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
       if (generation == _generation) _discoveryFresh = false;
       debugPrint('[VerifiedProfiles] discovery failed: $error');
     } finally {
+      if (identical(_discoveryDone, done)) _discoveryDone = null;
+      done.complete();
       if (generation == _generation) {
         _discoveryInFlight = false;
         _armRefresh(generation);
