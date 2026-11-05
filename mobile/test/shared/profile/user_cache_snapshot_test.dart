@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/profile/profile_snapshot.dart';
@@ -40,7 +41,7 @@ void main() {
   test('profiles persist across launches and revalidate once', () async {
     // First launch: nothing on disk, so the name loads from the relay.
     final first = _ProfileSession([
-      [_profile('v1', 1, 'Alice')],
+      Future.value([_profile('v1', 1, 'Alice')]),
     ]);
     final launch1 = cacheScope(first);
     final cache1 = launch1.read(userCacheProvider.notifier);
@@ -68,18 +69,28 @@ void main() {
 
     // Third launch, relay reachable: one revalidation picks up the rename,
     // and later lookups are served from memory.
+    final held = Completer<List<NostrEvent>>();
     final online = _ProfileSession([
-      [_profile('v2', 2, 'Alice Renamed')],
+      held.future,
+      Future.value([_profile('v2', 2, 'Alice Renamed')]),
     ]);
     final launch3 = cacheScope(online);
     final cache3 = launch3.read(userCacheProvider.notifier);
     expect(cache3.get(_alice)?.displayName, 'Alice');
     await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(online.requests, 1);
+    // A gate resolving while that revalidation is on the wire must not trust
+    // the restored profile; it confirms with the relay itself.
+    final resolved = await cache3.resolve(const [_alice]);
+    expect(resolved[_alice]?.displayName, 'Alice Renamed');
+    expect(online.requests, 2);
+    held.complete(const []);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
     expect(cache3.state[_alice]?.displayName, 'Alice Renamed');
     cache3.get(_alice);
     await cache3.preload(const [_alice]);
     await Future<void>.delayed(const Duration(milliseconds: 80));
-    expect(online.requests, 1);
+    expect(online.requests, 2);
     launch3.dispose();
     await pumpEventQueue();
 
@@ -147,7 +158,7 @@ class _Config extends RelayConfigNotifier {
 class _ProfileSession extends RelaySessionNotifier {
   _ProfileSession(this._results, {this.fail = false});
 
-  final List<List<NostrEvent>> _results;
+  final List<Future<List<NostrEvent>>> _results;
   final bool fail;
   int requests = 0;
 
@@ -161,6 +172,6 @@ class _ProfileSession extends RelaySessionNotifier {
   }) async {
     requests++;
     if (fail) throw StateError('offline');
-    return _results.isEmpty ? const [] : _results.removeAt(0);
+    return _results.isEmpty ? const [] : await _results.removeAt(0);
   }
 }

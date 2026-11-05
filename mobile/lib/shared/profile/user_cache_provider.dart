@@ -33,6 +33,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   /// Restored from the snapshot and not yet checked with the relay this scope.
   final Set<String> _unrevalidated = {};
+
+  /// Lookups whose batch query is on the wire.
+  final Set<String> _inFlight = {};
   void Function()? _snapshotWriter;
   Timer? _snapshotTimer;
   Map<String, UserProfile> _latest = const {};
@@ -43,6 +46,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _generation++;
     _profileEventOrders.clear();
     _unrevalidated.clear();
+    _inFlight.clear();
     ref.onDispose(() {
       _generation++;
       _pending.clear();
@@ -229,9 +233,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       ref.read(verifiedProfilesProvider.notifier).track(pubkeys);
 
   void _scheduleFetch(String pubkey) {
-    if (_isCached(pubkey) || _pending.contains(pubkey)) return;
-    // One revalidation per scope, whether or not the relay still has it.
-    _unrevalidated.remove(pubkey);
+    if (_isCached(pubkey) ||
+        _pending.contains(pubkey) ||
+        _inFlight.contains(pubkey)) {
+      return;
+    }
     _pending.add(pubkey);
     _batchCompleter ??= Completer<bool>();
     _scheduleBatch();
@@ -247,6 +253,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _batchCompleter = null;
 
     _flushInFlight = true;
+    _inFlight.addAll(pubkeys);
     final generation = _generation;
     var succeeded = false;
     try {
@@ -259,6 +266,8 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         );
         if (!_isCurrent(generation)) return;
         if (!await _verifyAndMerge(events, generation)) return;
+        // Confirmed by the relay, whether or not it still has a profile.
+        _unrevalidated.removeAll(batch);
         remaining -= batch.length;
         if (remaining == 0) {
           // All requested pages are ready.
@@ -269,10 +278,8 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     } catch (_) {
       // Silently fail — non-gating callers will just show pubkeys, or the
       // restored profile, which the next lookup revalidates again.
-      if (_isCurrent(generation)) {
-        _unrevalidated.addAll(pubkeys.where(state.containsKey));
-      }
     } finally {
+      if (_isCurrent(generation)) _inFlight.removeAll(pubkeys);
       if (completer != null && !completer.isCompleted) {
         completer.complete(succeeded);
       }
