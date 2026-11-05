@@ -389,40 +389,34 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
-/// The head read and supersede for one replaceable coordinate. `$4` binds the
-/// channel only when `in_channel`.
+/// The `WHERE` scope of one replaceable coordinate's head read and supersede.
+/// `in_channel` binds the channel as `$4`; `global` binds three parameters.
 ///
 /// The channel predicate is spelled per case, never `IS NOT DISTINCT FROM $4`:
 /// a btree cannot use that as an index condition, so the read would filter
 /// every live row of the (kind, pubkey) across all of its channels. The relay
 /// signs every channel's state events with one key, so each channel-state
 /// write would scan the whole community's.
-fn replacement_sql(in_channel: bool) -> (&'static str, &'static str) {
-    if in_channel {
-        (
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id = $4 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-            superseded_with_mentions_sql!(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                 AND channel_id = $4 AND deleted_at IS NULL"
-            ),
+macro_rules! replacement_scope {
+    (in_channel) => {
+        "WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id = $4 AND deleted_at IS NULL"
+    };
+    (global) => {
+        "WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id IS NULL AND deleted_at IS NULL"
+    };
+}
+
+/// The newest live row of one replaceable coordinate.
+macro_rules! replacement_head_sql {
+    ($scope:tt) => {
+        concat!(
+            "SELECT created_at, id FROM events ",
+            replacement_scope!($scope),
+            " ORDER BY created_at DESC, id ASC LIMIT 1"
         )
-    } else {
-        (
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-             AND channel_id IS NULL AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-            superseded_with_mentions_sql!(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                 AND channel_id IS NULL AND deleted_at IS NULL"
-            ),
-        )
-    }
+    };
 }
 
 impl Db {
@@ -479,7 +473,23 @@ impl Db {
 
                 // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
                 // historical data where prior bugs may have left multiple live rows.
-                let (head_sql, supersede_sql) = replacement_sql(channel_id.is_some());
+                let (head_sql, supersede_sql) = if channel_id.is_some() {
+                    (
+                        replacement_head_sql!(in_channel),
+                        superseded_with_mentions_sql!(concat!(
+                            "UPDATE events SET deleted_at = NOW() ",
+                            replacement_scope!(in_channel)
+                        )),
+                    )
+                } else {
+                    (
+                        replacement_head_sql!(global),
+                        superseded_with_mentions_sql!(concat!(
+                            "UPDATE events SET deleted_at = NOW() ",
+                            replacement_scope!(global)
+                        )),
+                    )
+                };
                 let mut head = sqlx::query_as(head_sql)
                     .bind(community_id.as_uuid())
                     .bind(kind_i32)
@@ -949,8 +959,25 @@ mod postgres_tests {
         .await
         .expect("pick a channel");
 
-        for in_channel in [true, false] {
-            let (head_sql, supersede_sql) = replacement_sql(in_channel);
+        let statements = [
+            (
+                true,
+                replacement_head_sql!(in_channel),
+                superseded_with_mentions_sql!(concat!(
+                    "UPDATE events SET deleted_at = NOW() ",
+                    replacement_scope!(in_channel)
+                )),
+            ),
+            (
+                false,
+                replacement_head_sql!(global),
+                superseded_with_mentions_sql!(concat!(
+                    "UPDATE events SET deleted_at = NOW() ",
+                    replacement_scope!(global)
+                )),
+            ),
+        ];
+        for (in_channel, head_sql, supersede_sql) in statements {
             for sql in [head_sql, supersede_sql] {
                 let explain = format!("EXPLAIN {sql}");
                 let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(explain))
