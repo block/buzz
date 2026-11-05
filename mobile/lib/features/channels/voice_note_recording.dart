@@ -842,8 +842,17 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           }
         } else {
           await _load(
-            () async =>
-                _player.setUrl(remote.url, headers: await remote.headers()),
+            () async {
+              final headers = await remote.headers();
+              // A cancel or new source while a slow assertion renews must
+              // not start the stale native load.
+              if (_disposed ||
+                  sourceGeneration != _sourceGeneration ||
+                  playbackOperationGeneration != _playbackOperationGeneration) {
+                return null;
+              }
+              return _player.setUrl(remote.url, headers: headers);
+            },
             fallbackDuration: remote.fallbackDuration,
             sourceGeneration: sourceGeneration,
             playbackOperationGeneration: playbackOperationGeneration,
