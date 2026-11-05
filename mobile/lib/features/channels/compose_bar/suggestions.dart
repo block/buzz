@@ -6,7 +6,7 @@ const _mentionRowHeight = 59.0;
 /// The chooser shows at most three rows, then scrolls.
 const _mentionChooserHeight = _mentionRowHeight * 3 + Grid.xxs * 2;
 
-class _MentionSuggestions extends StatelessWidget {
+class _MentionSuggestions extends ConsumerWidget {
   final List<MentionCandidate> suggestions;
 
   /// Shown rows that can no longer be chosen. They stay in place, disabled.
@@ -42,7 +42,10 @@ class _MentionSuggestions extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Only agents the owner's registry confirms, never a failed listing.
+    final remote =
+        ref.watch(availableRemoteAgentsProvider).value ?? const <String>{};
     return Material(
       key: const ValueKey('mention-suggestions-popover'),
       type: MaterialType.card,
@@ -54,7 +57,7 @@ class _MentionSuggestions extends StatelessWidget {
       clipBehavior: Clip.hardEdge,
       child: Stack(
         children: [
-          _rows(context),
+          _rows(context, remote),
           if (searching)
             const Positioned(
               top: 0,
@@ -72,7 +75,7 @@ class _MentionSuggestions extends StatelessWidget {
     );
   }
 
-  Widget _rows(BuildContext context) {
+  Widget _rows(BuildContext context, Set<String> remote) {
     return ConstrainedBox(
       constraints: BoxConstraints(
         minHeight: reserveHeight ? _mentionChooserHeight : 0,
@@ -143,6 +146,7 @@ class _MentionSuggestions extends StatelessWidget {
             subtitle: _MentionSuggestionInfo.build(
               context,
               candidate: candidate,
+              remote: candidate.isAgent && remote.contains(candidate.pubkey),
               currentPubkey: currentPubkey,
               isDmChannel: isDmChannel,
               userCache: userCache,
@@ -159,11 +163,13 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "managed by …" / "not in channel" (or "not in DM").
+/// for human admins), then "Remote" for a confirmed remote agent, then
+/// "managed by …" / "not in channel" (or "not in DM").
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
     required MentionCandidate candidate,
+    required bool remote,
     required String? currentPubkey,
     required bool isDmChannel,
     required Map<String, UserProfile> userCache,
@@ -175,16 +181,12 @@ abstract final class _MentionSuggestionInfo {
     final outside = isDmChannel ? 'not in DM' : 'not in channel';
     final isAdmin = !candidate.isAgent && candidate.role == 'admin';
 
-    final String? detail;
-    if (ownerLabel != null && notInChannel) {
-      detail = 'managed by $ownerLabel \u00b7 $outside';
-    } else if (ownerLabel != null) {
-      detail = 'managed by $ownerLabel';
-    } else if (notInChannel) {
-      detail = outside;
-    } else {
-      detail = null;
-    }
+    final parts = [
+      if (remote) 'Remote',
+      if (ownerLabel != null) 'managed by $ownerLabel',
+      if (notInChannel) outside,
+    ];
+    final detail = parts.isEmpty ? null : parts.join(' \u00b7 ');
 
     if (!candidate.isAgent && !isAdmin && detail == null) return null;
 

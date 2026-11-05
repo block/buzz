@@ -29,6 +29,7 @@ import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -215,9 +216,11 @@ Widget _buildComposeBar({
   Future<List<UserProfile>> Function(String query)? searchPeople,
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
+  Set<String> remoteAgents = const <String>{},
 }) {
   return ProviderScope(
     overrides: [
+      availableRemoteAgentsProvider.overrideWith((ref) async => remoteAgents),
       if (ownedAgents != null)
         ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (ownedAgentsUnknown)
@@ -2116,6 +2119,45 @@ void main() {
         expect(popover(), findsNothing);
         await settleSearch(tester);
       });
+    });
+
+    testWidgets('marks only confirmed remote agents Remote in the @ menu', (
+      tester,
+    ) async {
+      final signer = nostr.Keys.generate();
+      final remote = _testAgent('e' * 64);
+      final local = _testAgent('f' * 64);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: remote.pubkey,
+              displayName: 'Cloud Bot',
+              respondTo: remote.respondTo,
+              channelIds: remote.channelIds,
+            ),
+            local,
+          ],
+          remoteAgents: {remote.pubkey},
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      Finder info(String name) => find.descendant(
+        of: find.ancestor(of: find.text(name), matching: find.byType(ListTile)),
+        matching: find.textContaining('not in channel'),
+      );
+      expect(
+        tester.widget<Text>(info('Cloud Bot')).data,
+        'Remote \u00b7 not in channel',
+      );
+      expect(tester.widget<Text>(info('Helper Bot')).data, 'not in channel');
     });
 
     testWidgets('dismisses mention suggestions in the selection frame', (
