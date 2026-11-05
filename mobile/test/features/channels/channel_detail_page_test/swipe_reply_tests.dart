@@ -1,6 +1,87 @@
 part of '../channel_detail_page_test.dart';
 
 void swipeReplyTests() {
+  // Solo agents answer at top level, so a Solo chat starts no threads.
+  Channel soloChannel() => Channel(
+    id: _channelId,
+    name: 'Solo',
+    channelType: 'stream',
+    visibility: 'private',
+    labels: const ['buzz.solo'],
+    description: '',
+    createdBy: 'self',
+    createdAt: DateTime(2026),
+    memberCount: 2,
+    isMember: true,
+  );
+
+  testWidgets('Solo chat offers no reply by swipe or message actions', (
+    tester,
+  ) async {
+    final channel = soloChannel();
+    final events = [
+      _textMsg(id: threadIdRoot, pubkey: 'agent', content: 'Agent answer'),
+    ];
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        channel: channel,
+        personalChat: true,
+        organization: Stream.value(const MeGroups()),
+        home: ChannelDetailPage(channel: channel),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+    final bubble = find
+        .descendant(of: row, matching: find.byType(LocalSendBubbleSurface))
+        .first;
+    final initial = tester.getTopLeft(row);
+    final gesture = await tester.startGesture(tester.getCenter(bubble));
+    await gesture.moveBy(const Offset(25, 0));
+    await gesture.moveBy(const Offset(150, 0));
+    await tester.pump();
+    expect(tester.getTopLeft(row), initial);
+    expect(find.byKey(const ValueKey('swipe-reply-circle')), findsNothing);
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(find.byType(ThreadDetailPage), findsNothing);
+
+    await tester.longPress(bubble);
+    await tester.pumpAndSettle();
+    expect(find.text('Copy link'), findsOneWidget);
+    expect(find.text('Reply'), findsNothing);
+  });
+
+  testWidgets('Solo thread is read-only', (tester) async {
+    final channel = soloChannel();
+    final events = [
+      _textMsg(id: threadIdRoot, pubkey: 'self', content: 'Old thread head'),
+    ];
+    final messages = formatTimeline(events);
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        messages: events,
+        channel: channel,
+        personalChat: true,
+        organization: Stream.value(const MeGroups()),
+        home: ThreadDetailPage(
+          threadHead: messages.first,
+          allMessages: messages,
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Old thread head'), findsOneWidget);
+    expect(find.byType(ComposeBar), findsNothing);
+  });
+
   for (final thread in [false, true]) {
     for (final own in [false, true]) {
       testWidgets(
