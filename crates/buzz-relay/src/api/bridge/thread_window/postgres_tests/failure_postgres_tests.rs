@@ -10,10 +10,11 @@ use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan, Layer
 
 // Pause the HTTP future after the first real auxiliary page completes. This
 // observes a production span rather than replacing the database or closure.
-// With a proxy, the first page's span close also pauses it. That runs inside
-// the request's poll, before the second page's query is written, so the second
-// page stays pending however fast the database answers.
-struct AuxPages(Arc<AtomicUsize>, Option<Arc<PausingProxy>>);
+// The first page's span close also pauses the proxy the request's database
+// connects through. That runs inside the request's poll, before the second
+// page's query is written, so the second page stays pending however fast the
+// database answers.
+struct AuxPages(Arc<AtomicUsize>, Arc<PausingProxy>);
 impl<S> Layer<S> for AuxPages
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
@@ -22,16 +23,14 @@ where
         if ctx.span(&id).unwrap().metadata().name() == "thread_window_aux"
             && self.0.fetch_add(1, Ordering::SeqCst) == 0
         {
-            if let Some(proxy) = &self.1 {
-                proxy.set_paused(true);
-            }
+            self.1.set_paused(true);
         }
     }
 }
 
 async fn pause_after_aux_page<F: Future>(
     request: F,
-    proxy: Option<Arc<PausingProxy>>,
+    proxy: Arc<PausingProxy>,
 ) -> std::pin::Pin<Box<impl Future<Output = F::Output>>> {
     let pages = Arc::new(AtomicUsize::new(0));
     let subscriber = tracing_subscriber::registry().with(AuxPages(pages.clone(), proxy));
@@ -58,6 +57,23 @@ async fn pause_after_aux_page<F: Future>(
         "barrier must precede closure completion"
     );
     request
+}
+
+// State for the paused request alone, whose production writer connects through
+// a proxy so `AuxPages` can hold its second writer page. The test still reads
+// through the fixture's direct `state.db` while the request is held; through
+// the proxy, that read would deadlock.
+async fn proxied_state(f: &Fixture) -> (Arc<AppState>, Arc<PausingProxy>) {
+    let database_url = crate::test_support::database_url();
+    let options: sqlx::postgres::PgConnectOptions = database_url.parse().unwrap();
+    let proxy =
+        Arc::new(PausingProxy::spawn(options.get_host().to_owned(), options.get_port()).await);
+    let mut url = url::Url::parse(&database_url).unwrap();
+    url.set_host(Some("127.0.0.1")).unwrap();
+    url.set_port(Some(proxy.port)).unwrap();
+    let mut state = (*f.state).clone();
+    state.db = production_db_at(url.into(), buzz_db::DbConfig::default()).await;
+    (Arc::new(state), proxy)
 }
 
 #[tokio::test]
@@ -92,11 +108,8 @@ async fn thread_window_bridge_restarts_both_aux_hops_after_replica_failure() {
     let mut filter = f.filter();
     filter["until"] = json!(f.root.created_at.as_secs() + 1);
     filter["before_id"] = json!("00".repeat(32));
-    let request = pause_after_aux_page(
-        f.post(&f.keys, "/query", json!([filter])),
-        Some(proxy.clone()),
-    )
-    .await;
+    let request =
+        pause_after_aux_page(f.post(&f.keys, "/query", json!([filter])), proxy.clone()).await;
     let held: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name=$1 AND xact_start IS NOT NULL")
         .bind(&reader_name).fetch_one(&f.pool).await.unwrap();
     assert_eq!(held, 1, "must actually hold the proved replica transaction");
@@ -218,7 +231,12 @@ async fn assert_aux_access_change(grant: bool) {
         "pre-transition visibility control"
     );
 
-    let request = pause_after_aux_page(f.post(&f.keys, "/query", json!([filter])), None).await;
+    let (state, proxy) = proxied_state(&f).await;
+    let request = pause_after_aux_page(
+        post(state, &f.host, &f.keys, "/query", json!([filter])),
+        proxy.clone(),
+    )
+    .await;
     set_access(&f, aux_channel, grant).await;
     let current = f
         .state
@@ -231,6 +249,7 @@ async fn assert_aux_access_change(grant: bool) {
         "requested channel stays authorized"
     );
     assert_eq!(current.contains(&aux_channel), grant);
+    proxy.set_paused(false);
     let (status, interrupted) = request.await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{interrupted}");
     assert_eq!(
@@ -355,8 +374,14 @@ async fn thread_window_batch_discards_earlier_windows_after_revocation() {
         let (status, before) = f.post(&f.keys, "/query", batch.clone()).await;
         assert_eq!(status, StatusCode::OK, "{before}");
         assert_eq!(ids(&before, Some(39007)).len(), 2);
-        let request = pause_after_aux_page(f.post(&f.keys, "/query", batch.clone()), None).await;
+        let (state, proxy) = proxied_state(&f).await;
+        let request = pause_after_aux_page(
+            post(state, &f.host, &f.keys, "/query", batch.clone()),
+            proxy.clone(),
+        )
+        .await;
         set_access(&f, f.channel, false).await;
+        proxy.set_paused(false);
         let (status, body) = request.await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert_eq!(
