@@ -140,10 +140,13 @@ Future<void> _presentIosEmojiPicker({
         if (url is! String) return const <String, String>{};
         // Native downloads bypass the hosted HTTP client, so add its relay
         // assertion here too: a hosted relay refuses media reads without it.
-        return <String, String>{
-          ...mediaAuth.headersFor(url),
-          ...await hostedAuth.headersForUrl(relayConfig, Uri.parse(url)),
-        };
+        // Await the assertion before minting the short-lived media proof so a
+        // slow refresh cannot age it.
+        final assertion = await hostedAuth.headersForUrl(
+          relayConfig,
+          Uri.parse(url),
+        );
+        return <String, String>{...mediaAuth.headersFor(url), ...assertion};
       case 'selected':
         final emoji = call.arguments;
         if (emoji is String && emoji.isNotEmpty) onSelect(emoji);
