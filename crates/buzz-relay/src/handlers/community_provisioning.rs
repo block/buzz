@@ -270,6 +270,9 @@ pub async fn provision_community(
         .transpose()?;
 
     if request.create_only {
+        if !state.config.community_creation_enabled {
+            return Err("community_creation_disabled".to_string());
+        }
         if nip_fi_policy.is_some_and(|policy| policy.is_reserved(&request.host)) {
             return Err(buzz_auth::BindRefusal::ReservedHost.to_string());
         }
@@ -321,11 +324,22 @@ pub async fn provision_community(
     // Legacy convergence mode remains available to deployment operators and
     // startup tooling. Clients provisioning on behalf of end users must use
     // create_only so an existing owner can never be rotated by a create race.
-    let record = state
-        .db
-        .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
-        .await
-        .map_err(|e| format!("failed to create community: {e}"))?;
+    let record = if state.config.community_creation_enabled {
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
+            .await
+            .map_err(|e| format!("failed to create community: {e}"))?
+    } else {
+        // Never call an inserting ensure/upsert after an existence check: the
+        // disabled path must be unable to create even if the host disappears.
+        state
+            .db
+            .existing_configured_community(&request.host)
+            .await
+            .map_err(|e| format!("failed to create community: {e}"))?
+            .ok_or_else(|| "community_creation_disabled".to_string())?
+    };
     state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     if record.created {
         record_binding_creation(
