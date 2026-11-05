@@ -296,17 +296,21 @@ against them; each cites the PRs where reviewers litigated it.
    - **Count its relay reads per client** and keep reconnect to a delta
      from the client's cursor, not a rebuild. One replay filter per
      channel meant ~306 filters per reconnect for a 300-channel client
-     (block/buzz-app#2308). Re-reading channels whose replay was already
-     complete is the same problem (block/buzz-app#2206).
+     (block/buzz-app#2308). Skip a repair read only when the replay proves
+     continuity and the client can reconcile every projection it touched;
+     otherwise keep the repair, bounded (block/buzz-app#2206).
    - **Jitter its start and back off on failure with a cap.** Spread the
      server side of a mass close, too (drain close jitter, PR #4542).
    - **Prefer an event-driven refresh with a long backstop over a short
      poll.** For example, a full channel-list re-read every 60 s became
      every 15 min (block/buzz-app#2215).
    - **On the relay, check every cache on a connect or auth path at a 0%
-     hit rate.** Concurrent misses for one key share one read. Entries must
-     survive a saturated pool: 1 s caches stamped before the pool wait
-     expired on insert, so storms ran uncached (PRs #8846, #9012).
+     hit rate.** Concurrent misses for one key share one read, with a
+     bounded wait and a fallback read if the leader fails or hangs. Date
+     each entry from when its read checked out a connection: stamped before
+     the pool wait, 1 s entries expired on insert and storms ran uncached;
+     stamped at insert, they would outlive their staleness bound (PRs
+     #8846, #9012).
      (PRs #4542, #8846, #9012; block/buzz-app#2206, #2215, #2308)
 
 ---
