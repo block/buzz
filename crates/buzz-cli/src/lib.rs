@@ -127,6 +127,7 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_FEDERATED_IDENTITY  NIP-FI assertion (compact JWS)  [optional]
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -146,6 +147,11 @@ struct Cli {
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
+
+    /// NIP-FI identity assertion (compact JWS), sent as
+    /// `Nostr-Federated-Identity: Bearer <jws>` on authenticated relay requests.
+    #[arg(long, env = "BUZZ_FEDERATED_IDENTITY", hide_env_values = true)]
+    federated_identity: Option<String>,
 
     /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
     /// or 'agent' (event reads without signature material). Defaults to
@@ -2263,7 +2269,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    let mut client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    if let Some(ref jws) = cli.federated_identity {
+        client = client.with_federated_identity(jws)?;
+    }
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
@@ -2713,7 +2722,9 @@ mod tests {
     /// Collect all args (recursing into subcommands) whose env var name looks
     /// like a credential but does NOT have `hide_env_values` set.
     fn collect_unhidden_secret_args(cmd: &clap::Command) -> Vec<(String, String)> {
-        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+        const SECRET_PATTERNS: &[&str] = &[
+            "KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH", "IDENTITY",
+        ];
 
         let mut violations: Vec<(String, String)> = Vec::new();
 
@@ -2734,7 +2745,7 @@ mod tests {
         violations
     }
 
-    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH/IDENTITY
     /// must set `hide_env_values = true` to prevent credential leakage in --help.
     #[test]
     fn secret_env_args_hide_their_values_in_help() {

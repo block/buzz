@@ -4,6 +4,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+use reqwest::header::HeaderValue;
 use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
@@ -521,6 +522,42 @@ pub struct BuzzClient {
     auth_tag: Option<Tag>,
     /// Raw JSON of the auth tag for the `x-auth-tag` HTTP header.
     auth_tag_json: Option<String>,
+    /// NIP-FI `Nostr-Federated-Identity` header value (`Bearer <jws>`).
+    federated_identity: Option<HeaderValue>,
+}
+
+/// Header carrying a NIP-FI assertion on HTTP requests and the WebSocket upgrade.
+const FEDERATED_IDENTITY_HEADER: &str = "nostr-federated-identity";
+
+/// Build the shared HTTP client with `redirect` as its redirect policy.
+fn build_http(redirect: reqwest::redirect::Policy) -> Result<reqwest::Client, CliError> {
+    reqwest::Client::builder()
+        .redirect(redirect)
+        .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
+        .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
+        .build()
+        .map_err(|e| CliError::Other(e.to_string()))
+}
+
+/// Follow redirects only within the origin (scheme, host, effective port) they
+/// started from, at most 10 hops, so a custom credential header never reaches
+/// another origin. A cross-origin redirect is returned to the caller unfollowed.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let next = attempt.url();
+        let same_origin = attempt.previous().first().is_some_and(|start| {
+            start.scheme() == next.scheme()
+                && start.host_str() == next.host_str()
+                && start.port_or_known_default() == next.port_or_known_default()
+        });
+        if !same_origin {
+            attempt.stop()
+        } else if attempt.previous().len() > 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
 }
 
 impl BuzzClient {
@@ -539,18 +576,31 @@ impl BuzzClient {
         auth_tag: Option<Tag>,
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
-        let http = reqwest::Client::builder()
-            .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
-            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
-            .build()
-            .map_err(|e| CliError::Other(e.to_string()))?;
         Ok(Self {
-            http,
+            http: build_http(reqwest::redirect::Policy::default())?,
             relay_url,
             keys,
             auth_tag,
             auth_tag_json,
+            federated_identity: None,
         })
+    }
+
+    /// Attach the NIP-FI assertion `jws` (a compact JWS) to every authenticated
+    /// relay request and WebSocket upgrade, and keep redirects within the
+    /// relay's origin so the assertion never leaves it. An empty `jws` leaves
+    /// the client unchanged.
+    pub fn with_federated_identity(mut self, jws: &str) -> Result<Self, CliError> {
+        if jws.is_empty() {
+            return Ok(self);
+        }
+        let mut value = HeaderValue::from_str(&format!("Bearer {jws}")).map_err(|_| {
+            CliError::Auth("BUZZ_FEDERATED_IDENTITY is not a valid header value".into())
+        })?;
+        value.set_sensitive(true);
+        self.http = build_http(same_origin_redirects())?;
+        self.federated_identity = Some(value);
+        Ok(self)
     }
 
     /// Get the keypair.
@@ -607,12 +657,17 @@ impl BuzzClient {
         Ok(event)
     }
 
-    /// Attach the `x-auth-tag` header if configured (NIP-OA relay membership delegation).
-    fn with_auth_tag(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.auth_tag_json {
-            Some(ref json) => req.header("x-auth-tag", json),
-            None => req,
+    /// Attach the configured relay credentials that accompany NIP-98 auth: the
+    /// `x-auth-tag` header (NIP-OA relay membership delegation) and the
+    /// `Nostr-Federated-Identity` header (NIP-FI assertion).
+    fn with_relay_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref json) = self.auth_tag_json {
+            req = req.header("x-auth-tag", json);
         }
+        if let Some(ref value) = self.federated_identity {
+            req = req.header(FEDERATED_IDENTITY_HEADER, value.clone());
+        }
+        req
     }
 
     /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures
@@ -798,7 +853,7 @@ impl BuzzClient {
             async move {
                 let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
                 let resp = self
-                    .with_auth_tag(
+                    .with_relay_auth(
                         self.http
                             .post(&url)
                             .header("Authorization", auth)
@@ -828,7 +883,7 @@ impl BuzzClient {
             async move {
                 let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
                 let resp = self
-                    .with_auth_tag(
+                    .with_relay_auth(
                         self.http
                             .post(&url)
                             .header("Authorization", auth)
@@ -856,7 +911,7 @@ impl BuzzClient {
             async move {
                 let auth = sign_nip98(&self.keys, "GET", &url, None)?;
                 let resp = self
-                    .with_auth_tag(self.http.get(&url).header("Authorization", auth))
+                    .with_relay_auth(self.http.get(&url).header("Authorization", auth))
                     .send()
                     .await?;
                 self.handle_response(resp).await
@@ -886,7 +941,7 @@ impl BuzzClient {
             async move {
                 let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
                 let resp = self
-                    .with_auth_tag(
+                    .with_relay_auth(
                         self.http
                             .post(&url)
                             .header("Authorization", auth)
@@ -923,7 +978,7 @@ impl BuzzClient {
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
             .build()?;
         let response = self
-            .with_auth_tag(
+            .with_relay_auth(
                 http.post(&url)
                     .header("Authorization", auth)
                     .header("Content-Type", "application/json")
@@ -991,7 +1046,7 @@ impl BuzzClient {
             // event ID, keeping retries safe against the relay's replay guard.
             let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
             let send_result: Result<reqwest::Response, CliError> = self
-                .with_auth_tag(
+                .with_relay_auth(
                     self.http
                         .post(&url)
                         .header("Authorization", auth)
@@ -1143,7 +1198,7 @@ impl BuzzClient {
                     // event ID, keeping retries safe against the relay's replay guard.
                     let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
                     let resp = self
-                        .with_auth_tag(
+                        .with_relay_auth(
                             self.http
                                 .post(&url)
                                 .header("Authorization", auth)
@@ -1176,7 +1231,8 @@ impl BuzzClient {
     ///
     /// The relay accepts only typing (kind:20002) of the ephemeral kinds
     /// (20000–29999) over HTTP. Delegates to
-    /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
+    /// `buzz_ws_client::publish_event` which handles connect (with the NIP-FI
+    /// assertion on the upgrade, if configured), NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
@@ -1184,10 +1240,20 @@ impl BuzzClient {
         // additional overhead absorbed by this budget.
         // See buzz_ws_client::{AUTH_CHALLENGE_TIMEOUT_SECS, AUTH_OK_TIMEOUT_SECS,
         // PUBLISH_OK_TIMEOUT_SECS} for the inner ceilings.
-        let ok =
-            buzz_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 75)
-                .await
-                .map_err(|e| CliError::Other(e.to_string()))?;
+        let mut headers = buzz_ws_client::HeaderMap::new();
+        if let Some(ref value) = self.federated_identity {
+            headers.insert(FEDERATED_IDENTITY_HEADER, value.clone());
+        }
+        let ok = buzz_ws_client::publish_event(
+            &ws_url,
+            event,
+            &self.keys,
+            self.auth_tag.as_ref(),
+            headers,
+            75,
+        )
+        .await
+        .map_err(|e| CliError::Other(e.to_string()))?;
 
         if !ok.accepted {
             return Err(CliError::Relay {
@@ -1265,7 +1331,7 @@ impl BuzzClient {
                     let auth_header =
                         sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                     let resp = self
-                        .with_auth_tag(
+                        .with_relay_auth(
                             self.http
                                 .put(&url)
                                 .timeout(upload_timeout)
@@ -1311,7 +1377,7 @@ impl BuzzClient {
             async move {
                 let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                 let resp = self
-                    .with_auth_tag(
+                    .with_relay_auth(
                         self.http
                             .put(&legacy_url)
                             .timeout(upload_timeout)
@@ -1339,7 +1405,7 @@ impl BuzzClient {
         // Use a dedicated client: 120 s timeout, no redirect forwarding.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
-            // Do not forward Authorization or x-auth-tag to redirect targets.
+            // Do not forward relay credentials to redirect targets.
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| CliError::Other(format!("http client init failed: {e}")))?;
@@ -1349,7 +1415,7 @@ impl BuzzClient {
             async move {
                 let auth_header = sign_blossom_get(&self.keys, &url)?;
                 let resp = self
-                    .with_auth_tag(client.get(&url).header("Authorization", auth_header))
+                    .with_relay_auth(client.get(&url).header("Authorization", auth_header))
                     .send()
                     .await?;
                 if !resp.status().is_success() {
@@ -2602,7 +2668,7 @@ mod tests {
     }
 
     #[test]
-    fn with_auth_tag_sets_header_when_configured() {
+    fn with_relay_auth_sets_auth_tag_header_when_configured() {
         let keys = Keys::generate();
         let (auth_tag, auth_json) = make_auth_tag();
         let client = BuzzClient::new(
@@ -2614,7 +2680,7 @@ mod tests {
         .unwrap();
 
         let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
+        let req = client.with_relay_auth(req);
         let built = req.build().unwrap();
         let header = built
             .headers()
@@ -2628,16 +2694,263 @@ mod tests {
     }
 
     #[test]
-    fn with_auth_tag_omits_header_when_not_configured() {
+    fn with_relay_auth_omits_auth_tag_header_when_not_configured() {
         let keys = Keys::generate();
         let client = BuzzClient::new("https://test.relay".into(), keys, None, None).unwrap();
 
         let req = client.http.post("https://test.relay/events");
-        let req = client.with_auth_tag(req);
+        let req = client.with_relay_auth(req);
         let built = req.build().unwrap();
         assert!(
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+}
+
+/// NIP-FI assertion transport: which requests carry `Nostr-Federated-Identity`,
+/// and where redirects may take it. Every test drives real requests through
+/// `BuzzClient` against a local server that records what arrived.
+#[cfg(test)]
+mod federated_identity_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    use axum::extract::{OriginalUri, State};
+    use axum::http::{header, HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{any, get};
+    use axum::Router;
+    use nostr::{EventBuilder, Keys, Kind};
+    use tokio::net::TcpListener;
+
+    use super::{BuzzClient, CliError, FEDERATED_IDENTITY_HEADER};
+
+    const JWS: &str = "header.payload.signature";
+    const BEARER: &str = "Bearer header.payload.signature";
+    const BLOB: &str = r#"{"url":"u","sha256":"s","size":1,"type":"image/jpeg","uploaded":0}"#;
+
+    /// Each request seen: its path and its `Nostr-Federated-Identity` value.
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    fn fi_header(headers: &HeaderMap) -> Option<String> {
+        headers
+            .get(FEDERATED_IDENTITY_HEADER)
+            .map(|v| v.to_str().unwrap().to_owned())
+    }
+
+    /// Serve `app` plus a recording fallback that answers every other path
+    /// with a body every client method accepts. Returns the base URL.
+    async fn serve(app: Router<Seen>, seen: Seen) -> String {
+        let app = app
+            .fallback(
+                |State(seen): State<Seen>, OriginalUri(uri): OriginalUri, headers: HeaderMap| async move {
+                    seen.lock()
+                        .unwrap()
+                        .push((uri.path().to_owned(), fi_header(&headers)));
+                    BLOB
+                },
+            )
+            .with_state(seen);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn redirect_to(location: String) -> Response {
+        (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
+    }
+
+    fn client(base: &str, jws: &str) -> BuzzClient {
+        BuzzClient::new(base.to_owned(), Keys::generate(), None, None)
+            .unwrap()
+            .with_federated_identity(jws)
+            .unwrap()
+    }
+
+    /// Drive every authenticated HTTP surface, then the public metadata read.
+    async fn drive_http(client: &BuzzClient) {
+        let event = client
+            .sign_event(EventBuilder::new(Kind::TextNote, "hi"))
+            .unwrap();
+        client.submit_event(event).await.unwrap();
+        let moderation = client
+            .sign_event(EventBuilder::new(Kind::Custom(9040), ""))
+            .unwrap();
+        client.submit_event(moderation).await.unwrap();
+        client.query(&serde_json::json!({})).await.unwrap();
+        client.count(&serde_json::json!({})).await.unwrap();
+        client.get_authed("/authed").await.unwrap();
+        client
+            .post_json_authed("/json", &serde_json::json!({}))
+            .await
+            .unwrap();
+        client
+            .post_json_once_authed("/once", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F'])
+            .unwrap();
+        client
+            .upload_file(file.path().to_str().unwrap())
+            .await
+            .unwrap();
+        client.download_media(&"a".repeat(64)).await.unwrap();
+        client.get_public("/info").await.unwrap();
+    }
+
+    const AUTHED_PATHS: &[&str] = &[
+        "/events", "/events", "/query", "/count", "/authed", "/json", "/once", "/upload",
+    ];
+
+    #[tokio::test]
+    async fn configured_assertion_rides_every_authenticated_request_and_no_public_one() {
+        let seen = Seen::default();
+        let base = serve(Router::new(), seen.clone()).await;
+        drive_http(&client(&base, JWS)).await;
+
+        let seen = seen.lock().unwrap().clone();
+        let media = format!("/media/{}", "a".repeat(64));
+        let mut expected: Vec<(String, Option<String>)> = AUTHED_PATHS
+            .iter()
+            .map(|p| (p.to_string(), Some(BEARER.to_owned())))
+            .collect();
+        expected.push((media, Some(BEARER.to_owned())));
+        expected.push(("/info".to_owned(), None));
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
+    async fn unset_or_empty_assertion_sends_no_header() {
+        for jws in [None, Some("")] {
+            let seen = Seen::default();
+            let base = serve(Router::new(), seen.clone()).await;
+            let client = match jws {
+                None => BuzzClient::new(base, Keys::generate(), None, None).unwrap(),
+                Some(jws) => client(&base, jws),
+            };
+            drive_http(&client).await;
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), AUTHED_PATHS.len() + 2);
+            assert!(seen.iter().all(|(_, fi)| fi.is_none()), "{seen:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_assertion_is_an_auth_error_that_does_not_echo_it() {
+        let secret = "secret-jws\nInjected: header";
+        let err = BuzzClient::new("http://relay".into(), Keys::generate(), None, None)
+            .unwrap()
+            .with_federated_identity(secret)
+            .err()
+            .expect("a newline is not a valid header value");
+        let CliError::Auth(message) = err else {
+            panic!("expected an auth error, got {err:?}");
+        };
+        assert!(!message.contains("secret-jws"), "{message}");
+    }
+
+    /// The relay's routes for the redirect tests: a hop to another origin, a
+    /// same-origin hop, and a same-origin loop.
+    async fn redirecting_relay(seen: Seen, other: String) -> String {
+        let app = Router::new()
+            .route(
+                "/cross",
+                get(move || async move { redirect_to(format!("{other}/leak")) }),
+            )
+            .route("/same", get(|| async { redirect_to("/landed".to_owned()) }))
+            .route("/loop", get(|| async { redirect_to("/loop".to_owned()) }));
+        serve(app, seen).await
+    }
+
+    #[tokio::test]
+    async fn configured_assertion_never_follows_a_redirect_to_another_origin() {
+        let (relay_seen, other_seen) = (Seen::default(), Seen::default());
+        let other = serve(Router::new(), other_seen.clone()).await;
+        // Same host, different port: a different origin.
+        let base = redirecting_relay(relay_seen.clone(), other).await;
+        let client = client(&base, JWS);
+
+        let err = client.get_authed("/cross").await.unwrap_err();
+        assert!(
+            matches!(err, CliError::Relay { status: 302, .. }),
+            "{err:?}"
+        );
+        assert!(other_seen.lock().unwrap().is_empty());
+
+        client.get_authed("/same").await.unwrap();
+        assert_eq!(
+            *relay_seen.lock().unwrap(),
+            vec![("/landed".to_owned(), Some(BEARER.to_owned()))]
+        );
+
+        let err = client.get_authed("/loop").await.unwrap_err();
+        assert!(
+            matches!(&err, CliError::Network(e) if e.is_redirect()),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unset_assertion_keeps_following_redirects_to_another_origin() {
+        let other_seen = Seen::default();
+        let other = serve(Router::new(), other_seen.clone()).await;
+        let base = redirecting_relay(Seen::default(), other).await;
+        let client = BuzzClient::new(base, Keys::generate(), None, None).unwrap();
+
+        client.get_authed("/cross").await.unwrap();
+        assert_eq!(
+            *other_seen.lock().unwrap(),
+            vec![("/leak".to_owned(), None)]
+        );
+    }
+
+    /// A relay that records the upgrade's assertion header, then runs NIP-42
+    /// AUTH and accepts one EVENT, answering each with an OK.
+    async fn ws_relay(seen: Seen) -> String {
+        let app = Router::new().route(
+            "/",
+            any(
+                |State(seen): State<Seen>, headers: HeaderMap, ws: WebSocketUpgrade| async move {
+                    seen.lock()
+                        .unwrap()
+                        .push(("/".to_owned(), fi_header(&headers)));
+                    ws.on_upgrade(|mut socket| async move {
+                        let challenge = r#"["AUTH","challenge"]"#;
+                        socket.send(Message::Text(challenge.into())).await.unwrap();
+                        for expected in ["AUTH", "EVENT"] {
+                            let Some(Ok(Message::Text(text))) = socket.recv().await else {
+                                panic!("expected {expected}");
+                            };
+                            let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                            assert_eq!(frame[0], expected);
+                            let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                            socket
+                                .send(Message::Text(ok.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
+                    })
+                },
+            ),
+        );
+        serve(app, seen).await
+    }
+
+    #[tokio::test]
+    async fn ephemeral_publish_carries_the_assertion_on_the_upgrade_only_when_set() {
+        for (jws, expected) in [(JWS, Some(BEARER.to_owned())), ("", None)] {
+            let seen = Seen::default();
+            let client = client(&ws_relay(seen.clone()).await, jws);
+            let event = client
+                .sign_event(EventBuilder::new(Kind::Custom(20001), ""))
+                .unwrap();
+            let response = client.publish_ephemeral_event(event).await.unwrap();
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["accepted"], true);
+            assert_eq!(*seen.lock().unwrap(), vec![("/".to_owned(), expected)]);
+        }
     }
 }

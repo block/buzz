@@ -343,17 +343,22 @@ impl NostrWsConnection {
 ///
 /// Establishes a fresh WebSocket connection, completes NIP-42 authentication,
 /// publishes `event`, waits for the relay's OK response, then closes the
-/// connection. The entire operation is bounded by `timeout_secs`.
+/// connection. The entire operation is bounded by `timeout_secs`. `headers`
+/// ride the upgrade request, as in
+/// [`NostrWsConnection::connect_authenticated_with_headers`].
 pub async fn publish_event(
     relay_url: &str,
     event: Event,
     keys: &Keys,
     auth_tag: Option<&Tag>,
+    headers: HeaderMap,
     timeout_secs: u64,
 ) -> Result<OkResponse, WsClientError> {
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut conn = NostrWsConnection::connect(relay_url).await?;
-        conn.authenticate(keys, auth_tag).await?;
+        let mut conn = NostrWsConnection::connect_authenticated_with_headers(
+            relay_url, keys, auth_tag, headers,
+        )
+        .await?;
         let ok = conn.send_event(event).await?;
         let _ = conn.disconnect().await;
         Ok::<_, WsClientError>(ok)
