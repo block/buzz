@@ -4,10 +4,18 @@
 //! fills the reader pool, every further routed read misses its reader acquire
 //! budget, and before this gate those misses fell back to the writer, where
 //! they starved the authentication, tenant and moderation lookups that only
-//! the writer can serve. The gate holds history reads below the reader pool's
-//! size, so a slot stays free for authorization reads, and a history read that
-//! cannot get a reader is rejected as retryable instead of moved to the writer
-//! (see [`super::Db::route_read`]).
+//! the writer can serve. The gate holds running history transactions below the
+//! reader pool's size, and a history read that cannot get a reader is rejected
+//! as retryable instead of moved to the writer (see [`super::Db::route_read`]).
+//!
+//! The cap bounds history transactions, not reader connections. A permit is
+//! released when its transaction is dropped, while sqlx still returns the
+//! connection asynchronously through the pool's release check. Released
+//! connections can therefore briefly hold the slots the cap leaves free for
+//! authorization reads: usually one round trip, at most the release check's
+//! timeout when reader sockets stall. Authorization reads that miss a reader
+//! in that window fall back to the writer as before; history reads on the
+//! saturated pool are rejected, not moved to the writer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,9 +42,9 @@ impl HistoryReadGate {
         }
     }
 
-    /// History reads allowed to hold a reader connection at once: the pool
-    /// less one fifth (at least one) kept for authorization and bootstrap
-    /// reads, and never below one. 25 → 20, 5 → 4, 2 → 1, 1 → 1.
+    /// History transactions allowed at once: the pool less one fifth (at
+    /// least one) left to authorization and bootstrap reads, and never below
+    /// one. 25 → 20, 5 → 4, 2 → 1, 1 → 1.
     pub(crate) fn cap(read_max_connections: u32) -> u32 {
         read_max_connections
             .saturating_sub((read_max_connections / 5).max(1))
@@ -60,10 +68,11 @@ impl HistoryReadGate {
 }
 
 /// A proved reader transaction plus the history permit it was admitted
-/// under, if any. The permit is released exactly when the transaction (and
-/// so its reader connection) is dropped, wherever the transaction travels:
-/// a per-call routed read, or a [`super::ReadSession`] the relay keeps for
-/// follow-up queries.
+/// under, if any. The permit is released when the transaction is dropped,
+/// wherever the transaction travels: a per-call routed read, or a
+/// [`super::ReadSession`] the relay keeps for follow-up queries. The reader
+/// connection itself returns to the pool asynchronously after that (see the
+/// module docs).
 pub(crate) struct ReaderTx {
     tx: sqlx::Transaction<'static, sqlx::Postgres>,
     _permit: Option<OwnedSemaphorePermit>,

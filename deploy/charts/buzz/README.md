@@ -435,7 +435,8 @@ series. A rise in `timeout` means reader sockets stopped answering.
 Subscription-history reads are the exception to the writer fallback when the
 reader is merely busy. Each pod admits at most its reader pool size less one
 fifth (16 at the default pool size of 20) history reads to the reader at
-once, so authorization reads keep a free reader connection. A history read
+once, which normally leaves authorization reads a free reader connection
+(connections still finishing their release can briefly take it). A history read
 that waits more than 1s for admission, or misses the reader's 150ms acquire
 budget while every reader connection is busy, is rejected with the retryable
 `CLOSED` `error: database error` instead of moving to the writer, where it

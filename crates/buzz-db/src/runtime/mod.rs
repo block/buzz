@@ -399,7 +399,7 @@ pub(crate) enum RouteDecision {
     /// (the offload percentage is read straight off `decision="replica"`).
     ///
     /// A history read's transaction carries its [`history_reads`] permit, so
-    /// the permit is released when the reader connection is.
+    /// the permit is released when the transaction is dropped.
     Replica(
         history_reads::ReaderTx,
         replica_fence::TokenEntry,
