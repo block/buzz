@@ -497,6 +497,7 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
+    state.invalidate_community_host(&tenant);
     let closed = match state
         .disconnect_community_clusterwide(&tenant, record.archived_at)
         .await
@@ -568,6 +569,7 @@ pub async fn unarchive_community(
         }
     };
     tracing::info!(community = %record.id, host = %record.host, "community unarchived");
+    state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     Ok(Json(serde_json::json!({
         "community_id": record.id.to_string(),
         "host": record.host,
@@ -1307,6 +1309,10 @@ pub async fn enable_community_nip_fi(
         })?;
     match outcome {
         buzz_db::community_auth::UpgradeOutcome::Accepted(record) => {
+            state.invalidate_community_host(&TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(record.community_id),
+                &record.expected_host,
+            ));
             Ok(upgrade_response(&state, record))
         }
         buzz_db::community_auth::UpgradeOutcome::Refused(code) => {

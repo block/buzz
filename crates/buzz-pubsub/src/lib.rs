@@ -555,30 +555,32 @@ mod tests {
 
         let channel_id = Uuid::new_v4();
         let pubkey = Keys::generate().public_key().to_bytes().to_vec();
-        let sent = CacheInvalidation::Membership {
-            channel_id,
-            pubkey: pubkey.clone(),
-        };
-
         let ctx = ctx(0xaaaa, "a.example");
-
-        manager
-            .publish_cache_invalidation(&ctx, &sent)
-            .await
-            .expect("publish failed");
-
-        let received = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("timeout")
-            .expect("channel closed");
-
-        assert_eq!(
-            received,
-            ScopedCacheInvalidation {
-                community_id: ctx.community(),
-                invalidation: sent,
-            }
-        );
+        for sent in [
+            CacheInvalidation::Membership {
+                channel_id,
+                pubkey: pubkey.clone(),
+            },
+            CacheInvalidation::CommunityHost {
+                host: ctx.host().to_owned(),
+            },
+        ] {
+            manager
+                .publish_cache_invalidation(&ctx, &sent)
+                .await
+                .expect("publish failed");
+            let received = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout")
+                .expect("channel closed");
+            assert_eq!(
+                received,
+                ScopedCacheInvalidation {
+                    community_id: ctx.community(),
+                    invalidation: sent,
+                }
+            );
+        }
     }
 
     #[tokio::test]

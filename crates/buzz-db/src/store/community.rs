@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 use crate::{relay_members, Db, DbError, ReadAt, Result};
 
+// Admission and policy must select the same serving row. A deletion request
+// alone does not stop serving; begin_quiescing changes deletion_state.
+pub(super) const SERVING_HOST_QUERY: &str = "SELECT id, host, requires_nip_fi, policy_generation
+    FROM communities WHERE lower(host) = lower($1)
+    AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'";
+
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunityRecord {
@@ -133,19 +139,10 @@ impl Db {
         )
         .await?;
         let read_at = std::time::Instant::now();
-        let row = sqlx::query(
-            r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&mut *connection)
-        .await?;
+        let row = sqlx::query(SERVING_HOST_QUERY)
+            .bind(normalized_host)
+            .fetch_optional(&mut *connection)
+            .await?;
 
         let value = row
             .map(|row| {

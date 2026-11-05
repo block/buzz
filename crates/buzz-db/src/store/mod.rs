@@ -40,6 +40,8 @@ mod event_follow_up_postgres_tests;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Deployment-wide leader election over session advisory locks.
+pub mod leader_lock;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
 /// Deployment-global operator-listener mention registrations and delivery queues.
@@ -74,8 +76,6 @@ pub mod storage_accounting;
 pub mod thread;
 /// Strict newest-first thread windows and auxiliary scans.
 pub mod thread_window;
-/// Per-community usage rollup queries for Prometheus gauges.
-pub mod usage;
 /// User profile persistence.
 pub mod user;
 /// Workflow, run, and approval persistence.

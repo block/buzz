@@ -308,6 +308,7 @@ pub async fn provision_community(
             &record.host,
             nip_fi_issuers,
         );
+        state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
         fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
@@ -325,6 +326,7 @@ pub async fn provision_community(
         .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
         .await
         .map_err(|e| format!("failed to create community: {e}"))?;
+    state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     if record.created {
         record_binding_creation(
             state.nip_fi_resolver.as_deref(),

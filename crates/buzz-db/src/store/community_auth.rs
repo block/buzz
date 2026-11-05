@@ -11,6 +11,15 @@ use uuid::Uuid;
 
 use crate::{Db, Result};
 
+/// Fleet protocol bound for a cached host's policy, measured before checkout.
+/// Increasing this requires a coordinated acceptance-writer rollout first.
+pub const POLICY_LEASE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+// Allow clock-rate drift between pods. Never shorten below the fleet lease bound.
+const POLICY_LEASE_DRAIN: std::time::Duration =
+    POLICY_LEASE_MAX_AGE.saturating_add(std::time::Duration::from_millis(100));
+// Two-int advisory key space, separate from the existing bigint lock protocols.
+const POLICY_LEASE_NAMESPACE: i32 = 0x4649504c;
+
 /// Canonical request tuple, with the authenticated operator added by the relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpgradeRequest {
@@ -82,6 +91,9 @@ pub enum UpgradeOutcome {
 /// Authoritative policy for a community in the active lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromRow)]
 pub struct CommunityAuthPolicy {
+    /// Immutable identity from the same row as this policy.
+    #[sqlx(rename = "id")]
+    pub community_id: Uuid,
     /// Durable monotonic requirement. Global enforce remains an additional floor.
     pub requires_nip_fi: bool,
     /// Zero for legacy optional communities; positive after the first enable.
@@ -106,6 +118,99 @@ const RECEIPT: &str = "SELECT u.*, true AS requires_nip_fi,
     WHERE u.operation_id = $1";
 
 impl Db {
+    /// Read a cacheable serving policy under the host's shared lease lock.
+    ///
+    /// Callers must anchor expiry BEFORE invoking this method and refuse an
+    /// expired result. Acceptance excludes new leases and drains old ones before
+    /// committing. The lock and row read MUST be separate READ COMMITTED
+    /// statements: a snapshot from before lock acquisition is not a lease.
+    /// Contention refuses immediately; it never leaves a server-side lock wait.
+    pub async fn community_auth_policy_lease_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<CommunityAuthPolicy>> {
+        let host = buzz_core::tenant::normalize_host(host);
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout = '400ms'")
+            .execute(&mut *tx)
+            .await?;
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared($1, hashtext($2))")
+                .bind(POLICY_LEASE_NAMESPACE)
+                .bind(&host)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !acquired {
+            return Err(crate::DbError::AccessDenied(
+                "community policy transition".into(),
+            ));
+        }
+        let policy = sqlx::query_as(super::community::SERVING_HOST_QUERY)
+            .bind(&host)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(policy)
+    }
+
+    /// Bind a serving host and its authentication policy from one writer row.
+    /// A lifecycle transition between earlier checks and this lookup cannot
+    /// supply a tenant with another snapshot's optional policy.
+    #[datastore_span(name = "community_auth_binding_for_host", system = "postgresql")]
+    pub async fn community_auth_binding_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<(crate::CommunityRecord, CommunityAuthPolicy)>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::TenantResolution,
+        )
+        .await?;
+        let row = sqlx::query(super::community::SERVING_HOST_QUERY)
+            .bind(host)
+            .fetch_optional(&mut *connection)
+            .await?;
+        row.map(|row| {
+            Ok((
+                crate::CommunityRecord {
+                    id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                },
+                CommunityAuthPolicy {
+                    community_id: row.try_get("id")?,
+                    requires_nip_fi: row.try_get("requires_nip_fi")?,
+                    policy_generation: row.try_get("policy_generation")?,
+                },
+            ))
+        })
+        .transpose()
+    }
+
+    /// Resolve active host policy in one writer read. No replica or cross-request cache.
+    #[datastore_span(name = "community_auth_policy_for_host", system = "postgresql")]
+    pub async fn community_auth_policy_for_host(
+        &self,
+        host: &str,
+    ) -> Result<Option<CommunityAuthPolicy>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        Ok(sqlx::query_as(super::community::SERVING_HOST_QUERY)
+            .bind(host)
+            .fetch_optional(&mut *connection)
+            .await?)
+    }
+
     /// Read current active-community policy from the writer, never a replica.
     #[datastore_span(name = "community_auth_policy", system = "postgresql")]
     pub async fn community_auth_policy(
@@ -117,7 +222,7 @@ impl Db {
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        Ok(sqlx::query_as("SELECT requires_nip_fi, policy_generation FROM communities
+        Ok(sqlx::query_as("SELECT id, requires_nip_fi, policy_generation FROM communities
             WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'")
             .bind(community.as_uuid()).fetch_optional(&mut *connection).await?)
     }
@@ -199,6 +304,21 @@ impl Db {
         };
         if row.try_get::<String, _>("host")? != request.expected_host {
             return Ok(UpgradeOutcome::Refused("host_conflict"));
+        }
+        // Lock order: deletion-shared, community row, host lease. Fills take
+        // only the shared host lease and never a community row lock. Derive
+        // the key from the locked, validated row, not an earlier host snapshot.
+        let lease_host = buzz_core::tenant::normalize_host(&row.try_get::<String, _>("host")?);
+        sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(POLICY_LEASE_NAMESPACE)
+            .bind(&lease_host)
+            .execute(&mut *tx)
+            .await?;
+        // Keep the row stable while ALL optional leases expire, including
+        // leases under former host keys. No remap (single or double) can
+        // refill another host's optional cache while this drain is running.
+        if !row.try_get::<bool, _>("requires_nip_fi")? {
+            tokio::time::sleep(POLICY_LEASE_DRAIN).await;
         }
         let deletion_pending: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM

@@ -46,21 +46,23 @@ class ChannelDetailPage extends ConsumerWidget {
         body: const Center(child: BuzzLoadingIndicator()),
       );
     }
-    return _ResolvedChannelDetailPage(
-      key: ValueKey((channel.id, placed)),
-      channel: current,
-      personalChat: placed,
-      welcomeAgent: current.isDm
-          ? ref.watch(bestieWelcomeProvider(channel.id))
-          : null,
-      placementKnown:
-          placed ||
-          groups != null ||
-          placement != ChannelRoutePlacement.unresolved,
-      initialAssistant: initialAssistant,
-      initialMessageId: initialMessageId,
-      initialThreadRootId: initialThreadRootId,
-      initialThreadRouteBehavior: initialThreadRouteBehavior,
+    return CoveredRouteKeyboardInsets(
+      child: _ResolvedChannelDetailPage(
+        key: ValueKey((channel.id, placed)),
+        channel: current,
+        personalChat: placed,
+        welcomeAgent: current.isDm
+            ? ref.watch(bestieWelcomeProvider(channel.id))
+            : null,
+        placementKnown:
+            placed ||
+            groups != null ||
+            placement != ChannelRoutePlacement.unresolved,
+        initialAssistant: initialAssistant,
+        initialMessageId: initialMessageId,
+        initialThreadRootId: initialThreadRootId,
+        initialThreadRouteBehavior: initialThreadRouteBehavior,
+      ),
     );
   }
 }
