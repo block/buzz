@@ -209,6 +209,11 @@ async function select(paths, pullRequest = false, apiStatus = 200) {
 }
 const scenarios = [
   [
+    "credential provider test setup",
+    [".github/actions/setup-test-secrets/action.yml"],
+    ["rust"],
+  ],
+  [
     "mobile source and tests",
     [
       "mobile/lib/features/age_gate/age_signal_provider.dart",

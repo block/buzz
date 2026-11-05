@@ -3,7 +3,7 @@
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config_for_keys, build_git_clone_auth_config, clone_url_owner, run_git,
+    build_git_auth_config_for_account, build_git_clone_auth_config, clone_url_owner, run_git,
     validate_local_clone_url, validate_local_clone_url_for_workspace, validate_workspace_clone_url,
     GitAuthConfig,
 };
@@ -111,6 +111,7 @@ pub(crate) fn normalize_event_id(value: &str) -> Option<String> {
 pub(crate) struct ProjectOwnerIdentity {
     pub(crate) keys: Keys,
     pub(crate) auth_tag: Option<String>,
+    pub(crate) secret_account: String,
 }
 
 pub(crate) fn project_owner_identity(
@@ -123,6 +124,7 @@ pub(crate) fn project_owner_identity(
         return Ok(ProjectOwnerIdentity {
             keys: viewer_keys,
             auth_tag: None,
+            secret_account: "identity".to_string(),
         });
     }
 
@@ -149,6 +151,7 @@ pub(crate) fn project_owner_identity(
     Ok(ProjectOwnerIdentity {
         keys,
         auth_tag: record.auth_tag.clone(),
+        secret_account: crate::managed_agents::storage::agent_keyring_name(&record.pubkey),
     })
 }
 
@@ -537,7 +540,7 @@ pub async fn merge_project_pull_request(
         &pull_request_id,
         &pull_request_author,
     )?;
-    let auth = build_git_auth_config_for_keys(&owner_identity.keys)?;
+    let auth = build_git_auth_config_for_account(&owner_identity.secret_account)?;
 
     let git_result = tauri::async_runtime::spawn_blocking(
         move || -> Result<ProjectRepoMergeGitResult, ProjectPullRequestMergeError> {
