@@ -470,7 +470,7 @@ pub(crate) async fn handle_connection(
         conn_id,
         community_id,
         control,
-        move || async move { check_state.db.is_community_active(community_id).await },
+        move || async move { check_state.is_community_active_cached(community_id).await },
         move |control| async move {
             let socket = socket_for_run
                 .lock()
@@ -5660,6 +5660,35 @@ pub(crate) mod terminal_close_delivery_tests {
                 .is_err(),
             "the active handler must not have started"
         );
+    }
+
+    /// Socket admission takes the community's lifecycle from the shared
+    /// cache: with the database unreachable, a cached "active" still admits
+    /// the socket, which then gets its AUTH challenge.
+    /// Mutation: read `is_community_active` uncached in `handle_connection`
+    /// → RED.
+    #[tokio::test]
+    async fn bootstrap_admits_from_the_cached_community_answer() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
+        state
+            .community_active
+            .seed(buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()), true);
+        let address = serve_outer(state, None).await;
+
+        let mut client = connect(address).await;
+        let frame = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("an admitted socket gets its challenge")
+            .expect("frame")
+            .expect("message");
+        let Message::Text(text) = frame else {
+            panic!("expected the AUTH challenge, got {frame:?}");
+        };
+        let challenge: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(challenge[0], "AUTH", "got {text}");
     }
 
     // An upgrade would-deny's line is held by the real `handle_connection`

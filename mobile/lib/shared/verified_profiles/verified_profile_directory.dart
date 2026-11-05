@@ -9,6 +9,11 @@ import 'verified_profile_discovery_fetch.dart';
 import 'verified_profile_proof.dart';
 
 const _wantedLimit = 1024;
+
+/// Records kept after their subject stops being tracked. A roster larger than
+/// [_wantedLimit] keeps evicting and re-tracking the same people; their last
+/// known names stay on screen, unchecked, instead of blinking to fallbacks.
+const _cachedHeadLimit = 4 * _wantedLimit;
 const _eoseTimeout = Duration(seconds: 10);
 const _discoveryRefresh = Duration(minutes: 5);
 
@@ -142,9 +147,9 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     if (overflow > 0) {
       for (final oldest in _wanted.keys.take(overflow).toList()) {
         _wanted.remove(oldest);
-        _heads.remove(oldest);
         _checked.remove(oldest);
       }
+      _trimCachedHeads();
       added = true;
     }
     if (!added) return;
@@ -153,6 +158,19 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     } else {
       _schedule(_generation);
     }
+  }
+
+  /// Drops the oldest untracked records past [_cachedHeadLimit], in one pass.
+  void _trimCachedHeads() {
+    var excess = _heads.length - _cachedHeadLimit;
+    if (excess <= 0) return;
+    final drop = <String>[];
+    for (final key in _heads.keys) {
+      if (_wanted.containsKey(key)) continue;
+      drop.add(key);
+      if (--excess == 0) break;
+    }
+    drop.forEach(_heads.remove);
   }
 
   Future<void> _onConnected(int generation) async {
@@ -434,24 +452,76 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     }
   }
 
+  /// Validates one head. Tests override this to count parses.
+  @visibleForTesting
+  VerifiedProfile? parseHead(
+    NostrEvent event,
+    VerifiedProfileAuthority authority, {
+    required bool checked,
+  }) => parseVerifiedProfile(event, authority, checked: checked);
+
+  /// The last parse of each subject's head. Every publish rebuilds the whole
+  /// map, so without it each batch re-validated every head already known.
+  Map<String, _ParsedHead> _parsed = const {};
+
   Map<String, VerifiedProfile> _snapshot() {
     final authority = _authority;
-    if (!_enabled || authority == null) return const {};
-    return {
-      for (final MapEntry(:key, :value) in _heads.entries)
-        if (_wanted.containsKey(key))
-          key: ?parseVerifiedProfile(
-            value,
-            authority,
-            checked: _discoveryFresh && _checked.contains(key),
-          ),
-    };
+    if (!_enabled || authority == null) {
+      _parsed = const {};
+      return const {};
+    }
+    final parsed = <String, _ParsedHead>{};
+    final profiles = <String, VerifiedProfile>{};
+    for (final MapEntry(:key, :value) in _heads.entries) {
+      final checked = _discoveryFresh && _checked.contains(key);
+      final previous = _parsed[key];
+      final head =
+          previous != null &&
+              identical(previous.event, value) &&
+              previous.authority == authority
+          ? previous
+          : _ParsedHead(
+              value,
+              authority,
+              parseHead(value, authority, checked: checked),
+            );
+      parsed[key] = head;
+      if (head.withChecked(checked) case final profile?) {
+        profiles[key] = profile;
+      }
+    }
+    _parsed = parsed;
+    return profiles;
   }
 
   void _publish() {
     if (!ref.mounted) return;
     final next = _snapshot();
     if (!mapEquals(state, next)) state = next;
+  }
+}
+
+/// A head's parse, kept while the head and authority stand. Only `checked`
+/// varies between publishes, so it is applied without validating again.
+class _ParsedHead {
+  _ParsedHead(this.event, this.authority, this._profile);
+
+  final NostrEvent event;
+  final VerifiedProfileAuthority authority;
+  VerifiedProfile? _profile;
+
+  VerifiedProfile? withChecked(bool checked) {
+    final profile = _profile;
+    if (profile == null || profile.checked == checked) return profile;
+    return _profile = VerifiedProfile(
+      displayName: profile.displayName,
+      username: profile.username,
+      fullName: profile.fullName,
+      issuerLabel: profile.issuerLabel,
+      verifiedAt: profile.verifiedAt,
+      checked: checked,
+      multipleIssuers: profile.multipleIssuers,
+    );
   }
 }
 

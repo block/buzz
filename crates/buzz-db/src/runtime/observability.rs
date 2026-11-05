@@ -292,17 +292,21 @@ fn record_pool_acquire(
 ) {
     // Preserve the original observed population for existing dashboards.
     // Newly instrumented raw-pool seams must not create a deployment-time
-    // discontinuity in these compatibility families.
+    // discontinuity in these compatibility families. They carry `operation`
+    // so a breakdown by it attributes every sample instead of reporting it
+    // as unlabelled; summing over `operation` gives the original series.
     if emit_legacy && outcome != Outcome::Cancelled {
         metrics::histogram!(
             "buzz_db_pool_acquire_wait_seconds",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .record(elapsed.as_secs_f64());
         metrics::counter!(
             "buzz_db_pool_acquisitions_total",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .increment(1);
@@ -764,15 +768,24 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
 
+        for name in [
+            "buzz_db_pool_acquire_wait_seconds",
+            "buzz_db_pool_acquisitions_total",
+        ] {
+            let labels = [
+                ("operation", "subscription_history"),
+                ("outcome", "timeout"),
+                ("pool_role", "reader"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>();
+            assert!(
+                keys.contains(&(name.to_owned(), labels)),
+                "legacy family {name} must carry the operation label; got {keys:?}"
+            );
+        }
         for expected in [
-            (
-                "buzz_db_pool_acquire_wait_seconds",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
-            (
-                "buzz_db_pool_acquisitions_total",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
             (
                 "buzz_db_advisory_lock_wait_seconds",
                 [("lock_type", "replacement"), ("outcome", "success")],
@@ -819,15 +832,8 @@ mod tests {
             "buzz_db_pool_acquisitions_total",
         ] {
             assert!(
-                !keys.contains(&(
-                    name.to_owned(),
-                    [
-                        ("outcome".to_owned(), "success".to_owned()),
-                        ("pool_role".to_owned(), "writer".to_owned()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )),
+                !keys.iter().any(|(key, labels)| key == name
+                    && labels.get("pool_role").map(String::as_str) == Some("writer")),
                 "newly instrumented seams must not expand legacy metric population"
             );
         }

@@ -30,6 +30,8 @@ mod event_deletion;
 pub(crate) mod event_follow_up;
 /// Per-community NIP-FI issuer bindings.
 pub mod nip_fi_binding;
+/// Recent-first passes for newest-first `events` page reads.
+pub(crate) mod recent_pass;
 /// User-specific deletion submission and inventory preparation.
 pub mod user_deletion;
 /// Operator-global user restrictions and identity-lock primitives.
