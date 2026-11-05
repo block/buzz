@@ -792,6 +792,8 @@ async fn test_dm_discovery_events_emitted() {
         .await
         .expect("membership EOSE");
 
+    // The relay may also enroll a fresh key into the landing channel; skip its
+    // notice by requiring the DM's `h` tag.
     let membership = membership_events
         .iter()
         .find(|e| {
@@ -799,6 +801,10 @@ async fn test_dm_discovery_events_emitted() {
                 && e.tags.iter().any(|t| {
                     let p = t.as_slice();
                     p.len() >= 2 && p[0] == "p" && p[1] == a_pubkey_hex
+                })
+                && e.tags.iter().any(|t| {
+                    let p = t.as_slice();
+                    p.len() >= 2 && p[0] == "h" && p[1] == channel_id
                 })
         })
         .expect("kind:44100 membership notification addressed to A");

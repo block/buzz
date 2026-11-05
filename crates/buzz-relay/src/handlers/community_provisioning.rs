@@ -326,8 +326,11 @@ pub async fn provision_community(
             &record.host,
             nip_fi_issuers,
         );
-        state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
+        let tenant = TenantContext::resolved(record.id, &record.host);
+        state.invalidate_community_host(&tenant);
         fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
+        // The owner just committed, so this creates the landing `general`.
+        crate::handlers::landing::converge_landing_channel(&tenant, state).await;
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
@@ -373,6 +376,13 @@ pub async fn provision_community(
         }
         fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
     }
+    // Without an owner or admin this adopts an eligible `general` or skips;
+    // the next human admission tries again.
+    crate::handlers::landing::converge_landing_channel(
+        &TenantContext::resolved(record.id, &record.host),
+        state,
+    )
+    .await;
 
     info!(
         operator = %operator_hex,
