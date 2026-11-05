@@ -353,12 +353,41 @@ export function useMentionSendFlow({
       let composerCleared = false;
       let optimisticComposerContent = "";
       let clearedRevision = -1;
-      const restoreComposerAfterFailure = () => {
+      const restoreComposerAfterFailure = (uploaded: ImetaMedia[] = []) => {
         if (!composerCleared) return;
         composerCleared = false;
         // An authored edit (even edit -> clear) ends optimistic recovery's
         // authority over this key, including its persisted record and files.
-        if (draft.sourceOwner.getComposerRevision() !== clearedRevision) return;
+        if (draft.sourceOwner.getComposerRevision() !== clearedRevision) {
+          // Newer authored text wins, but the failed send's media (a
+          // voice note is an in-memory recording) has no other copy: hand it
+          // back beside that text, uploaded descriptors first so a retry does
+          // not re-upload. Media the user added since wins like their text.
+          const imeta = [...draft.savedImeta, ...uploaded];
+          const files = uploaded.length > 0 ? [] : draft.queuedAttachments;
+          if (
+            (imeta.length > 0 || files.length > 0) &&
+            isMountedRef.current &&
+            ownsComposer() &&
+            !hasUnsavedMedia()
+          ) {
+            runComposerUpdate(() => {
+              setPendingImeta(imeta);
+              restoreQueuedAttachments(files);
+              setSpoileredAttachmentUrls?.(
+                new Set([
+                  ...draft.savedSpoileredAttachmentUrls,
+                  ...draft.queuedAttachments.flatMap((attachment, index) =>
+                    attachment.spoilered && uploaded[index]
+                      ? [uploaded[index].url]
+                      : [],
+                  ),
+                ]),
+              );
+            }, imeta);
+          }
+          return;
+        }
         const persisted = persistRecoverableDraft();
         const canAnimateCurrentComposer =
           isMountedRef.current && ownsComposer();
@@ -635,7 +664,7 @@ export function useMentionSendFlow({
               try {
                 await finishSend(uploaded, signal);
               } catch (error) {
-                restoreComposerAfterFailure();
+                restoreComposerAfterFailure(uploaded);
                 toast.error(
                   error instanceof AgentMentionAuthorizationError
                     ? error.message
