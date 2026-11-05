@@ -160,6 +160,11 @@ case "$command" in
     # the mobile tag ruleset (the mobile release managers). No GitHub App or
     # workflow is involved. Check before creating anything locally.
     require_mobile_release_tag_ruleset || exit 1
+    # A pinned --commit can be a verified ancestor outside a shallow clone's
+    # history. Fetch that exact commit so the local tag can point at it.
+    if ! git cat-file -e "$source_sha^{commit}" 2>/dev/null; then
+      git fetch -q --no-tags origin "$source_sha" || fail "could not fetch source commit $source_sha"
+    fi
     # Annotated, never forced; the operator's own tag signing config applies.
     git tag -a -m "Buzz Mobile $version release candidate $next" "$tag" "$source_sha" || \
       fail "could not create local tag $tag"

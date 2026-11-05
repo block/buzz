@@ -314,6 +314,20 @@ git -C "$operator" config --unset "url.file://$fork_remote.pushInsteadOf"
 assert_no_candidate_tag 2.0.1
 [[ "$(git --git-dir="$fork_remote" for-each-ref refs/tags)" == "$fork_tags_before" ]]
 
+# A shallow operator clone can still pin a verified ancestor outside its
+# local history.
+shallow_operator="$tmp/shallow-operator"
+git -c "url.file://$remote.insteadOf=$canonical_origin" \
+  -c protocol.file.allow=always clone -q --depth 1 "$canonical_origin" "$shallow_operator"
+git -C "$shallow_operator" config tag.gpgSign false
+git -C "$shallow_operator" config user.name test
+git -C "$shallow_operator" config user.email test@example.com
+if git -C "$shallow_operator" cat-file -e "$remote_main_sha^{commit}" 2>/dev/null; then
+  fail "shallow-clone fixture already contains the historical commit"
+fi
+run_release "$shallow_operator" candidate 7.7.2 --commit "$remote_main_sha" >/dev/null
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v7.7.2-rc.1^{commit}')" == "$remote_main_sha" ]]
+
 tags_before="$(git --git-dir="$remote" for-each-ref refs/tags)"
 if GH_VERSION=2.86.0 run_release "$operator" candidate 2.0.0 >/dev/null 2>&1; then
   fail "gh older than 2.87.0 was accepted"
