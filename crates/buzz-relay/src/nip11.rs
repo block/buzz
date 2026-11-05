@@ -23,6 +23,9 @@ pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
 /// Relay information document served at `GET /` with `Accept: application/nostr+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayInfo {
+    /// Host-specific policy, independent of NIP-FI capability advertisement.
+    #[serde(default)]
+    pub requires_nip_fi: bool,
     /// Human-readable relay name.
     pub name: String,
     /// Human-readable relay description.
@@ -202,7 +205,7 @@ impl RelayInfo {
     /// `self`. Pass `Some` whenever the relay has a stable signing key.
     ///
     /// `icon` is the community's workspace icon (see
-    /// [`workspace_icon_for_host`]) — a host-scoped scalar, pre-fetched by
+    /// [`workspace_icon_for_tenant`]) — a host-scoped scalar, pre-fetched by
     /// the caller so `build` itself stays static-input.
     ///
     /// `advertise_nip43` controls whether NIP-43 (relay membership) is added
@@ -314,6 +317,7 @@ impl RelayInfo {
             gif,
             relay_self: relay_self.map(|s| s.to_string()),
             federated_identity,
+            requires_nip_fi: false,
         }
     }
 }
@@ -322,12 +326,12 @@ impl RelayInfo {
 pub async fn relay_info_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
     headers: axum::http::HeaderMap,
-) -> axum::response::Json<RelayInfo> {
+) -> axum::response::Response {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    axum::response::Json(nip11_document(&state, raw_host).await)
+    nip11_response(&state, raw_host).await
 }
 
 fn push_descriptor(
@@ -378,11 +382,75 @@ fn push_descriptor(
 /// stays a pre-derived scalar: [`nip11_facts`] (config + keypair) plus the
 /// host-scoped workspace icon. Optional provider capabilities are passed as
 /// config-derived scalar identifiers; no provider credential enters NIP-11.
-pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
+pub(crate) async fn nip11_response(
+    state: &crate::state::AppState,
+    raw_host: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut response = match nip11_document(state, raw_host).await {
+        Ok(document) => axum::Json(document).into_response(),
+        Err(response) => response,
+    };
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+#[allow(clippy::result_large_err)] // Axum responses carry the discovery denial contract.
+pub(crate) async fn nip11_document(
+    state: &crate::state::AppState,
+    raw_host: &str,
+) -> Result<RelayInfo, axum::response::Response> {
+    use axum::response::IntoResponse;
+    let mut headers = axum::http::HeaderMap::new();
+    if let Ok(host) = axum::http::HeaderValue::from_str(raw_host) {
+        headers.insert(axum::http::header::HOST, host);
+    }
+    let policy = if state.config.nip_fi.mode.is_off() {
+        // Off discovery uses ordinary tenant routing, independent of FI policy
+        // and issuer dependencies. A missing tenant remains a routing refusal.
+        let tenant = crate::tenant::bind_community(state, raw_host)
+            .await
+            .map_err(|_| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    "relay: no community is configured for this host",
+                )
+                    .into_response()
+            })?;
+        crate::nip_fi_policy::Policy {
+            community_id: *tenant.community().as_uuid(),
+            mode: state.config.nip_fi.mode,
+            required: false,
+            stored_required: false,
+            mapped: true,
+        }
+    } else {
+        crate::nip_fi_policy::resolve(state, &headers).await?
+    };
+    if !state.config.nip_fi.mode.is_off() && policy.stored_required {
+        // Required implies a usable binding and verifier, not merely a bit.
+        state
+            .nip_fi_communities()
+            .resolve(&headers)
+            .await
+            .map_err(crate::nip_fi_core::http_denial)?;
+        if !crate::nip_fi_policy::required_dependencies_ready(state) {
+            return Err(crate::nip_fi_core::http_denial(
+                buzz_auth::DenialClass::AuthorizationUnavailable,
+            ));
+        }
+    }
     let (relay_self, advertise_nip43) = nip11_facts(state);
-    let icon = workspace_icon_for_host(state, raw_host).await;
+    let tenant = policy.tenant(raw_host);
+    let icon = match tenant.as_ref() {
+        Some(tenant) => workspace_icon_for_tenant(state, tenant).await,
+        None => None,
+    };
     let admin_api = admin_api_advertisement(state.config.admin.as_ref());
-    let advertise_fi = state.config.nip_fi.mode.evaluates();
+    let advertise_fi = state.config.nip_fi.mode.evaluates() || policy.required;
     let mut info = RelayInfo::build(
         relay_self.as_deref(),
         icon.as_deref(),
@@ -395,9 +463,10 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         admin_api.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
+    info.requires_nip_fi = policy.required;
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
-    if let Ok(tenant) = crate::tenant::bind_community(state, raw_host).await {
-        if let Some(profile) = crate::verified_profiles::discovery(state, &tenant).await {
+    if let Some(tenant) = tenant.as_ref() {
+        if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
             if let Some(fi) = info.federated_identity.as_mut() {
                 fi["public_profile"] = profile;
             }
@@ -421,10 +490,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         }));
     }
     let tenant_host = if state.config.push_enabled {
-        crate::tenant::bind_community(state, raw_host)
-            .await
-            .ok()
-            .map(|tenant| tenant.host().to_owned())
+        tenant.as_ref().map(|tenant| tenant.host().to_owned())
     } else {
         None
     };
@@ -440,20 +506,15 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
             .push("buzz-push-v1".to_string());
         info.push = Some(push);
     }
-    info
+    Ok(info)
 }
 
-/// Fetches the workspace icon for the community bound to `raw_host`, as the
-/// host-scoped scalar consumed by [`RelayInfo::build`].
-///
-/// The icon is per-community state (`communities.icon`, set by relay
-/// admins/owners via the kind:9033 command) served in the standard NIP-11
-/// `icon` field. The lookup is scoped through
-/// [`crate::tenant::bind_community`] — never an unscoped query. Fails open to
-/// `None` (no `icon` field): NIP-11 is intentionally served to unmapped hosts
-/// too, and an icon lookup failure must not break that.
-async fn workspace_icon_for_host(state: &crate::state::AppState, raw_host: &str) -> Option<String> {
-    let tenant = crate::tenant::bind_community(state, raw_host).await.ok()?;
+/// Fetch the icon for the same immutable tenant that supplied NIP-11 policy.
+/// A decoration lookup failure omits the icon.
+async fn workspace_icon_for_tenant(
+    state: &crate::state::AppState,
+    tenant: &buzz_core::TenantContext,
+) -> Option<String> {
     state
         .db
         .get_community_icon(tenant.community())
@@ -500,10 +561,9 @@ fn admin_api_advertisement(admin: Option<&crate::config::AdminConfig>) -> Option
 /// DB/search/audit inputs", so an unauthenticated NIP-11 read can never become
 /// an enumeration oracle for *other* communities. `build` takes only static
 /// and scalar inputs — the per-deployment facts arrive pre-derived through
-/// [`nip11_facts`] (config + relay keypair), and the one host-scoped fact
-/// (the workspace `icon`) arrives as a scalar from
-/// [`workspace_icon_for_host`], whose DB lookup is scoped through
-/// [`crate::tenant::bind_community`] and can therefore only ever surface the
+/// [`nip11_facts`] (config + relay keypair). Host-scoped policy and optional
+/// presentation fields are resolved before construction or assigned afterward
+/// as scalars by [`nip11_document`]. These lookups can surface only the
 /// requesting host's own community state.
 ///
 /// This const binds `RelayInfo::build` to its **exact** allowed signature. The
@@ -536,16 +596,28 @@ mod tests {
             "postgres://127.0.0.1:1/none",
         )
         .await;
+        base.tenant_host_cache.insert(
+            "relay.example".into(),
+            (
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
+                std::time::Instant::now(),
+            ),
+        );
         let mut docs = Vec::new();
         for mode in [NipFiMode::Off, NipFiMode::Enforce, NipFiMode::Shadow] {
             let mut state = (*base).clone();
             let mut config = (*state.config).clone();
             config.nip_fi.mode = mode;
             state.config = std::sync::Arc::new(config);
-            docs.push(
-                serde_json::to_string(&super::nip11_document(&state, "relay.example").await)
+            let mut document = serde_json::to_value(
+                super::nip11_document(&state, "relay.example")
+                    .await
                     .unwrap(),
-            );
+            )
+            .unwrap();
+            assert_eq!(document["requires_nip_fi"], mode.enforces());
+            document.as_object_mut().unwrap().remove("requires_nip_fi");
+            docs.push(document);
         }
         assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
         assert_eq!(docs[2], docs[1]);

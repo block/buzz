@@ -59,7 +59,7 @@ pub use runtime::{
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
-pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] =
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
     runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
 
 /// Raw Prometheus series ceiling per relay pod for the operation-aware contract.
@@ -89,9 +89,9 @@ pub(crate) use runtime::{
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
     channel_members, community, community_auth, deletion, dm, entity_deletion, event, feed,
-    git_repo, moderation, nip_fi_binding, operator_listener, partition, personal_read,
+    git_repo, leader_lock, moderation, nip_fi_binding, operator_listener, partition, personal_read,
     product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite, relay_members,
-    relay_operators, reminder, replaceable, storage_accounting, thread, thread_window, usage, user,
+    relay_operators, reminder, replaceable, storage_accounting, thread, thread_window, user,
     user_deletion, user_deletion_fences, workflow,
 };
 
@@ -105,11 +105,11 @@ pub use community::{
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use leader_lock::SessionLeader;
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
-pub use usage::SessionLeader;
 
 /// A value read from the database, with when its reading connection was
 /// checked out of the pool.

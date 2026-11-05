@@ -32,6 +32,7 @@ class AddCommunityPage extends StatelessWidget {
     required this.onSubmitPairing,
     this.onboarding = false,
     this.onFindCommunities,
+    this.onImportIdentity,
     this.onCreateCommunity,
     this.enteringCommunityLink = false,
     this.creatingCommunity = false,
@@ -53,6 +54,7 @@ class AddCommunityPage extends StatelessWidget {
   final ValueChanged<String> onSubmitPairing;
   final bool onboarding;
   final VoidCallback? onFindCommunities;
+  final VoidCallback? onImportIdentity;
   final VoidCallback? onCreateCommunity;
   final bool enteringCommunityLink;
   final bool creatingCommunity;
@@ -80,6 +82,7 @@ class AddCommunityPage extends StatelessWidget {
             onSubmitCommunity: onSubmitCommunity,
             onboarding: onboarding,
             onFindCommunities: onFindCommunities,
+            onImportIdentity: onImportIdentity,
             onCreateCommunity: onCreateCommunity,
             scannerProgress: scannerProgress,
             accountStatus: accountStatus,

@@ -295,10 +295,6 @@ pub struct Db {
     /// bounded-stale read semantics are a product decision, not an
     /// invariant, so the gate ships off.
     pub(crate) replica_read_max_age: Option<Duration>,
-    /// Replica freshness budget used only by the leader's fleet telemetry
-    /// queries. This is independent of serving-read rollout policy: telemetry
-    /// may be stale or skipped, but it must never fall back to the writer.
-    pub(crate) usage_metrics_replica_max_age: Option<Duration>,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -693,10 +689,6 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
-    /// Replica freshness budget for usage telemetry, in milliseconds
-    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). `0` disables fleet database
-    /// telemetry. This does not enable replica routing for serving reads.
-    pub usage_metrics_replica_max_age_ms: u64,
     /// Session `lock_timeout` in milliseconds for writer connections (env
     /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
     pub lock_timeout_ms: u64,
@@ -732,7 +724,6 @@ impl Default for DbConfig {
             max_lifetime_secs: 300,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
-            usage_metrics_replica_max_age_ms: 30_000,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
@@ -816,8 +807,6 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
-        let usage_metrics_replica_max_age =
-            read_budget_from_ms(config.usage_metrics_replica_max_age_ms);
         let push_enqueue = config
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
@@ -829,7 +818,6 @@ impl Db {
             read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
-            usage_metrics_replica_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
     }
@@ -1090,8 +1078,6 @@ impl Db {
     /// round trip strands that one slot until the socket fails. That is
     /// bounded by the releases in flight at that instant, and later checkouts
     /// of silent connections go through the proof timeout and this check.
-    /// Checkouts that must never strand a slot use `close_on_drop` (see
-    /// `ReaderOperation::bounded_release`).
     pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1387,7 +1373,6 @@ impl Db {
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
-            usage_metrics_replica_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1408,7 +1393,6 @@ impl Db {
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
-            usage_metrics_replica_max_age: Some(replica_fence::FENCE_STALENESS),
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1514,7 +1498,7 @@ impl Db {
         // `read_pool` separately would spend a second budget whenever the
         // capability is uncached — i.e. after a failed boot ping, which is
         // precisely the reader-unavailable case the bound must hold for.
-        let conn =
+        let mut conn =
             match observability::acquire_reader_with_legacy_metrics(read_pool, operation).await {
                 Ok(conn) => conn,
                 Err(sqlx::Error::PoolTimedOut) => {
@@ -1526,12 +1510,6 @@ impl Db {
                     return Err("reader_validation_error");
                 }
             };
-        let mut conn = conn;
-        if operation.bounded_release() {
-            // Must precede the first post-acquire await: a caller deadline
-            // can drop this checkout at any of them.
-            conn.close_on_drop();
-        }
         // The proof is the reader's first wire round trip (no pre-acquire
         // ping, see `connect_read_pool`), so it carries the liveness bound:
         // a half-open socket to a vanished reader would otherwise hang the
@@ -1857,39 +1835,6 @@ impl Db {
         }
         tx.commit().await?;
         Ok(result)
-    }
-
-    /// Route a usage-telemetry query only to a proved, sufficiently fresh
-    /// reader. Unlike serving reads, an unavailable reader is recorded as
-    /// skipped and never represented as or executed on the writer.
-    pub(crate) async fn route_usage_read(
-        &self,
-        path: &'static str,
-    ) -> Option<(sqlx::Transaction<'static, sqlx::Postgres>, &'static str)> {
-        let skip = |reason| {
-            Self::record_route(path, "skipped", reason);
-            None
-        };
-        let Some(read_pool) = &self.read_pool else {
-            return skip("disabled");
-        };
-        let Some(budget) = self.usage_metrics_replica_max_age else {
-            return skip("disabled");
-        };
-        let Some(newest) = self.fence.newest() else {
-            return skip("uninitialized");
-        };
-        if newest.committed_at.elapsed() > budget {
-            return skip("stale");
-        }
-        match self
-            .proved_reader(read_pool, observability::ReaderOperation::Maintenance)
-            .await
-        {
-            Ok((tx, entry)) if entry.committed_at.elapsed() <= budget => Some((tx, "fresh")),
-            Ok((_tx, _entry)) => skip("stale"),
-            Err(reason) => skip(reason),
-        }
     }
 
     /// Shared route decision for one read: evaluate the predicate against a

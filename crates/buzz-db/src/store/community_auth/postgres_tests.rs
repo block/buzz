@@ -191,6 +191,7 @@ async fn failed_preconditions_leave_free_policy_and_no_receipt() {
     assert_eq!(
         policy(&db, &request).await,
         CommunityAuthPolicy {
+            community_id: request.community_id,
             requires_nip_fi: false,
             policy_generation: 0
         }
@@ -437,6 +438,7 @@ async fn migration_schema_expansion_preserves_existing_optional_rows_with_and_wi
         assert_eq!(
             db.community_auth_policy(community).await.unwrap(),
             Some(CommunityAuthPolicy {
+                community_id: *community.as_uuid(),
                 requires_nip_fi: false,
                 policy_generation: 0,
             })
@@ -497,4 +499,62 @@ async fn supported_writer_maintains_generation_while_direct_sql_is_not_constrain
         Some("23514")
     );
     assert_eq!(policy(&db, &request).await.policy_generation, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn host_policy_tracks_primary_requirement_and_serving_lifecycle() {
+    let (db, request, _) = fixture().await;
+    let host = &request.expected_host;
+    assert_eq!(
+        db.community_auth_policy_for_host(host).await.unwrap(),
+        Some(CommunityAuthPolicy {
+            community_id: request.community_id,
+            requires_nip_fi: false,
+            policy_generation: 0
+        })
+    );
+    let upgraded = accepted(&db, &request).await;
+    assert_eq!(
+        db.community_auth_policy_for_host(host).await.unwrap(),
+        Some(CommunityAuthPolicy {
+            community_id: request.community_id,
+            requires_nip_fi: true,
+            policy_generation: upgraded.policy_generation
+        })
+    );
+    assert!(db
+        .community_auth_policy_for_host("unknown.example")
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("INSERT INTO community_deletion_requests (community_id, community_host, requested_by) VALUES ($1, $2, 'policy-test')")
+        .bind(request.community_id).bind(host).execute(db.pool()).await.unwrap();
+    for stage in ["submitted", "inventoried", "approved"] {
+        sqlx::query("UPDATE community_deletion_requests SET stage = $2 WHERE community_id = $1")
+            .bind(request.community_id)
+            .bind(stage)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert!(db.lookup_community_by_host(host).await.unwrap().is_some());
+        assert!(
+            db.community_auth_policy_for_host(host)
+                .await
+                .unwrap()
+                .unwrap()
+                .requires_nip_fi,
+            "{stage}"
+        );
+    }
+    sqlx::query("UPDATE communities SET archived_at = now() WHERE id = $1")
+        .bind(request.community_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(db
+        .community_auth_policy_for_host(host)
+        .await
+        .unwrap()
+        .is_none());
 }

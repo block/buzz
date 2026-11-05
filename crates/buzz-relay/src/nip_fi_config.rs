@@ -750,9 +750,8 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
 // ── Duration helpers ──────────────────────────────────────────────────────────
 
 impl NipFiRelayConfig {
-    /// Whether startup builds the database resolver: only for the `database`
-    /// source in a mode that evaluates evidence. Off and deny-protected never
-    /// resolve a community, so they load no snapshot.
+    /// Only evaluating modes load FI bindings. Off starts without an FI
+    /// snapshot and cannot establish required-admission readiness.
     pub fn builds_resolver(&self) -> bool {
         self.source == CommunitySource::Database && self.mode.evaluates()
     }
@@ -2004,10 +2003,10 @@ mod tests {
         }
     }
 
-    // Mutation: building the resolver for the database source in every mode
-    // loads a snapshot that off and deny-protected never read.
+    // Off must not depend on an FI snapshot.
+    // Repair mode remains unconditional and needs no snapshot.
     #[test]
-    fn only_evaluating_modes_with_the_database_source_build_a_resolver() {
+    fn database_source_builds_a_resolver_only_in_evaluating_modes() {
         let base = {
             let _guard = super::NIP_FI_ENV_LOCK
                 .lock()

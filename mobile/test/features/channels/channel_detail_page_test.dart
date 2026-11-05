@@ -66,6 +66,7 @@ import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -274,7 +275,7 @@ Widget _buildTestable({
   _FakeChannelsNotifier? channelsNotifier,
   List<NavigatorObserver> navigatorObservers = const [],
   Future<List<ChannelMember>> Function()? loadMembers,
-  List<DirectoryUser>? directoryUsers,
+  List<UserProfile>? directoryPeople,
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
@@ -428,8 +429,16 @@ Widget _buildTestable({
       meAgentInventoryReadProvider.overrideWithValue(
         () async => {...inventoryAgents},
       ),
-      if (directoryUsers != null)
-        relayDirectoryUsersProvider.overrideWith((ref) async => directoryUsers),
+      if (directoryPeople != null)
+        mentionUserSearchProvider.overrideWith(
+          (ref, query) async => [
+            for (final person in directoryPeople)
+              if (person.displayName!.toLowerCase().contains(
+                query.trim().toLowerCase(),
+              ))
+                person,
+          ],
+        ),
       if (createChannelActions != null)
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
@@ -597,6 +606,10 @@ double? effectiveFontSizeForText(
   return null;
 }
 
+const _directoryAlice =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const _directoryBob =
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
   for (final fromLauncher in [false, true]) {
     testWidgets(
@@ -3870,8 +3883,8 @@ void main() {
               joinedAt: DateTime(2025),
             ),
           ],
-          directoryUsers: const [
-            DirectoryUser(pubkey: 'alice', displayName: 'Alice'),
+          directoryPeople: [
+            UserProfile(pubkey: _directoryAlice, displayName: 'Alice'),
           ],
         ),
       );
@@ -3905,8 +3918,8 @@ void main() {
               joinedAt: DateTime(2025),
             ),
           ],
-          directoryUsers: const [
-            DirectoryUser(pubkey: 'alice', displayName: 'Alice'),
+          directoryPeople: [
+            UserProfile(pubkey: _directoryAlice, displayName: 'Alice'),
           ],
           createChannelActions: (ref) => _FakeChannelActions(
             ref,
@@ -3925,33 +3938,39 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.enterText(
+        find.byKey(const ValueKey('add-channel-members-search')),
+        'Al',
+      );
       await tester.pump();
-      final unselectedSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('add-channel-member-alice')),
+      await tester.pumpAndSettle();
+      final rowSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
       );
-      expect(unselectedSemantics.flagsCollection.isButton, isTrue);
-      expect(
-        unselectedSemantics.flagsCollection.isSelected.toString(),
-        'Tristate.isFalse',
-      );
+      expect(rowSemantics.flagsCollection.isButton, isTrue);
+      expect(rowSemantics.label, 'Alice');
 
-      await tester.tap(find.byKey(const ValueKey('add-channel-member-alice')));
+      await tester.tap(
+        find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
+      );
       await tester.pump();
-      final selectedSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('add-channel-member-alice')),
-      );
-      expect(selectedSemantics.flagsCollection.isButton, isTrue);
+      // A pick moves to the chips above the search.
       expect(
-        selectedSemantics.flagsCollection.isSelected.toString(),
-        'Tristate.isTrue',
+        find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
+        findsNothing,
       );
-      expect(selectedSemantics.label, 'Alice, selected');
+      expect(
+        find.byKey(
+          const ValueKey('add-channel-member-selected-$_directoryAlice'),
+        ),
+        findsOneWidget,
+      );
       await tester.tap(
         find.byKey(const ValueKey('add-channel-members-submit')),
       );
       await tester.pumpAndSettle();
 
-      expect(addedPubkeys, ['alice']);
+      expect(addedPubkeys, [_directoryAlice]);
       expect(
         find.byKey(const ValueKey('add-channel-members-search')),
         findsNothing,
@@ -3973,9 +3992,9 @@ void main() {
                 joinedAt: DateTime(2025),
               ),
             ],
-            directoryUsers: const [
-              DirectoryUser(pubkey: 'alice', displayName: 'Alice'),
-              DirectoryUser(pubkey: 'bob', displayName: 'Bob'),
+            directoryPeople: [
+              UserProfile(pubkey: _directoryAlice, displayName: 'Alice'),
+              UserProfile(pubkey: _directoryBob, displayName: 'Bob'),
             ],
             createChannelActions: (ref) => _FakeChannelActions(
               ref,
@@ -3983,7 +4002,7 @@ void main() {
                 submittedPubkeys.add(pubkeys);
                 attempts += 1;
                 if (attempts == 1) {
-                  throw const AddMembersException({'bob': 'rejected'});
+                  throw const AddMembersException({_directoryBob: 'rejected'});
                 }
               },
             ),
@@ -4000,18 +4019,29 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(
-          find.byKey(const ValueKey('add-channel-member-alice')),
-        );
-        await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('add-channel-member-bob')));
-        await tester.pump();
+        Future<void> pick(String name, String pubkey) async {
+          await tester.enterText(
+            find.byKey(const ValueKey('add-channel-members-search')),
+            name,
+          );
+          await tester.pump();
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(ValueKey('add-channel-member-$pubkey')));
+          await tester.pump();
+        }
+
+        await pick('Alice', _directoryAlice);
+        await pick('Bob', _directoryBob);
         expect(
-          find.byKey(const ValueKey('add-channel-member-selected-alice')),
+          find.byKey(
+            const ValueKey('add-channel-member-selected-$_directoryAlice'),
+          ),
           findsOneWidget,
         );
         expect(
-          find.byKey(const ValueKey('add-channel-member-selected-bob')),
+          find.byKey(
+            const ValueKey('add-channel-member-selected-$_directoryBob'),
+          ),
           findsOneWidget,
         );
         await tester.tap(
@@ -4021,24 +4051,29 @@ void main() {
 
         expect(attempts, 1);
         expect(
-          find.byKey(const ValueKey('add-channel-member-selected-alice')),
+          find.byKey(
+            const ValueKey('add-channel-member-selected-$_directoryAlice'),
+          ),
           findsNothing,
         );
-        expect(
-          find.byKey(const ValueKey('add-channel-member-selected-bob')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('add-channel-member-alice')),
-          findsNothing,
-        );
-        // The successful add must not remain selected for a retry.
+        // The successful add must not remain selected for a retry, nor be
+        // offered again.
         expect(
           tester
               .widgetList<InputChip>(find.byType(InputChip))
               .map((chip) => chip.key)
               .toList(),
-          [const ValueKey('add-channel-member-selected-bob')],
+          [const ValueKey('add-channel-member-selected-$_directoryBob')],
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('add-channel-members-search')),
+          'Alice',
+        );
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
+          findsNothing,
         );
         await tester.tap(
           find.byKey(const ValueKey('add-channel-members-submit')),
@@ -4046,8 +4081,8 @@ void main() {
         await tester.pumpAndSettle();
         expect(attempts, 2);
         expect(submittedPubkeys, [
-          ['alice', 'bob'],
-          ['bob'],
+          [_directoryAlice, _directoryBob],
+          [_directoryBob],
         ]);
       },
     );

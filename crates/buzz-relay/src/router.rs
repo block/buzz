@@ -28,7 +28,7 @@ use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_document, relay_info_handler};
+use crate::nip11::{nip11_response, relay_info_handler};
 use crate::nip_fi_core::http_denial;
 use crate::readiness::{self, DependencySnapshot, ReadinessReason};
 use crate::state::AppState;
@@ -72,8 +72,8 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// When `NipFiMode::Off` or `NipFiMode::Shadow` the guard is fully transparent —
-// no request is touched; Shadow records its verdict elsewhere.  [FI-INV-15]
+// Off skips FI policy reads and enforcement. Shadow preserves optional-community
+// admission and enforces stored requirements. Enforce requires FI everywhere.
 //
 // ## What this guard checks (and does NOT check)
 //
@@ -155,6 +155,14 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/internal/git/policy",
 ];
 
+fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
+    slot.method(AuthMethod::NipFi);
+    slot.finish(AuthResult::Denied(
+        crate::access::AuthReason::AuthorizationUnavailable,
+    ));
+    http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+}
+
 /// Middleware: full offline assertion guard for NIP-FI protected paths.
 ///
 /// Fires before any handler.  In Enforce mode, if the request path is not
@@ -175,17 +183,79 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// Only a cryptographically verified assertion reaches the handler; the
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
-///
-/// In Off mode the middleware is fully transparent; in Shadow it only records.
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,
     request: Request<Body>,
     next: middleware::Next,
 ) -> axum::response::Response {
-    let mode = state.config.nip_fi.mode;
-    // Off: fully transparent. [FI-INV-15]
-    if mode.is_off() || nip_fi_guard_exempts(&state, &request) {
+    if state.config.nip_fi.mode.is_off() || nip_fi_guard_exempts(&state, &request) {
+        return next.run(request).await;
+    }
+    if state.config.nip_fi.mode.denies_unconditionally() {
+        return nip_fi_unavailable(&slot);
+    }
+    let policy = match crate::nip_fi_policy::resolve(&state, request.headers()).await {
+        Ok(policy) => policy,
+        Err(response) if response.status() == StatusCode::NOT_FOUND => {
+            // The authoritative read found no serving policy. Let the route
+            // retain its legacy rejection (e.g. Git's credential challenge).
+            // The shared admission gate refuses this scope unconditionally;
+            // this is never an optional-policy fallback or a data admission.
+            let mode = state.config.nip_fi.mode;
+            let policy = crate::nip_fi_policy::Policy {
+                community_id: uuid::Uuid::nil(),
+                mode,
+                required: mode.enforces(),
+                stored_required: false,
+
+                mapped: false,
+            };
+            return crate::nip_fi_policy::with_policy(
+                policy,
+                nip_fi_assertion_guard_with_policy(state, slot, request, next, mode),
+            )
+            .await;
+        }
+        Err(response) => {
+            slot.method(AuthMethod::NipFi);
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::AuthorizationUnavailable,
+            ));
+            if state.config.nip_fi.mode.observes_only() {
+                crate::nip_fi_shadow::record_for(
+                    "http",
+                    crate::nip_fi_shadow::label(&Err(
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                    )),
+                    Err(crate::nip_fi_shadow::WouldDeny::new(
+                        crate::nip_fi_shadow::Stage::Community,
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                        crate::nip_fi_shadow::UNRESOLVED,
+                    )),
+                );
+            }
+            return response;
+        }
+    };
+    if policy.stored_required && state.nip_fi_deny_map.is_none() {
+        return nip_fi_unavailable(&slot);
+    }
+    crate::nip_fi_policy::with_policy(
+        policy,
+        nip_fi_assertion_guard_with_policy(state, slot, request, next, policy.mode),
+    )
+    .await
+}
+
+async fn nip_fi_assertion_guard_with_policy(
+    state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
+    request: Request<Body>,
+    next: middleware::Next,
+    mode: buzz_auth::NipFiMode,
+) -> axum::response::Response {
+    if mode.is_off() {
         return next.run(request).await;
     }
 
@@ -749,7 +819,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return Json(nip11_document(&state, raw_host).await).into_response();
+        return nip11_response(&state, raw_host).await;
     }
 
     // NIP-FI assertion gate at WebSocket upgrade.
@@ -783,7 +853,13 @@ async fn nip11_or_ws_handler(
     //
     // Keying on the header pair (not on `Accept`) means an HTML Accept header
     // on a real WS upgrade is still gated correctly.
-    let (upgrade_checked, nip_fi_assertion, shadow_assertion, nip_fi_deadline, shadow_line) = {
+    let (
+        upgrade_checked,
+        mut nip_fi_assertion,
+        shadow_assertion,
+        mut nip_fi_deadline,
+        mut shadow_line,
+    ) = {
         let is_h1_ws_upgrade = headers
             .get(axum::http::header::UPGRADE)
             .and_then(|v| v.to_str().ok())
@@ -808,7 +884,7 @@ async fn nip11_or_ws_handler(
         if is_h1_ws_upgrade || is_h2_ws_connect {
             use crate::nip_fi_session::NipFiWsRoute::Root;
             use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-            let mode = state.config.nip_fi.mode;
+            let mode = crate::nip_fi_policy::mode(&state, &headers).await;
             let verifier = state.nip_fi_verifier.as_deref();
             let communities = state.nip_fi_communities();
             match check_nip_fi_at_upgrade(&slot, Root, &headers, communities, verifier, mode)
@@ -856,7 +932,7 @@ async fn nip11_or_ws_handler(
             }
         }
     }
-    let shadow_assertion = shadow_assertion.filter(|(a, c)| {
+    let mut shadow_assertion = shadow_assertion.filter(|(a, c)| {
         !crate::nip_fi_shadow_session::upgrade_denied(&state, &c.shadow_label(), a)
     });
 
@@ -864,25 +940,45 @@ async fn nip11_or_ws_handler(
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
     // lookup failure fails closed with a generic rejection — never a default
-    // tenant. NIP-11 above is served before binding and stays fail-open: an
-    // unmapped host still gets the document (with host-scoped fields like
-    // `icon` simply absent), so the doc cannot leak which hosts are mapped.
+    // tenant. NIP-11 above resolves host policy independently and fails closed
+    // when that policy cannot be loaded.
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
-    let tenant = match crate::tenant::bind_community(&*state, raw_host).await {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            // Generic rejection: do not distinguish "unmapped" from "lookup
-            // error", and never echo the host, so an unauthenticated caller
-            // cannot probe which communities exist on this deployment.
-            return (
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response();
-        }
+    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
+    {
+        Ok(binding) => binding,
+        Err(response) => return response,
     };
+    // An initially missing/optional host may have become required while the
+    // early gate awaited. Only the policy read with the bound row authorizes
+    // this socket; a shadow observation is not an enforced admission.
+    if upgrade_checked
+        && bound_mode.restricts()
+        && (nip_fi_assertion.is_none() || bound_mode.denies_unconditionally())
+    {
+        match crate::nip_fi_upgrade::check_nip_fi_at_upgrade(
+            &slot,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+            &headers,
+            state.nip_fi_communities(),
+            state.nip_fi_verifier.as_deref(),
+            bound_mode,
+        )
+        .await
+        .into_assertions()
+        {
+            Ok(assertions) => {
+                (
+                    nip_fi_assertion,
+                    shadow_assertion,
+                    nip_fi_deadline,
+                    shadow_line,
+                ) = assertions
+            }
+            Err(response) => return (*response).into_response(),
+        }
+    }
     // The tenant lookup awaited since the community resolved; a snapshot
     // that went stale meanwhile accepts no socket.
     if let Err(class) = nip_fi_deadline.check() {
@@ -917,7 +1013,7 @@ async fn nip11_or_ws_handler(
                 // Only re-check if the pre-extractor gate did not fire (h2 path).
                 use crate::nip_fi_session::NipFiWsRoute::Root;
                 use crate::nip_fi_upgrade::check_nip_fi_at_upgrade;
-                let mode = state.config.nip_fi.mode;
+                let mode = bound_mode;
                 let verifier = state.nip_fi_verifier.as_deref();
                 let communities = state.nip_fi_communities();
                 // Resolved after every await of this upgrade: nothing to re-check.
@@ -986,7 +1082,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS upgrade request — serve NIP-11 as fallback.
-            Json(nip11_document(&state, raw_host).await).into_response()
+            nip11_response(&state, raw_host).await
         }
     }
 }
@@ -1318,7 +1414,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -1330,6 +1426,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -2351,7 +2448,7 @@ mod tests {
             buzz_workflow::WorkflowConfig::default(),
         ));
         let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
-        let (state, _audit_shutdown) = AppState::new(
+        let (mut state, _audit_shutdown) = AppState::new(
             config,
             db,
             redis_pool,
@@ -2363,6 +2460,7 @@ mod tests {
             nostr::Keys::generate(),
             media_storage,
         );
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
@@ -3814,7 +3912,7 @@ mod tests {
             ));
             let media_storage =
                 buzz_media::MediaStorage::new(&config.media).expect("media storage");
-            let (state, _audit_shutdown) = AppState::new(
+            let (mut state, _audit_shutdown) = AppState::new(
                 config,
                 db,
                 redis_pool,
@@ -3826,6 +3924,7 @@ mod tests {
                 nostr::Keys::generate(),
                 media_storage,
             );
+            state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
             Arc::new(state)
         }
 
@@ -4275,6 +4374,7 @@ mod tests {
         );
         state.nip_fi_deny_map = Some(deny_map);
 
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
         Arc::new(state)
     }
 
