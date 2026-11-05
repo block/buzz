@@ -223,12 +223,20 @@ void main() {
 
     test('an issued assertion serves cached reads for the relay', () async {
       await saveSession();
-      final auth = relayAuth(organizationClient());
+      final organizationAccount = organizationClient();
+      final auth = relayAuth(organizationAccount);
       expect(auth.cachedHeaders(relay), isNull);
       await auth.headers(relay);
       expect(auth.cachedHeaders(relay), {
         'Nostr-Federated-Identity': 'Bearer org-token',
       });
+      // Cached reads never present a signed-out or replaced account's
+      // assertion.
+      await organizationAccount.clearLocalSession();
+      expect(auth.cachedHeaders(relay), isNull);
+      await saveSession();
+      expect(await organizationAccount.restore(), isNotNull);
+      expect(auth.cachedHeaders(relay), isNull);
     });
 
     test(
