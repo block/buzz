@@ -460,17 +460,10 @@ def collect_registered_routes() -> Counter:
             except ValueError as error:
                 errors.append(f"{path.relative_to(ROOT)}::{name}: {error}")
                 continue
-            methods = {
-                method.upper()
-                for method in re.findall(
-                    r"\b(get|head|post|put|delete|patch|options|trace|connect|any)\s*\(",
-                    method_mask,
-                )
-            }
-            if not methods:
-                errors.append(
-                    f"{path.relative_to(ROOT)}::{name}: no Axum HTTP method in route expression"
-                )
+            try:
+                methods = route_methods(method_mask)
+            except ValueError as error:
+                errors.append(f"{path.relative_to(ROOT)}::{name}: {error}")
                 continue
             full_path = f"{prefix.rstrip('/')}{route}" if prefix else route
             for method in methods:
@@ -483,6 +476,40 @@ def collect_registered_routes() -> Counter:
         rendered = ", ".join(f"{scope} {method} {path}" for scope, method, path in duplicates)
         raise ValueError(f"duplicate production route registrations: {rendered}")
     return registrations
+
+
+def route_methods(method_mask: str) -> set[str]:
+    """Classify an entire MethodRouter chain, never calls inside its arguments.
+
+    Keep this grammar deliberately small: an Axum routing helper followed by
+    known method helpers or non-method modifiers. Unknown chains must fail so
+    a newly added Axum API cannot silently expose an uninventoried method.
+    """
+    expression = method_mask.strip().removesuffix(",").rstrip()
+    methods = set()
+    position = 0
+    first = True
+    while position < len(expression):
+        pattern = (
+            r"(?:axum::routing::)?([A-Za-z_]\w*)\s*\("
+            if first
+            else r"\s*\.\s*([A-Za-z_]\w*)\s*\("
+        )
+        call = re.compile(pattern).match(expression, position)
+        if call is None:
+            raise ValueError("unclassified route method expression")
+        name = call.group(1)
+        if name in HTTP_METHODS:
+            methods.add(HTTP_METHODS[name])
+        elif first or name not in {"with_state", "layer", "route_layer"}:
+            raise ValueError(f"unclassified route method expression: {name}")
+        # Handler and middleware arguments can themselves call functions named
+        # get/post/etc.; those calls do not register HTTP methods on this route.
+        position = matching_delimiter(expression, call.end() - 1) + 1
+        first = False
+    if not methods:
+        raise ValueError("unclassified route method expression: no Axum HTTP method")
+    return methods
 
 
 def read_tsv(path: Path, expected_header: list[str]) -> list[dict[str, str]]:
