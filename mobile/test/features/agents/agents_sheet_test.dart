@@ -218,7 +218,7 @@ void main() {
       await tester.tap(find.byKey(ValueKey(fakeAgent)));
       await tester.pumpAndSettle();
       expect(
-        find.textContaining('This agent runs on Builderbot.'),
+        find.textContaining('This agent runs remotely on Builderlab.'),
         findsOneWidget,
       );
       // Remote instructions come from the registry row, not published config.

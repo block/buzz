@@ -62,11 +62,11 @@ class AgentIdentitySections extends HookConsumerWidget {
                 width: double.infinity,
                 child: Text(
                   unknown && !remote && controller.busy
-                      ? 'Checking whether this agent runs on Builderbot…'
+                      ? 'Checking whether this agent runs on Builderlab…'
                       : unknown && !remote
-                      ? 'Sign in to Builderlab to see whether this agent runs on Builderbot or your desktop.'
+                      ? 'Sign in to Builderlab to see whether this agent runs remotely or on your desktop.'
                       : remote
-                      ? 'This agent runs on Builderbot. Your desktop doesn’t need to be online for it to work.'
+                      ? 'This agent runs remotely on Builderlab. You can chat with it from your phone, even when your desktop is off. It can’t open files on your computer.'
                       : 'This agent is managed on your desktop. Keep Buzz open and your desktop online for it to work.',
                   style: context.textTheme.bodyMedium,
                 ),
