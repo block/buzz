@@ -6,6 +6,7 @@
 pub(crate) mod access;
 mod admission;
 mod build_info;
+mod community_active;
 mod host_cache;
 mod rejection;
 

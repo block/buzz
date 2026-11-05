@@ -807,10 +807,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        // Cached (10s): this runs per ephemeral event. Persistent ingest keeps
-        // the uncached read as its durable write fence.
+        // Cached: this runs per ephemeral event. Persistent ingest keeps the
+        // uncached read as its durable write fence.
         match state
-            .is_serving_active_cached(conn.tenant.community())
+            .is_community_active_cached(conn.tenant.community())
             .await
         {
             Ok(true) => {}
@@ -1267,7 +1267,7 @@ pub(crate) async fn publish_http_typing(
     super::ingest::enforce_write_restriction(state, tenant, KIND_TYPING_INDICATOR, &auth_pubkey)
         .await?;
     super::ingest::map_serving_fence_state(
-        state.is_serving_active_cached(tenant.community()).await,
+        state.is_community_active_cached(tenant.community()).await,
     )?;
     publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
@@ -3914,12 +3914,12 @@ mod tests {
         }
 
         /// The ephemeral community fence reads the cached serving state.
-        /// Mutation: call the uncached `is_serving_active` → RED.
+        /// Mutation: call the uncached `is_community_active` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn ephemeral_fence_uses_cached_serving_state() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.serving_active_cache.insert(tenant.community(), false);
+            state.community_active.seed(tenant.community(), false);
             let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert!(
                 frame.contains("false") && frame.contains("community writes are fenced"),
@@ -3934,7 +3934,10 @@ mod tests {
             let (state, tenant, user) = unrestricted_fixture().await;
             ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert_eq!(
-                state.serving_active_cache.get(&tenant.community()),
+                state
+                    .community_active
+                    .entry(tenant.community())
+                    .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
@@ -4045,12 +4048,12 @@ mod tests {
 
         /// Stored writes skip the cached serving state: a cached "fenced"
         /// for a community Postgres says is active does not refuse them.
-        /// Mutation: make ingest's fence call `is_serving_active_cached` → RED.
+        /// Mutation: make ingest's fence call `is_community_active_cached` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_ignore_cached_fence() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.serving_active_cache.insert(tenant.community(), false);
+            state.community_active.seed(tenant.community(), false);
             let frame = ok_frame_scoped(
                 &state,
                 &tenant,
