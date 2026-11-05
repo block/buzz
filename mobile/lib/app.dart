@@ -48,6 +48,7 @@ import 'shared/relay/relay.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 import 'shared/widgets/buzz_toast_host.dart';
+import 'shared/widgets/covered_route_keyboard_insets.dart';
 
 const _starterChannelNamespace = '3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0';
 
@@ -456,19 +457,21 @@ class App extends HookConsumerWidget {
         data: (state) => switch (state.status) {
           AuthStatus.authenticated => HostedAppGate(
             authenticated: true,
-            child: HomePage(
-              onAgents: showAgents,
-              defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                onChooseAgent: () => showAgents(context, createOnOpen: true),
+            child: CoveredRouteKeyboardInsets(
+              child: HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context, createOnOpen: true),
+                ),
+                mePageBuilder: (_, chat, workspace) => MePage(
+                  sliver: true,
+                  newChatAction: chat,
+                  newWorkspaceAction: workspace,
+                ),
+                settingsPageBuilder: _buildSettingsPage,
+                communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+                communityAppearancePageBuilder: (_) => const ThemePickerPage(),
               ),
-              mePageBuilder: (_, chat, workspace) => MePage(
-                sliver: true,
-                newChatAction: chat,
-                newWorkspaceAction: workspace,
-              ),
-              settingsPageBuilder: _buildSettingsPage,
-              communityInvitePageBuilder: (_) => const CommunityInvitePage(),
-              communityAppearancePageBuilder: (_) => const ThemePickerPage(),
             ),
           ),
           _ => const HostedAppGate(

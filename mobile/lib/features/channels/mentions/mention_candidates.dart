@@ -40,6 +40,23 @@ String? formatOwnerLabel(
   return shortPubkey(ownerPubkey);
 }
 
+/// The detail line a recipient picker shows under [candidate], as the
+/// mention chooser's info line reads outside a channel: agents say who
+/// manages them; people have none.
+String? recipientRowDetail(
+  MentionCandidate candidate,
+  String? currentPubkey,
+  Map<String, UserProfile> userCache,
+) {
+  if (!candidate.isAgent) return null;
+  final owner = formatOwnerLabel(
+    candidate.ownerPubkey,
+    currentPubkey,
+    userCache,
+  );
+  return owner == null ? 'agent' : 'agent \u00b7 managed by $owner';
+}
+
 /// Assemble the full mention candidate list: channel members first-class,
 /// then the viewer's own agents where they can be invited, then eligible
 /// non-member relay agents, then global user-search results.
@@ -51,6 +68,8 @@ String? formatOwnerLabel(
 /// answer until desktop imports it, and mobile cannot import. While the list
 /// is unknown, owned agents are not held back. [offerOwnedAgents] offers the
 /// listed agents unprompted, as desktop does in streams and forums.
+/// [offerUnsharedAgents] keeps searched agents that do not answer the
+/// viewer, for pickers that add them to a channel rather than address them.
 List<MentionCandidate> buildMentionCandidates({
   required List<ChannelMember> members,
   required List<AgentDirectoryEntry> relayAgents,
@@ -61,6 +80,7 @@ List<MentionCandidate> buildMentionCandidates({
   String? currentPubkey,
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool offerOwnedAgents = false,
+  bool offerUnsharedAgents = false,
 }) {
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
@@ -161,7 +181,9 @@ List<MentionCandidate> buildMentionCandidates({
       // verified NIP-OA owner) or shared via the relay agent directory.
       final ownedByCurrentUser =
           currentLower != null && ownerPubkey?.toLowerCase() == currentLower;
-      if (!ownedByCurrentUser && !sharedAgentPubkeys.contains(pk)) {
+      if (!offerUnsharedAgents &&
+          !ownedByCurrentUser &&
+          !sharedAgentPubkeys.contains(pk)) {
         continue;
       }
       if (unlistedOwnAgent(pk, ownerPubkey)) continue;

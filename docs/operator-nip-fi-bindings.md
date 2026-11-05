@@ -13,6 +13,12 @@ assertion audience. The relay refuses to start while a reserved host holds a
 binding, and the operator lookup route reports no issuers for a host that is not
 bindable or for an issuer that is not configured.
 
+A community with durable `requires_nip_fi=true` always retains its last issuer.
+The internal `allow_last` exception for unbindable hosts cannot override this
+policy. Bind a replacement first, or archive/delete the community for containment.
+Bulk backfill skips required communities whose bindings are missing; its closing
+report still counts them as unbound. Repair those bindings with an explicit bind.
+
 ## Configuration
 
 `BUZZ_NIP_FI_PROVISION_BINDING` is read in every NIP-FI mode. Unset or empty

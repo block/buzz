@@ -22,8 +22,7 @@ import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/agent_artwork_panel.dart';
 import '../../shared/widgets/buzz_sheet_header.dart';
-import '../../shared/widgets/verified_mark.dart';
-import '../../shared/widgets/verified_profile_details.dart';
+import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
@@ -161,6 +160,13 @@ class UserProfileSheet extends HookConsumerWidget {
     final displayName =
         (opener != null ? ref.watch(opener) : watchIdentityNames(ref, {pk}))
             .labelFor(pk);
+    final verifiedFullName = ref.watch(
+      verifiedProfilesProvider.select((all) => all[pk]?.fullName),
+    );
+    final titleName = agentPresentation
+        ? displayName
+        : verifiedFullName ?? displayName;
+    final secondaryName = titleName != displayName ? displayName : null;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
     final initial =
@@ -268,7 +274,7 @@ class UserProfileSheet extends HookConsumerWidget {
                         children: [
                           Flexible(
                             child: Text(
-                              displayName,
+                              titleName,
                               style: agentPresentation
                                   ? context.textTheme.bodyLarge?.copyWith(
                                       fontSize: 20,
@@ -281,11 +287,22 @@ class UserProfileSheet extends HookConsumerWidget {
                               textAlign: TextAlign.center,
                             ),
                           ),
-                          VerifiedMark(pubkey: pk, size: 20),
                         ],
                       ),
                     ),
-                    VerifiedProfileDetails(pubkey: pk),
+                    if (secondaryName != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: Grid.xxs),
+                        child: Center(
+                          child: Text(
+                            secondaryName,
+                            textAlign: TextAlign.center,
+                            style: context.textTheme.bodySmall?.copyWith(
+                              color: context.colors.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ),
                     if (!agentPresentation && agentSubtitle != null) ...[
                       const SizedBox(height: Grid.xxs),
                       Center(

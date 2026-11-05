@@ -102,6 +102,14 @@ public final class BuzzNotificationCache: @unchecked Sendable {
   /// message can carry an earlier time than one already shown. Anything older is
   /// history, not the message a push is for.
   public static let presentationReorderWindow = 15 * 60
+
+  /// The oldest time still within ``presentationReorderWindow`` of `newest`. Saturates,
+  /// because a signed event can carry any `created_at` and an overflow would crash the
+  /// extension on every push.
+  static func presentationCutoff(after newest: Int) -> Int {
+    let (cutoff, overflow) = newest.subtractingReportingOverflow(presentationReorderWindow)
+    return overflow ? .min : cutoff
+  }
   /// Retention keeps up to this many entries by `watermark` and as many by `createdAt`,
   /// so neither future-dated entries nor a burst of recent ones can evict the other.
   static let maximumPresentedMessages = 256
@@ -309,7 +317,7 @@ public final class BuzzNotificationCache: @unchecked Sendable {
           return index
         case .success(let entries):
           guard !entries.contains(where: { $0.id == candidate.event.id }) else { continue }
-          if let newestShown, watermark < newestShown - Self.presentationReorderWindow {
+          if let newestShown, watermark < Self.presentationCutoff(after: newestShown) {
             continue
           }
         }
@@ -409,7 +417,7 @@ public final class BuzzNotificationCache: @unchecked Sendable {
       if let presented = state.presented, let newest = presented.map(\.watermark).max() {
         // The age check rejects anything older than the window, so those entries can
         // go. A future-dated entry stays while the relay may still rank it first.
-        let cutoff = newest - Self.presentationReorderWindow
+        let cutoff = Self.presentationCutoff(after: newest)
         // Entries are newest claim first, so ties keep the most recent claims.
         let current = Array(presented.filter { $0.createdAt >= cutoff }.enumerated())
         func newestIDs(by key: (PresentedMessage) -> Int) -> [String] {

@@ -101,6 +101,7 @@ pub(super) async fn authorize(
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
     // Private state always requires cryptographic identity, even on a dev relay.
     // NIP-FI admission owns NIP-98 extraction, assertion pairing and deny map.
+    let mode = crate::nip_fi_policy::mode(state, headers).await;
     let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
         state,
         headers,
@@ -117,7 +118,7 @@ pub(super) async fn authorize(
     )
     .await
     .map_err(|response| {
-        if state.config.nip_fi.mode.restricts() {
+        if mode.restricts() {
             // Preserve the shared NIP-FI wire contract, not just its status.
             Error::Admission(Box::new(response))
         } else {

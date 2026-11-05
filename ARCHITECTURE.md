@@ -738,6 +738,8 @@ pub struct ConnectionState {
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
 
+**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
+
 **HTTP endpoints:**
 
 | Method | Path | Handler |

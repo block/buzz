@@ -6,12 +6,28 @@ class ReconnectCapsule extends HookWidget {
     super.key,
     required this.onSignIn,
     this.visible = true,
+    this.message = 'Reconnect to Builderlab',
+    this.actionLabel = 'Sign in',
+    this.destructiveAction = false,
+    this.secondaryAction,
     this.islandOrigin,
     this.islandSpeed = 0.75,
   });
 
   final VoidCallback onSignIn;
   final bool visible;
+
+  /// Persistent status displayed beside or above the actions.
+  final String message;
+
+  /// Label for the primary recovery action.
+  final String actionLabel;
+
+  /// Uses the theme error colors for the primary action.
+  final bool destructiveAction;
+
+  /// Adds a second recovery action and stacks both buttons below the message.
+  final ({String label, VoidCallback onPressed})? secondaryAction;
   final Rect? islandOrigin;
   final double islandSpeed;
 
@@ -22,8 +38,10 @@ class ReconnectCapsule extends HookWidget {
     // Remounting after dismissal restarts the persistent entrance if needed.
     if (transientVisible) return const SizedBox.shrink();
     return _ToastBubble(
-      message: 'Reconnect to Builderlab',
-      actionLabel: 'Sign in',
+      message: message,
+      actionLabel: actionLabel,
+      destructiveAction: destructiveAction,
+      secondaryAction: secondaryAction,
       onRetry: onSignIn,
       onDismiss: () {},
       persistent: true,

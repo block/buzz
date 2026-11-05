@@ -1347,7 +1347,8 @@ pub const RESTRICTION_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::
 /// How long a pod serves a cached host → community mapping after the
 /// database read that produced it began, at its connection checkout (see
 /// [`AppState::tenant_host_cache`]).
-pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration =
+    buzz_db::community_auth::POLICY_LEASE_MAX_AGE;
 
 /// How long a cache miss waits for a shared read's statement, beyond the
 /// writer pool's acquire timeout that its holder may spend waiting for a
@@ -1578,7 +1579,7 @@ pub struct AppState {
     /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its
     /// read's connection checkout: a host remapped, archived or deleted
     /// elsewhere resolves to its old community for at most that long.
-    pub tenant_host_cache: Arc<moka::sync::Cache<String, (CommunityId, Instant)>>,
+    pub tenant_host_cache: Arc<crate::host_cache::HostCache>,
     /// Lets concurrent misses on [`Self::tenant_host_cache`] share one read.
     pub(crate) tenant_host_reads: Arc<crate::shared_reads::SharedReads<String>>,
 
@@ -1599,7 +1600,8 @@ pub struct AppState {
     /// NIP-FI federated-identity assertion verifier, shared across all HTTP
     /// ingress and WebSocket upgrade checks.
     ///
-    /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
+    /// `None` when FI evaluation is disabled, including database-sourced Off
+    /// deployments. When present, the verifier
     /// is the single offline authority for assertion validation on every
     /// protected HTTP surface and WebSocket upgrade. The backing `ProductionJwksSource` is also
     /// shared and performs bounded periodic JWKS refresh internally.
@@ -1611,6 +1613,9 @@ pub struct AppState {
     /// erased form costs one vtable dispatch per request, which is negligible
     /// relative to the JWT crypto.
     pub nip_fi_verifier: Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+
+    /// Primary-database policy lookup; tests can substitute the same source seam.
+    pub(crate) nip_fi_policy: Arc<dyn crate::nip_fi_policy::PolicySource>,
 
     /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
     /// can warm it at startup and drive the background refresh loop.
@@ -1648,6 +1653,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Whether local FI admission dependencies can serve a stored requirement.
+    /// This is not fleet activation or registry-baseline verification.
+    pub fn nip_fi_required_admission_ready(&self) -> bool {
+        crate::nip_fi_policy::required_dependencies_ready(self)
+    }
+
     /// The NIP-FI community source admission resolves against.
     pub(crate) fn nip_fi_communities(&self) -> crate::nip_fi_core::Communities<'_> {
         use crate::nip_fi_config::CommunitySource;
@@ -1677,6 +1688,7 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
+        let nip_fi_policy = Arc::new(db.clone());
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
@@ -1872,12 +1884,7 @@ impl AppState {
                 100_000,
                 shared_read_wait,
             )),
-            tenant_host_cache: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
-                    .build(),
-            ),
+            tenant_host_cache: Arc::new(crate::host_cache::HostCache::new()),
             tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(
                 10_000,
                 shared_read_wait,
@@ -1889,6 +1896,7 @@ impl AppState {
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
             nip_fi_verifier,
+            nip_fi_policy,
             nip_fi_jwks_source,
             // NIP-FI deny map and command verifier are initialized lazily by
             // `build_nip_fi_command_components` in `api::nip_fi`, called from
@@ -2189,6 +2197,9 @@ impl AppState {
         invalidation: CacheInvalidation,
     ) {
         match invalidation {
+            CacheInvalidation::CommunityHost { host } => {
+                self.tenant_host_cache.invalidate(&host);
+            }
             CacheInvalidation::Membership { channel_id, pubkey } => {
                 self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
@@ -2202,6 +2213,18 @@ impl AppState {
                 self.invalidate_channel_deleted_local(community_id);
             }
         }
+    }
+
+    /// Drop the host's policy/routing snapshot locally and best-effort on peers.
+    /// Lease expiry, not notification delivery, protects acceptance consistency.
+    pub fn invalidate_community_host(&self, tenant: &TenantContext) {
+        self.tenant_host_cache.invalidate(tenant.host());
+        self.spawn_cache_invalidation(
+            tenant,
+            CacheInvalidation::CommunityHost {
+                host: tenant.host().to_owned(),
+            },
+        );
     }
 
     /// Close everything `pubkey` has open in `community` on this pod: root
@@ -2483,6 +2506,7 @@ impl AppState {
         community_id: CommunityId,
         archived_at: Option<DateTime<Utc>>,
     ) -> Result<Option<usize>, buzz_db::DbError> {
+        self.tenant_host_cache.invalidate_community(community_id);
         match archived_at {
             Some(archived_at) => {
                 self.db
@@ -2758,10 +2782,8 @@ impl AuditShutdownHandle {
 
 /// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
 ///
-/// Returns `(None, None)` when the mode is `Off` or `DenyProtected` (the
-/// verifier is never consulted there; admission always returns 503). In
-/// `Enforce` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
-/// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
+/// Only evaluating modes construct these components. Off and repair mode
+/// need no verifier or outbound JWKS traffic. The JWKS source is shared via `Arc`.
 /// The source starts empty; HTTP admission returns `authorization_unavailable`
 /// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 type NipFiComponents = (
@@ -2864,6 +2886,37 @@ pub(crate) mod tests {
     use crate::connection::{AuthState, ConnectionState};
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn fi_components_exist_only_in_evaluating_modes() {
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.jwks_configs = vec![buzz_auth::IssuerJwksConfig {
+            issuer: "https://issuer.example".to_owned(),
+            contract: buzz_auth::JwksSourceContract::new(
+                "https://issuer.example/.well-known/jwks.json".to_owned(),
+                300,
+                3600,
+            )
+            .expect("valid test contract"),
+        }];
+        for source in [
+            crate::nip_fi_config::CommunitySource::Env,
+            crate::nip_fi_config::CommunitySource::Database,
+        ] {
+            config.nip_fi.source = source;
+            for mode in [
+                buzz_auth::NipFiMode::Off,
+                buzz_auth::NipFiMode::Shadow,
+                buzz_auth::NipFiMode::Enforce,
+                buzz_auth::NipFiMode::DenyProtected,
+            ] {
+                config.nip_fi.mode = mode;
+                let (verifier, jwks) = build_nip_fi_components(&config);
+                assert_eq!(verifier.is_some(), mode.evaluates(), "{source:?} {mode:?}");
+                assert_eq!(jwks.is_some(), mode.evaluates(), "{source:?} {mode:?}");
+            }
+        }
+    }
 
     /// Helper: create a ConnectionManager with one registered connection.
     /// Returns (manager, conn_id, receiver, ctrl_receiver, cancel,
@@ -3426,7 +3479,9 @@ pub(crate) mod tests {
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        build_test_state(config, pool).await
+        let mut state = (*build_test_state(config, pool).await).clone();
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
+        Arc::new(state)
     }
 
     /// The same test state with an unreachable database target. This lets
@@ -3438,12 +3493,15 @@ pub(crate) mod tests {
     pub(crate) async fn test_state_with_unreachable_database_url(
         database_url: &str,
     ) -> Arc<AppState> {
-        test_state_with_database_url_and_pool_options(
+        let mut state = (*test_state_with_database_url_and_pool_options(
             database_url,
             sqlx::postgres::PgPoolOptions::new()
                 .acquire_timeout(std::time::Duration::from_millis(100)),
         )
-        .await
+        .await)
+            .clone();
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
+        Arc::new(state)
     }
 
     /// Test state whose config and writer pool both target `database_url`,

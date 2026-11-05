@@ -52,6 +52,15 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
     }
 }
 
+/// Time one persistent WebSocket EVENT from frame to OK under `outcome`:
+/// `accepted`, `not_accepted` (for example a duplicate), or the ingest error
+/// class (`invalid`, `auth`, `error`). Failures are timed too, so a slow
+/// failing store shows in the latency instead of hiding from it.
+fn record_event_processing(start: std::time::Instant, outcome: &'static str) {
+    metrics::histogram!("buzz_event_processing_seconds", "outcome" => outcome)
+        .record(start.elapsed().as_secs_f64());
+}
+
 fn event_frame_for_sub(sub_id: &str, event_json: &str) -> String {
     format!(r#"["EVENT","{}",{}]"#, sub_id, event_json)
 }
@@ -921,8 +930,14 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     "Event ingested"
                 );
             }
-            metrics::histogram!("buzz_event_processing_seconds")
-                .record(start.elapsed().as_secs_f64());
+            record_event_processing(
+                start,
+                if result.accepted {
+                    "accepted"
+                } else {
+                    "not_accepted"
+                },
+            );
             conn.send(RelayMessage::ok(
                 &result.event_id,
                 result.accepted,
@@ -941,6 +956,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     ("error: internal server error".to_string(), "error")
                 }
             };
+            record_event_processing(start, reason);
             reject(reason);
             conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
         }
@@ -3977,6 +3993,54 @@ mod tests {
                 frame.contains(",true,"),
                 "an aged-out cached ban must be reread from Postgres; got {frame}"
             );
+        }
+
+        /// Every persistent ingest is timed under its outcome, failures
+        /// included, so a failing store cannot hide from the latency.
+        /// Mutation: drop `record_event_processing` from the `Err` arm → RED.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn event_processing_is_timed_for_accepted_and_refused_ingest() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            let scopes = buzz_auth::Scope::all_non_admin();
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                let frame =
+                    ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+                assert!(frame.contains(",true,"), "{frame}");
+                state.seed_restriction(
+                    (tenant.community(), user.public_key().to_bytes().to_vec()),
+                    buzz_db::moderation::RestrictionState {
+                        banned: true,
+                        own_banned: true,
+                        muted_until: None,
+                    },
+                );
+                let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
+                assert!(frame.contains("blocked: you are banned"), "{frame}");
+            }
+            let mut timed: Vec<(String, usize)> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_event_processing_seconds")
+                .map(|(key, _, _, value)| {
+                    let metrics_util::debugging::DebugValue::Histogram(samples) = value else {
+                        panic!("buzz_event_processing_seconds must be a histogram");
+                    };
+                    let outcome = key
+                        .key()
+                        .labels()
+                        .find(|l| l.key() == "outcome")
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default();
+                    (outcome, samples.len())
+                })
+                .collect();
+            timed.sort();
+            assert_eq!(timed, [("accepted".to_owned(), 1), ("auth".to_owned(), 1)]);
         }
 
         /// Stored writes skip the cached serving state: a cached "fenced"
