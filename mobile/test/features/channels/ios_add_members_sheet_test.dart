@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -36,14 +37,17 @@ class _Lifecycle extends AppLifecycleNotifier {
 
 class _Actions extends Fake implements ChannelActions {
   final calls = <List<String>>[];
+  final roleCalls = <Map<String, String>>[];
   bool failBob = false;
   @override
   Future<void> addMembers({
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Map<String, String> roles = const {},
   }) async {
     calls.add(pubkeys);
+    roleCalls.add(Map.of(roles));
     if (failBob) throw AddMembersException({_bob: 'Try again'});
   }
 }
@@ -53,10 +57,12 @@ Future<void> _pump(
   _Actions actions, {
   Map<String, String>? people,
   Set<String>? agents,
+  String humanRole = 'member',
 }) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        agentOwnersProvider.overrideWith((ref) async => const {}),
         userCacheProvider.overrideWith(_Cache.new),
         channelActionsProvider.overrideWithValue(actions),
         channelMembersProvider('channel').overrideWith((ref) async => []),
@@ -78,6 +84,7 @@ Future<void> _pump(
                 context: context,
                 channelId: 'channel',
                 existingPubkeys: {_existing},
+                humanRole: humanRole,
               ),
               child: const Text('Open picker'),
             ),
@@ -180,6 +187,9 @@ void main() {
           expect(actions.calls, [
             [_bob],
           ]);
+          expect(actions.roleCalls, [
+            {_bob: 'bot'},
+          ]);
         } finally {
           await tester.pumpWidget(const SizedBox());
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -206,7 +216,7 @@ void main() {
           });
       try {
         final actions = _Actions()..failBob = true;
-        await _pump(tester, actions);
+        await _pump(tester, actions, humanRole: 'guest');
         expect(methods.first, 'present');
         expect(find.byType(TextField), findsNothing);
         // No directory dump: people are found by name, as with `@`.
@@ -252,6 +262,10 @@ void main() {
         expect(actions.calls, [
           [_alice, _bob],
           [_bob],
+        ]);
+        expect(actions.roleCalls, [
+          {_alice: 'guest', _bob: 'bot'},
+          {_bob: 'bot'},
         ]);
         expect(find.text('Open picker'), findsOneWidget);
         expect(methods.last, 'dismiss');

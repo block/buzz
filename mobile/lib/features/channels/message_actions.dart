@@ -74,6 +74,7 @@ Future<void> showMessageActions({
   ValueChanged<String>? onToggleReaction,
   String? currentPubkey,
   bool isMember = false,
+  bool? canContribute,
   Rect? anchorRect,
   Future<ui.Image> Function()? captureAnchorSnapshot,
   ValueChanged<bool>? onPopoverPreviewVisibilityChanged,
@@ -116,14 +117,15 @@ Future<void> showMessageActions({
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _QuickReactionRow(
-                    message: message,
-                    reactions: reactions ?? message.reactions,
-                    onToggleReaction: onToggleReaction,
-                    sheetContext: sheetContext,
-                    pageContext: context,
-                    pageRef: ref,
-                  ),
+                  if (canContribute ?? isMember)
+                    _QuickReactionRow(
+                      message: message,
+                      reactions: reactions ?? message.reactions,
+                      onToggleReaction: onToggleReaction,
+                      sheetContext: sheetContext,
+                      pageContext: context,
+                      pageRef: ref,
+                    ),
                   SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[
                     // Fast actions: respond now, hand off context, defer.
@@ -133,6 +135,7 @@ Future<void> showMessageActions({
                       allMessages: allMessages,
                       currentPubkey: currentPubkey,
                       isMember: isMember,
+                      canContribute: canContribute,
                       isArchived: isArchived,
                       pageContext: context,
                     ),
@@ -579,6 +582,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   final List<TimelineMessage>? allMessages;
   final String? currentPubkey;
   final bool isMember;
+  final bool? canContribute;
   final bool isArchived;
 
   /// The long-pressed message's page context — survives the sheet pop, used
@@ -591,6 +595,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
     required this.allMessages,
     required this.currentPubkey,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
     required this.pageContext,
   });
@@ -615,6 +620,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
                   channelId: channelId,
                   currentPubkey: currentPubkey,
                   isMember: isMember,
+                  initialCanContribute: canContribute,
                   isArchived: isArchived,
                 ),
               ),

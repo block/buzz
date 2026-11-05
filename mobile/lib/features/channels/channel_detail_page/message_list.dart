@@ -21,6 +21,8 @@ class _MessageList extends HookConsumerWidget {
   final bool isDm;
   final String? currentPubkey;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
   final double appBarTitleContentHeight;
   final double composerBottomInset;
@@ -46,6 +48,7 @@ class _MessageList extends HookConsumerWidget {
     required this.isDm,
     required this.currentPubkey,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
     required this.appBarTitleContentHeight,
     required this.composerBottomInset,
@@ -734,6 +737,7 @@ class _MessageList extends HookConsumerWidget {
             channelId: channelId,
             currentPubkey: currentPubkey,
             isMember: isMember,
+            initialCanContribute: mayContribute,
             isArchived: isArchived,
             initialMessageId: initialMessageId,
           ),
@@ -1085,6 +1089,7 @@ class _MessageList extends HookConsumerWidget {
                             currentPubkey: currentPubkey,
                             allMessages: allMessages,
                             isMember: isMember,
+                            canContribute: mayContribute,
                             isArchived: isArchived,
                           )
                         else ...[
@@ -1109,30 +1114,13 @@ class _MessageList extends HookConsumerWidget {
                             ),
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
-                            replyFooter:
-                                entry.summary == null &&
-                                    !threadWorking.containsKey(
-                                      message.id.toLowerCase(),
-                                    )
-                                ? null
-                                : _ThreadSummaryRow(
-                                    summary: entry.summary,
-                                    working:
-                                        threadWorking[message.id
-                                            .toLowerCase()] ??
-                                        const [],
-                                    message: message,
-                                    allMessages: allMessages,
-                                    channelId: channelId,
-                                    currentPubkey: currentPubkey,
-                                    isMember: isMember,
-                                    isArchived: isArchived,
-                                  ),
+                            replyFooter: _buildThreadReplyFooter(this, entry),
                             channelNames: channelNamesMap,
                             currentChannelId: channelId,
                             currentPubkey: currentPubkey,
                             allMessages: allMessages,
                             isMember: isMember,
+                            canContribute: mayContribute,
                             isArchived: isArchived,
                             composerFocusNode: composerFocusNode,
                             restoreComposerFocus: restoreComposerFocus,

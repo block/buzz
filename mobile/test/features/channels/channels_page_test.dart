@@ -373,11 +373,26 @@ void main() {
           memberCount: 1,
           isMember: true,
         ),
+      for (final visibility in ['private', 'open'])
+        for (final own in [true, false])
+          Channel(
+            id: '$visibility-labeled-$own',
+            name: '$visibility-labeled-$own',
+            channelType: 'stream',
+            visibility: visibility,
+            labels: const ['buzz.solo'],
+            description: '',
+            createdBy: own ? 'aabb' : 'other',
+            createdAt: DateTime(2025),
+            memberCount: 1,
+            isMember: true,
+          ),
     ];
     await tester.pumpWidget(
       buildTestable(
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+          myPubkeyProvider.overrideWithValue('aabb'),
         ],
       ),
     );
@@ -391,6 +406,10 @@ void main() {
     expect(tester.widget<Icon>(privateIcon).icon, BuzzIcons.lock);
     expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
     expect(find.text('private-solo'), findsNothing);
+    for (final visibility in ['private', 'open']) {
+      expect(find.text('$visibility-labeled-true'), findsNothing);
+      expect(find.text('$visibility-labeled-false'), findsOneWidget);
+    }
   });
 
   testWidgets('shows grouped channel list when data loads', (tester) async {

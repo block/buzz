@@ -206,6 +206,7 @@ class _MessageTile extends ConsumerWidget {
             postEventId: hit.eventId,
             currentPubkey: currentPubkey,
             isMember: channel.isMember,
+            initialCanContribute: channel.canContribute,
             isArchived: channel.isArchived,
           ),
         ),

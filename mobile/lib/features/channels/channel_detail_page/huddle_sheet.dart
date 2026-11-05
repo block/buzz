@@ -283,6 +283,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
     required this.allMessages,
     required this.parentChannelId,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
   });
 
@@ -290,6 +291,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String parentChannelId;
   final bool isMember;
+  final bool? canContribute;
   final bool isArchived;
 
   @override
@@ -316,7 +318,11 @@ class _HuddleJoinSurface extends ConsumerWidget {
         _huddleLifetime;
     final blockedByOtherHuddle = session.isInSession && !isThisSession;
     final canJoin =
-        isMember && !isArchived && !ended && !stale && !blockedByOtherHuddle;
+        (canContribute ?? isMember) &&
+        !isArchived &&
+        !ended &&
+        !stale &&
+        !blockedByOtherHuddle;
 
     final label = unavailable
         ? 'Start new'

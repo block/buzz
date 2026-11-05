@@ -1,6 +1,7 @@
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -32,7 +33,7 @@ void main() {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    final relay = FakeRelay();
+    final relay = FakeRelay()..seedChannelAccess(_channelId);
     relay.seed([
       relay.sign(
         kind: EventKind.streamMessage,
@@ -47,6 +48,11 @@ void main() {
       ProviderScope(
         overrides: [
           ...relay.overrides,
+          // A known contributor must send optimistically even when signer
+          // discovery cannot complete. Relay rejection remains authoritative.
+          relayAuthorProvider('https://relay.test').overrideWith(
+            (ref) => Future<String?>.error(StateError('Discovery unavailable')),
+          ),
           savedPrefsProvider.overrideWithValue(prefs),
           appLifecycleProvider.overrideWith(_Resumed.new),
         ],

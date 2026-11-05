@@ -12,6 +12,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/text_editor.dart';
 import 'channel.dart';
+import 'channel_contribution_provider.dart';
 import 'channel_management_provider.dart';
 
 String _channelName(String value) =>
@@ -29,7 +30,10 @@ Future<bool?> showManageChannelSheet({
   var nameDraft = channel.name;
   var descriptionDraft = channel.description;
   var retry = false;
-  final canEditCanvas = channel.isMember && !channel.isArchived;
+  final canEditCanvas =
+      (container.read(channelContributionProvider(channel.id)) ??
+          channel.canContribute) &&
+      !channel.isArchived;
   bool canPresent() =>
       context.mounted && (ModalRoute.of(context)?.isCurrent ?? true);
 
@@ -232,7 +236,10 @@ class ManageChannelSheet extends HookConsumerWidget {
         savedCanvas.value ?? canvas.asData?.value.content ?? '';
     final canvasLoaded = savedCanvas.value != null || canvas.hasValue;
     final hasCanvas = canvasLoaded && canvasContent.trim().isNotEmpty;
-    final canEditCanvas = channel.isMember && !channel.isArchived;
+    final canEditCanvas =
+        (ref.watch(channelContributionProvider(channel.id)) ??
+            channel.canContribute) &&
+        !channel.isArchived;
     // Keep actions bound to the community in which this editor was opened.
     final actions = useMemoized(() => ref.read(channelActionsProvider));
     final canonicalName = _channelName(name.text);

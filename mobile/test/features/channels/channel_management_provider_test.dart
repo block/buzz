@@ -73,7 +73,7 @@ void main() {
   });
 
   test(
-    'Solo metadata survives details merges and classifies only own private streams',
+    'Solo metadata survives details merges and classifies own streams at any visibility',
     () {
       for (final type in ['stream', 'forum', 'dm']) {
         for (final private in [true, false]) {
@@ -106,12 +106,24 @@ void main() {
           ).mergeDetails(details).copyWith(isMember: true);
           expect(channel.labels, ['buzz.solo']);
           expect(channel.createdBy, 'owner');
-          expect(channel.isSolo, type == 'stream' && private);
-          expect(
-            channel.isPersonalChat('owner', const []),
-            type == 'stream' && private,
-          );
+          expect(channel.isSolo, type == 'stream');
+          expect(channel.isPersonalChat('owner', const []), type == 'stream');
           expect(channel.isPersonalChat('other', const []), isFalse);
+          expect(channel.isPersonalChat(null, const []), isFalse);
+          if (type == 'stream') {
+            // Metadata remains a presentation hint, never a membership grant.
+            final visitor = channel.copyWith(isMember: false);
+            expect(visitor.isSolo, isTrue);
+            expect(visitor.isMember, isFalse);
+            expect(visitor.isPersonalChat('other', const ['chat']), isFalse);
+          }
+          final ordinary = Channel.fromJson({
+            ...channel.toJson(),
+            'labels': <String>[],
+          });
+          expect(ordinary.isSolo, isFalse);
+          expect(ordinary.isPersonalChat('owner', const []), isFalse);
+          expect(ordinary.isPersonalChat('owner', const ['chat']), isTrue);
           expect(ChannelDetails.fromChannel(channel).labels, ['buzz.solo']);
         }
       }

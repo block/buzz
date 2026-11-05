@@ -215,13 +215,14 @@ void main() {
       expect(channel.canAddMembers('member'), isTrue);
     });
 
-    test('private channels accept adds from any active member role', () {
+    test('private channels accept adds from contributing members', () {
       final channel = make(channelType: 'stream', visibility: 'private');
       expect(channel.canAddMembers('owner'), isTrue);
       expect(channel.canAddMembers('admin'), isTrue);
       expect(channel.canAddMembers('member'), isTrue);
       expect(channel.canAddMembers('bot'), isTrue);
-      expect(channel.canAddMembers('guest'), isTrue);
+      expect(channel.canAddMembers('guest'), isFalse);
+      expect(channel.canAddMembers('unknown'), isFalse);
       expect(channel.canAddMembers(null), isFalse);
     });
 

@@ -43,6 +43,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final displayedChannel = useState(channel);
     final resolvedChannel = displayedChannel.value;
+    final hasSigningKey = ref.watch(
+      relayConfigProvider.select((config) => config.nsec != null),
+    );
     final scrollController = useScrollController();
     final heroNameKey = useMemoized(GlobalKey.new);
     final collapsedTitleOffset = useRef<double?>(null);
@@ -89,10 +92,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         !resolvedChannel.isDm &&
         canManageLifecycle &&
         !resolvedChannel.isArchived;
-    final canJoin =
-        resolvedChannel.visibility == 'open' &&
-        !resolvedChannel.isArchived &&
-        !resolvedChannel.isMember;
+    final canJoin = resolvedChannel.canJoin;
     final canAddMembers =
         membersAsync.hasValue &&
         !membersAsync.isLoading &&
@@ -213,9 +213,49 @@ class ChannelDetailsPage extends HookConsumerWidget {
     );
 
     Future<void> openAddMembers() async {
+      var humanRole = resolvedChannel.isSolo || resolvedChannel.isPrivate
+          ? 'member'
+          : resolvedChannel.joinRole;
+      if (currentMember?.isElevated == true && !resolvedChannel.isSolo) {
+        final selected = await showDialog<String>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Add people as'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final role in ['member', 'guest', 'admin'])
+                  ListTile(
+                    title: Text(memberAccessLabel(role)),
+                    subtitle: Text(
+                      role == 'guest'
+                          ? 'Read messages and threads.'
+                          : role == 'admin'
+                          ? 'Manage access and participate.'
+                          : 'Send messages, reply and react.',
+                    ),
+                    onTap: () => Navigator.pop(dialogContext, role),
+                  ),
+                const Text(
+                  'Agents are added as participating. Existing members keep their access.',
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+        );
+        if (selected == null || !context.mounted) return;
+        humanRole = selected;
+      }
       await showAddChannelMembersSheet(
         context: context,
         channelId: resolvedChannel.id,
+        humanRole: humanRole,
         existingPubkeys: {
           for (final member in members) member.pubkey.toLowerCase(),
         },
@@ -398,6 +438,70 @@ class ChannelDetailsPage extends HookConsumerWidget {
               ),
             ),
           ),
+          if (!resolvedChannel.isDm)
+            AppListCard(
+              verticalPadding: _channelDetailsSectionPadding,
+              children: [
+                AppListRow(
+                  key: const ValueKey('channel-details-access'),
+                  icon: resolvedChannel.isPrivate
+                      ? BuzzIcons.lock
+                      : resolvedChannel.joinRole == 'guest'
+                      ? BuzzIcons.shieldCheck
+                      : BuzzIcons.users,
+                  title: 'General access',
+                  subtitle: resolvedChannel.isPrivate
+                      ? 'Private'
+                      : resolvedChannel.joinRole == 'guest'
+                      ? 'View only'
+                      : 'Public',
+                  onTap: () => showChannelAccessSheet(
+                    context,
+                    resolvedChannel,
+                    onUpdated: (details) {
+                      if (context.mounted) {
+                        displayedChannel.value = displayedChannel.value
+                            .mergeDetails(details);
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+          if (hasSigningKey &&
+              !resolvedChannel.isDm &&
+              resolvedChannel.createdBy == resolvedCurrentPubkey &&
+              (resolvedChannel.isSolo ||
+                  MeChatConversion.pending(
+                        ref.watch(meSyncProvider),
+                        resolvedChannel.id,
+                      ) !=
+                      null))
+            AppListCard(
+              verticalPadding: _channelDetailsSectionPadding,
+              children: [
+                AppListRow(
+                  icon: BuzzIcons.arrowLeftRight,
+                  title: 'Convert to channel',
+                  onTap: () =>
+                      showSoloConversionSheet(context, resolvedChannel),
+                ),
+              ],
+            ),
+          if (hasSigningKey &&
+              resolvedChannel.isSolo &&
+              canAddMembers &&
+              currentMember != null)
+            AppListCard(
+              verticalPadding: _channelDetailsSectionPadding,
+              children: [
+                AppListRow(
+                  icon: BuzzIcons.share,
+                  title: 'Share with a channel',
+                  onTap: () => showSoloShareSheet(context, resolvedChannel),
+                ),
+              ],
+            ),
           if (!isDirectDm)
             AppListCard(
               key: const ValueKey('channel-details-members-card'),
@@ -727,7 +831,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
     final initial = isSelf || hasName
         ? name[0].toUpperCase()
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
-    final roleLabel = _channelMemberRoleLabel(member.role);
+    final roleLabel = memberRowRoleLabel(member.role);
     final titleStyle = context.textTheme.bodyLarge;
     final roleStyle = context.textTheme.bodySmall?.copyWith(
       color: context.colors.onSurfaceVariant,
@@ -746,7 +850,8 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
           style: titleStyle,
           children: [
             TextSpan(text: label),
-            TextSpan(text: ' · $roleLabel', style: roleStyle),
+            if (roleLabel != null)
+              TextSpan(text: ' · $roleLabel', style: roleStyle),
           ],
         ),
         maxLines: 1,
@@ -757,12 +862,6 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
       verticalPadding: Grid.xxs,
     );
   }
-}
-
-String _channelMemberRoleLabel(String role) {
-  if (role == 'bot') return 'Agent';
-  if (role.isEmpty) return 'Member';
-  return '${role[0].toUpperCase()}${role.substring(1)}';
 }
 
 IconData _channelDetailsIcon(Channel channel) {

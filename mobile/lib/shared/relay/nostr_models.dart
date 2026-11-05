@@ -294,6 +294,9 @@ class ChannelData {
   /// Original channel creator from the relay-authored uppercase `P` tag.
   final String? creator;
   final String visibility;
+
+  /// Admission default, independent of each existing member's role.
+  final String joinRole;
   final String description;
   final String? topic;
   final List<String> participantPubkeys;
@@ -310,6 +313,7 @@ class ChannelData {
     required this.name,
     required this.channelType,
     required this.visibility,
+    this.joinRole = 'member',
     required this.description,
     this.topic,
     this.labels = const [],
@@ -367,6 +371,7 @@ class ChannelData {
           .toList(),
       creator: event.getTagValue('P'),
       visibility: visibility,
+      joinRole: parseChannelJoinRole(event.tags),
       description: description,
       topic: topic,
       participantPubkeys: participants,
@@ -419,4 +424,19 @@ Map<String, dynamic>? parseCommandResponse(String message) {
     if (decoded is Map<String, dynamic>) return decoded;
   } catch (_) {}
   return null;
+}
+
+/// Legacy metadata omits the admission default. Explicit malformed defaults
+/// (including duplicate tags) fail closed for previews.
+String parseChannelJoinRole(List<List<String>> tags) {
+  final values = tags
+      .where((tag) => tag.isNotEmpty && tag[0] == 'join_role')
+      .toList();
+  if (values.isEmpty) return 'member';
+  if (values.length == 1 &&
+      values.single.length == 2 &&
+      values.single[1] == 'member') {
+    return 'member';
+  }
+  return 'guest';
 }

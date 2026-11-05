@@ -9,11 +9,13 @@ import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
+import '../../shared/crypto/event_signing.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
+import 'channel_access_provider.dart';
 import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
 
@@ -323,7 +325,6 @@ List<DirectoryUser> directoryUsersFromProfileEvents(
 /// Riverpod / WebSocket scaffolding. Make sure all fields parsed by
 /// [ChannelData.fromEvent] that exist on [ChannelDetails] are propagated —
 /// any omission silently drops state when [Channel.mergeDetails] is called.
-@visibleForTesting
 ChannelDetails channelDetailsFromEvent(NostrEvent event) {
   final data = ChannelData.fromEvent(event);
   final eventTime = DateTime.fromMillisecondsSinceEpoch(
@@ -336,6 +337,7 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
     channelType: data.channelType,
     labels: data.labels,
     visibility: data.visibility,
+    joinRole: data.joinRole,
     description: data.description,
     topic: data.topic,
     createdBy: data.creator ?? event.pubkey,
@@ -459,14 +461,21 @@ final channelMembersProvider = FutureProvider.autoDispose
 /// scope instead of dropping it. Another relay or account never sees it.
 List<ChannelMember>? watchLatestChannelMembers(Ref ref, String channelId) {
   final loaded = ref.watch(channelMembersProvider(channelId)).asData?.value;
-  if (loaded != null) return loaded;
-  return ref
+  if (loaded?.isNotEmpty == true) return loaded;
+  final cached = ref
       .read(_channelMembersSnapshotCacheProvider)
       .read(
         relayBaseUrl: ref.watch(relayConfigProvider).baseUrl,
         pubkey: ref.watch(myPubkeyProvider)?.toLowerCase(),
         channelId: channelId,
       );
+  // Offline providers may expose an empty placeholder before any roster was
+  // fetched. Only the scope-local cache distinguishes that from a confirmed
+  // empty roster (including a viewer who has actually been removed).
+  final status = ref.watch(
+    relaySessionProvider.select((session) => session.status),
+  );
+  return status == SessionStatus.connected ? loaded ?? cached : cached;
 }
 
 /// Channel canvas (kind:40100 for the channel).

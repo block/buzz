@@ -16,7 +16,7 @@ void main() {
     'a channel loads, follows, settles sends, recovers and detaches once left',
     () {
       fakeAsync((async) {
-        final relay = FakeRelay();
+        final relay = FakeRelay()..seedChannelAccess(_channel);
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         NostrEvent message(String text, int createdAt) => relay.sign(
           kind: EventKind.streamMessage,

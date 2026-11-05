@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
+import '../channels/channel_access_provider.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import 'forum_models.dart';
@@ -157,6 +158,15 @@ class ForumEventDelivery {
         if (seen.add(pk.toLowerCase())) pk,
     ];
 
+    await _container
+        .read(channelAccessProvider.notifier)
+        .requireContribution(channelId);
+    final finalConfig = _container.read(relayConfigProvider);
+    if (finalConfig.baseUrl != _relayUrl || finalConfig.nsec != _nsec) {
+      throw StateError(
+        'Forum delivery cancelled because the active community changed',
+      );
+    }
     await _relay.submit(
       kind: kind,
       content: content,

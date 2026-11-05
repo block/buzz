@@ -29,6 +29,7 @@ Future<bool?> showAddChannelMembersSheet({
   required BuildContext context,
   required String channelId,
   required Set<String> existingPubkeys,
+  String humanRole = 'member',
 }) async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     if (_nativePickerOpen) return null;
@@ -41,6 +42,7 @@ Future<bool?> showAddChannelMembersSheet({
         pageBuilder: (_, _, _) => AddChannelMembersSheet(
           channelId: channelId,
           existingPubkeys: existingPubkeys,
+          humanRole: humanRole,
           nativePresentation: true,
         ),
       );
@@ -61,6 +63,7 @@ Future<bool?> showAddChannelMembersSheet({
     builder: (_) => AddChannelMembersSheet(
       channelId: channelId,
       existingPubkeys: existingPubkeys,
+      humanRole: humanRole,
     ),
   );
 }
@@ -72,11 +75,13 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     required this.channelId,
     required this.existingPubkeys,
     this.nativePresentation = false,
+    this.humanRole = 'member',
   });
 
   final String channelId;
   final Set<String> existingPubkeys;
   final bool nativePresentation;
+  final String humanRole;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -186,6 +191,10 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         await actions.addMembers(
           channelId: channelId,
           pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
+          roles: {
+            for (final user in submittedUsers)
+              user.pubkey.toLowerCase(): user.isAgent ? 'bot' : humanRole,
+          },
         );
         if (context.mounted) Navigator.of(context).pop(true);
       } on AddMembersException catch (error) {

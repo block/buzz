@@ -20,6 +20,8 @@ class MessageSwipeReply extends HookConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
   final Widget child;
 
@@ -33,6 +35,7 @@ class MessageSwipeReply extends HookConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
     required this.child,
     required this.contentKey,
@@ -151,6 +154,7 @@ class MessageSwipeReply extends HookConsumerWidget {
                           channelId: channelId,
                           currentPubkey: currentPubkey,
                           isMember: isMember,
+                          initialCanContribute: mayContribute,
                           isArchived: isArchived,
                         ),
                       ),

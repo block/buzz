@@ -14,6 +14,8 @@ class _MessageBubble extends HookConsumerWidget {
   final String? currentPubkey;
   final List<TimelineMessage>? allMessages;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
   final FocusNode? composerFocusNode;
   final VoidCallback? restoreComposerFocus;
@@ -32,6 +34,7 @@ class _MessageBubble extends HookConsumerWidget {
     required this.currentPubkey,
     this.allMessages,
     this.isMember = false,
+    this.canContribute,
     this.isArchived = false,
     this.composerFocusNode,
     this.restoreComposerFocus,
@@ -66,9 +69,11 @@ class _MessageBubble extends HookConsumerWidget {
         ref.watch(agentMentionPubkeysProvider(currentChannelId)).contains(pk) ||
         profile?.ownerPubkey != null;
     final canManageMessage =
-        currentPubkey?.toLowerCase() == pk ||
-        (profile?.ownerPubkey != null &&
-            profile?.ownerPubkey == currentPubkey?.toLowerCase());
+        !isArchived &&
+        ((mayContribute && currentPubkey?.toLowerCase() == pk) ||
+            (isMember &&
+                profile?.ownerPubkey != null &&
+                profile?.ownerPubkey == currentPubkey?.toLowerCase()));
 
     // Watch only profiles referenced by this message. A batched profile fetch
     // should not rebuild every visible message just because an unrelated user
@@ -123,6 +128,7 @@ class _MessageBubble extends HookConsumerWidget {
         allMessages: allMessages,
         currentPubkey: currentPubkey,
         isMember: isMember,
+        canContribute: mayContribute,
         isArchived: isArchived,
         anchorRect: details.anchorRect,
         captureAnchorSnapshot: details.captureSnapshot,
@@ -165,6 +171,7 @@ class _MessageBubble extends HookConsumerWidget {
                         channelId: currentChannelId,
                         currentPubkey: currentPubkey,
                         isMember: isMember,
+                        initialCanContribute: mayContribute,
                         isArchived: isArchived,
                       ),
                     ),
@@ -208,7 +215,8 @@ class _MessageBubble extends HookConsumerWidget {
                                     reactions: message.reactions,
                                     onToggle: (emoji) =>
                                         toggleReaction(ref, message, emoji),
-                                    showAddButton: isMember && !isArchived,
+                                    showAddButton: mayContribute && !isArchived,
+                                    canReact: mayContribute && !isArchived,
                                     onAddReaction: () => showAddReactionPicker(
                                       context: context,
                                       ref: ref,
@@ -395,6 +403,8 @@ class _MessageBubble extends HookConsumerWidget {
                                                         currentPubkey:
                                                             currentPubkey,
                                                         isMember: isMember,
+                                                        initialCanContribute:
+                                                            mayContribute,
                                                         isArchived: isArchived,
                                                       ),
                                                 ),
@@ -493,6 +503,7 @@ class _MessageBubble extends HookConsumerWidget {
       channelId: currentChannelId,
       currentPubkey: currentPubkey,
       isMember: isMember,
+      canContribute: mayContribute,
       isArchived: isArchived,
       child: content,
     );

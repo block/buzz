@@ -9,6 +9,8 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
   final String channelId;
   final String? currentPubkey;
   final bool isMember;
+  final bool? canContribute;
+  bool get mayContribute => canContribute ?? isMember;
   final bool isArchived;
 
   const _NestedThreadSummaryRow({
@@ -18,6 +20,7 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.isMember,
+    this.canContribute,
     required this.isArchived,
   });
 
@@ -48,6 +51,7 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
                     channelId: channelId,
                     currentPubkey: currentPubkey,
                     isMember: isMember,
+                    initialCanContribute: mayContribute,
                     isArchived: isArchived,
                   ),
                 ),

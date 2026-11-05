@@ -17,6 +17,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
+import '../channels/channel_contribution_provider.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -31,6 +32,7 @@ class ForumThreadPage extends HookConsumerWidget {
   final String postEventId;
   final String? currentPubkey;
   final bool isMember;
+  final bool? initialCanContribute;
   final bool isArchived;
 
   const ForumThreadPage({
@@ -39,6 +41,7 @@ class ForumThreadPage extends HookConsumerWidget {
     required this.postEventId,
     required this.currentPubkey,
     required this.isMember,
+    this.initialCanContribute,
     required this.isArchived,
   });
 
@@ -71,6 +74,12 @@ class ForumThreadPage extends HookConsumerWidget {
       return timer.cancel;
     }, [channelId, postEventId]);
 
+    final mayContribute =
+        isMember &&
+        !isArchived &&
+        (ref.watch(channelContributionProvider(channelId)) ??
+            initialCanContribute ??
+            isMember);
     final isOwnPost =
         threadAsync
             .whenData(
@@ -85,7 +94,7 @@ class ForumThreadPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         title: const Text('Thread'),
         actions: [
-          if (isOwnPost)
+          if (isOwnPost && mayContribute)
             IconButton(
               onPressed: () =>
                   _showPostActions(context, ref, threadAsync.value!),
@@ -119,7 +128,7 @@ class ForumThreadPage extends HookConsumerWidget {
           thread: thread,
           channelId: channelId,
           currentPubkey: currentPubkey,
-          isMember: isMember,
+          canContribute: mayContribute,
           isArchived: isArchived,
         ),
       ),
@@ -214,14 +223,14 @@ class _ThreadContent extends HookConsumerWidget {
   final ForumThreadResponse thread;
   final String channelId;
   final String? currentPubkey;
-  final bool isMember;
+  final bool canContribute;
   final bool isArchived;
 
   const _ThreadContent({
     required this.thread,
     required this.channelId,
     required this.currentPubkey,
-    required this.isMember,
+    required this.canContribute,
     required this.isArchived,
   });
 
@@ -315,7 +324,7 @@ class _ThreadContent extends HookConsumerWidget {
         ),
 
         // Reply composer
-        if (isMember && !isArchived)
+        if (canContribute && !isArchived)
           ComposeBar(
             channelId: channelId,
             hintText: 'Reply to this post\u2026',

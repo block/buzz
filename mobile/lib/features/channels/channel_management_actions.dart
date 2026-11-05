@@ -106,12 +106,20 @@ class ChannelActions {
       channelType: details.channelType,
       labels: details.labels,
       visibility: details.visibility,
+      joinRole: details.joinRole,
       description: details.description,
       topic: details.topic,
       createdBy: details.createdBy,
       createdAt: details.createdAt,
       memberCount: members.length,
       isMember: true,
+      viewerRole: members
+          .where(
+            (member) =>
+                member.pubkey.toLowerCase() == _currentPubkey?.toLowerCase(),
+          )
+          .firstOrNull
+          ?.role,
       archivedAt: details.archivedAt,
       ttlSeconds: details.ttlSeconds,
       ttlDeadline: details.ttlDeadline,
@@ -170,6 +178,7 @@ class ChannelActions {
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Map<String, String> roles = const {},
   }) async {
     final normalizedRole = role.trim();
     if (normalizedRole.isEmpty) {
@@ -189,15 +198,9 @@ class ChannelActions {
       // add, not be recorded as this pubkey's rejection.
       _ensureCommunityValid();
       try {
-        await _signedEventRelay.submit(
-          kind: 9000,
-          content: '',
-          tags: [
-            ['h', channelId],
-            ['p', pubkey],
-            ['role', normalizedRole],
-          ],
-        );
+        await _ref
+            .read(channelAccessProvider.notifier)
+            .addMember(channelId, pubkey, roles[pubkey] ?? normalizedRole);
       } catch (error) {
         failures[pubkey] = _relayErrorMessage(error);
       }
@@ -303,6 +306,10 @@ class ChannelActions {
     required String content,
   }) async {
     _ensureCommunityValid();
+    await _ref
+        .read(channelAccessProvider.notifier)
+        .requireContribution(channelId);
+    _ensureCommunityValid();
     await _signedEventRelay.submit(
       kind: 40100,
       content: content,
@@ -373,18 +380,14 @@ class ChannelActions {
     required String role,
   }) async {
     _ensureCommunityValid();
-    await _signedEventRelay.submit(
-      kind: 9000,
-      content: '',
-      tags: [
-        ['h', channelId],
-        ['p', pubkey.toLowerCase()],
-        ['role', role],
-      ],
+    final controller = _ref.read(channelAccessProvider.notifier);
+    await controller.changeMember(
+      channelId,
+      await controller.load(channelId),
+      pubkey,
+      role: role,
     );
     _ensureCommunityValid();
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
   Future<void> removeMember({
@@ -392,20 +395,60 @@ class ChannelActions {
     required String pubkey,
   }) async {
     _ensureCommunityValid();
-    await _signedEventRelay.submit(
-      kind: 9001,
-      content: '',
-      tags: [
-        ['h', channelId],
-        ['p', pubkey.toLowerCase()],
-      ],
+    final controller = _ref.read(channelAccessProvider.notifier);
+    await controller.changeMember(
+      channelId,
+      await controller.load(channelId),
+      pubkey,
     );
     _ensureCommunityValid();
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelBotPubkeysProvider(channelId));
+  }
+
+  Future<void> _requireReactionAccess(
+    String eventId, {
+    bool reaction = false,
+  }) async {
+    _ensureCommunityValid();
+    final events = await _session.fetchHistory(
+      NostrFilter(
+        ids: [eventId],
+        kinds: reaction
+            ? [EventKind.reaction]
+            : [
+                EventKind.streamMessage,
+                EventKind.streamMessageV2,
+                EventKind.systemMessage,
+                EventKind.forumPost,
+                EventKind.forumComment,
+              ],
+        limit: 1,
+      ),
+    );
+    _ensureCommunityValid();
+    final event =
+        events.where((event) => event.id == eventId).firstOrNull ??
+        (throw StateError('The reaction target could not be confirmed.'));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
+    if (reaction) {
+      final target = event.getTagValue('e');
+      if (target == null) {
+        throw StateError('The reaction target could not be confirmed.');
+      }
+      await _requireReactionAccess(target);
+    } else {
+      final channel = event.channelId;
+      if (channel == null) {
+        throw StateError('The reaction channel could not be confirmed.');
+      }
+      await _ref
+          .read(channelAccessProvider.notifier)
+          .requireContribution(channel);
+    }
+    _ensureCommunityValid();
   }
 
   Future<void> addReaction(String eventId, String emoji) async {
+    await _requireReactionAccess(eventId);
     final shortcode = normalizeShortcode(emoji);
     final emojiUrl = reactionEmojiUrl(
       emoji,
@@ -423,6 +466,7 @@ class ChannelActions {
   }
 
   Future<void> removeReaction(String reactionEventId, String emoji) async {
+    await _requireReactionAccess(reactionEventId, reaction: true);
     await _signedEventRelay.submit(
       kind: EventKind.deletion,
       content: '',
@@ -438,6 +482,10 @@ class ChannelActions {
     required String content,
     List<List<String>> mediaTags = const [],
   }) async {
+    _ensureCommunityValid();
+    await _ref
+        .read(channelAccessProvider.notifier)
+        .requireMessageManagement(channelId, eventId);
     _ensureCommunityValid();
     await _signedEventRelay.submit(
       kind: EventKind.streamMessageEdit,
@@ -455,6 +503,10 @@ class ChannelActions {
     required String channelId,
     required String eventId,
   }) async {
+    _ensureCommunityValid();
+    await _ref
+        .read(channelAccessProvider.notifier)
+        .requireMessageManagement(channelId, eventId);
     _ensureCommunityValid();
     await _signedEventRelay.submit(
       kind: EventKind.deletion,
