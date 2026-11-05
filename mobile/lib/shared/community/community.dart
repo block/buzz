@@ -46,8 +46,6 @@ class Community {
   /// installation id so their already-published lease remains addressable.
   final String? pushLeaseInstallationId;
 
-  /// Whether invite-created starter channels still need to be recovered.
-  final bool starterSetupIncomplete;
   final DateTime addedAt;
 
   const Community({
@@ -60,7 +58,6 @@ class Community {
     this.pushNotificationsEnabled = _defaultPushNotificationsEnabled,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     this.pushLeaseInstallationId,
-    this.starterSetupIncomplete = false,
     required this.addedAt,
   }) : _name = name;
 
@@ -71,7 +68,6 @@ class Community {
     String? nsec,
     SensitiveActionPolicy sensitiveActionPolicy =
         SensitiveActionPolicy.disabledByUser,
-    bool starterSetupIncomplete = false,
   }) {
     return Community(
       id: _uuid.v4(),
@@ -81,7 +77,6 @@ class Community {
       nsec: nsec,
       sensitiveActionPolicy: sensitiveActionPolicy,
       pushLeaseInstallationId: _newPushLeaseInstallationId(),
-      starterSetupIncomplete: starterSetupIncomplete,
       addedAt: DateTime.now(),
     );
   }
@@ -95,7 +90,6 @@ class Community {
     bool? pushNotificationsEnabled,
     BuzzPushLeaseSubscriptionState? pushSubscriptionState,
     Object? pushLeaseInstallationId = _sentinel,
-    bool? starterSetupIncomplete,
   }) {
     return Community(
       id: id,
@@ -112,8 +106,6 @@ class Community {
       pushLeaseInstallationId: pushLeaseInstallationId == _sentinel
           ? this.pushLeaseInstallationId
           : pushLeaseInstallationId as String?,
-      starterSetupIncomplete:
-          starterSetupIncomplete ?? this.starterSetupIncomplete,
       addedAt: addedAt,
     );
   }
@@ -129,7 +121,6 @@ class Community {
     'pushSubscriptionState': pushSubscriptionState.toJson(),
     if (pushLeaseInstallationId != null)
       'pushLeaseInstallationId': pushLeaseInstallationId,
-    'starterSetupIncomplete': starterSetupIncomplete,
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -167,7 +158,6 @@ class Community {
       pushNotificationsEnabled: pushNotificationsEnabled,
       pushSubscriptionState: pushSubscriptionState,
       pushLeaseInstallationId: pushLeaseInstallationId,
-      starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,
       addedAt: DateTime.parse(json['addedAt'] as String),
     );
   }

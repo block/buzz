@@ -6,6 +6,8 @@ import 'package:buzz/shared/hosted/hosted_admission.dart';
 import 'package:buzz/shared/hosted/hosted_community_connection.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/hosted_communities_fixture.dart';
@@ -59,8 +61,6 @@ void main() {
           isCurrent: () => true,
           storage: storage,
           admission: admission,
-          recoverStarterChannels: (_, _) async =>
-              fail('Saved non-invite community needs no starter repair'),
           persist: (community, current) async {
             if (current()) await storage.save(community);
           },
@@ -84,4 +84,53 @@ void main() {
       },
     );
   }
+
+  test('an invite claims once and never reclaims a saved community', () async {
+    final f = HostedCommunitiesFixture();
+    await f.initialize();
+    addTearDown(f.dispose);
+    final storage = CommunityStorage();
+    const invite = InviteDeepLink(
+      relayUrl: 'wss://invited.communities.buzz.xyz',
+      code: 'single-use',
+    );
+    var claims = 0;
+    final admission = HostedAdmission(
+      account: f.account,
+      relayAuth: HostedRelayAuth(f.account, enabled: false),
+      store: f.store,
+      probe: (_) async {},
+      client: MockClient((request) async {
+        if (request.method == 'GET' && request.url.path == '/api/join-policy') {
+          return http.Response('{}', 200);
+        }
+        expect(request.url.path, '/api/invites/claim');
+        claims++;
+        return http.Response('{}', claims == 1 ? 200 : 410);
+      }),
+    );
+    addTearDown(admission.dispose);
+    Future<void> connect() => connectHostedCommunity(
+      link: invite,
+      subject: 'owner',
+      pubkey: f.keys.public,
+      isCurrent: () => true,
+      storage: storage,
+      admission: admission,
+      persist: (community, current) async {
+        if (current()) await storage.save(community);
+      },
+    );
+
+    await connect();
+    expect(claims, 1);
+    final saved = (await storage.loadAll()).single;
+    expect(saved.relayUrl, invite.relayUrl);
+
+    // Reopening the consumed invite reuses the saved record without a claim.
+    await connect();
+    expect(claims, 1);
+    final reopened = (await storage.loadAll()).single;
+    expect(reopened.id, saved.id);
+  });
 }

@@ -1801,31 +1801,34 @@ void main() {
     );
   });
 
-  test('directory-aware refresh discovers open starter channels', () async {
-    final session = _FakeRelaySession(
-      memberships: const [],
-      metadata: [
-        _meta(id: _channelA, name: 'general'),
-        _meta(id: _channelB, name: 'welcome-everyone'),
-      ],
-    );
-    final container = _buildContainer(session: session);
-    addTearDown(container.dispose);
+  test(
+    'directory-aware refresh discovers open channels the user has not joined',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'welcome-everyone'),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
 
-    expect(await container.read(channelsProvider.future), isEmpty);
+      expect(await container.read(channelsProvider.future), isEmpty);
 
-    await container
-        .read(channelsProvider.notifier)
-        .refresh(fetchDirectory: true);
+      await container
+          .read(channelsProvider.notifier)
+          .refresh(fetchDirectory: true);
 
-    final channels = container.read(channelsProvider).requireValue;
-    expect(channels.map((channel) => channel.name), [
-      'general',
-      'welcome-everyone',
-    ]);
-    expect(channels.every((channel) => channel.isMember), isFalse);
-    expect(session.directoryQueryFilters, isNotEmpty);
-  });
+      final channels = container.read(channelsProvider).requireValue;
+      expect(channels.map((channel) => channel.name), [
+        'general',
+        'welcome-everyone',
+      ]);
+      expect(channels.every((channel) => channel.isMember), isFalse);
+      expect(session.directoryQueryFilters, isNotEmpty);
+    },
+  );
 
   test('deduplicates joined channels from directory discovery', () async {
     final session = _FakeRelaySession(
@@ -2884,7 +2887,7 @@ void main() {
       final active = channels.firstWhere((c) => c.name == 'active');
       expect(active.isArchived, isFalse);
       // The bare `["unlisted"]` flag: an unlisted namesake does not hold a
-      // name in the relay's listed-name rule (starter setup relies on it).
+      // name in the relay's listed-name rule.
       expect(active.isUnlisted, isTrue);
       expect(expired.isUnlisted, isFalse);
     },

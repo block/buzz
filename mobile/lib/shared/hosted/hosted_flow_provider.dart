@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import '../../features/invites/invite_join_provider.dart';
 import '../../features/profile/profile_provider.dart';
-import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../auth/auth.dart';
 import '../deeplink/deep_link.dart';
@@ -135,11 +133,8 @@ HostedFlow createHostedFlow(
                     ),
               shouldContinue: current,
               activate:
-                  community.starterSetupIncomplete ||
-                  (flow.addedCommunityCount == 0 && !flow.restoringAfterAdd),
+                  flow.addedCommunityCount == 0 && !flow.restoringAfterAdd,
             ),
-        recoverStarterChannels: (community, current) =>
-            finishHostedStarterSetup(ref, community, current),
       );
       if (flow.addedCommunityCount == 0 &&
           !flow.restoringAfterAdd &&
@@ -221,54 +216,4 @@ Future<void> offerHostedProfile(
   } finally {
     subscription.close();
   }
-}
-
-/// Completes the existing scoped invite recovery only after activation. The
-/// pending flag remains durable on failure, cancellation or a community switch.
-Future<void> finishHostedStarterSetup(
-  Ref ref,
-  Community community,
-  bool Function() isCurrent,
-) async {
-  void checkCurrent() {
-    if (!ref.mounted || !isCurrent()) throw AccountFailure.unavailable;
-  }
-
-  bool matches(Community? candidate) =>
-      candidate?.id == community.id &&
-      candidate?.relayUrl == community.relayUrl &&
-      candidate?.pubkey == community.pubkey &&
-      candidate?.nsec == community.nsec;
-
-  checkCurrent();
-  final active = await ref.read(activeCommunityProvider.future);
-  checkCurrent();
-  if (!matches(active)) throw AccountFailure.unavailable;
-  final config = RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec);
-  await ref
-      .read(inviteJoinRecoveryProvider)(
-        InviteJoinRecoveryScope(
-          relayHttpOrigin: config.baseUrl,
-          nsec: config.nsec,
-        ),
-      )
-      .ensureStarterChannels();
-  checkCurrent();
-  await ref.read(communityTransitionProvider).runExclusive(() async {
-    checkCurrent();
-    final storage = ref.read(communityStorageProvider);
-    final saved = (await storage.loadAll())
-        .where((item) => item.id == community.id)
-        .firstOrNull;
-    final activeId = await storage.loadActiveId();
-    checkCurrent();
-    if (!matches(saved) || activeId != community.id) {
-      throw AccountFailure.unavailable;
-    }
-    await storage.save(saved!.copyWith(starterSetupIncomplete: false));
-    await syncStoredCommunitySnapshot(ref);
-    ref.invalidate(communityListProvider);
-    ref.invalidate(activeCommunityProvider);
-    ref.invalidate(authProvider);
-  });
 }

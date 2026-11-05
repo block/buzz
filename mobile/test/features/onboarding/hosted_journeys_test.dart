@@ -1040,7 +1040,7 @@ void main() {
 
   for (final savedIncomplete in [false, true]) {
     journey(
-      '${savedIncomplete ? 'incomplete saved' : 'fresh'} account signs in, backs up, accepts invite and retries starters before home',
+      '${savedIncomplete ? 'signed-in account needing setup' : 'fresh account'} signs in, backs up and accepts invite before home',
       (tester, f) async {
         await f.initialize(
           localIdentity: false,
@@ -1048,7 +1048,6 @@ void main() {
           signedIn: savedIncomplete,
         );
         f.needsAccountSetup = savedIncomplete;
-        f.starterFailures = 2;
         final browserReturn = Completer<void>();
         f.beforeBrowserReturn = () async {
           await browserReturn.future;
@@ -1135,9 +1134,7 @@ void main() {
         await tester.tap(find.byType(CheckboxListTile));
         await f.settle(tester);
         await f.tap(tester, 'Accept and join');
-        expect(find.text('Try again').hitTestable(), findsOneWidget);
         final pending = (await f.storage.loadAll()).single;
-        expect(pending.starterSetupIncomplete, isTrue);
         expect(pending.pubkey, generated.pubkey);
         expect(f.sent('/claim'), hasLength(1));
         expect(
@@ -1148,15 +1145,6 @@ void main() {
           jsonDecode(f.sent('/accept-policy').single.body)['age_confirmed'],
           isTrue,
         );
-        // Reopen the saved invite after its claim was consumed. Starter recovery
-        // must retain the durable marker and must not claim it again.
-        await f.link(tester, 'one');
-        expect(
-          (await f.storage.loadAll()).single.starterSetupIncomplete,
-          isTrue,
-        );
-        expect(find.text('Try again').hitTestable(), findsOneWidget);
-        await f.tap(tester, 'Try again');
         expect(
           find.byType(ProfileSetupPage, skipOffstage: false),
           findsOneWidget,
@@ -1169,11 +1157,6 @@ void main() {
           findsNothing,
         );
         expect(f.sent('/claim'), hasLength(1));
-        expect(f.recoveryScopes, hasLength(3));
-        expect(
-          f.recoveryScopes.every((scope) => scope.nsec == pending.nsec),
-          isTrue,
-        );
         await tester.enterText(
           find.byType(TextField).hitTestable(),
           'Journey Person',
@@ -1184,9 +1167,14 @@ void main() {
         expect(f.profileWrites, ['Journey Person']);
         final saved = (await f.storage.loadAll()).single;
         expect(saved.id, pending.id);
-        expect(saved.starterSetupIncomplete, isFalse);
         expect(await f.storage.loadActiveId(), saved.id);
         expect(find.byType(OnboardingAppEntry), findsNothing);
+        expect(find.text('Community home').hitTestable(), findsOneWidget);
+        // Reopening the consumed invite opens the saved community without
+        // claiming again.
+        await f.link(tester, 'one');
+        expect(f.sent('/claim'), hasLength(1));
+        expect((await f.storage.loadAll()).single.id, pending.id);
         expect(find.text('Community home').hitTestable(), findsOneWidget);
       },
       requiresAuthDomain: true,
@@ -1437,9 +1425,7 @@ void main() {
         ),
         isEmpty,
       );
-      // Reopening an interrupted self-hosted invite follows legacy recovery.
-      await f.storage.save(saved.copyWith(starterSetupIncomplete: true));
-      f.container.invalidate(communityListProvider);
+      // Reopening an invite for the saved community switches to it.
       f.container
           .read(pendingDeepLinkProvider.notifier)
           .open(
@@ -1453,11 +1439,7 @@ void main() {
             ),
           );
       await f.settle(tester);
-      expect(f.recoveryScopes, hasLength(1));
-      expect(
-        (await f.storage.loadAll()).single.starterSetupIncomplete,
-        isFalse,
-      );
+      expect((await f.storage.loadAll()).single.id, saved.id);
       expect(f.sent('/claim'), isEmpty);
 
       expect(find.byType(OnboardingAppEntry), findsNothing);
@@ -1717,7 +1699,6 @@ void main() {
       await f.tap(tester, 'Accept and join');
       final saved = (await f.storage.loadAll()).single;
       expect(saved.relayUrl, 'wss://two.communities.buzz.xyz');
-      expect(saved.starterSetupIncomplete, isFalse);
       expect(f.sent('/claim'), hasLength(1));
       expect(f.sent('/claim').single.url.host, 'two.communities.buzz.xyz');
       expect(f.sent('/accept-policy'), hasLength(1));

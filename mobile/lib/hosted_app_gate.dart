@@ -82,8 +82,7 @@ class HostedAppGate extends HookConsumerWidget {
                 (item) => relayIdentity(item.relayUrl) == relayIdentity(relay),
               )
               .firstOrNull;
-          if (existing != null &&
-              !(existing.starterSetupIncomplete && requiresAuth)) {
+          if (existing != null) {
             await ref
                 .read(communityListProvider.notifier)
                 .switchCommunity(existing.id);

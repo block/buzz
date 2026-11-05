@@ -15,7 +15,7 @@ const buzzPushHellthreadParticipantLimit = 20;
 const _supportedNotificationClasses = {'default'};
 const _filterKeys = {'kinds', 'authors', '#p', '#h', '#e'};
 final _exactHexPattern = RegExp(r'^[0-9a-f]{64}$');
-// Channel IDs use canonical UUID text; starter channels are UUIDv5.
+// Channel IDs use canonical UUID text.
 // Match the relay's UUID parser without imposing a version or variant.
 final _channelIdPattern = RegExp(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
