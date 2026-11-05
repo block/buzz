@@ -114,7 +114,8 @@ final class NotificationService: UNNotificationServiceExtension {
     let accessGroup = Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
     return BuzzNotificationAvatarLoader(directory: directory,
       privateKey: { Self.loadPrivateKey(communityID: $0, keychainAccessGroup: accessGroup) },
-      isCurrent: { [weak self] in self?.isCurrent($0) == true })
+      isCurrent: { [weak self] in self?.isCurrent($0) == true },
+      assertionIssuer: Self.assertionIssuer)
   }()
 
   private func isCurrent(_ scope: BuzzNotificationCacheScope) -> Bool {

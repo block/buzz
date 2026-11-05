@@ -16,6 +16,23 @@ void main() {
   const canonicalCompact = 'npub180c\u2026h6w6';
 
   group('fullNpub', () {
+    test('reuses the encoding of a key it has already encoded', () {
+      // Identity views relabel a large roster on every rebuild; each key's
+      // bech32 encoding must happen once, not once per rebuild.
+      final first = fullNpub(canonicalHex);
+      expect(first, canonicalNpub);
+      expect(identical(fullNpub(canonicalHex.toUpperCase()), first), isTrue);
+    });
+
+    test('a roster larger than the cache still reuses its encodings', () {
+      String key(int i) => i.toRadixString(16).padLeft(64, '0');
+      final firstPass = [
+        for (var i = 0; i <= npubCacheLimit; i++) fullNpub(key(i)),
+      ];
+      // A second scan in the same order finds the early keys still cached.
+      expect(identical(fullNpub(key(1)), firstPass[1]), isTrue);
+    });
+
     test('canonicalizes every accepted input wrapper', () {
       // Every accepted wrapper — lowercase hex, uppercase hex, whitespace-
       // padded, and an already-npub key — converges on the canonical npub.

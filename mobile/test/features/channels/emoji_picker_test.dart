@@ -157,7 +157,10 @@ class _FakeHostedRelayAuth extends HostedRelayAuth {
   Completer<void>? gate;
 
   @override
-  Future<Map<String, String>> headers(RelayConfig config) async {
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+  }) async {
     await gate?.future;
     return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
   }
