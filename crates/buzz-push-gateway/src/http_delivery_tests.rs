@@ -44,6 +44,12 @@ fn now() -> i64 {
 }
 
 async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
+    fixture_with_transport(None).await
+}
+
+async fn fixture_with_transport(
+    transport: Option<Arc<dyn PushTransport>>,
+) -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     let keys = Keys::generate();
     let authority = Arc::new(MemoryAuthorityStore::default());
     let token_keyring =
@@ -95,6 +101,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
+        trusted_proxy_cidrs: Vec::new(),
         grant_keyring,
         authority,
         token_keyring,
@@ -106,7 +113,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 )
                 .unwrap(),
             ),
-            transport: Arc::new(TestTransport(sends.clone())),
+            transport: transport.unwrap_or_else(|| Arc::new(TestTransport(sends.clone()))),
         }),
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
@@ -367,4 +374,80 @@ async fn grant_signer_and_replay_checks_remain_enforced() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(sends.load(Ordering::SeqCst), 1);
+}
+
+struct GatedTransport {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+#[async_trait::async_trait]
+impl PushTransport for GatedTransport {
+    async fn send(&self, _: DeliveryAttempt, _: &str) -> DeliveryOutcome {
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        DeliveryOutcome::Accepted
+    }
+}
+
+#[tokio::test]
+async fn cancelled_deliveries_keep_capacity_and_leave_v1_challenge_and_revoke_lanes_free() {
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (app, keys, template, _) = fixture_with_transport(Some(Arc::new(GatedTransport {
+        entered: entered.clone(),
+        release: release.clone(),
+    })))
+    .await;
+    for n in 0..8 {
+        let mut value: serde_json::Value = serde_json::from_slice(&template).unwrap();
+        value["request_id"] = Uuid::new_v4().to_string().into();
+        let body = serde_json::to_vec(&value).unwrap();
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let mut req = request(DIRECT_URL, None, auth, body);
+        // Two concurrent requests per source, four independent sources.
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            format!("192.0.2.{}:1234", n / 2 + 1)
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ));
+        let task = tokio::spawn(app.clone().oneshot(req));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/deliveries/apns")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["retry-after"], "1");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/installations/challenges")
+                .body(Body::from(r#"{"v":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .oneshot(
+            Request::post("/v1/delegations/revoke")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    release.add_permits(8);
 }

@@ -394,3 +394,17 @@ query, fragment or credentials. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.
+
+The public listener bounds enrollment, anonymous challenges, management,
+revocation and delivery independently. Each source has a bounded rate and
+concurrency share; revocation retains four slots (at most two per source).
+V1 revocation still needs an anonymous challenge: distributed challenge floods
+can exhaust the shared durable issuance quota, so this is not a guarantee of
+revocation availability under arbitrary distributed attacks.
+
+Forwarded addresses are ignored by default. Set optional
+`BUZZ_PUSH_TRUSTED_PROXY_CIDRS` to comma-separated proxy IPs/CIDRs only when
+those peers overwrite `X-Buzz-Client-IP` with one bare client IP and cannot be
+reached through untrusted peers. Trusted peers must supply exactly one such
+header. NAT clients share a source budget. Delivery permits remain occupied
+until APNs and disposition bookkeeping finish, even after HTTP cancellation.
