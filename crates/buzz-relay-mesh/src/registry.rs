@@ -201,12 +201,12 @@ fn decode_ready_record(key: &str, raw: &str) -> Option<ReadyRecord> {
 /// Redis-backed mesh bootstrap registry.
 #[derive(Clone)]
 pub struct ReadyRegistry {
-    redis: redis::aio::ConnectionManager,
+    redis: buzz_pubsub::RedisConnection,
     refresh: Duration,
 }
 
 impl ReadyRegistry {
-    pub fn new(redis: redis::aio::ConnectionManager, refresh: Duration) -> Self {
+    pub fn new(redis: buzz_pubsub::RedisConnection, refresh: Duration) -> Self {
         Self { redis, refresh }
     }
 
@@ -402,12 +402,8 @@ mod tests {
         nostr::Keys::generate()
     }
 
-    fn lazy_redis(url: &str) -> redis::aio::ConnectionManager {
-        redis::aio::ConnectionManager::new_lazy_with_config(
-            redis::Client::open(url).expect("redis url"),
-            redis::aio::ConnectionManagerConfig::new(),
-        )
-        .expect("redis connection")
+    fn lazy_redis(url: &str) -> buzz_pubsub::RedisConnection {
+        buzz_pubsub::redis_connection(url).expect("redis connection")
     }
 
     fn ready_record(byte: u8) -> ReadyRecord {
@@ -475,7 +471,7 @@ mod tests {
     mod external_infra_redis {
         use super::*;
 
-        fn pool() -> redis::aio::ConnectionManager {
+        fn pool() -> buzz_pubsub::RedisConnection {
             let url = std::env::var("BUZZ_TEST_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
             lazy_redis(&url)
@@ -490,7 +486,7 @@ mod tests {
             records.iter().map(|r| r.runtime_id).collect()
         }
 
-        async fn index_score(pool: &redis::aio::ConnectionManager, member: &str) -> Option<f64> {
+        async fn index_score(pool: &buzz_pubsub::RedisConnection, member: &str) -> Option<f64> {
             let mut conn = pool.clone();
             redis::cmd("ZSCORE")
                 .arg(READY_INDEX_KEY)

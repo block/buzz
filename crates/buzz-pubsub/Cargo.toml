@@ -20,6 +20,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 nostr = { workspace = true }
 futures-util = { workspace = true }
+arc-swap = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

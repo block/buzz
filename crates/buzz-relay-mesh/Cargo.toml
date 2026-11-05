@@ -9,6 +9,7 @@ repository.workspace   = true
 
 [dependencies]
 tokio        = { workspace = true }
+buzz-pubsub  = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 postcard     = { workspace = true }

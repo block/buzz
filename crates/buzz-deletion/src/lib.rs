@@ -25,6 +25,7 @@ use buzz_media::{
     is_tenant_owned_key, tenant_prefixes, BulkDeleteOutcome, MediaStorage, ObjectVersionKind,
     ObjectVersionRef,
 };
+use buzz_pubsub::{redis_connection, RedisConnection};
 use clap::Subcommand;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -340,7 +341,7 @@ impl LoopMode {
 struct Services {
     store: DeletionStore,
     media: Arc<MediaStorage>,
-    redis: redis::aio::ConnectionManager,
+    redis: RedisConnection,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1682,7 +1683,7 @@ async fn verify_storage_absence(services: &Services, request: &DeletionRequest) 
 }
 
 async fn publish_disconnect_community(
-    pool: &redis::aio::ConnectionManager,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
     let mut connection = pool.clone();
@@ -1696,7 +1697,7 @@ async fn publish_disconnect_community(
 }
 
 async fn purge_redis_namespace(
-    pool: &redis::aio::ConnectionManager,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<u64> {
     let mut connection = pool.clone();
@@ -1727,22 +1728,13 @@ async fn purge_redis_namespace(
     Ok(deleted)
 }
 
-/// One shared auto-reconnecting multiplexed connection for the worker's
-/// Redis commands; built lazily, so nothing dials until the first command.
-fn redis_connection(redis_url: &str) -> Result<redis::aio::ConnectionManager> {
-    Ok(redis::aio::ConnectionManager::new_lazy_with_config(
-        redis::Client::open(redis_url)?,
-        redis::aio::ConnectionManagerConfig::new(),
-    )?)
-}
-
 fn scan_proves_absence(pages: &[(u64, Vec<String>)]) -> bool {
     pages.last().is_some_and(|(cursor, _)| *cursor == 0)
         && pages.iter().all(|(_, keys)| keys.is_empty())
 }
 
 async fn scan_redis_namespace(
-    connection: &mut redis::aio::ConnectionManager,
+    connection: &mut RedisConnection,
     pattern: &str,
 ) -> Result<Vec<(u64, Vec<String>)>> {
     let mut cursor = 0u64;
@@ -1765,7 +1757,7 @@ async fn scan_redis_namespace(
 }
 
 async fn verify_redis_absence(
-    pool: &redis::aio::ConnectionManager,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
     let mut connection = pool.clone();

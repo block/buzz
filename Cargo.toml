@@ -62,7 +62,7 @@ sqlx = { version = "0.9", features = [
 ] }
 
 # Redis
-redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
+redis        = { version = "1.0", features = ["tokio-comp", "tokio-rustls-comp"] }
 
 # Kubernetes (buzz-backend-kubernetes provider). No `ring` feature here: the
 # process-level CryptoProvider is installed explicitly at startup, matching

@@ -1211,6 +1211,7 @@ dependencies = [
  "buzz-core",
  "buzz-db",
  "buzz-media",
+ "buzz-pubsub",
  "chrono",
  "clap",
  "hex",
@@ -1367,6 +1368,7 @@ dependencies = [
 name = "buzz-pubsub"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "buzz-auth",
  "buzz-core",
  "chrono",
@@ -1498,6 +1500,7 @@ dependencies = [
 name = "buzz-relay-mesh"
 version = "0.1.0"
 dependencies = [
+ "buzz-pubsub",
  "bytes",
  "futures-util",
  "hex",
@@ -8380,14 +8383,11 @@ version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bae41a63fd0b8a5372f82b21e810e09a316f5dd7efd96bf08e678fb240fc1918"
 dependencies = [
- "arc-swap",
  "arcstr",
  "async-lock",
- "backon",
  "bytes",
  "cfg-if 1.0.4",
  "combine",
- "futures-channel",
  "futures-util",
  "itoa",
  "num-bigint",
