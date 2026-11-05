@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nostr::signer::{SignerBackend, SignerError};
-use nostr::{Event, JsonUtil, PublicKey, UnsignedEvent};
+use nostr::{Event, JsonUtil, PublicKey, Tag, UnsignedEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -105,6 +105,36 @@ impl ProviderError {
             Self::Transport(why) => CliError::Auth(format!("Buzz desktop: {why}")),
         }
     }
+}
+
+/// `unsigned` dated now, if it is a short-lived auth proof (NIP-42, NIP-98
+/// or Blossom); a Blossom `expiration` moves by the same amount.
+fn renewed(mut unsigned: UnsignedEvent) -> UnsignedEvent {
+    if !matches!(unsigned.kind.as_u16(), 22242 | 27235 | 24242) {
+        return unsigned;
+    }
+    let now = nostr::Timestamp::now();
+    let shift = now.as_secs().saturating_sub(unsigned.created_at.as_secs());
+    if shift == 0 {
+        return unsigned;
+    }
+    let tags = unsigned
+        .tags
+        .clone()
+        .to_vec()
+        .into_iter()
+        .map(|tag| match tag.as_slice() {
+            [name, exp] if name == "expiration" => match exp.parse::<u64>() {
+                Ok(exp) => Tag::parse(["expiration", &(exp + shift).to_string()]).unwrap_or(tag),
+                Err(_) => tag,
+            },
+            _ => tag,
+        });
+    unsigned.tags = nostr::Tags::from_list(tags.collect());
+    unsigned.created_at = now;
+    unsigned.id = None;
+    unsigned.ensure_id();
+    unsigned
 }
 
 /// The contract's codes; anything else is `denied`.
@@ -345,13 +375,25 @@ async fn call(
     method: &str,
     params: &[String],
 ) -> Result<String, ProviderError> {
+    call_with(endpoint, token, same_user, method, &|| params.to_vec()).await
+}
+
+/// [`call`], building `params` afresh for every envelope, so a re-send after
+/// a refusal can carry a renewed auth proof.
+async fn call_with(
+    endpoint: &Endpoint,
+    token: Option<&str>,
+    same_user: bool,
+    method: &str,
+    params: &(dyn Fn() -> Vec<String> + Sync),
+) -> Result<String, ProviderError> {
     let mut version = VERSION;
     let mut negotiated = false;
     let mut throttled = 0;
     loop {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let body = serde_json::to_vec(&serde_json::json!({
-            "id": id, "method": method, "params": params,
+            "id": id, "method": method, "params": params(),
         }))
         .map_err(|_| ProviderError::Transport("request serialization failed".into()))?;
         let timeout = if held(method) {
@@ -525,7 +567,17 @@ impl Provider {
 
     /// Sign `unsigned` as this identity; the result is checked.
     pub async fn sign(&self, unsigned: UnsignedEvent) -> Result<Event, CliError> {
-        let signed = self.call("sign_event", &[unsigned.as_json()]).await?;
+        // A re-sent auth proof is renewed so it is fresh when it reaches the
+        // relay; any other event is signed exactly as built.
+        let signed = call_with(
+            &self.endpoint,
+            Some(&self.token),
+            self.same_user,
+            "sign_event",
+            &|| vec![renewed(unsigned.clone()).as_json()],
+        )
+        .await
+        .map_err(|e| e.into_cli("sign_event"))?;
         let event = Event::from_json(&signed)
             .map_err(|_| CliError::Auth("Buzz desktop returned an unreadable event".into()))?;
         if event.pubkey != self.public_key || event.verify().is_err() {
@@ -1376,6 +1428,58 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(matches!(err, ProviderError::NoCommonVersion));
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// A throttled auth proof is re-sent dated now (its Blossom expiration
+    /// moved with it); a content event is re-sent exactly as built.
+    #[tokio::test]
+    async fn a_throttled_auth_proof_is_renewed_and_a_content_event_is_not() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let keys = nostr::Keys::generate();
+        let answer = desktop_answers(keys.clone(), vec![RELAY.into()]);
+        let throttle = Arc::new(AtomicBool::new(false));
+        let gate = throttle.clone();
+        let (endpoint, seen) = provider(move |version, request| {
+            if request["method"] == "sign_event" && gate.swap(false, Ordering::SeqCst) {
+                // As long as a real throttle takes, at least a clock second.
+                std::thread::sleep(Duration::from_millis(1100));
+                return serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1});
+            }
+            answer(version, request)
+        })
+        .await;
+        let desktop = match Provider::open(endpoint, "tok".into(), false, RELAY)
+            .await
+            .unwrap()
+        {
+            Ok(p) => p,
+            Err(_) => panic!("provider not opened"),
+        };
+        let expiration = |e: &Event| e.tags.expiration().map(|t| t.as_secs());
+
+        let proof = nostr::EventBuilder::new(nostr::Kind::from(24242), "Upload file")
+            .tags([Tag::parse(["expiration", &(unix_now() + 60).to_string()]).unwrap()])
+            .build(keys.public_key());
+        throttle.store(true, Ordering::SeqCst);
+        let signed = desktop.sign(proof.clone()).await.unwrap();
+        assert!(
+            signed.created_at > proof.created_at,
+            "the proof kept its old date"
+        );
+        assert_eq!(
+            expiration(&signed).unwrap() - signed.created_at.as_secs(),
+            60,
+            "the expiration did not move with the date"
+        );
+
+        let mut content =
+            nostr::EventBuilder::new(nostr::Kind::TextNote, "hi").build(keys.public_key());
+        let id = content.id();
+        throttle.store(true, Ordering::SeqCst);
+        let signed = desktop.sign(content.clone()).await.unwrap();
+        assert_eq!(signed.created_at, content.created_at);
+        assert_eq!(signed.id, id);
+        assert!(seen.lock().unwrap().len() >= 5);
     }
 
     #[tokio::test]
