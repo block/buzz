@@ -65,10 +65,14 @@ void main() {
       await tester.pump();
       expect(flow.reconnects, 1);
 
-      // Signing in restores the desktop labelling for unregistered agents.
+      // Signing in alone confirms nothing; the completed flow's registry
+      // listing restores the labelling for unregistered agents.
       h.registry.signedIn = true;
       await tester.pumpAndSettle();
       expect(find.text(prompt), findsNothing);
+      expect(find.text('On another device'), findsNothing);
+      await h.controller.run(h.controller.refresh);
+      await tester.pumpAndSettle();
       expect(find.text('On another device'), findsOneWidget);
     },
     skip: !HostedEnvironment.enabled,

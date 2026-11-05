@@ -26,7 +26,8 @@ class AgentIdentitySections extends HookConsumerWidget {
     useListenable(controller);
     useListenable(controller.account.subjectChanges);
     final community = ref.watch(activeCommunityProvider).asData?.value;
-    final unknown = agentLocationUnknown(community, controller);
+    final signedOut = agentLocationUnknown(community, controller);
+    final unconfirmed = agentLocationUnconfirmed(community, controller);
     final remote = controller.agents.any(
       (agent) => agent['agent_pubkey'] == pubkey,
     );
@@ -73,10 +74,12 @@ class AgentIdentitySections extends HookConsumerWidget {
                 child: SizedBox(
                   width: double.infinity,
                   child: Text(
-                    unknown && controller.busy
+                    unconfirmed && controller.busy
                         ? 'Checking whether this agent runs on Builderlab…'
-                        : unknown
+                        : signedOut
                         ? 'Sign in to Builderlab to see whether this agent runs remotely or on another of your devices.'
+                        : unconfirmed
+                        ? 'Couldn’t check whether this agent runs on Builderlab. Pull down on Agents to try again.'
                         : 'Runs on another of your devices, so you can chat with it from here while Buzz is open there. Change or delete it on that device.',
                     style: context.textTheme.bodyMedium,
                   ),

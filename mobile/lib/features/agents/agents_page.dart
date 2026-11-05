@@ -217,7 +217,7 @@ class _AgentsNavigation extends HookConsumerWidget {
                           (agent) => agent['agent_pubkey'] == pubkey,
                         )
                         ? 'Remote agent'
-                        : agentLocationUnknown(
+                        : agentLocationUnconfirmed(
                             ref.read(activeCommunityProvider).asData?.value,
                             controller,
                           )
@@ -344,6 +344,7 @@ class AgentsPage extends HookConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final creating = useState(false);
     final needsSignIn = agentLocationUnknown(community, controller);
+    final unconfirmed = agentLocationUnconfirmed(community, controller);
     final signInNeeded = builderlabSignInNeeded(community, controller);
     final failed =
         registered.hasError ||
@@ -712,7 +713,7 @@ class AgentsPage extends HookConsumerWidget {
                           ? null
                           : remote != null
                           ? 'Remote agent'
-                          : needsSignIn
+                          : unconfirmed
                           ? null
                           : 'On another device',
                       subtitleIcon: !editable && remote != null
