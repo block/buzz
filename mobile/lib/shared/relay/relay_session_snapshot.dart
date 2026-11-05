@@ -38,7 +38,12 @@ extension on RelaySessionNotifier {
         ),
       );
       checkContext();
-      final text = utf8.decode(response.bodyBytes);
+      // The query transport leaves gzip bodies compressed (see
+      // RelayHttpQueryClient), and the relay's CDN gzips both responses.
+      final text = relayResponseText(
+        response.bodyBytes,
+        response.headers['content-type'],
+      );
       if (response.statusCode < 200 || response.statusCode >= 300) {
         _activateRateLimitGateFromHttpError(text);
         throw RelayException(response.statusCode, text);

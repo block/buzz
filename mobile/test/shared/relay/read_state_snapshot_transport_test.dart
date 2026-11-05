@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
@@ -112,6 +113,25 @@ void main() {
       );
     },
   );
+
+  test('inflates gzip discovery and snapshot bodies', () async {
+    // The query transport keeps gzip bodies compressed, and the relay's CDN
+    // gzips both responses. Decoding the raw bytes failed every snapshot.
+    http.StreamedResponse gzipped(String body) => http.StreamedResponse(
+      Stream.value(gzip.encode(utf8.encode(body))),
+      200,
+      headers: {'content-type': 'application/json', 'content-encoding': 'gzip'},
+    );
+    final h = harness(
+      _StreamClient(
+        (request) async => gzipped(
+          request.method == 'GET' ? discovery : jsonEncode(envelope()),
+        ),
+      ),
+    );
+    final events = await h.session.fetchReadStateSnapshot();
+    expect(events.single.id, event()['id']);
+  });
 
   test(
     'accepts complete empty state and unrelated own kind-30078 coordinates',
