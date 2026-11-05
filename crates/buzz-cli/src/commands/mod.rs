@@ -2,6 +2,7 @@ pub mod agents;
 pub mod channel_templates;
 pub mod channel_unread;
 pub mod channels;
+pub mod community;
 pub mod dms;
 pub mod emoji;
 pub(crate) mod event_output;
