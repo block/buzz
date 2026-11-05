@@ -289,8 +289,8 @@ class ComposeBar extends HookConsumerWidget {
 
     // Preload profiles for channel members, mentionable agents, and their
     // owners so @mention suggestions show names ("managed by …" included).
-    final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
-    final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    final relayAgents = ref.watch(agentDirectoryProvider).value;
+    final agentOwners = ref.watch(agentOwnersProvider).value;
     final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
     final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(

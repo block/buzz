@@ -137,9 +137,8 @@ final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
 /// identity source; channel features add their bot roles separately.
 final knownAgentPubkeysProvider = Provider<Set<String>>((ref) {
   final relayAgents =
-      ref.watch(agentDirectoryProvider).asData?.value ??
-      const <AgentDirectoryEntry>[];
-  final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      ref.watch(agentDirectoryProvider).value ?? const <AgentDirectoryEntry>[];
+  final owners = ref.watch(agentOwnersProvider).value ?? const {};
   return _AgentPubkeySet({
     for (final agent in relayAgents) agent.pubkey.toLowerCase(),
     ...owners.keys.map((pubkey) => pubkey.toLowerCase()),
@@ -149,8 +148,7 @@ final knownAgentPubkeysProvider = Provider<Set<String>>((ref) {
 /// Directory display names keyed by agent pubkey for mention presentation.
 final agentDirectoryDisplayNamesProvider = Provider<Map<String, String>>((ref) {
   final agents =
-      ref.watch(agentDirectoryProvider).asData?.value ??
-      const <AgentDirectoryEntry>[];
+      ref.watch(agentDirectoryProvider).value ?? const <AgentDirectoryEntry>[];
   return Map.unmodifiable({
     for (final agent in agents)
       if (agent.displayName?.trim().isNotEmpty == true)
@@ -320,32 +318,49 @@ final channelMembershipUpdateProvider = NotifierProvider.autoDispose
       _ChannelBotRoleSubscription.new,
     );
 
+/// Channel bot roles last read per channel, one memo per community.
+final _channelBotPubkeysMemoProvider = Provider<Map<String, Set<String>>>((
+  ref,
+) {
+  ref.watch(relayConfigProvider);
+  return {};
+});
+
 /// Bot pubkeys currently assigned a channel bot role.
+///
+/// While the session reconnects, the roles last read for the channel stand,
+/// so agents keep their labels through a resume.
 final channelBotPubkeysProvider = FutureProvider.autoDispose
     .family<Set<String>, String>((ref, channelId) async {
+      final memo = ref.watch(_channelBotPubkeysMemoProvider);
       ref.watch(
         channelMembershipUpdateProvider(
           channelId,
         ).select((update) => update.version),
       );
       final sessionState = ref.watch(relaySessionProvider);
-      if (sessionState.status != SessionStatus.connected) return const {};
+      if (sessionState.status != SessionStatus.connected) {
+        return memo[channelId] ?? const {};
+      }
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.channelMembers(channelId),
       );
-      if (events.isEmpty) return const {};
-      return _AgentPubkeySet({
-        for (final member in membersFromEvent(events.first))
-          if (member.role == 'bot') member.pubkey.toLowerCase(),
-      });
+      final bots = events.isEmpty
+          ? const <String>{}
+          : _AgentPubkeySet({
+              for (final member in membersFromEvent(events.first))
+                if (member.role == 'bot') member.pubkey.toLowerCase(),
+            });
+      if (ref.mounted) memo[channelId] = bots;
+      return bots;
     });
 
 /// Pubkeys currently known to represent agents in a channel.
 final agentMentionPubkeysProvider = Provider.autoDispose
     .family<Set<String>, String>((ref, channelId) {
       final channelBotPubkeys =
-          ref.watch(channelBotPubkeysProvider(channelId)).asData?.value ??
+          ref.watch(channelBotPubkeysProvider(channelId)).value ??
           const <String>{};
       return agentPubkeysWithChannelBots(
         knownAgentPubkeys: ref.watch(knownAgentPubkeysProvider),

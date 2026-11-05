@@ -18,7 +18,7 @@ final identityNameSourcesProvider = Provider<IdentityNameSources>((ref) {
     },
     agentPubkeys: ref.watch(knownAgentPubkeysProvider),
     agentDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
-    agentOwners: ref.watch(agentOwnersProvider).asData?.value ?? const {},
+    agentOwners: ref.watch(agentOwnersProvider).value ?? const {},
     viewer: ref.watch(myPubkeyProvider)?.toLowerCase(),
   );
 });

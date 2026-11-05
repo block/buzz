@@ -260,6 +260,39 @@ void main() {
     );
   });
 
+  test('keeps channel bot roles while the session reconnects', () async {
+    final relaySession = _MembershipRelaySessionNotifier([
+      _membershipEvent(role: 'bot'),
+      _membershipEvent(role: 'bot'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final keepAlive = container.listen(
+      channelBotPubkeysProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(keepAlive.close);
+
+    expect(await container.read(channelBotPubkeysProvider(_channelId).future), {
+      _agentPubkey,
+    });
+    relaySession.setStatus(SessionStatus.reconnecting);
+    expect(await container.read(channelBotPubkeysProvider(_channelId).future), {
+      _agentPubkey,
+    });
+    // Consumers read the last value while the provider reloads.
+    relaySession.setStatus(SessionStatus.connected);
+    expect(container.read(channelBotPubkeysProvider(_channelId)).value, {
+      _agentPubkey,
+    });
+    expect(await container.read(channelBotPubkeysProvider(_channelId).future), {
+      _agentPubkey,
+    });
+  });
+
   test('blank profile labels defer to the directory label', () {
     const pubkey = 'deadbeef0123456789';
 
@@ -310,6 +343,8 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
   _MembershipRelaySessionNotifier(this._memberships, {this.subscribeError});
 
   Future<void> get subscribed => _subscribed.future;
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);

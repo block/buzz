@@ -260,9 +260,8 @@ List<MentionCandidate> _chooserCandidates(
   final channels =
       ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
   final relayAgents =
-      ref.watch(agentDirectoryProvider).asData?.value ??
-      const <AgentDirectoryEntry>[];
-  final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
+      ref.watch(agentDirectoryProvider).value ?? const <AgentDirectoryEntry>[];
+  final owners = ref.watch(agentOwnersProvider).value ?? const {};
   // Null while loading or failed: nothing is known to be unlisted.
   final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
   final userCache = ref.watch(userCacheProvider);

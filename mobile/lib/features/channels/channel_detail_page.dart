@@ -459,8 +459,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         },
         profileOwnedAgentPubkeys: profileOwnedAgentPubkeys,
       ),
-      channelBotPubkeys:
-          channelBotPubkeysState.asData?.value ?? const <String>{},
+      channelBotPubkeys: channelBotPubkeysState.value ?? const <String>{},
     );
     // Flat conversations show agent work inline instead of linking to threads.
     final threadWorking = _threadWorkingAgents(
