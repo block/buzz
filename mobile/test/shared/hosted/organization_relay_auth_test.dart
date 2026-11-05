@@ -266,10 +266,7 @@ void main() {
         // issuance for the other community leaves the active recovery intact.
         auth.rejected(relay, 'Bearer token-for-$relayHost', terminal: true);
         boundIdentity = {'pubkey_hex': 'f' * 64};
-        await expectLater(
-          auth.headers(other, background: true),
-          throwsA(AccountFailure.denied),
-        );
+        expect(await auth.headers(other, background: true), isEmpty);
         expect(auth.failedRelay, relay.baseUrl);
         expect(auth.failure, AccountFailure.denied);
         // The active relay's reconnect, arriving while that background
@@ -281,7 +278,7 @@ void main() {
             : 'token-for-${Uri.parse(relayUrl).host}';
         final revocation = expectLater(
           auth.headers(other, background: true),
-          throwsA(AccountFailure.invalidResponse),
+          completion(isEmpty),
         );
         expect(await auth.headers(relay), {
           'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
@@ -303,11 +300,9 @@ void main() {
             requests.where((r) => r.url.path.endsWith('/assertions')).length;
 
         // An unbound account is never bound by cleanup with a key the user
-        // may have discarded; the durable revocation retries later.
-        await expectLater(
-          auth.headers(relay, background: true),
-          throwsA(AccountFailure.denied),
-        );
+        // may have discarded. Cleanup goes out without an assertion and the
+        // relay decides; an enforcing relay's refusal is retried durably.
+        expect(await auth.headers(relay, background: true), isEmpty);
         expect(assertions(), 0);
         expect(auth.failure, isNull);
 
@@ -350,7 +345,7 @@ void main() {
         ];
         final revocation = expectLater(
           auth.headers(relay, background: true),
-          throwsA(AccountFailure.denied),
+          completion(isEmpty),
         );
         expect(await auth.headers(relay), {
           'Nostr-Federated-Identity': 'Bearer token-5',

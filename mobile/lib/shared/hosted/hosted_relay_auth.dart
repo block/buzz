@@ -174,6 +174,8 @@ class HostedRelayAuth extends ChangeNotifier {
   /// It never backs up the key or binds it to an unbound account, and its
   /// assertion bypasses the shared cache: each attempt gets a fresh one, and
   /// foreground use never inherits an assertion whose key was not backed up.
+  /// Without an assertion it gets no headers rather than a failure, so the
+  /// relay decides.
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
@@ -183,6 +185,9 @@ class HostedRelayAuth extends ChangeNotifier {
     try {
       return await _headers(config, client, background);
     } on AccountFailure catch (failure) {
+      // Cleanup still reaches a relay that does not enforce assertions; an
+      // enforcing relay refuses, and the caller's durable retry tries again.
+      if (background) return const {};
       // Without an organization session, connect as before and let the relay
       // decide: an enforcing relay refuses, and sign-in is offered.
       if (failure == AccountFailure.signedOut &&
