@@ -2702,7 +2702,8 @@ impl Db {
     /// unset, even covered-eligible queries stay on the writer, so merging
     /// this seam is a true no-op until the budget is configured. Every
     /// failure fails closed to the writer, except a statement-timeout cancel
-    /// (57014), which is surfaced rather than re-run.
+    /// (57014), which is surfaced rather than re-run, and a busy reader,
+    /// which rejects the read as retryable (see [`Db::route_read`]).
     #[datastore_span(name = "query_events_routed", system = "postgresql")]
     pub async fn query_events_routed(
         &self,
@@ -2719,7 +2720,7 @@ impl Db {
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2783,7 +2784,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2849,7 +2850,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::count_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -3110,7 +3111,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {

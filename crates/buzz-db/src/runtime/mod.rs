@@ -1,6 +1,7 @@
 mod admitted_tx;
 mod cold_start;
 mod connection_observability;
+mod history_reads;
 pub mod migration;
 pub(crate) mod observability;
 pub(crate) mod push_enqueue;
@@ -302,6 +303,10 @@ pub struct Db {
     /// not yet probed (or the probe hit a transient error and will retry).
     /// Shared across `Db` clones.
     pub(crate) reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    /// Concurrency cap on replica-served subscription-history reads, sized
+    /// from [`Db::read_max_connections`] (see [`history_reads`]). Shared
+    /// across `Db` clones.
+    pub(crate) history_reads: history_reads::HistoryReadGate,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -329,7 +334,7 @@ pub(crate) enum ReadSessionInner {
     /// to the writer instead of surfacing an error: degraded capacity,
     /// never holes — and never a 500 the writer could have served.
     Replica {
-        tx: sqlx::Transaction<'static, sqlx::Postgres>,
+        tx: history_reads::ReaderTx,
         writer: PgPool,
     },
     /// The writer pool (cheap clone; Arc-backed).
@@ -392,8 +397,11 @@ pub(crate) enum RouteDecision {
     /// replica, so a post-verification writer re-run or a mid-query replica
     /// failure emits exactly one `buzz_db_route_decision` event per request
     /// (the offload percentage is read straight off `decision="replica"`).
+    ///
+    /// A history read's transaction carries its [`history_reads`] permit, so
+    /// the permit is released when the reader connection is.
     Replica(
-        sqlx::Transaction<'static, sqlx::Postgres>,
+        history_reads::ReaderTx,
         replica_fence::TokenEntry,
         &'static str,
     ),
@@ -819,6 +827,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            history_reads: history_reads::HistoryReadGate::for_read_pool(read_max_connections),
         })
     }
 
@@ -964,12 +973,14 @@ impl Db {
     }
 
     /// Reader acquire timeout — deliberately far below the writer's
-    /// (seconds-denominated) timeout. Failing closed to the writer must be
-    /// fast: a saturated reader pool that made routed reads wait the full
-    /// writer-style timeout would add dead latency during exactly the load
-    /// spike the offload exists for. A miss here surfaces as
-    /// `writer/reader_acquire_timeout` (see [`Db::proved_reader`] for why
-    /// the reason names the mechanism rather than a diagnosis).
+    /// (seconds-denominated) timeout. A miss must resolve fast: a saturated
+    /// reader pool that made routed reads wait the full writer-style timeout
+    /// would add dead latency during exactly the load spike the offload
+    /// exists for. A miss surfaces as `writer/reader_acquire_timeout`, or as
+    /// `rejected/reader_acquire_timeout` for a history read, which is not
+    /// moved to the writer (see [`Db::route_read`], and
+    /// [`Db::proved_reader`] for why the reason names the mechanism rather
+    /// than a diagnosis).
     const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 
     /// Client-side bound on a routed read's fence proof (Aurora capability
@@ -1369,6 +1380,9 @@ impl Db {
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
+            history_reads: history_reads::HistoryReadGate::for_read_pool(
+                pool.options().get_max_connections(),
+            ),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
@@ -1390,6 +1404,9 @@ impl Db {
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
+            history_reads: history_reads::HistoryReadGate::for_read_pool(
+                read_pool.options().get_max_connections(),
+            ),
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
@@ -1839,22 +1856,37 @@ impl Db {
 
     /// Shared route decision for one read: evaluate the predicate against a
     /// proved reader session and record the decision. Fail closed to the
-    /// writer everywhere.
+    /// writer, with one exception for subscription-history reads.
+    ///
+    /// History reads are the heavy, high-volume routed reads. They hold a
+    /// [`history_reads`] permit for as long as their reader transaction, so
+    /// they never fill the reader pool, and they are never moved to the
+    /// writer merely because the reader is busy: a history read that waits
+    /// out its permit ([`history_reads::HistoryReadGate::PERMIT_WAIT`]) or
+    /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) is rejected with
+    /// [`sqlx::Error::PoolTimedOut`], which the relay answers with its
+    /// retryable `CLOSED`. Spilling that load onto the writer starved the
+    /// authentication, tenant and moderation reads only the writer serves.
+    /// A reader that is wrong rather than busy (validation failure, proof
+    /// timeout, stale token) still falls back to the writer, as do
+    /// prechecks that never reach the reader. Recorded as
+    /// `decision="rejected"` with `reason="history_read_cap"` or
+    /// `"reader_acquire_timeout"`.
     pub(crate) async fn route_read(
         &self,
         path: &'static str,
         predicate: RoutePredicate,
         operation: observability::ReaderOperation,
-    ) -> RouteDecision {
+    ) -> Result<RouteDecision> {
         let Some(read_pool) = &self.read_pool else {
             Self::record_route(path, "writer", "disabled");
-            return RouteDecision::Writer;
+            return Ok(RouteDecision::Writer);
         };
         // Cheap prechecks on the shared ring before spending a reader
         // checkout; the connection-local observation still has to prove it.
         let Some(newest) = self.fence.newest() else {
             Self::record_route(path, "writer", "uninitialized");
-            return RouteDecision::Writer;
+            return Ok(RouteDecision::Writer);
         };
         // Precheck helpers against the newest shared entry: if the newest
         // cannot satisfy an arm, no proved (older-or-equal) entry can.
@@ -1885,8 +1917,17 @@ impl Db {
         };
         if let Err(reason) = precheck {
             Self::record_route(path, "writer", reason);
-            return RouteDecision::Writer;
+            return Ok(RouteDecision::Writer);
         }
+        let history = operation == observability::ReaderOperation::SubscriptionHistory;
+        let permit = if history {
+            let Some(permit) = self.history_reads.admit().await else {
+                return Err(Self::reject_history_read(path, "history_read_cap"));
+            };
+            Some(permit)
+        } else {
+            None
+        };
         match self.proved_reader(read_pool, operation).await {
             Ok((tx, entry)) => {
                 // Re-evaluate against the entry the session actually proved
@@ -1912,20 +1953,34 @@ impl Db {
                     }
                 };
                 match verdict {
-                    Some(reason) => RouteDecision::Replica(tx, entry, reason),
+                    Some(reason) => Ok(RouteDecision::Replica(
+                        history_reads::ReaderTx::new(tx, permit),
+                        entry,
+                        reason,
+                    )),
                     None => {
                         // The session proves an older entry than the
                         // predicate needs (replication lag) — fail closed.
                         Self::record_route(path, "writer", "stale");
-                        RouteDecision::Writer
+                        Ok(RouteDecision::Writer)
                     }
                 }
             }
+            Err(reason @ "reader_acquire_timeout") if history => {
+                Err(Self::reject_history_read(path, reason))
+            }
             Err(reason) => {
                 Self::record_route(path, "writer", reason);
-                RouteDecision::Writer
+                Ok(RouteDecision::Writer)
             }
         }
+    }
+
+    /// Record a rejected history read (see [`Db::route_read`]) and build its
+    /// retryable error.
+    fn reject_history_read(path: &'static str, reason: &'static str) -> DbError {
+        Self::record_route(path, "rejected", reason);
+        DbError::Sqlx(sqlx::Error::PoolTimedOut)
     }
 }
 

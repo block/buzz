@@ -424,7 +424,21 @@ Each routed read proves the replica is caught up before serving from it. A
 proof that does not answer within 1s falls back to the writer, counted as
 `buzz_db_route_decision{decision="writer",reason="reader_proof_timeout"}`.
 A sustained rise in that series means the replica is reachable but not
-answering, for example during a failover. Every connection returned to the
+answering, for example during a failover.
+
+Subscription-history reads are the exception to that writer fallback when
+the reader is merely busy. Each pod admits at most its reader pool size less
+one fifth (20 of 25) history reads to the reader at once, so authorization
+reads keep a free reader connection. A history read that waits more than 1s
+for admission, or misses the reader's 150ms acquire budget, is rejected with
+the retryable `CLOSED` `error: database error` instead of moving to the
+writer, where it would compete with authentication and tenant lookups. Each
+rejection increments `buzz_db_route_decision{decision="rejected"}`, with
+`reason="history_read_cap"` or `"reader_acquire_timeout"`. A history read
+the reader cannot prove (validation failure, proof timeout, stale replica)
+still falls back to the writer. The compatibility families
+`buzz_db_pool_acquire_wait_seconds` and `buzz_db_pool_acquisitions_total`
+carry `operation` as well as `pool_role` and `outcome`. Every connection returned to the
 reader pool passes a release check first. A connection is closed instead of
 returned, and the pool dials a replacement, when the check does not answer
 within 5s (`reason="timeout"`), fails (`error`), or finds a transaction still

@@ -365,7 +365,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_mentions_on(
                 &mut tx,
@@ -455,7 +455,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::feed::query_needs_action_on(
@@ -538,7 +538,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_activity_on(
                 &mut tx,
