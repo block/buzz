@@ -27,6 +27,10 @@ part 'channel_management_actions.dart';
 String _relayErrorMessage(Object error) =>
     error.toString().replaceFirst('Exception: ', '');
 
+/// Why adding to a DM failed. The most common refusal is a full DM.
+const dmAdditionFailedMessage =
+    'Couldn’t add them. A DM holds up to 9 people, not counting agents.';
+
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
 ///
 /// Callers surface [message] to the user — a relay rejection here (e.g. a plain

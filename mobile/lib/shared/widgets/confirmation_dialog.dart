@@ -66,3 +66,48 @@ Future<bool> showConfirmation({
       ) ==
       true;
 }
+
+/// Asks whether the people being added to a DM see its history, using a UIKit
+/// alert on iOS. Returns true for Include history, false for Start new DM, and
+/// null when cancelled.
+Future<bool?> showDmHistoryChoice({
+  required BuildContext context,
+  required String title,
+}) async {
+  const message =
+      'Include history to add them to this DM with its earlier messages, or '
+      'start a new DM with everyone and no history.';
+  const options = ['Start new DM', 'Include history'];
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+    final index = await const MethodChannel('buzz/confirmation_dialog')
+        .invokeMethod<int>('choose', {
+          'title': title,
+          'message': message,
+          'options': options,
+          'cancelLabel': 'Cancel',
+          'dark': context.theme.brightness == Brightness.dark,
+        });
+    return index == null ? null : index == 1;
+  }
+  return showBuzzDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog.adaptive(
+      title: Text(title),
+      content: const Text(message),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: Text(options[0]),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: Text(options[1]),
+        ),
+      ],
+    ),
+  );
+}
