@@ -132,6 +132,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
+    RemindersNotifier Function()? remindersNotifier,
     Set<String> knownAgentPubkeys = const {},
     List<Override> overrides = const [],
   }) async {
@@ -156,7 +157,9 @@ void main() {
         composeDraftsProvider.overrideWith(
           () => _FakeComposeDraftsNotifier(drafts),
         ),
-        remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
+        remindersProvider.overrideWith(
+          remindersNotifier ?? () => _FakeRemindersNotifier(reminders),
+        ),
         ...overrides,
       ],
       child: MaterialApp(
@@ -892,8 +895,10 @@ void main() {
     tester,
   ) async {
     final reminders = _CapturingReminderService();
+    final remindersNotifier = _FakeRemindersNotifier(const []);
     await tester.pumpWidget(
       await buildTestable(
+        remindersNotifier: () => remindersNotifier,
         overrides: [
           reminder.reminderServiceProvider.overrideWithValue(reminders),
         ],
@@ -944,11 +949,82 @@ void main() {
     await tester.tap(find.text('In 1 hour'));
     await tester.pumpAndSettle();
 
-    final target = reminders.targets.single;
-    expect(target.eventId, 'm1');
-    expect(target.channelId, 'ch1');
-    expect(target.preview, 'Hey check this out');
+    final first = reminders.saved.single;
+    expect(first.target.eventId, 'm1');
+    expect(first.target.channelId, 'ch1');
+    expect(first.target.preview, 'Hey check this out');
+    expect(first.dTag, isNull);
     expect(find.text('Reminder set'), findsOneWidget);
+    expect(remindersNotifier.refreshes, 1);
+  });
+
+  testWidgets('long-press reschedules an existing reminder instead of adding '
+      'one', (tester) async {
+    final reminders = _CapturingReminderService();
+    final existing = Reminder(
+      id: 'reminder-d1',
+      notBefore: now + 600,
+      status: 'pending',
+      target: const ReminderTarget(
+        eventId: 'm1',
+        channelId: 'ch1',
+        preview: 'Hey check this out',
+        authorPubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+      ),
+      note: 'Reply after standup',
+      createdAt: now - 60,
+      eventId: 'reminder-event-1',
+    );
+    await tester.pumpWidget(
+      await buildTestable(
+        reminders: [existing],
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remind me'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('In 1 hour'));
+    await tester.pumpAndSettle();
+
+    final saved = reminders.saved.single;
+    expect(saved.dTag, 'reminder-d1');
+    expect(saved.note, 'Reply after standup');
+    expect(find.text('Reminder updated'), findsOneWidget);
+  });
+
+  testWidgets('long-press omits Follow in a Solo chat', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        channels: [
+          Channel(
+            id: 'ch1',
+            name: 'Notes',
+            channelType: 'stream',
+            visibility: 'private',
+            description: '',
+            createdBy: 'x',
+            createdAt: DateTime(2025),
+            memberCount: 1,
+            isMember: true,
+            labels: const ['buzz.solo'],
+          ),
+          testChannels[1],
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Open conversation'), findsOneWidget);
+    expect(find.text('Follow thread'), findsNothing);
   });
 
   testWidgets('long-press hides reminders when signed out', (tester) async {
@@ -1183,8 +1259,13 @@ class _FakeRemindersNotifier extends RemindersNotifier {
   final List<Reminder> _reminders;
   _FakeRemindersNotifier(this._reminders);
 
+  int refreshes = 0;
+
   @override
   Future<List<Reminder>> build() async => _reminders;
+
+  @override
+  Future<void> refresh() async => refreshes++;
 }
 
 class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
@@ -1208,14 +1289,16 @@ class _CapturingReminderService extends reminder.ReminderService {
   factory _CapturingReminderService() =>
       _CapturingReminderService._(nostr.Keys.generate());
 
-  final targets = <reminder.ReminderTarget>[];
+  final saved =
+      <({reminder.ReminderTarget target, String? note, String? dTag})>[];
 
   @override
   Future<void> createReminder({
     required reminder.ReminderTarget target,
     required int notBefore,
     String? note,
+    String? replacingDTag,
   }) async {
-    targets.add(target);
+    saved.add((target: target, note: note, dTag: replacingDTag));
   }
 }
