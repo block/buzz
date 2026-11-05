@@ -455,28 +455,36 @@ async fn set_landing_ws(
     (ok.accepted, ok.message)
 }
 
+/// Whether `tags` includes one named `name`.
+fn has_tag(tags: &[Vec<String>], name: &str) -> bool {
+    tags.iter()
+        .any(|t| t.first().map(String::as_str) == Some(name))
+}
+
+/// The `welcome` tag's text, if present.
+fn welcome_tag(tags: &[Vec<String>]) -> Option<String> {
+    tags.iter()
+        .find(|t| t.first().map(String::as_str) == Some("welcome"))
+        .and_then(|t| t.get(1).cloned())
+}
+
 /// The landing channel journey on the shared relay. A fresh person's AUTH
 /// joins them to the advertised landing channel, whose kind:39000 carries
 /// `["landing"]`. A relay owner moves the designation with the client's
 /// full-state kind:9002 (twice: it is idempotent); NIP-11 and both
 /// channels' kind:39000 follow. The landing channel refuses an archive, a
 /// non-admin is refused, and the designation moves back.
+///
+/// The relay is shared with the other e2e tests, so the part that moves the
+/// designation runs under `catch_unwind` and the original designation and
+/// welcome are restored before any failure is reported.
 #[tokio::test]
 #[ignore]
 async fn test_landing_channel_journey() {
-    const PROTECTED: &str = "invalid: this is the community's landing channel; make another channel the landing channel first";
+    use futures_util::FutureExt;
     let url = relay_url();
     let owner = Keys::generate();
     seed_relay_owner(&owner).await;
-    let has = |tags: &[Vec<String>], name: &str| {
-        tags.iter()
-            .any(|t| t.first().map(String::as_str) == Some(name))
-    };
-    let welcome_of = |tags: &[Vec<String>]| {
-        tags.iter()
-            .find(|t| t.first().map(String::as_str) == Some("welcome"))
-            .and_then(|t| t.get(1).cloned())
-    };
 
     let person = Keys::generate();
     let person_hex = person.public_key().to_hex();
@@ -509,57 +517,71 @@ async fn test_landing_channel_journey() {
         "NIP-11 advertises the extension: {info}"
     );
     let original_tags = group_metadata_tags(&url, &owner, &original).await;
-    assert!(has(&original_tags, "landing"), "{original_tags:?}");
-    let original_welcome = welcome_of(&original_tags).unwrap_or_default();
+    assert!(has_tag(&original_tags, "landing"), "{original_tags:?}");
+    let original_welcome = welcome_tag(&original_tags).unwrap_or_default();
 
     let target = create_test_channel(&owner).await;
+    let moved =
+        std::panic::AssertUnwindSafe(landing_move_journey(&url, &owner, &original, &target))
+            .catch_unwind()
+            .await;
+
+    // Leave the shared relay as found, even after a failed assertion.
+    let restored = set_landing_ws(&url, &original, &owner, &original_welcome).await;
+    let advertised = advertised_landing_channel().await.0;
+    let archived = set_metadata_ws(&url, &target, &owner, "archived", "true").await;
+    if let Err(panic) = moved {
+        eprintln!(
+            "landing journey failed; restore: {restored:?}, advertised: {advertised:?}, \
+             target archived: {archived:?}"
+        );
+        std::panic::resume_unwind(panic);
+    }
+    assert_eq!(restored, (true, String::new()));
+    assert_eq!(advertised.as_deref(), Some(original.as_str()));
+    assert_eq!(
+        archived,
+        (true, String::new()),
+        "the previous landing channel can be archived"
+    );
+}
+
+/// The part of [`test_landing_channel_journey`] that moves the designation
+/// from `original` to `target`; the caller restores it.
+async fn landing_move_journey(url: &str, owner: &Keys, original: &str, target: &str) {
+    const PROTECTED: &str = "invalid: this is the community's landing channel; make another channel the landing channel first";
     let welcome = "Welcome to the e2e community.\nSay hello.";
     for attempt in ["move", "idempotent resend"] {
         assert_eq!(
-            set_landing_ws(&url, &target, &owner, welcome).await,
+            set_landing_ws(url, target, owner, welcome).await,
             (true, String::new()),
             "{attempt}"
         );
     }
     assert_eq!(
         advertised_landing_channel().await.0.as_deref(),
-        Some(target.as_str())
+        Some(target)
     );
-    let target_tags = group_metadata_tags(&url, &owner, &target).await;
-    assert!(has(&target_tags, "landing"), "{target_tags:?}");
-    assert_eq!(welcome_of(&target_tags).as_deref(), Some(welcome));
-    let previous_tags = group_metadata_tags(&url, &owner, &original).await;
+    let target_tags = group_metadata_tags(url, owner, target).await;
+    assert!(has_tag(&target_tags, "landing"), "{target_tags:?}");
+    assert_eq!(welcome_tag(&target_tags).as_deref(), Some(welcome));
+    let previous_tags = group_metadata_tags(url, owner, original).await;
     assert!(
-        !has(&previous_tags, "landing") && !has(&previous_tags, "welcome"),
+        !has_tag(&previous_tags, "landing") && !has_tag(&previous_tags, "welcome"),
         "the previous landing channel drops both tags: {previous_tags:?}"
     );
 
     assert_eq!(
-        set_metadata_ws(&url, &target, &owner, "archived", "true").await,
+        set_metadata_ws(url, target, owner, "archived", "true").await,
         (false, PROTECTED.to_string())
     );
     assert_eq!(
-        set_landing_ws(&url, &original, &Keys::generate(), "").await,
+        set_landing_ws(url, original, &Keys::generate(), "").await,
         (
             false,
             "invalid: actor not authorized: landing and welcome require a relay owner or admin"
                 .to_string()
         )
-    );
-
-    // Leave the shared relay as found.
-    assert_eq!(
-        set_landing_ws(&url, &original, &owner, &original_welcome).await,
-        (true, String::new())
-    );
-    assert_eq!(
-        advertised_landing_channel().await.0.as_deref(),
-        Some(original.as_str())
-    );
-    assert_eq!(
-        set_metadata_ws(&url, &target, &owner, "archived", "true").await,
-        (true, String::new()),
-        "the previous landing channel can be archived"
     );
 }
 
