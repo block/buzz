@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use buzz_core::CommunityId;
 use buzz_db::{DbError, ReadAt};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 type Key = (CommunityId, Vec<u8>);
@@ -15,8 +15,7 @@ type Snapshot = ReadAt<Memberships>;
 
 const MAX_AGE: Duration = Duration::from_secs(10);
 const CACHE_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const MAX_MEMBERSHIPS: usize = 4096;
-const MAX_LOADS: usize = 16;
+pub(crate) const MAX_MEMBERSHIPS: usize = 16_384;
 
 /// Oversized users retain authoritative point checks, never a truncated set.
 enum Memberships {
@@ -74,16 +73,15 @@ impl Entry {
 pub(crate) struct MembershipCache {
     entries: moka::sync::Cache<Key, Entry>,
     publication: PublicationMutex<()>,
-    loads: Semaphore,
     wait: Duration,
 }
 
 impl MembershipCache {
     pub(crate) fn new(wait: Duration) -> Self {
-        Self::with_limits(wait, CACHE_BYTES, MAX_LOADS)
+        Self::with_capacity(wait, CACHE_BYTES)
     }
 
-    fn with_limits(wait: Duration, bytes: u64, loads: usize) -> Self {
+    fn with_capacity(wait: Duration, bytes: u64) -> Self {
         Self {
             entries: moka::sync::Cache::builder()
                 .max_capacity(bytes)
@@ -92,14 +90,13 @@ impl MembershipCache {
                 .support_invalidation_closures()
                 .build(),
             publication: PublicationMutex::new(()),
-            loads: Semaphore::new(loads),
             wait,
         }
     }
 
-    /// Shares a bounded full-set read. Gate timeouts and load saturation use
-    /// the authoritative point query, never another unconstrained full load.
-    /// Errors are not cached; cancellation releases the gate and load permit.
+    /// Shares a bounded full-set read; the database pool controls query concurrency.
+    /// Gate timeouts use the authoritative point query, never a second full load.
+    /// Errors are not cached; cancellation releases the gate.
     pub(crate) async fn contains(
         &self,
         key: Key,
@@ -138,15 +135,10 @@ impl MembershipCache {
                 };
             }
         }
-        let Ok(permit) = self.loads.try_acquire() else {
-            drop(guard);
-            return Self::point_check("load_limit", point).await;
-        };
         metrics::counter!("buzz_membership_cache_misses_total").increment(1);
         let read = read.await?;
         let memberships = if read.value.len() > MAX_MEMBERSHIPS {
-            // Do not retain the query buffer while a point check waits after
-            // we release the full-set load permit below.
+            // Do not retain the query buffer while a point check waits.
             drop(read.value);
             Memberships::PointChecks
         } else {
@@ -176,7 +168,6 @@ impl MembershipCache {
                 self.entries.insert(key, completed);
             }
         }
-        drop(permit);
         drop(guard);
         match answer {
             Some(member) => Ok(member),

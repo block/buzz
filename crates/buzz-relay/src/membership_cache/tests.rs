@@ -279,50 +279,47 @@ async fn timed_out_waiters_use_point_checks_without_a_second_full_load() {
 }
 
 #[tokio::test]
-async fn load_limit_is_shared_across_users_and_cancellation_returns_capacity() {
-    let cache = MembershipCache::with_limits(Duration::from_secs(1), CACHE_BYTES, 2);
+async fn cold_users_share_loads_even_when_more_than_sixteen_are_waiting() {
+    let cache = MembershipCache::new(Duration::from_secs(5));
     let channel = Uuid::from_u128(1);
-    let mut loaders = (1..=2)
-        .map(|n| {
-            Box::pin(cache.contains(
-                (community(n), vec![1; 32]),
-                channel,
-                std::future::pending(),
-                async { panic!("capacity should be available") },
-            ))
-        })
-        .collect::<Vec<_>>();
+    let mut releases = Vec::new();
+    let mut loaders = Vec::new();
+    let mut waiters = Vec::new();
+    for user in 1..=96 {
+        let key = (community(1), vec![user; 32]);
+        let (release, released) = oneshot::channel();
+        releases.push(release);
+        loaders.push(Box::pin(cache.contains(
+            key.clone(),
+            channel,
+            async {
+                released.await.unwrap();
+                Ok(snapshot(vec![channel]))
+            },
+            async { panic!("other users must not force an uncached point check") },
+        )));
+        waiters.push(Box::pin(cache.contains(
+            key,
+            channel,
+            async { panic!("same-user checks must share the first load") },
+            async { panic!("same-user checks must reuse the snapshot") },
+        )));
+    }
     for loader in &mut loaders {
         assert!(futures_util::poll!(loader.as_mut()).is_pending());
     }
-    let key = (community(3), vec![1; 32]);
-    assert!(!cache
-        .contains(
-            key.clone(),
-            channel,
-            async { panic!("full-set concurrency limit exceeded") },
-            async { Ok(false) }
-        )
-        .await
-        .unwrap());
-    assert!(cache
-        .contains(
-            key.clone(),
-            channel,
-            async { panic!("full-set concurrency limit exceeded") },
-            async { Err(DbError::InvalidData("point failed".into())) }
-        )
-        .await
-        .is_err());
-    drop(loaders.pop());
-    assert!(cache
-        .contains(key, channel, async { Ok(snapshot(vec![channel])) }, async {
-            panic!("capacity must return after cancellation")
-        })
-        .await
-        .unwrap());
-    drop(loaders);
-    assert_eq!(cache.loads.available_permits(), 2);
+    for waiter in &mut waiters {
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+    }
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    for loader in loaders {
+        assert!(loader.await.unwrap());
+    }
+    for waiter in waiters {
+        assert!(waiter.await.unwrap());
+    }
 }
 
 #[tokio::test]
@@ -401,7 +398,7 @@ async fn completed_payload_is_weighed_and_moka_evicts_under_byte_pressure() {
     let payload = 1000 * std::mem::size_of::<Uuid>() as u64;
     // Enough for two snapshots, independent of entry count.
     let budget = 2 * (overhead + payload);
-    let cache = MembershipCache::with_limits(Duration::from_secs(1), budget, 2);
+    let cache = MembershipCache::with_capacity(Duration::from_secs(1), budget);
     let ids = (1..=1000).map(Uuid::from_u128).collect::<Vec<_>>();
     let channel = ids[0];
     let (release, released) = oneshot::channel();

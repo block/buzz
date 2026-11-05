@@ -1976,7 +1976,7 @@ impl AppState {
 
     /// Check the user's complete active-membership snapshot, cached for at
     /// most 10 seconds from its query's connection checkout. Concurrent
-    /// channel checks share a bounded load; oversized users and busy loaders
+    /// channel checks share a bounded load; oversized users and timed-out waiters
     /// use authoritative point checks. Discovery visibility is irrelevant.
     pub async fn is_member_cached(
         &self,

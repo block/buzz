@@ -231,3 +231,61 @@ async fn oversized_membership_reads_are_bounded_and_point_checks_fail_closed() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cold_users_wait_for_the_pool_then_reuse_their_snapshots() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+    let community = state
+        .db
+        .ensure_configured_community(&format!("cold-users-{}.local", Uuid::new_v4()))
+        .await
+        .unwrap()
+        .id;
+    let channel = Uuid::new_v4();
+    let users = (1..=96).map(|n| vec![n; 32]).collect::<Vec<_>>();
+    sqlx::query("INSERT INTO channels (community_id, id, name, visibility, created_by) VALUES ($1, $2, 'cold-users', 'private', $3)")
+        .bind(community.as_uuid()).bind(channel).bind(&users[0]).execute(&pool).await.unwrap();
+    for user in &users {
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // Force all users to reach the load path before any query can complete.
+    let held = pool.acquire().await.unwrap();
+    let mut checks = users
+        .iter()
+        .map(|user| Box::pin(state.is_member_cached(community, channel, user)))
+        .collect::<Vec<_>>();
+    for check in &mut checks {
+        assert!(futures_util::poll!(check.as_mut()).is_pending());
+    }
+    drop(held);
+    for check in checks {
+        assert!(check.await.unwrap());
+    }
+    // With the old semaphore, users beyond its capacity only made point
+    // queries. Closing the pool makes their missing cache entries observable.
+    pool.close().await;
+    for user in users {
+        assert!(state
+            .is_member_cached(community, channel, &user)
+            .await
+            .unwrap());
+        assert!(!state
+            .is_member_cached(community, Uuid::nil(), &user)
+            .await
+            .unwrap());
+    }
+}
