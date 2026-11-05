@@ -257,6 +257,7 @@ class _MarkdownEditingController extends TextEditingController {
     final inserted = newText.substring(start, insertedEnd);
     final match = _linkPattern.matchAsPrefix(inserted);
     if (match == null ||
+        _isInCode(newText, start, insertedEnd) ||
         match.end != inserted.length ||
         _linkTrailingPunctuation.hasMatch(inserted) ||
         (insertedEnd < newText.length &&
@@ -268,6 +269,16 @@ class _MarkdownEditingController extends TextEditingController {
       selection: TextSelection.collapsed(offset: insertedEnd + 1),
     );
   }
+
+  /// Whether [start, end) sits inside inline or fenced code, where links
+  /// stay raw text rather than chips.
+  static bool _isInCode(String source, int start, int end) => _rules.any(
+    (rule) =>
+        !rule.parsesNestedFormatting &&
+        rule.pattern
+            .allMatches(source)
+            .any((code) => code.start < start && end < code.end),
+  );
 
   /// Widens a backspace or forward delete that removes part of a chip's
   /// hidden source so it removes the whole chip. Each chip draws its whole

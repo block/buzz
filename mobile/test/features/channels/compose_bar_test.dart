@@ -4156,6 +4156,17 @@ void main() {
       );
       await tester.pump();
       expect(controller.text, 'See ${urls[2]}. ');
+      // A link pasted into code stays exactly as pasted; code never shows
+      // chips.
+      await setValue('``', 1);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '`${urls[2]}`',
+          selection: TextSelection.collapsed(offset: 1 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, '`${urls[2]}`');
       await setValue('see ${urls[2]} ', 5 + urls[2].length);
 
       // Undo after typing at the end of a revealed link restores it rather
