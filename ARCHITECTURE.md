@@ -579,6 +579,12 @@ multi-community mode every query filter includes `community_id`, so the shared
 `events` table is infrastructure, not a cross-community result space; the relay
 re-authorizes every candidate hit before returning it.
 
+A database built from `migrations/0008_fresh_install_search_allowlist.sql` indexes
+only an allowlist of kinds, and so does one converted by
+`scripts/maintenance/nip_rs_search_allowlist.sql`. Such a database does not index
+kind 30180 (custom emoji entries) until an operator runs the updated maintenance
+script, which must happen before the emoji migration rollout.
+
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
   parameterized FTS query against the `events.search_tsv` GIN index and returns
