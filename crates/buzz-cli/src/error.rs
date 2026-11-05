@@ -52,6 +52,12 @@ pub enum CliError {
     #[error("rate limited: {0}")]
     Throttled(String),
 
+    /// The relay could not be reached in a usable state (e.g. it kept
+    /// closing the WebSocket before sign-in). Nothing was sent, so a later
+    /// re-run is safe.
+    #[error("relay unavailable: {0}")]
+    Unavailable(String),
+
     /// Catch-all for unexpected failures
     #[error("{0}")]
     Other(String),
@@ -94,7 +100,7 @@ pub fn is_retryable_error(e: &CliError) -> bool {
                 || net_err.is_decode()
         }
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
-        CliError::Adapter(_) | CliError::Throttled(_) => true,
+        CliError::Adapter(_) | CliError::Throttled(_) | CliError::Unavailable(_) => true,
         CliError::DeliveryUnknown(_) => false,
         _ => false,
     }
@@ -119,7 +125,7 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Conflict(_) => 5,
         CliError::NotFound(_) => 1,
         CliError::DeliveryUnknown(_) => 2,
-        CliError::Adapter(_) | CliError::Throttled(_) => 2,
+        CliError::Adapter(_) | CliError::Throttled(_) | CliError::Unavailable(_) => 2,
         CliError::Other(_) => 4,
     }
 }
@@ -144,6 +150,7 @@ pub fn print_error(e: &CliError) {
         CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Adapter(_) => "adapter_error",
         CliError::Throttled(_) => "rate_limited",
+        CliError::Unavailable(_) => "relay_unavailable",
         CliError::Other(_) => "error",
     };
     let obj = serde_json::json!({

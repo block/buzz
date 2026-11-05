@@ -92,6 +92,8 @@ fn relay_server_tag(relay_url: &str) -> Option<String> {
 /// Maximum number of attempts per request (initial attempt + two retries).
 /// The WebSocket connect and upgrade, before any NIP-42 wait.
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Connections a WebSocket publish may open to complete NIP-42 sign-in.
+const WS_SIGN_IN_ATTEMPTS: u32 = 3;
 const RETRY_MAX_ATTEMPTS: u32 = 3;
 
 /// Base sleep durations for full-jitter exponential backoff.
@@ -1258,16 +1260,46 @@ impl BuzzClient {
             }
             None => CliError::Other(e.to_string()),
         };
-        let mut conn = tokio::time::timeout(
-            WS_CONNECT_TIMEOUT,
-            buzz_ws_client::NostrWsConnection::connect_with_headers(&ws_url, headers),
-        )
-        .await
-        .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
-        .map_err(ws_error)?;
-        conn.authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
+        //
+        // The relay closes a socket that has not signed in within seconds,
+        // so a slow or throttled sign-in signature reconnects and signs the
+        // new challenge, a bounded number of times. EVENT, signed before
+        // any of this, is sent only once AUTH succeeds.
+        let mut attempt = 1;
+        let mut conn = loop {
+            let mut conn = tokio::time::timeout(
+                WS_CONNECT_TIMEOUT,
+                buzz_ws_client::NostrWsConnection::connect_with_headers(&ws_url, headers.clone()),
+            )
             .await
-            .map_err(|e| signer.take_failure().unwrap_or_else(|| ws_error(e)))?;
+            .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
+            .map_err(ws_error)?;
+            let signed_in = conn
+                .authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
+                .await;
+            let Err(e) = signed_in else { break conn };
+            let failure = signer.take_failure();
+            let lost = matches!(
+                e,
+                buzz_ws_client::WsClientError::ConnectionClosed
+                    | buzz_ws_client::WsClientError::WebSocket(_)
+            );
+            let throttled = matches!(failure, Some(CliError::Throttled(_)));
+            let _ = conn.disconnect().await;
+            if !(lost || throttled) {
+                return Err(failure.unwrap_or_else(|| ws_error(e)));
+            }
+            if attempt == WS_SIGN_IN_ATTEMPTS {
+                return Err(failure.unwrap_or_else(|| {
+                    CliError::Unavailable(format!(
+                        "the relay closed the WebSocket before sign-in completed, \
+                         {WS_SIGN_IN_ATTEMPTS} times: {e}"
+                    ))
+                }));
+            }
+            tokio::time::sleep(jitter_delay(attempt - 1)).await;
+            attempt += 1;
+        };
         let ok = conn.send_event(event).await.map_err(ws_error)?;
         let _ = conn.disconnect().await;
 
@@ -3484,6 +3516,10 @@ mod ws_deadline_tests {
     #[derive(Debug)]
     struct Slow(Keys, Duration);
 
+    /// Keys whose first signature takes `delay`, then sign at once.
+    #[derive(Debug)]
+    struct SlowFirst(Slow, std::sync::atomic::AtomicBool);
+
     impl NostrSigner for Slow {
         fn backend(&self) -> nostr::signer::SignerBackend<'_> {
             nostr::signer::SignerBackend::Custom("slow".into())
@@ -3532,6 +3568,140 @@ mod ws_deadline_tests {
         ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
             self.0.nip44_decrypt(p, c)
         }
+    }
+
+    impl NostrSigner for SlowFirst {
+        fn backend(&self) -> nostr::signer::SignerBackend<'_> {
+            self.0.backend()
+        }
+        fn get_public_key(
+            &self,
+        ) -> nostr::util::BoxedFuture<'_, Result<PublicKey, nostr::signer::SignerError>> {
+            self.0.get_public_key()
+        }
+        fn sign_event(
+            &self,
+            unsigned: UnsignedEvent,
+        ) -> nostr::util::BoxedFuture<'_, Result<Event, nostr::signer::SignerError>> {
+            if self.1.swap(false, Ordering::SeqCst) {
+                self.0.sign_event(unsigned)
+            } else {
+                self.0 .0.sign_event(unsigned)
+            }
+        }
+        fn nip04_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_encrypt(p, c)
+        }
+        fn nip04_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip04_decrypt(p, c)
+        }
+        fn nip44_encrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_encrypt(p, c)
+        }
+        fn nip44_decrypt<'a>(
+            &'a self,
+            p: &'a PublicKey,
+            c: &'a str,
+        ) -> nostr::util::BoxedFuture<'a, Result<String, nostr::signer::SignerError>> {
+            self.0.nip44_decrypt(p, c)
+        }
+    }
+
+    /// A relay that, like buzz-relay, drops a socket not signed in within
+    /// 5 s; otherwise as [`ws_relay`]. Returns its URL, its connection
+    /// count, and the challenges each AUTH answered.
+    async fn deadline_relay() -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let conns = Arc::new(AtomicUsize::new(0));
+        let answered: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let (n, log) = (conns.clone(), answered.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let challenge = format!("c{}", n.fetch_add(1, Ordering::SeqCst));
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let hello = serde_json::json!(["AUTH", challenge]).to_string();
+                    let _ = ws.send(Message::Text(hello.into())).await;
+                    let deadline = tokio::time::sleep(Duration::from_secs(5));
+                    tokio::pin!(deadline);
+                    let mut authed = false;
+                    loop {
+                        let next = tokio::select! {
+                            _ = &mut deadline, if !authed => return,
+                            next = ws.next() => next,
+                        };
+                        let Some(Ok(Message::Text(text))) = next else {
+                            return;
+                        };
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if frame[0] == "AUTH" {
+                            let tags = frame[1]["tags"].as_array().unwrap();
+                            let c = tags.iter().find(|t| t[0] == "challenge").unwrap();
+                            log.lock().unwrap().push(c[1].as_str().unwrap().to_owned());
+                            authed = true;
+                        }
+                        let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                        let _ = ws.send(Message::Text(ok.to_string().into())).await;
+                    }
+                });
+            }
+        });
+        (relay, conns, answered)
+    }
+
+    /// A sign-in signature that comes back after the relay's 5 s deadline
+    /// reconnects and signs the new challenge, never the old one.
+    #[tokio::test]
+    async fn a_late_sign_in_reconnects_and_signs_the_new_challenge() {
+        let keys = Keys::generate();
+        let (relay, conns, answered) = deadline_relay().await;
+        let signer = Arc::new(SlowFirst(
+            Slow(keys.clone(), Duration::from_secs(8)),
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        let c =
+            BuzzClient::new(relay, Credentials::from_signer(signer, keys.public_key())).unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(conns.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *answered.lock().unwrap(),
+            ["c1"],
+            "only the new challenge is signed"
+        );
+    }
+
+    /// A signer that is always too slow ends retryable after the bound.
+    #[tokio::test]
+    async fn a_sign_in_always_too_late_ends_retryable() {
+        let keys = Keys::generate();
+        let (relay, conns, _) = deadline_relay().await;
+        let c = client(relay, &keys, Duration::from_secs(8));
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let err = c.publish_ephemeral_event(event).await.unwrap_err();
+        assert!(crate::error::is_retryable_error(&err), "{err:?}");
+        assert_eq!(
+            conns.load(Ordering::SeqCst),
+            super::WS_SIGN_IN_ATTEMPTS as usize
+        );
     }
 
     fn client(relay: String, keys: &Keys, delay: Duration) -> BuzzClient {
