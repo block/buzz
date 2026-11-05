@@ -2740,7 +2740,9 @@ mod federated_identity_tests {
     }
 
     /// Serve `app` plus a recording fallback that answers every other path
-    /// with a body every client method accepts. Returns the base URL.
+    /// with a body every client method accepts, except `/upload`, which
+    /// answers 404 so uploads also take the legacy `/media/upload` path.
+    /// Returns the base URL.
     async fn serve(app: Router<Seen>, seen: Seen) -> String {
         let app = app
             .fallback(
@@ -2748,7 +2750,12 @@ mod federated_identity_tests {
                     seen.lock()
                         .unwrap()
                         .push((uri.path().to_owned(), fi_header(&headers)));
-                    BLOB
+                    let status = if uri.path() == "/upload" {
+                        StatusCode::NOT_FOUND
+                    } else {
+                        StatusCode::OK
+                    };
+                    (status, BLOB)
                 },
             )
             .with_state(seen);
@@ -2802,7 +2809,15 @@ mod federated_identity_tests {
     }
 
     const AUTHED_PATHS: &[&str] = &[
-        "/events", "/events", "/query", "/count", "/authed", "/json", "/once", "/upload",
+        "/events",
+        "/events",
+        "/query",
+        "/count",
+        "/authed",
+        "/json",
+        "/once",
+        "/upload",
+        "/media/upload",
     ];
 
     #[tokio::test]
