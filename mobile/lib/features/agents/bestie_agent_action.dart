@@ -7,12 +7,18 @@ import '../../shared/me/default_agent_writer.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/profile_action_chip.dart';
 
 /// Saves the selected owned agent using the shared desktop/mobile preference.
 class BestieAgentAction extends HookConsumerWidget {
-  const BestieAgentAction({required this.pubkey, super.key});
+  const BestieAgentAction({
+    required this.pubkey,
+    this.compact = false,
+    super.key,
+  });
 
   final String pubkey;
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -39,30 +45,50 @@ class BestieAgentAction extends HookConsumerWidget {
     }
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: compact
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.stretch,
       children: [
-        Semantics(
-          selected: selected,
-          child: FilledButton.icon(
+        if (compact)
+          ProfileActionChip(
+            label: selected ? 'Your Bestie' : 'Make Bestie',
+            selected: selected,
             onPressed: saving.value || selected ? null : choose,
-            style: FilledButton.styleFrom(
-              backgroundColor: context.colors.surfaceContainerHighest,
-              foregroundColor: context.colors.onSurface,
-              disabledBackgroundColor: context.colors.surfaceContainerHighest,
-              disabledForegroundColor: context.colors.onSurface,
-              minimumSize: const Size(double.infinity, Grid.xxl),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(Radii.dialog),
-              ),
-            ),
-            icon: saving.value
-                ? const BuzzLoadingIndicator(size: 18)
+            leading: saving.value
+                ? const BuzzLoadingIndicator(size: 14)
                 : selected
-                ? const Icon(Icons.star, size: 22)
+                ? const Icon(Icons.star, size: 14)
                 : null,
-            label: Text(selected ? 'Your Bestie' : 'Make Bestie'),
+          )
+        else
+          Semantics(
+            selected: selected,
+            child: FilledButton.icon(
+              onPressed: saving.value || selected ? null : choose,
+              style: FilledButton.styleFrom(
+                backgroundColor: context.colors.surfaceContainerHighest,
+                foregroundColor: context.colors.onSurface,
+                disabledBackgroundColor: context.colors.surfaceContainerHighest,
+                disabledForegroundColor: context.colors.onSurface,
+                minimumSize: Size(
+                  compact ? 0 : double.infinity,
+                  compact ? 48 : Grid.xxl,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(
+                    compact ? Radii.full : Radii.dialog,
+                  ),
+                ),
+              ),
+              icon: saving.value
+                  ? const BuzzLoadingIndicator(size: 18)
+                  : selected
+                  ? const Icon(Icons.star, size: 22)
+                  : null,
+              label: Text(selected ? 'Your Bestie' : 'Make Bestie'),
+            ),
           ),
-        ),
         if (error.value != null)
           Semantics(
             liveRegion: true,

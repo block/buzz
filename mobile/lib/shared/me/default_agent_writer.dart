@@ -1,7 +1,6 @@
 import 'dart:convert';
 
-import 'package:nostr/nostr.dart' as nostr;
-
+import '../crypto/event_signing.dart';
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
 import 'default_agent.dart';
@@ -9,7 +8,11 @@ import 'me_sync.dart';
 
 /// Publishes and confirms the owner's encrypted, community-scoped choice.
 /// Failures propagate to the selection UI so the user can retry.
-Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
+Future<void> saveDefaultAgent(
+  MeSync sync,
+  String? pubkey, {
+  bool onlyIfUnset = false,
+}) async {
   if (pubkey != null && !RegExp(r'^[0-9a-f]{64}$').hasMatch(pubkey)) {
     throw const FormatException('Invalid agent public key');
   }
@@ -27,24 +30,25 @@ Future<void> saveDefaultAgent(MeSync sync, String? pubkey) async {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   for (final event in previous) {
     decodeDefaultAgent(event, sync);
+    if (onlyIfUnset) return;
     if (event.createdAt >= now) {
       throw StateError('Please wait a second before saving again.');
     }
   }
   final event = NostrEvent.fromJson(
-    nostr.Event.from(
+    signNostrEvent(
       kind: 30078,
       content: nip44Encrypt(
         sync.key,
         jsonEncode({'version': 1, 'agent': pubkey}),
       ),
       secretKey: sync.privateHex,
+      pubkey: sync.pubkey,
       createdAt: now,
       tags: [
         ['d', defaultAgentCoordinate(sync.community)],
         ['t', defaultAgentTag],
       ],
-      verify: false,
     ).toMap(),
   );
   await sync.session.publish(event);

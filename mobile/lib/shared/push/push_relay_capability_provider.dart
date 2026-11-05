@@ -60,11 +60,3 @@ Future<BuzzPushLeaseDescriptor?> discoverBuzzPushRelayCapability(
     return null;
   }
 }
-
-Future<void> startBuzzPushRegistrationIfCapable(
-  BuzzPushLeaseDescriptor? descriptor, {
-  required Future<void> Function() startRegistration,
-}) async {
-  if (descriptor == null) return;
-  await startRegistration();
-}

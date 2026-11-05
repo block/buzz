@@ -2,10 +2,13 @@ import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../../helpers/recipient_directory_session.dart';
 
 class _RecordingUserCache extends UserCacheNotifier {
   final preloaded = <String>{};
@@ -46,10 +49,8 @@ void main() {
         overrides: [
           userCacheProvider.overrideWith(() => cache),
           channelMembersProvider(channelId).overrideWith((ref) async => roster),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => [
-              DirectoryUser(pubkey: agent, displayName: 'Scout', isAgent: true),
-            ],
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession({agent: 'Scout'}, agents: {agent}),
           ),
         ],
         child: MaterialApp(
@@ -63,6 +64,13 @@ void main() {
         ),
       ),
     );
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('add-channel-members-search')),
+      'Scout',
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.pumpAndSettle();
 
     // The shown agent is told apart from the human member named Scout.

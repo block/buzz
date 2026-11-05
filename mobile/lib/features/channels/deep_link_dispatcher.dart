@@ -1,8 +1,10 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/agents_surface.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -88,6 +90,12 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
 
   void _maybeDispatch(BuzzDeepLink? link) {
     if (link == null || _preparingInvite || _handlingOnboarding) return;
+    if (link is AgentCreationDeepLink) {
+      // Held until signed in and the community is hydrated.
+      if (!widget.dispatchMessageLinks) return;
+      unawaited(_dispatchAgentCreation(link));
+      return;
+    }
     if (widget.onboardingHandler != null &&
         (link is InviteDeepLink ||
             link is NostrBindDeepLink ||
@@ -109,6 +117,41 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
 
     _dispatchNavigableLink(link);
+  }
+
+  Future<void> _dispatchAgentCreation(AgentCreationDeepLink link) async {
+    _handlingOnboarding = true;
+    try {
+      final handler = ref.read(agentCreationSurfaceProvider);
+      if (handler == null) {
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(
+            content: Text('Agent creation is unavailable in this build.'),
+          ),
+          kind: ToastKind.error,
+        );
+      } else {
+        await handler(context, link);
+      }
+    } catch (error) {
+      debugPrint('deep-link: agent draft failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(
+            content: Text('Couldn’t open this agent card. Reopen the link.'),
+          ),
+          kind: ToastKind.error,
+        );
+      }
+    } finally {
+      if (mounted) {
+        if (ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+        }
+        _handlingOnboarding = false;
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      }
+    }
   }
 
   Future<void> _dispatchOnboarding(BuzzDeepLink link) async {
@@ -135,12 +178,11 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
           ref.read(pendingDeepLinkProvider.notifier).consume();
           consumed = true;
         }
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
           const SnackBar(
-            content: Text(
-              'Could not open setup. Re-open the link to try again.',
-            ),
+            content: Text('Couldn’t open setup. Reopen the link.'),
           ),
+          kind: ToastKind.error,
         );
       }
     } finally {
@@ -165,16 +207,14 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         return;
       case DeepLinkCommunityPreparation.unavailable:
         ref.read(pendingDeepLinkProvider.notifier).consume();
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('Notification community is no longer available'),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Community unavailable')),
+          kind: ToastKind.error,
         );
       case DeepLinkCommunityPreparation.failed:
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('Could not open the notification community'),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Couldn’t open community')),
+          kind: ToastKind.error,
         );
     }
   }
@@ -260,15 +300,17 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     ref.read(pendingDeepLinkProvider.notifier).consume();
     if (failure != null) {
       debugPrint('deep-link: channel $channelId lookup failed: $failure');
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
         const SnackBar(content: Text('Could not open the channel')),
+        kind: ToastKind.error,
       );
     } else {
       debugPrint(
         'deep-link: channel $channelId not found in workspace; dropping link',
       );
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text('Channel not found in this workspace')),
+      ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+        const SnackBar(content: Text('Channel not found here')),
+        kind: ToastKind.error,
       );
     }
   }
@@ -327,19 +369,19 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             }
           }
         } else if (status == InviteJoinStatus.switchedExisting) {
-          messenger?.showSnackBar(
-            const SnackBar(content: Text('Switched to this community')),
+          messenger?.showFeedbackSnackBar(
+            const SnackBar(content: Text('Community switched')),
+            kind: ToastKind.generic,
           );
         }
       } catch (error) {
         debugPrint('deep-link: failed to prepare invite: $error');
         if (navigatorContext.mounted) {
-          messenger?.showSnackBar(
+          messenger?.showFeedbackSnackBar(
             const SnackBar(
-              content: Text(
-                'Could not open this invite. Re-open the invite link to try again.',
-              ),
+              content: Text('Couldn’t open invite. Reopen the link.'),
             ),
+            kind: ToastKind.error,
           );
         }
       } finally {

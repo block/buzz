@@ -68,6 +68,65 @@ class RelayHttpQueryClient {
     }
   }
 
+  /// Sends a non-redirecting request, bounding bytes before buffering or parsing.
+  /// The deadline includes headers and the entire response body.
+  Future<http.Response> sendBounded(
+    http.Request request, {
+    required int maxBytes,
+    required Duration timeout,
+    http.Client Function(http.Client, bool Function())? decorate,
+  }) async {
+    request.followRedirects = false;
+    final generation = _injectedClient == null
+        ? (_currentGeneration ??= _createGeneration())
+        : null;
+    generation?.acquire();
+    StreamIterator<List<int>>? iterator;
+    var finished = false;
+    Future<http.Response> receive() async {
+      final transport = _injectedClient ?? generation!.client;
+      final client = decorate?.call(transport, () => !finished) ?? transport;
+      final response = await client.send(request);
+      if (finished) {
+        await response.stream.listen(null).cancel();
+        throw StateError('Relay request already timed out');
+      }
+      iterator = StreamIterator(response.stream);
+      if ((response.contentLength ?? 0) > maxBytes) {
+        throw const FormatException('Relay response exceeds byte limit');
+      }
+      final bytes = <int>[];
+      while (await iterator!.moveNext()) {
+        final chunk = iterator!.current;
+        if (bytes.length + chunk.length > maxBytes) {
+          throw const FormatException('Relay response exceeds byte limit');
+        }
+        bytes.addAll(chunk);
+      }
+      iterator = null; // An exhausted stream needs no cancellation.
+      return http.Response.bytes(
+        bytes,
+        response.statusCode,
+        headers: response.headers,
+        request: request,
+      );
+    }
+
+    try {
+      return await receive().timeout(timeout);
+    } on TimeoutException {
+      if (identical(_currentGeneration, generation)) {
+        _currentGeneration = null;
+      }
+      generation?.retire();
+      rethrow;
+    } finally {
+      finished = true;
+      if (iterator != null) await iterator!.cancel();
+      generation?.release();
+    }
+  }
+
   void close() {
     for (final generation in _generations.toList()) {
       generation.close();

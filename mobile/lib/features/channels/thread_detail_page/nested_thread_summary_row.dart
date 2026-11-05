@@ -31,10 +31,7 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
         textDirection: Directionality.of(context),
         child: Padding(
           padding: EdgeInsets.only(
-            left: ownMessage
-                ? 0
-                : messageAvatarSize + messageAvatarContentGap + Grid.xxs,
-            right: ownMessage ? Grid.xxs : 0,
+            left: ownMessage ? 0 : messageAvatarSize + messageAvatarContentGap,
             bottom: Grid.xxs,
           ),
           child: ReplySummaryLink(

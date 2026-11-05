@@ -1,6 +1,41 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  messageAuthorVisibilityTests();
+  testWidgets('reply footer does not add reaction padding inside the bubble', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(id: 'plain', pubkey: 'alice', content: 'Same text'),
+          _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Same text'),
+          _textMsg(
+            id: threadIdR1,
+            pubkey: 'bob',
+            content: 'Reply',
+            extraTags: [
+              ['e', threadIdRoot, '', 'reply'],
+            ],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    Finder bubble(String id) => find
+        .descendant(
+          of: find.byKey(ValueKey('message-row-$id')),
+          matching: find.byType(LocalSendBubbleSurface),
+        )
+        .first;
+    expect(find.text('1 reply'), findsOneWidget);
+    expect(
+      tester.getSize(bubble(threadIdRoot)).height,
+      closeTo(tester.getSize(bubble('plain')).height, 0.01),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   for (final author in ['self', 'alice']) {
     testWidgets('date divider owns equal space around $author messages', (
       tester,
@@ -145,13 +180,16 @@ void bubbleLayoutTests() {
             find.byType(MessageMediaAvatar),
           );
           expect(incomingAvatar.right, lessThan(incoming.left));
-          final outgoingAvatar = bounds(
-            'outgoing',
-            find.byType(MessageMediaAvatar),
-          );
-          expect(outgoingAvatar.left, greaterThan(outgoing.right));
+          expect(incomingAvatar.size, const Size.square(36));
           expect(
-            outgoingAvatar.right,
+            find.descendant(
+              of: find.byKey(const ValueKey('message-row-outgoing')),
+              matching: find.byType(MessageMediaAvatar),
+            ),
+            findsNothing,
+          );
+          expect(
+            outgoing.right,
             closeTo(
               tester
                   .getRect(find.byKey(const ValueKey('message-row-outgoing')))
@@ -585,7 +623,7 @@ void bubbleLayoutTests() {
         messages: [
           _systemMsg(
             id: 'single-line',
-            payload: {'type': 'member_left', 'actor': 'alice'},
+            payload: {'type': 'channel_archived', 'actor': 'alice'},
           ),
         ],
         users: {
@@ -597,7 +635,7 @@ void bubbleLayoutTests() {
     final card = find.byKey(const ValueKey('activity-card-single-line'));
     final icon = find.descendant(of: card, matching: find.byType(Icon));
     expect(icon, findsNothing);
-    expect(findRichText('left the channel'), findsOneWidget);
+    expect(findRichText('archived this channel'), findsOneWidget);
   });
 
   testWidgets(
@@ -613,7 +651,7 @@ void bubbleLayoutTests() {
           messages: [
             _systemMsg(
               id: 'sys-accessible',
-              payload: {'type': 'member_left', 'actor': 'alice'},
+              payload: {'type': 'channel_archived', 'actor': 'alice'},
               createdAt:
                   DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/ 1000,
             ),
