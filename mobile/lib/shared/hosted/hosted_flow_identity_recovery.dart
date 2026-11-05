@@ -27,7 +27,7 @@ extension HostedFlowIdentityRecovery on HostedFlow {
     final generation = _nextGeneration();
     _set(HostedFlowStage.working);
     return _enqueue(() async {
-      final bool released;
+      var released = false;
       try {
         released = await identity.releaseRejected(
           rejected.pubkey,
@@ -40,21 +40,16 @@ extension HostedFlowIdentityRecovery on HostedFlow {
             account.account?.subject != rejected.subject) {
           rethrow;
         }
-        // The rejection still stands, so the choice can be made again.
-        _rejectedBinding = (
-          subject: rejected.subject,
-          pubkey: rejected.pubkey,
-          generation: generation,
-        );
-        _set(HostedFlowStage.blocked, HostedFlowProblem.requestRejected);
-        return;
       }
       if (_disposed || generation != _generation) return;
-      if (!released) {
-        _set(HostedFlowStage.blocked, HostedFlowProblem.requestRejected);
-        return;
-      }
-      await _continue(generation);
+      if (released) return _continue(generation);
+      // The rejection still stands, so the choice can be made again.
+      _rejectedBinding = (
+        subject: rejected.subject,
+        pubkey: rejected.pubkey,
+        generation: generation,
+      );
+      _set(HostedFlowStage.blocked, HostedFlowProblem.requestRejected);
     });
   }
 

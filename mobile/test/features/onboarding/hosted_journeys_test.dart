@@ -1380,6 +1380,26 @@ void main() {
     expect(find.text('Saved identity'), findsOneWidget);
   });
 
+  journey('a refused release keeps the choice, then retries', (
+    tester,
+    f,
+  ) async {
+    await rejectedSavedChoice(tester, f);
+    // Without an inventory, the copy kept elsewhere cannot be confirmed.
+    final keychain = _StickyKeychain(
+      Map.of(await const FlutterSecureStorage().readAll()),
+    )..locked = true;
+    FlutterSecureStorage.setMockInitialValues(keychain);
+    await f.tap(tester, 'Choose a different identity');
+    expect(f.flow.problem, HostedFlowProblem.requestRejected);
+    expect(f.flow.canChooseDifferentIdentity, isTrue);
+    expect((await f.store.read())!.pubkey, f.keys.public);
+    keychain.locked = false;
+    await f.tap(tester, 'Choose a different identity');
+    expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+    expect(await f.store.read(), isNull);
+  });
+
   journey('leaving from the picker ignores a late creation', (tester, f) async {
     await f.initialize();
     await f.mount(tester);
@@ -1969,6 +1989,7 @@ class _StickyKeychain extends MapBase<String, String> {
   _StickyKeychain(this._entries);
   final Map<String, String> _entries;
   String? sticky;
+  bool locked = false;
   @override
   String? operator [](Object? key) => _entries[key];
   @override
@@ -1976,7 +1997,8 @@ class _StickyKeychain extends MapBase<String, String> {
   @override
   void clear() => _entries.clear();
   @override
-  Iterable<String> get keys => _entries.keys;
+  Iterable<String> get keys =>
+      locked ? throw StateError('keychain is locked') : _entries.keys;
   @override
   String? remove(Object? key) {
     if (key == sticky) throw StateError('keychain item is in use');
