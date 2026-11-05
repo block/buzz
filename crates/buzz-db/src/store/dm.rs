@@ -653,25 +653,50 @@ pub async fn grow_dm(
     })
 }
 
-/// Stop `channel_id`, if it is a DM, from being any set of people's DM, after
-/// a member was removed from it. Its fingerprint would otherwise name someone
-/// no longer in it, so neither they nor the rest could reach that group again.
-/// The DM keeps its history for those still in it; opening that group again
-/// starts a new DM. The caller holds the channel's membership lock, as every
-/// membership writer does, so this cannot race [`grow_dm`].
-pub(crate) async fn release_dm_identity<'e>(
-    executor: impl sqlx::PgExecutor<'e>,
+/// Keep `channel_id`'s fingerprint, if it is a DM, true to who is still in it
+/// after a member was removed. When the remaining members no longer have that
+/// fingerprint (a person left, or the DM was identified by all its members),
+/// the DM stops being any group's DM: it keeps its history for those still in
+/// it, and opening that group again starts a new DM. Removing an agent from a
+/// DM of people changes nothing. The caller holds the channel's membership
+/// lock, as every membership writer does, so this cannot race [`grow_dm`].
+pub(crate) async fn release_dm_identity(
+    conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE channels SET participant_hash = NULL \
-         WHERE community_id = $1 AND id = $2 AND channel_type = 'dm' \
-           AND participant_hash IS NOT NULL",
+    let stored: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT participant_hash FROM channels \
+         WHERE community_id = $1 AND id = $2 AND channel_type = 'dm'",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(executor)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    let members: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let members: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+    let agents = agents_among(&mut *conn, community_id, &members).await?;
+    if dm_identity_hash(&members, &agents).as_slice() == stored.as_slice() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE channels SET participant_hash = NULL \
+         WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
