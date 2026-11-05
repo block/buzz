@@ -1041,7 +1041,8 @@ fn forget_revoked(store: &dyn PairingStore, revoked: &[(String, String)]) {
 
 /// The desktop link for `relay_url`. An inherited token decides the identity:
 /// when it cannot serve, the command fails, and a paired token (which acts as
-/// the human) is never tried, so an agent never acts as its owner. Without an
+/// the human) is never tried, so an agent's process acts only as that agent
+/// unless the owner approves pairing it. Without an
 /// inherited token, the first paired token whose instance is advertised.
 /// `None` when no paired token applies, so the chain moves on.
 pub async fn discover(relay_url: &str) -> Result<Option<Arc<Provider>>, CliError> {

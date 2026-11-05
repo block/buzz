@@ -17,8 +17,9 @@ interoperates with both.
 
 - **One identity per caller.** A caller holds a token for exactly one identity.
   The desktop never decides on the caller's behalf which identity to use.
-- **An agent never acts as its owner.** A process the desktop launches for an
-  agent can act only as that agent.
+- **An agent's process gets only that agent's token.** The desktop gives a
+  process it launches for an agent a token for that agent alone. Acting as the
+  owner takes the owner's own approval, given when pairing.
 - **The desktop sees what it signs.** The caller sends the complete unsigned
   event; the desktop classifies it into an operation and applies a policy before
   signing. There is no blind signing of opaque bytes.
@@ -295,9 +296,10 @@ constants in `crates/buzz-core/src/kind.rs`.
 ### Sensitive operations
 
 These kinds change who the identity is, what it controls or what others see
-about it. The provider MUST get a person's approval for each request, holding
-the request open for at most 120 seconds. Without a decision it answers
-`approval_required`; on refusal, `denied`.
+about it. For each request the provider MUST either get a person's approval,
+holding the request open for at most 120 seconds, or refuse it with `denied`.
+If it asks and gets no decision, it answers `approval_required`; on refusal,
+`denied`.
 
 | Category | Kinds |
 |---|---|
