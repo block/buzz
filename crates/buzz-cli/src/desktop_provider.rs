@@ -190,6 +190,11 @@ impl Endpoint {
 
 /// Exchange one request on `stream` (one request per connection) and return
 /// the HTTP status and body.
+///
+/// This is a minimal HTTP/1.1 exchange rather than reqwest or hyper because
+/// the same-user check in [`connect`] must vet the very TCP connection the
+/// token is then sent on; a pooled client opens its own connections, which
+/// the check never saw.
 async fn exchange(
     mut stream: TcpStream,
     endpoint: &Endpoint,
