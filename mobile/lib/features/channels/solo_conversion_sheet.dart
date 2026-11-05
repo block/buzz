@@ -31,10 +31,12 @@ class SoloConversionSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = ref.watch(channelAccessProvider.notifier);
     final sync = ref.watch(meSyncProvider);
+    final reload = useState(0);
     final request = useMemoized(() => controller.load(channel.id), [
       controller,
       sync,
       channel.id,
+      reload.value,
     ]);
     final snapshot = useFuture(request);
     final intent = useState(MeChatConversion.pending(sync, channel.id));
@@ -65,8 +67,16 @@ class SoloConversionSheet extends HookConsumerWidget {
         snapshot.data?.canEdit(sync.pubkey) == true &&
         data?.creator == sync.pubkey;
 
+    final canFinish =
+        intent.value != null &&
+        data != null &&
+        !data.labels.contains('buzz.solo');
+
     Future<void> convert() async {
-      if (busy.value || !canConvert || visibility == null || data == null) {
+      if (busy.value ||
+          (!canConvert && !canFinish) ||
+          visibility == null ||
+          data == null) {
         return;
       }
       final selected =
@@ -83,12 +93,12 @@ class SoloConversionSheet extends HookConsumerWidget {
             labels: data.labels.where((label) => label != 'buzz.solo').toList(),
           );
       if (intent.value == null) {
-        final confirmed = await showDialog<bool>(
+        final confirmed = await showBuzzDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             title: const Text('Convert this chat?'),
             content: Text(
-              'The same history, Canvas and people will become a ${visibility == 'private' ? 'private' : 'community-readable'} channel. This chat will leave your Solo workspace.',
+              'The same history, Canvas and people will become a ${visibility == 'private' ? 'private' : 'community-readable'} channel. ${access == 'public' ? 'Everyone in the community can join, read and post, including to your agents.' : 'Existing participants can read and post, including to your agents.'} This chat will leave your Solo workspace.',
             ),
             actions: [
               TextButton(
@@ -112,10 +122,13 @@ class SoloConversionSheet extends HookConsumerWidget {
         await selected.complete(
           sync,
           ensureConverted: () async {
+            final current = await controller.load(channel.id);
+            if (!current.data.labels.contains('buzz.solo')) return;
             if (ref.read(channelAccessProvider).containsKey(channel.id)) {
               await controller.checkSave(channel.id);
             }
             final fresh = await controller.load(channel.id);
+            if (!fresh.data.labels.contains('buzz.solo')) return;
             final labels = fresh.data.labels
                 .where((label) => label != 'buzz.solo')
                 .toList();
@@ -140,15 +153,53 @@ class SoloConversionSheet extends HookConsumerWidget {
                     ? 'view-only'
                     : 'public',
               );
-            } else if (fresh.data.visibility != selected.visibility ||
-                fresh.data.joinRole != selected.joinRole) {
-              throw StateError(
-                'The converted channel has different access. Check its settings.',
-              );
             }
           },
         );
         if (context.mounted) Navigator.pop(context);
+      } catch (reason) {
+        if (context.mounted) error.value = accessErrorMessage(reason);
+      } finally {
+        if (context.mounted) busy.value = false;
+      }
+    }
+
+    Future<void> discardConversion() async {
+      final reviewed = intent.value;
+      if (busy.value || reviewed == null) return;
+      busy.value = true;
+      try {
+        final confirmed = await showBuzzDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Discard this conversion?'),
+            content: const Text(
+              'Any channel conversion that already landed stays in place. This forgets the pending conversion and its Solo filing cleanup. Nothing will be resent or rolled back.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Keep conversion'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Discard conversion'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true ||
+            !context.mounted ||
+            !identical(intent.value, reviewed)) {
+          return;
+        }
+        await reviewed.discard(sync);
+        if (context.mounted) {
+          intent.value = null;
+          choice.value = null;
+          error.value = null;
+          reload.value++;
+        }
       } catch (reason) {
         if (context.mounted) error.value = accessErrorMessage(reason);
       } finally {
@@ -208,8 +259,22 @@ class SoloConversionSheet extends HookConsumerWidget {
                     style: TextStyle(color: context.colors.error),
                   ),
                 ),
+              if (!canConvert && !canFinish && data != null)
+                const Text(
+                  'Only the chat creator with owner or admin access can convert this chat.',
+                ),
+              if (intent.value != null)
+                TextButton(
+                  onPressed: busy.value ? null : discardConversion,
+                  child: const Text('Discard conversion'),
+                ),
               FilledButton(
-                onPressed: busy.value || !canConvert ? null : convert,
+                onPressed:
+                    busy.value ||
+                        (!canConvert && !canFinish) ||
+                        visibility == null
+                    ? null
+                    : convert,
                 child: Text(
                   busy.value
                       ? 'Converting…'

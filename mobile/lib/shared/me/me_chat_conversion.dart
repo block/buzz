@@ -78,6 +78,19 @@ class MeChatConversion {
     }
   }
 
+  /// Forget this intent only; already-converted metadata is never rolled back.
+  Future<void> discard(MeSync sync) async {
+    _check(sync);
+    final prefs = sync.prefs;
+    if (prefs == null) throw StateError('Local conversion is unavailable.');
+    await clearMeJournal(
+      prefs,
+      _scope,
+      _record,
+      checkScope: () => _check(sync),
+    );
+  }
+
   /// Persists before dispatch and never replaces a different unfinished choice.
   Future<void> complete(
     MeSync sync, {
