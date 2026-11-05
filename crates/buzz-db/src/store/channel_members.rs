@@ -2350,6 +2350,19 @@ impl Db {
         .await
     }
 
+    /// [`Db::put_member`] for several people in one transaction, returning
+    /// the role each held just before the write (see [`put_members`]).
+    #[datastore_span(name = "put_members", system = "postgresql")]
+    pub async fn put_members(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        targets: &[MemberPut<'_>],
+        invited_by: Option<&[u8]>,
+    ) -> Result<Vec<Result<PutMemberResult>>> {
+        put_members(&self.pool, community_id, channel_id, targets, invited_by).await
+    }
+
     /// Self-joins `pubkey` with the channel's `join_role` only if they have
     /// never been a member of the channel (see [`put_first_member`]).
     #[datastore_span(name = "put_first_member", system = "postgresql")]

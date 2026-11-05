@@ -3061,10 +3061,26 @@ pub(crate) async fn put_member_as_self(
     // also decides visibility and archive state again under its locks, so a
     // channel made private or archived since the checks above is refused
     // here, with no side effects.
-    state
+    let put = state
         .db
-        .put_member(tenant.community(), channel_id, pubkey, None, None)
-        .await?;
+        .put_members(
+            tenant.community(),
+            channel_id,
+            &[buzz_db::channel_members::MemberPut {
+                pubkey,
+                requested: None,
+            }],
+            None,
+        )
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("membership put returned no result"))??;
+    // A join that raced this one (an invite claim against the same person's
+    // AUTH) wrote the row between the cache read and the lock: the upsert
+    // changed nothing, so there is nothing to announce a second time.
+    if put.prior_role.as_deref() == Some(put.member.role.as_str()) {
+        return Ok(SelfJoinOutcome::AlreadyMember);
+    }
     Ok(SelfJoinOutcome::Joined)
 }
 
