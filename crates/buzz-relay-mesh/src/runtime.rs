@@ -9,7 +9,7 @@
 //!   runtime id is present in the (attested) membership table; unknown ids get
 //!   one registry rescan before rejection. Membership is a hint — admission
 //!   here gates *dialability*, never session ownership.
-//! - **Reconcile loop**: periodically rescans the Redis ready registry and
+//! - **Reconcile loop**: periodically reads the Redis ready-registry index and
 //!   dials every known, non-draining peer we are not yet connected to. This is
 //!   what makes the mesh *warm*: failover is "next frame goes elsewhere," not
 //!   "wait for a handshake."
@@ -41,6 +41,12 @@ use crate::{InboundHandler, MeshDatagram, MeshError, MeshStream, RelayPeerTransp
 
 /// How often the reconcile loop rescans the registry and dials missing peers.
 pub const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+/// Every Nth reconcile pass also runs the full-keyspace legacy SCAN, so peers
+/// running a relay that predates the ready-record index stay in the table
+/// during a mixed-version rollout (membership peer records expire after five
+/// minutes; 12 passes at the default interval is one minute). Delete with
+/// [`ReadyRegistry::legacy_scan_ready`].
+pub const LEGACY_SCAN_EVERY_PASSES: u64 = 12;
 /// How often each side sends a gossip digest on every control stream.
 pub const DEFAULT_GOSSIP_INTERVAL: Duration = Duration::from_secs(2);
 /// Bound on queued control-stream frames per peer before backpressure.
@@ -149,7 +155,7 @@ impl MeshRuntime {
     /// Force one reconcile pass right now (bootstrap fast-path: dial the seed
     /// records without waiting for the first interval tick).
     pub async fn reconcile_now(&self) {
-        reconcile_once(&self.inner).await;
+        reconcile_once(&self.inner, RegistryRead::LegacyScan).await;
     }
 
     /// Stop all loops and drop all peer connections.
@@ -316,29 +322,69 @@ async fn accept_loop(inner: Arc<Inner>) {
 }
 
 /// Admission check for inbound connections: the runtime id must appear in the
-/// attested membership table. Unknown ids get one registry rescan (covers the
-/// bootstrap race where a fresh pod dials us before our next reconcile tick).
+/// attested membership table. Unknown ids get one index read, then one legacy
+/// scan (covers the bootstrap race where a fresh pod dials us before our next
+/// reconcile tick, including a pod running a relay that predates the index).
 async fn is_known_peer(inner: &Arc<Inner>, runtime_id: RuntimeId) -> bool {
     if inner.membership.has_peer(runtime_id) {
         return true;
     }
-    if let Some(registry) = &inner.registry {
-        match registry.scan_ready().await {
-            Ok(records) => inner.membership.apply_ready_records(records),
-            Err(err) => tracing::warn!(%err, "mesh: registry rescan on inbound failed"),
+    for read in [RegistryRead::Index, RegistryRead::LegacyScan] {
+        refresh_from_registry(inner, read).await;
+        if inner.membership.has_peer(runtime_id) {
+            return true;
         }
     }
-    inner.membership.has_peer(runtime_id)
+    false
+}
+
+/// How a reconcile pass reads the ready registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegistryRead {
+    /// O(peers): the ready-record index.
+    Index,
+    /// O(total Redis keys): also finds peers that predate the index.
+    LegacyScan,
+}
+
+impl RegistryRead {
+    /// Steady-state cadence: the legacy scan every
+    /// [`LEGACY_SCAN_EVERY_PASSES`] passes, the index otherwise. Pass 0 is
+    /// the loop's first tick, which races `reconcile_now`'s boot-time scan, so
+    /// it reads the index.
+    fn for_pass(pass: u64) -> Self {
+        if pass > 0 && pass.is_multiple_of(LEGACY_SCAN_EVERY_PASSES) {
+            Self::LegacyScan
+        } else {
+            Self::Index
+        }
+    }
+}
+
+async fn refresh_from_registry(inner: &Arc<Inner>, read: RegistryRead) {
+    let Some(registry) = &inner.registry else {
+        return;
+    };
+    let result = match read {
+        RegistryRead::Index => registry.ready_records().await,
+        RegistryRead::LegacyScan => registry.legacy_scan_ready().await,
+    };
+    match result {
+        Ok(records) => inner.membership.apply_ready_records(records),
+        Err(err) => tracing::warn!(%err, ?read, "mesh: registry read failed"),
+    }
 }
 
 async fn reconcile_loop(inner: Arc<Inner>) {
+    let mut pass: u64 = 0;
     loop {
-        reconcile_once(&inner).await;
+        reconcile_once(&inner, RegistryRead::for_pass(pass)).await;
+        pass = pass.wrapping_add(1);
         tokio::time::sleep(inner.reconcile_interval).await;
     }
 }
 
-async fn reconcile_once(inner: &Arc<Inner>) {
+async fn reconcile_once(inner: &Arc<Inner>, read: RegistryRead) {
     let started = Instant::now();
     {
         let peers = inner.peers.read().expect("peer lock poisoned");
@@ -351,12 +397,7 @@ async fn reconcile_once(inner: &Arc<Inner>) {
         tracing::info!(pruned, "mesh: pruned expired peer records");
     }
 
-    if let Some(registry) = &inner.registry {
-        match registry.scan_ready().await {
-            Ok(records) => inner.membership.apply_ready_records(records),
-            Err(err) => tracing::warn!(%err, "mesh: registry scan failed"),
-        }
-    }
+    refresh_from_registry(inner, read).await;
     inner.membership.publish_table_metrics();
 
     let candidates = dial_candidates(inner);
@@ -663,6 +704,27 @@ mod tests {
 
     fn loopback_any() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
+
+    #[test]
+    fn steady_state_reads_the_index_and_scans_once_per_cadence() {
+        let cases = [
+            (0, RegistryRead::Index),
+            (1, RegistryRead::Index),
+            (LEGACY_SCAN_EVERY_PASSES - 1, RegistryRead::Index),
+            (LEGACY_SCAN_EVERY_PASSES, RegistryRead::LegacyScan),
+            (LEGACY_SCAN_EVERY_PASSES + 1, RegistryRead::Index),
+            (2 * LEGACY_SCAN_EVERY_PASSES, RegistryRead::LegacyScan),
+        ];
+        for (pass, want) in cases {
+            assert_eq!(RegistryRead::for_pass(pass), want, "pass {pass}");
+        }
+        // One legacy scan per cadence keeps pre-index peers fresher than the
+        // membership peer-record TTL.
+        assert!(
+            DEFAULT_RECONCILE_INTERVAL * (LEGACY_SCAN_EVERY_PASSES as u32)
+                < crate::membership::DEFAULT_PEER_RECORD_TTL
+        );
     }
 
     const RECONCILE_INTERVAL: Duration = Duration::from_millis(200);
