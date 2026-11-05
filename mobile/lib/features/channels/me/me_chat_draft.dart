@@ -123,6 +123,11 @@ class _MeChatDraft extends HookConsumerWidget {
           composerBusy.value = false;
           pending.value = MeChatCreation.pending(sync);
           error.value = failure.toString().replaceFirst('Bad state: ', '');
+          // Conflicting pending Solo edits block every chat creation until the
+          // user decides. The saved creation stays, so Retry finishes it.
+          if (failure is MeRecoveryConflict) {
+            await offerMeRecovery(context, sync);
+          }
         }
         // ComposeBar treats StateError as a community switch. Preserve the
         // actual failure and its draft through its ordinary error path.
