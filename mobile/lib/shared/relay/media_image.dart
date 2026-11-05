@@ -86,9 +86,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static final Set<String> _refreshing = {};
 
   /// Downloaded bytes not yet saved to disk, by URL: they are saved once one
-  /// load decodes them, so a corrupt body is never persisted.
-  static final Map<String, ({MediaDiskCache cache, bool immutable})> _unsaved =
-      {};
+  /// load decodes a frame from them, so a corrupt body is never persisted.
+  static final Map<
+    String,
+    ({MediaDiskCache cache, Uint8List bytes, bool immutable})
+  >
+  _unsaved = {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -119,6 +122,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       codec: _loadAsync(key, decode, abandoned.future),
       scale: key.scale,
       debugLabel: url,
+      onFirstFrame: _saveDecoded,
+      onError: () => _unsaved.remove(url),
     )..addOnLastListenerRemovedCallback(() {
       if (!abandoned.isCompleted) abandoned.complete();
     });
@@ -165,13 +170,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       if (wasAbandoned) throw StateError('Image load abandoned');
       onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      final codec = await decode(buffer);
-      if (_unsaved.remove(url) case final save?) {
-        unawaited(save.cache.write(url, bytes, immutable: save.immutable));
-      }
-      return codec;
+      return await decode(buffer);
     } catch (_) {
-      _unsaved.remove(url);
       // An abandoned load has no listener left to report to, and an error
       // would surface as an unhandled image error. The consumer already
       // evicted it; leave the codec unresolved.
@@ -197,8 +197,18 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       return hit.bytes;
     }
     final bytes = await _fetchBytes(abort);
-    _unsaved[url] = (cache: cache, immutable: _isContentAddressed);
+    _unsaved[url] = (
+      cache: cache,
+      bytes: bytes,
+      immutable: _isContentAddressed,
+    );
     return bytes;
+  }
+
+  void _saveDecoded() {
+    if (_unsaved.remove(url) case final save?) {
+      unawaited(save.cache.write(url, save.bytes, immutable: save.immutable));
+    }
   }
 
   Future<void> _refresh(MediaDiskCache cache) async {
@@ -209,7 +219,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // Nothing displays these bytes yet, so check they decode before they
       // replace the saved copy.
       final codec = await ui.instantiateImageCodec(bytes);
-      codec.dispose();
+      try {
+        (await codec.getNextFrame()).image.dispose();
+      } finally {
+        codec.dispose();
+      }
       await cache.write(url, bytes, immutable: _isContentAddressed);
     } on Object catch (error) {
       // The stale bytes stay; the next load after the cooldown retries.
@@ -336,10 +350,45 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
   _MediaImageStreamCompleter({
     required super.codec,
     required super.scale,
+    required this.onFirstFrame,
+    required this.onError,
     super.debugLabel,
   });
 
+  /// Called once, when the first frame has decoded. A codec can be created
+  /// from bytes whose frames then fail to decode.
+  final VoidCallback onFirstFrame;
+  final VoidCallback onError;
+  var _hasFrame = false;
+
   final _listeners = <ImageStreamListener>[];
+
+  @override
+  void setImage(ImageInfo image) {
+    if (!_hasFrame) {
+      _hasFrame = true;
+      onFirstFrame();
+    }
+    super.setImage(image);
+  }
+
+  @override
+  void reportError({
+    DiagnosticsNode? context,
+    required Object exception,
+    StackTrace? stack,
+    InformationCollector? informationCollector,
+    bool silent = false,
+  }) {
+    onError();
+    super.reportError(
+      context: context,
+      exception: exception,
+      stack: stack,
+      informationCollector: informationCollector,
+      silent: silent,
+    );
+  }
 
   @override
   void addListener(ImageStreamListener listener) {

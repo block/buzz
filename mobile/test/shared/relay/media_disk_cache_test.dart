@@ -30,6 +30,9 @@ const _hugeUrl =
 const _corruptUrl =
     '$_relayBase/media/'
     'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.png';
+const _truncatedUrl =
+    '$_relayBase/media/'
+    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.png';
 const _externalUrl = 'https://images.example.org/avatar.png';
 
 void main() {
@@ -62,7 +65,11 @@ void main() {
         ], 200);
       }
       if (request.url.toString() == _corruptUrl) {
-        return http.Response('truncated', 200);
+        return http.Response('not an image', 200);
+      }
+      // A valid header, so a codec opens, but the frame fails to decode.
+      if (request.url.toString() == _truncatedUrl) {
+        return http.Response.bytes(_pngBytes.sublist(0, 41), 200);
       }
       return http.Response.bytes(_pngBytes, 200);
     });
@@ -100,13 +107,14 @@ void main() {
         expect(await show(cache, url), isNull, reason: url);
       }
       expect(await show(cache, _corruptUrl), isNotNull);
+      expect(await show(cache, _truncatedUrl), isNotNull);
       await _settle();
     });
-    expect(fetched, [...urls, _corruptUrl]);
+    expect(fetched, [...urls, _corruptUrl, _truncatedUrl]);
 
     // Offline relaunch: the original and its thumbnail are separate entries,
-    // both shown from disk. The oversized image and the body that failed to
-    // decode were never saved.
+    // both shown from disk. The oversized image and the bodies that failed
+    // to decode were never saved.
     fetched.clear();
     online = false;
     await launch((cache) async {
@@ -115,8 +123,9 @@ void main() {
       }
       expect(await show(cache, _hugeUrl), isNotNull);
       expect(await show(cache, _corruptUrl), isNotNull);
+      expect(await show(cache, _truncatedUrl), isNotNull);
     });
-    expect(fetched, [_hugeUrl, _corruptUrl]);
+    expect(fetched, [_hugeUrl, _corruptUrl, _truncatedUrl]);
 
     // A week on, the external image shows from disk at once and refreshes
     // in the background. Relay media never goes stale.
