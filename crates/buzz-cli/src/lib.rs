@@ -2278,7 +2278,7 @@ pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
 /// Binds the configured community: `auth` pairs it, anything else builds
 /// the client. A desktop binds the whole community URL, trailing slash
 /// included, so pairing and the credential chain take it as configured; only
-/// requests use the trimmed base. The two steps are parameters so a test can
+/// requests use the trimmed base, which the client derives. The two steps are parameters so a test can
 /// run them against a fake desktop.
 pub(crate) async fn connect(
     configured: &str,
@@ -2286,14 +2286,13 @@ pub(crate) async fn connect(
     pair: impl AsyncFnOnce(AuthCmd, &str) -> Result<(), CliError>,
     credentials: impl AsyncFnOnce(&str) -> Result<credentials::Credentials, CliError>,
 ) -> Result<Option<(Cmd, BuzzClient)>, CliError> {
-    let relay_url = client::normalize_relay_url(configured);
     // Pairing runs before any credential exists.
     if let Cmd::Auth(sub) = command {
         pair(sub, configured).await?;
         return Ok(None);
     }
     let credentials = credentials(configured).await?;
-    let client = BuzzClient::new(relay_url, credentials)?;
+    let client = BuzzClient::new(configured.to_owned(), credentials)?;
     Ok(Some((command, client)))
 }
 

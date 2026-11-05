@@ -462,7 +462,11 @@ async fn call_with(
                 }
             }
             "unsupported_version" => return Err(ProviderError::NoCommonVersion),
-            "rate_limited" if throttled < retries => {
+            // A wait past the cap is reported at once, with its real length.
+            "rate_limited"
+                if throttled < retries
+                    && envelope.retry_after.unwrap_or(1) <= RATE_LIMIT_MAX_WAIT_SECS =>
+            {
                 throttled += 1;
                 tokio::time::sleep(throttle_wait(envelope.retry_after)).await;
             }
@@ -562,7 +566,9 @@ impl Provider {
             Ok(raw) => raw,
             Err(ProviderError::Revoked) => return Ok(Err(Skip::Revoked)),
             Err(ProviderError::NoCommonVersion) => return Ok(Err(Skip::NotApplicable)),
-            Err(ProviderError::Transport(_)) => return Ok(Err(Skip::Unreachable)),
+            Err(ProviderError::Transport(_) | ProviderError::Unconfirmed) => {
+                return Ok(Err(Skip::Unreachable))
+            }
             Err(e) => return Err(e.into_cli("describe")),
         };
         let describe: Describe = serde_json::from_str(&raw)
@@ -1279,11 +1285,20 @@ pub(crate) mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            // Read the whole request first: closing with any of it unread
+            // resets the connection and loses the reply.
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n{}") {
+                let mut chunk = [0u8; 4096];
+                match tokio::io::AsyncReadExt::read(&mut stream, &mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
             let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
             let _ = stream.write_all(head.as_bytes()).await;
             let _ = stream.write_all(&body).await;
+            let _ = stream.shutdown().await;
         });
         let endpoint = Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap();
         let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -1628,6 +1643,21 @@ pub(crate) mod tests {
         let err = err.into_cli("sign_event");
         assert!(matches!(err, CliError::Throttled(_)), "{err:?}");
         assert!(crate::error::is_retryable_error(&err));
+    }
+
+    #[tokio::test]
+    async fn a_cooldown_past_the_cap_is_reported_without_retrying() {
+        let (endpoint, seen) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 300}),
+        )
+        .await;
+        let err = call(&endpoint, None, false, "pair", &[]).await.unwrap_err();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let err = err.into_cli("pair");
+        assert!(
+            matches!(&err, CliError::Throttled(m) if m.contains("retry in 300s")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

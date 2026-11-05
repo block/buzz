@@ -496,6 +496,9 @@ impl<'a> Proof<'a> {
 pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
+    /// The configured URL as a WebSocket URL, path and trailing slash kept,
+    /// as NIP-42 AUTH must name it.
+    ws_url: String,
     /// Identity, signer, NIP-OA auth tag and NIP-FI evidence source.
     credentials: Credentials,
     /// Whether any request has carried a NIP-FI assertion, for error hints.
@@ -520,6 +523,7 @@ impl BuzzClient {
     /// - `BUZZ_TIMEOUT_SECS` — per-request total timeout (default 30 s)
     ///
     /// A value of zero for either variable is treated as invalid and falls back to the default.
+    /// A client for the relay at `relay_url`, as configured.
     pub fn new(relay_url: String, credentials: Credentials) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
             // Never replay credentials to a redirect target: reqwest strips
@@ -532,7 +536,8 @@ impl BuzzClient {
             .map_err(|e| CliError::Other(e.to_string()))?;
         Ok(Self {
             http,
-            relay_url,
+            ws_url: to_ws_url(&relay_url),
+            relay_url: normalize_relay_url(&relay_url),
             credentials,
             assertion_sent: Default::default(),
         })
@@ -613,8 +618,9 @@ impl BuzzClient {
         let mut assertion = self.evidence().await?;
         let mut round = 1;
         let authorization = loop {
-            let authorization = self.proof(&proof).await?;
+            // The proof is dated before signing, which may be held for long.
             let signed_at = crate::cached_assertion::unix_now();
+            let authorization = self.proof(&proof).await?;
             let current = self.evidence().await?;
             let age = crate::cached_assertion::unix_now().saturating_sub(signed_at);
             if current == assertion && age < PROOF_MAX_AGE_SECS {
@@ -1297,7 +1303,7 @@ impl BuzzClient {
     /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let ws_url = to_ws_url(&self.relay_url);
+        let ws_url = &self.ws_url;
         // Two kinds of deadline: each network phase is capped as a whole,
         // writes included (the connect below, then buzz_ws_client's challenge,
         // AUTH, EVENT and close phases), and NIP-42 signing between them is
@@ -1326,7 +1332,7 @@ impl BuzzClient {
             let headers = self.upgrade_headers().await?;
             let mut conn = tokio::time::timeout(
                 WS_CONNECT_TIMEOUT,
-                buzz_ws_client::NostrWsConnection::connect_with_headers(&ws_url, headers),
+                buzz_ws_client::NostrWsConnection::connect_with_headers(ws_url, headers),
             )
             .await
             .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
@@ -4109,5 +4115,16 @@ mod ws_deadline_tests {
             "{err:?}"
         );
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn auth_keeps_the_configured_relay_path() {
+        let client = BuzzClient::new(
+            "wss://host.example/team/".into(),
+            Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+        assert_eq!(client.ws_url, "wss://host.example/team/");
+        assert_eq!(client.relay_url, "https://host.example/team");
     }
 }
