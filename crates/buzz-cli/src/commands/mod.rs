@@ -10,6 +10,7 @@ mod huddle_tracker;
 pub mod huddles;
 pub mod issues;
 pub mod mem;
+pub mod message_report;
 pub mod messages;
 pub mod moderation;
 pub mod notes;
