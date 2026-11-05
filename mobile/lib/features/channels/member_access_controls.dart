@@ -242,3 +242,9 @@ String memberAccessLabel(String role) => switch (role) {
   'member' || 'bot' => 'Participating',
   _ => 'Access unknown',
 };
+
+/// Row captions highlight elevated or view-only access; participation is implicit.
+String? memberRowRoleLabel(String role) => switch (role) {
+  'owner' || 'admin' || 'guest' => memberAccessLabel(role),
+  _ => null,
+};

@@ -829,7 +829,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
     final initial = isSelf || hasName
         ? name[0].toUpperCase()
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
-    final roleLabel = _channelMemberRoleLabel(member.role);
+    final roleLabel = memberRowRoleLabel(member.role);
     final titleStyle = context.textTheme.bodyLarge;
     final roleStyle = context.textTheme.bodySmall?.copyWith(
       color: context.colors.onSurfaceVariant,
@@ -848,7 +848,8 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
           style: titleStyle,
           children: [
             TextSpan(text: label),
-            TextSpan(text: ' · $roleLabel', style: roleStyle),
+            if (roleLabel != null)
+              TextSpan(text: ' · $roleLabel', style: roleStyle),
           ],
         ),
         maxLines: 1,
@@ -860,8 +861,6 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
     );
   }
 }
-
-String _channelMemberRoleLabel(String role) => memberAccessLabel(role);
 
 IconData _channelDetailsIcon(Channel channel) {
   if (channel.isPrivate) return BuzzIcons.lock;

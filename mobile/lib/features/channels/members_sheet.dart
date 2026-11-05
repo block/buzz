@@ -202,10 +202,6 @@ class MembersSheet extends HookConsumerWidget {
   }
 }
 
-String _roleLabel(String role) {
-  return memberAccessLabel(role);
-}
-
 class _MemberTile extends ConsumerWidget {
   final ChannelMember member;
   final String? currentPubkey;
@@ -250,6 +246,7 @@ class _MemberTile extends ConsumerWidget {
     final showManagementActions =
         (canManage || canRemoveOwn) && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
+    final roleLabel = memberRowRoleLabel(member.role);
 
     return ListTile(
       leading: _MemberAvatar(
@@ -286,10 +283,10 @@ class _MemberTile extends ConsumerWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             )
-          : !const {'owner', 'admin', 'guest'}.contains(member.role)
+          : roleLabel == null
           ? null
           : Text(
-              _roleLabel(member.role),
+              roleLabel,
               style: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),

@@ -155,6 +155,8 @@ void main() {
     final semantics = tester.ensureSemantics();
 
     await _pump(tester, _roster(2, 1), onTap: (key) => selected = key);
+    expect(find.text('Owner'), findsOneWidget);
+    expect(find.text('Participating'), findsNothing);
     expect(find.text('People · 2'), findsOneWidget);
     expect(find.text('Agents · 1'), findsOneWidget);
     final agentIndex = tester.widget<IndexedSemantics>(
@@ -181,6 +183,27 @@ void main() {
       tester.getSize(find.byKey(const ValueKey('members-sheet-list'))).height,
       lessThan(400),
     );
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    final members = _roster(4, 1);
+    members[2] = ChannelMember(
+      pubkey: _key(2),
+      role: 'admin',
+      joinedAt: DateTime(2026),
+      displayName: 'Person 2',
+    );
+    members[3] = ChannelMember(
+      pubkey: _key(3),
+      role: 'guest',
+      joinedAt: DateTime(2026),
+      displayName: 'Person 3',
+    );
+    await _pump(tester, members, onTap: (key) => selected = key);
+    expect(find.text('Owner'), findsOneWidget);
+    expect(find.text('Admin'), findsOneWidget);
+    expect(find.text('Viewing only'), findsOneWidget);
+    expect(find.text('Participating'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
