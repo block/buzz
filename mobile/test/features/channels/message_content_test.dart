@@ -25,6 +25,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
@@ -667,6 +668,86 @@ void main() {
       expect(openedFilename, 'report.pdf');
       expect(openedHeaders?['Authorization'], startsWith('Nostr '));
     });
+
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+      testWidgets('holding a link opens link actions on ${platform.name}', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const url = 'https://relay.example/media/report.pdf';
+        final opened = <String>[];
+        final clipboard = <String>[];
+        var messageMenus = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboard.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final auth = MediaGetAuthService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+        );
+
+        await tester.pumpWidget(
+          _testable(
+            MessageLongPressInkWell(
+              onLongPress: (_) => messageMenus++,
+              child: const MessageContent(
+                content: 'See the [report]($url) before standup',
+              ),
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue(
+                (url, headers, filename) async => opened.add(url),
+              ),
+            ],
+          ),
+        );
+
+        // A hold on the surrounding text still opens the message menu.
+        await tester.longPress(find.textContaining('before standup'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text('Copy link'), findsNothing);
+
+        // A hold on the link opens its own actions instead.
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text(url), findsOneWidget);
+        expect(find.text('Share link'), findsOneWidget);
+
+        await tester.tap(find.text('Copy link'));
+        await tester.pumpAndSettle();
+        expect(clipboard, [url]);
+        expect(find.text('Copy link'), findsNothing);
+
+        await tester.longPress(find.text('report'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open link'));
+        await tester.pumpAndSettle();
+        expect(opened, [url]);
+
+        // An ordinary tap still opens the link directly.
+        await tester.tap(find.text('report'));
+        await tester.pumpAndSettle();
+        expect(opened, [url, url]);
+        expect(messageMenus, 1);
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
 
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
