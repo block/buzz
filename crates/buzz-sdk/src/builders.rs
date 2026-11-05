@@ -1970,9 +1970,20 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
 }
 
 /// Build a DM add-member event (kind 41011).
-pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilder, SdkError> {
+///
+/// With `include_history`, a person joins this DM and sees its history.
+/// Without it, adding a person starts a new DM of everyone. Agents always join
+/// this DM in place.
+pub fn build_dm_add_member(
+    channel_id: Uuid,
+    pubkey: &str,
+    include_history: bool,
+) -> Result<EventBuilder, SdkError> {
     let pk = check_pubkey_hex(pubkey, "pubkey")?;
-    let tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
+    if include_history {
+        tags.push(tag(&["history", "include"])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags))
 }
 
@@ -5073,15 +5084,22 @@ mod tests {
     fn dm_add_member_happy_path() {
         let cid = uuid();
         let pk = "b".repeat(64);
-        let ev = sign(build_dm_add_member(cid, &pk).unwrap());
+        let ev = sign(build_dm_add_member(cid, &pk, false).unwrap());
         assert_eq!(ev.kind.as_u16(), 41011);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert!(has_tag(&ev, "p", &pk));
+        assert!(!ev.tags.iter().any(|t| t.as_slice()[0] == "history"));
+    }
+
+    #[test]
+    fn dm_add_member_with_history() {
+        let ev = sign(build_dm_add_member(uuid(), &"b".repeat(64), true).unwrap());
+        assert!(has_tag(&ev, "history", "include"));
     }
 
     #[test]
     fn dm_add_member_rejects_bad_pubkey() {
-        let err = build_dm_add_member(uuid(), "short").unwrap_err();
+        let err = build_dm_add_member(uuid(), "short", false).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
