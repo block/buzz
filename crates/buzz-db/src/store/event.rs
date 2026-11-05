@@ -846,10 +846,14 @@ const THREAD_REPLY_KINDS: [i32; 2] = [
 ];
 
 /// The candidate thread root of a "replies to this message" read: one channel,
-/// one lowercase-hex `#e` value, only [`THREAD_REPLY_KINDS`], and no `#p`
-/// join, and not an [`EventQuery::exact_match`] read. [`query_events_on`]
-/// takes the thread route only when the target is
-/// not itself a recorded reply (see [`is_recorded_reply`]).
+/// one lowercase-hex `#e` value, only [`THREAD_REPLY_KINDS`], no `#p` join, no
+/// author or id selector, and not an [`EventQuery::exact_match`] read.
+/// [`query_events_on`] takes the thread route only when the target is not
+/// itself a recorded reply (see [`is_recorded_reply`]).
+///
+/// Author and id selectors stay generic: the route tests them per reply, so an
+/// author with no reply in a hot thread walks the whole thread, while the
+/// generic read narrows by author first.
 ///
 /// The generic `#e` read gathers every event that tags the root before it can
 /// sort and keep a page, so a root with hundreds of thousands of replies cost
@@ -868,6 +872,9 @@ fn thread_reply_root(q: &EventQuery) -> Option<Vec<u8>> {
     let routable = q.channel_id.is_some()
         && !q.exact_match
         && q.p_tag_hex.is_none()
+        && q.pubkey.is_none()
+        && q.authors.is_none()
+        && q.ids.is_none()
         && !kinds.is_empty()
         && kinds.iter().all(|k| THREAD_REPLY_KINDS.contains(k))
         && root.len() == 64
@@ -899,7 +906,9 @@ async fn is_recorded_reply(
     qb.push_bind(q.community_id.as_uuid())
         .push(" AND tm.event_id = ")
         .push_bind(id.to_vec())
-        .push(" LIMIT 1");
+        // One id can carry a reply row and a stub with a fallback timestamp;
+        // prefer the row that answers the question.
+        .push(" ORDER BY (tm.root_event_id IS NOT NULL) DESC, (e.id IS NOT NULL) DESC LIMIT 1");
     let rows = fetch_with_read_deadline(conn, &mut qb, true, deadline).await?;
     let Some(row) = rows.first() else {
         return Ok(false);
@@ -3187,7 +3196,7 @@ mod e_tag_filter_shape_tests {
         assert!(sql.contains("ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT "));
 
         type Change = fn(&mut EventQuery);
-        let generic: [(&str, Change); 7] = [
+        let generic: [(&str, Change); 10] = [
             ("two roots", |q| {
                 q.e_tags = Some(vec!["ab".repeat(32), "cd".repeat(32)])
             }),
@@ -3197,6 +3206,9 @@ mod e_tag_filter_shape_tests {
             ("uppercase root", |q| q.e_tags = Some(vec!["AB".repeat(32)])),
             ("p join", |q| q.p_tag_hex = Some("cd".repeat(32))),
             ("exact match", |q| q.exact_match = true),
+            ("authors", |q| q.authors = Some(vec![vec![0xcd; 32]])),
+            ("pubkey", |q| q.pubkey = Some(vec![0xcd; 32])),
+            ("ids", |q| q.ids = Some(vec![vec![0xcd; 32]])),
         ];
         for (label, change) in generic {
             let mut q = routed();
