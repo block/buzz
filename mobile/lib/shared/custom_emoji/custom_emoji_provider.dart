@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../read_state/read_state_time.dart';
 import '../relay/relay.dart';
 import 'custom_emoji.dart';
+import 'emoji_catalog_search.dart';
 
 /// Community custom-emoji palette (NIP-30, per-user kind:30030 sets unioned).
 ///
@@ -127,8 +128,19 @@ final customEmojiPaletteProvider =
 
 /// Synchronous read of the current palette (empty while loading/error).
 /// Convenience for widgets that only need the resolved list, not the async
-/// state — renderer, autocomplete, reaction resolution.
+/// state — renderer, autocomplete, reaction resolution. Catalog emoji picked
+/// this session ([pickedCatalogEmojiProvider]) are part of it.
 final customEmojiListProvider = Provider<List<CustomEmoji>>((ref) {
-  final palette = ref.watch(customEmojiPaletteProvider);
-  return palette.hasError ? const [] : palette.value ?? const [];
+  final state = ref.watch(customEmojiPaletteProvider);
+  final palette = state.hasError
+      ? const <CustomEmoji>[]
+      : state.value ?? const <CustomEmoji>[];
+  final picked = ref.watch(pickedCatalogEmojiProvider);
+  if (picked.isEmpty) return palette;
+  final pickedNames = {for (final emoji in picked) emoji.shortcode};
+  return [
+    for (final emoji in palette)
+      if (!pickedNames.contains(emoji.shortcode)) emoji,
+    ...picked,
+  ]..sort((a, b) => a.shortcode.compareTo(b.shortcode));
 });
