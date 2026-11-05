@@ -262,12 +262,15 @@ void main() {
               }
               return null;
             });
+            final auth = _AssertingRelayAuth();
+            addTearDown(auth.dispose);
             clock.seconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
             BuzzPushLeaseRevocationOutbox makeOutbox() => _outbox(
               storage: storage,
               clock: clock,
               scheduler: scheduler,
-              publisher: publishBuzzPushLeaseRevocation,
+              publisher: (record) =>
+                  publishBuzzPushLeaseRevocation(record, relayAuth: auth),
             );
             var outbox = makeOutbox();
             await outbox.enqueue(
