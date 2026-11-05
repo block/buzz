@@ -88,8 +88,9 @@ type UseAnchoredScrollResult = {
   /** Arm a one-shot scroll-to-bottom that fires on the next appended message
    *  (used by the composer's send flow). */
   scrollToBottomOnNextUpdate: () => void;
-  /** True while that one-shot is armed and its append has not landed. */
-  isBottomPinArmed: () => boolean;
+  /** True from that arming until the first append lands, whether or not the
+   *  append moves the tail and fires the one-shot. */
+  isOwnSendPending: () => boolean;
   /** Imperative: scroll a specific message into view; optionally pulse it.
    *  Returns true if the row was found and scrolled, false otherwise. */
   scrollToMessage: (
@@ -252,6 +253,11 @@ export function useAnchoredScroll({
   // appends, we snap to bottom even if they had scrolled up to read history.
   // Consumed (and cleared) by the next append in the restoration effect.
   const forceBottomOnNextAppendRef = React.useRef(false);
+  // Set with the one-shot, but any append clears it, including one that sorts
+  // above the current tail (a sender whose clock runs ahead, a same-second
+  // row) and so leaves the one-shot armed for a later tail. MessageTimeline
+  // holds its tail open only while this is set.
+  const ownSendPendingRef = React.useRef(false);
   // True from a programmatic bottom pin until the list's row measurement settles
   // and the view reaches a true physical bottom. During this window `onScroll`
   // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
@@ -288,6 +294,7 @@ export function useAnchoredScroll({
     prevMessagesRef.current = [];
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
+    ownSendPendingRef.current = false;
     settlingRef.current = false;
     programmaticScrollTopRef.current = null;
     isWritingScrollRef.current = false;
@@ -446,9 +453,10 @@ export function useAnchoredScroll({
   // outbound message pulls the view down even if they'd scrolled up.
   const scrollToBottomOnNextUpdate = React.useCallback(() => {
     forceBottomOnNextAppendRef.current = true;
+    ownSendPendingRef.current = true;
   }, []);
-  const isBottomPinArmed = React.useCallback(
-    () => forceBottomOnNextAppendRef.current,
+  const isOwnSendPending = React.useCallback(
+    () => ownSendPendingRef.current,
     [],
   );
 
@@ -739,6 +747,10 @@ export function useAnchoredScroll({
       previous: prevMessages,
     });
     const isPrepend = messageDelta === "prepend";
+    // The first append ends a pending send, wherever its row sorts.
+    if (newLatestArrived || messageDelta === "append") {
+      ownSendPendingRef.current = false;
+    }
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -1065,7 +1077,7 @@ export function useAnchoredScroll({
     scrollToBottom: scrollToBottomImperative,
     settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
-    isBottomPinArmed,
+    isOwnSendPending,
     scrollToMessage: scrollToMessageImperative,
     onVirtualizerAtBottomStateChange,
   };

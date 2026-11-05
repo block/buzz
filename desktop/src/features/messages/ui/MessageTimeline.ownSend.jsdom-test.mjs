@@ -140,7 +140,7 @@ afterEach(() => {
   container?.remove();
 });
 
-async function mountAtFloor() {
+async function mountAtFloor(initial = history) {
   const router = createRouter({
     routeTree: createRootRoute(),
     history: createMemoryHistory({ initialEntries: ["/"] }),
@@ -171,7 +171,7 @@ async function mountAtFloor() {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  await render(history);
+  await render(initial);
   const scroller = container.querySelector('[data-testid="message-timeline"]');
   act(() => {
     for (const observer of resizeObservers) {
@@ -231,3 +231,35 @@ for (const { name, order } of [
     assert.equal(scroller.scrollTop, scroller.scrollHeight - VIEWPORT);
   });
 }
+
+// Rows arrive sorted by created_at, so a tail from a sender whose clock runs
+// ahead stays the tail when the send lands above it, and the pin stays armed.
+// The send's row still ends its hold on freezing: a reader who then scrolls up
+// gets the next arrival behind the pill, even one that becomes the tail.
+test("a reader who scrolls up after a send that lands above the tail keeps their place", async () => {
+  const earlier = history.slice(0, -1);
+  const aheadTail = { ...history.at(-1), createdAt: sent.createdAt + 3600 };
+  const aheadNext = { ...message(22), createdAt: aheadTail.createdAt + 1 };
+  const { render, scroller, timeline } = await mountAtFloor([
+    ...earlier,
+    aheadTail,
+  ]);
+
+  act(() => timeline.current.scrollToBottomOnNextUpdate());
+  await render([...earlier, sent, aheadTail]);
+  flushFrames();
+  assert.ok(container.querySelector(`[data-message-id="${sent.id}"]`));
+
+  readerScrollsTo(scroller, scroller.scrollTop - 200);
+  const readingOffset = scroller.scrollTop;
+  flushFrames();
+  await render([...earlier, sent, aheadTail, aheadNext]);
+  flushFrames();
+
+  assert.equal(
+    container.querySelector('[data-testid="message-scroll-to-latest"]')
+      ?.textContent,
+    "1 new message",
+  );
+  assert.equal(scroller.scrollTop, readingOffset);
+});
