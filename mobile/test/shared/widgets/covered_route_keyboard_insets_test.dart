@@ -69,9 +69,145 @@ void main() {
     expect(builds[0], coveredBuilds);
     expect(seen.last, EdgeInsets.zero);
 
+    // Uncovered while the covering route's keyboard is still up: the page
+    // stays where it was instead of jumping up, then takes live values once
+    // the keyboard is gone.
     navigator.currentState!.pop();
     await tester.pumpAndSettle();
+    expect(seen.last, EdgeInsets.zero);
+    for (final bottom in [200.0, 100.0]) {
+      setOuter(() => insets = EdgeInsets.only(bottom: bottom));
+      await tester.pump();
+      expect(seen.last, EdgeInsets.zero);
+    }
+    setOuter(() => insets = EdgeInsets.zero);
+    await tester.pump();
+    expect(seen.last, EdgeInsets.zero);
+    setOuter(() => insets = const EdgeInsets.only(bottom: 120));
+    await tester.pump();
+    expect(seen.last, const EdgeInsets.only(bottom: 120));
+  });
+
+  testWidgets('an uncovered page never rises above the live keyboard and '
+      'follows it once it reaches the held value', (tester) async {
+    final builds = [0];
+    final seen = <EdgeInsets>[];
+    final navigator = GlobalKey<NavigatorState>();
+    var insets = const EdgeInsets.only(bottom: 300);
+    late StateSetter setOuter;
+    final app = MaterialApp(
+      navigatorKey: navigator,
+      home: CoveredRouteKeyboardInsets(child: _Probe(builds, seen)),
+    );
+
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setState) {
+          setOuter = setState;
+          return MediaQuery(
+            data: MediaQueryData(
+              size: const Size(400, 800),
+              viewInsets: insets,
+            ),
+            child: app,
+          );
+        },
+      ),
+    );
+
+    navigator.currentState!.push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        transitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => const SizedBox(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // The page's keyboard closes to 100 behind the covering route, whose own
+    // field then raises the keyboard back to 300.
+    for (final bottom in [200.0, 100.0, 200.0, 300.0]) {
+      setOuter(() => insets = EdgeInsets.only(bottom: bottom));
+      await tester.pump();
+    }
+    expect(seen.last, const EdgeInsets.only(bottom: 100));
+
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(seen.last, const EdgeInsets.only(bottom: 100));
+    for (final bottom in [250.0, 150.0, 100.0]) {
+      setOuter(() => insets = EdgeInsets.only(bottom: bottom));
+      await tester.pump();
+      expect(seen.last, const EdgeInsets.only(bottom: 100));
+    }
+    setOuter(() => insets = const EdgeInsets.only(bottom: 40));
+    await tester.pump();
+    expect(seen.last, const EdgeInsets.only(bottom: 40));
+  });
+
+  testWidgets('an uncovered page follows the keyboard its own field raises', (
+    tester,
+  ) async {
+    final builds = [0];
+    final seen = <EdgeInsets>[];
+    final navigator = GlobalKey<NavigatorState>();
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+    var insets = EdgeInsets.zero;
+    late StateSetter setOuter;
+    final app = MaterialApp(
+      navigatorKey: navigator,
+      home: CoveredRouteKeyboardInsets(
+        child: Scaffold(
+          resizeToAvoidBottomInset: false,
+          body: Column(
+            children: [
+              Expanded(child: _Probe(builds, seen)),
+              TextField(focusNode: focusNode),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setState) {
+          setOuter = setState;
+          return MediaQuery(
+            data: MediaQueryData(
+              size: const Size(400, 800),
+              viewInsets: insets,
+            ),
+            child: app,
+          );
+        },
+      ),
+    );
+
+    navigator.currentState!.push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        transitionDuration: Duration.zero,
+        pageBuilder: (_, _, _) => const SizedBox(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    setOuter(() => insets = const EdgeInsets.only(bottom: 300));
+    await tester.pump();
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(seen.last, EdgeInsets.zero);
+
+    // The page's own field takes focus while the keyboard is still up, so the
+    // page has to follow the keyboard rather than hold below it.
+    focusNode.requestFocus();
+    await tester.pump();
+    await tester.pump();
+    expect(focusNode.hasPrimaryFocus, isTrue);
     expect(seen.last, const EdgeInsets.only(bottom: 300));
+    setOuter(() => insets = const EdgeInsets.only(bottom: 280));
+    await tester.pump();
+    expect(seen.last, const EdgeInsets.only(bottom: 280));
   });
 
   testWidgets('a covered page follows its own keyboard closing', (
