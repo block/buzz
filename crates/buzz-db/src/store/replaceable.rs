@@ -389,6 +389,42 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
+/// The head read and supersede for one replaceable coordinate. `$4` binds the
+/// channel only when `in_channel`.
+///
+/// The channel predicate is spelled per case, never `IS NOT DISTINCT FROM $4`:
+/// a btree cannot use that as an index condition, so the read would filter
+/// every live row of the (kind, pubkey) across all of its channels. The relay
+/// signs every channel's state events with one key, so each channel-state
+/// write would scan the whole community's.
+fn replacement_sql(in_channel: bool) -> (&'static str, &'static str) {
+    if in_channel {
+        (
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id = $4 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+            superseded_with_mentions_sql!(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+                 AND channel_id = $4 AND deleted_at IS NULL"
+            ),
+        )
+    } else {
+        (
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NULL AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+            superseded_with_mentions_sql!(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+                 AND channel_id IS NULL AND deleted_at IS NULL"
+            ),
+        )
+    }
+}
+
 impl Db {
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
     /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).
@@ -443,20 +479,16 @@ impl Db {
 
                 // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
                 // historical data where prior bugs may have left multiple live rows.
-                let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> =
-                    sqlx::query_as(
-                        "SELECT created_at, id FROM events \
-                         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                         AND channel_id IS NOT DISTINCT FROM $4 \
-                         AND deleted_at IS NULL \
-                         ORDER BY created_at DESC, id ASC LIMIT 1",
-                    )
+                let (head_sql, supersede_sql) = replacement_sql(channel_id.is_some());
+                let mut head = sqlx::query_as(head_sql)
                     .bind(community_id.as_uuid())
                     .bind(kind_i32)
-                    .bind(pubkey_bytes.as_slice())
-                    .bind(channel_id)
-                    .fetch_optional(tx.conn())
-                    .await?;
+                    .bind(pubkey_bytes.as_slice());
+                if let Some(channel_id) = channel_id {
+                    head = head.bind(channel_id);
+                }
+                let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> =
+                    head.fetch_optional(tx.conn()).await?;
 
                 // Stale-write protection: reject if incoming is not newer.
                 // NIP-16: created_at is second-resolution. On same-second tie, lowest
@@ -487,19 +519,15 @@ impl Db {
                 )
                 .await?;
 
-                // Soft-delete the old event (if any). IS NOT DISTINCT FROM for NULL safety.
-                sqlx::query(superseded_with_mentions_sql!(
-                    "UPDATE events SET deleted_at = NOW() \
-                     WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-                     AND channel_id IS NOT DISTINCT FROM $4 \
-                     AND deleted_at IS NULL"
-                ))
-                .bind(community_id.as_uuid())
-                .bind(kind_i32)
-                .bind(pubkey_bytes.as_slice())
-                .bind(channel_id)
-                .execute(tx.conn())
-                .await?;
+                // Soft-delete the old event (if any).
+                let mut supersede = sqlx::query(supersede_sql)
+                    .bind(community_id.as_uuid())
+                    .bind(kind_i32)
+                    .bind(pubkey_bytes.as_slice());
+                if let Some(channel_id) = channel_id {
+                    supersede = supersede.bind(channel_id);
+                }
+                supersede.execute(tx.conn()).await?;
 
                 // Insert the new event inside the same transaction.
                 let sig_bytes = event.sig.serialize();
@@ -776,6 +804,136 @@ mod postgres_tests {
                 .await
                 .expect("count rolled-back event");
         assert_eq!(new_rows, 0, "new roster must roll back with its index");
+    }
+
+    /// A replaceable write supersedes only its own channel's head, and a
+    /// channel-less (global) write only the global head. Each case reads and
+    /// supersedes through its own `channel_id` predicate, so this pins that
+    /// neither spelling reaches the other's rows.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn addressable_replacement_supersedes_only_its_own_channel_scope() {
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        let (pool, _scratch) = ScratchDb::migrated(&admin_url().await, "addressable_scope").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let owner_keys = Keys::generate();
+        let channel_a = Uuid::new_v4();
+        let channel_b = Uuid::new_v4();
+        seed_community_channel(&pool, community_uuid, channel_a, &owner_keys).await;
+        crate::channel::create_channel_with_id(
+            &pool,
+            CommunityId::from_uuid(community_uuid),
+            channel_b,
+            &format!("replica-routing-{channel_b}"),
+            crate::channel::ChannelType::Stream,
+            crate::channel::ChannelVisibility::Open,
+            None,
+            owner_keys.public_key().to_bytes().as_slice(),
+            None,
+            &[],
+        )
+        .await
+        .expect("create second channel");
+        let community = CommunityId::from_uuid(community_uuid);
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+        let version = |offset: u64, content: &str| {
+            EventBuilder::new(Kind::Custom(10_050), content)
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign version")
+        };
+        let live = |event: &nostr::Event| {
+            let pool = pool.clone();
+            let id = event.id.as_bytes().to_vec();
+            async move {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT deleted_at IS NULL FROM events WHERE community_id = $1 AND id = $2",
+                )
+                .bind(community_uuid)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("read head")
+            }
+        };
+
+        let global = version(0, "global");
+        let in_a = version(1, "a");
+        let in_b = version(2, "b");
+        for (event, channel) in [(&global, None), (&in_a, Some(channel_a)), (&in_b, Some(channel_b))]
+        {
+            assert!(
+                db.replace_addressable_event(community, event, channel)
+                    .await
+                    .expect("insert head")
+                    .1,
+                "each scope starts with its own head"
+            );
+        }
+        assert!(live(&global).await && live(&in_a).await && live(&in_b).await);
+
+        let newer_a = version(3, "a2");
+        db.replace_addressable_event(community, &newer_a, Some(channel_a))
+            .await
+            .expect("replace in channel a");
+        assert!(!live(&in_a).await, "channel a's old head is superseded");
+        assert!(live(&newer_a).await);
+        assert!(live(&in_b).await, "channel b's head is untouched");
+        assert!(live(&global).await, "the global head is untouched");
+
+        // An older write is judged against its own scope's head only: channel
+        // b's newest head (offset 2) must not make this channel-less write stale.
+        let newer_global = version(1, "global2");
+        assert!(
+            db.replace_addressable_event(community, &newer_global, None)
+                .await
+                .expect("replace global")
+                .1,
+            "a global write is ordered against the global head only"
+        );
+        assert!(!live(&global).await, "the old global head is superseded");
+        assert!(live(&newer_a).await && live(&in_b).await, "channel heads are untouched");
+    }
+
+    /// Both channel spellings of the head read and the supersede must reach a
+    /// btree as an index condition. `channel_id IS NOT DISTINCT FROM $4` cannot,
+    /// so a relay channel-state write would filter every live row of its kind
+    /// across the community instead of seeking to one channel.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replacement_channel_predicate_is_an_index_condition() {
+        let db = setup_db().await;
+        let mut conn = db.pool.acquire().await.expect("acquire connection");
+        let mut tx = conn.begin().await.expect("begin");
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .expect("disable sequential scans");
+        for in_channel in [true, false] {
+            let (head_sql, supersede_sql) = replacement_sql(in_channel);
+            for sql in [head_sql, supersede_sql] {
+                let explain = format!("EXPLAIN {sql}");
+                let mut query = sqlx::query_scalar::<_, String>(&explain)
+                    .bind(Uuid::new_v4())
+                    .bind(10_050_i32)
+                    .bind(vec![0_u8; 32]);
+                if in_channel {
+                    query = query.bind(Uuid::new_v4());
+                }
+                let plan = query.fetch_all(&mut *tx).await.expect("explain").join("\n");
+                let seeks_channel = plan
+                    .lines()
+                    .any(|line| line.contains("Index Cond:") && line.contains("channel_id"));
+                assert!(
+                    seeks_channel,
+                    "in_channel={in_channel}: channel_id must be an index condition:\n{plan}"
+                );
+            }
+        }
+        tx.rollback().await.expect("rollback");
     }
 
     #[tokio::test]

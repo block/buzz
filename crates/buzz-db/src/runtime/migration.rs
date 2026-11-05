@@ -898,10 +898,22 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 83);
+        assert_eq!(migrations.len(), 84);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
+        // Unused events index (0084): a plain, bounded drop, because a
+        // partitioned index cannot be dropped CONCURRENTLY. The desired schema
+        // no longer declares it.
+        assert_eq!(migrations[83].version, 84);
+        let drop_deleted = strip_sql_comments(migrations[83].sql.as_str());
+        assert!(drop_deleted.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(drop_deleted.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(drop_deleted
+            .contains("DROP INDEX IF EXISTS public.idx_events_community_deleted;"));
+        assert!(!drop_deleted.contains("CONCURRENTLY"));
+        assert!(!crate::test_support::desired_state_schema_sql()
+            .contains("idx_events_community_deleted"));
         assert!(migrations[79]
             .sql
             .as_str()
@@ -3077,6 +3089,22 @@ mod postgres_tests {
             listed_name(index_shapes(&migrated, "channels").await),
             "idx_channels_listed_name parity mismatch: update \
              schema/tables/public/channels.sql to match migration 0083"
+        );
+        // `events` index set, by name and definition: the desired state and the
+        // migrations must agree on which indexes the parent carries (0084 drops
+        // idx_events_community_deleted from both).
+        let desired_events_indexes = index_shapes(&desired, "events").await;
+        assert!(
+            !desired_events_indexes
+                .iter()
+                .any(|(name, _, _)| name == "idx_events_community_deleted"),
+            "desired state must not declare idx_events_community_deleted"
+        );
+        assert_eq!(
+            desired_events_indexes,
+            index_shapes(&migrated, "events").await,
+            "events index parity mismatch: update schema/tables/public/events.sql to match \
+             the migrations"
         );
         assert_eq!(
             events_key_defs(&desired).await,
