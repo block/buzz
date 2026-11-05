@@ -9,6 +9,11 @@ import 'verified_profile_discovery_fetch.dart';
 import 'verified_profile_proof.dart';
 
 const _wantedLimit = 1024;
+
+/// Records kept after their subject stops being tracked. A roster larger than
+/// [_wantedLimit] keeps evicting and re-tracking the same people; their last
+/// known names stay on screen, unchecked, instead of blinking to fallbacks.
+const _cachedHeadLimit = 4 * _wantedLimit;
 const _eoseTimeout = Duration(seconds: 10);
 const _discoveryRefresh = Duration(minutes: 5);
 
@@ -142,9 +147,9 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     if (overflow > 0) {
       for (final oldest in _wanted.keys.take(overflow).toList()) {
         _wanted.remove(oldest);
-        _heads.remove(oldest);
         _checked.remove(oldest);
       }
+      _trimCachedHeads();
       added = true;
     }
     if (!added) return;
@@ -153,6 +158,19 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     } else {
       _schedule(_generation);
     }
+  }
+
+  /// Drops the oldest untracked records past [_cachedHeadLimit], in one pass.
+  void _trimCachedHeads() {
+    var excess = _heads.length - _cachedHeadLimit;
+    if (excess <= 0) return;
+    final drop = <String>[];
+    for (final key in _heads.keys) {
+      if (_wanted.containsKey(key)) continue;
+      drop.add(key);
+      if (--excess == 0) break;
+    }
+    drop.forEach(_heads.remove);
   }
 
   Future<void> _onConnected(int generation) async {
@@ -439,12 +457,11 @@ class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
     if (!_enabled || authority == null) return const {};
     return {
       for (final MapEntry(:key, :value) in _heads.entries)
-        if (_wanted.containsKey(key))
-          key: ?parseVerifiedProfile(
-            value,
-            authority,
-            checked: _discoveryFresh && _checked.contains(key),
-          ),
+        key: ?parseVerifiedProfile(
+          value,
+          authority,
+          checked: _discoveryFresh && _checked.contains(key),
+        ),
     };
   }
 
