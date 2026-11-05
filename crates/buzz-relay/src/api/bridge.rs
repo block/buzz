@@ -1083,7 +1083,7 @@ async fn handle_channel_window_filter(
             kind_filter.as_deref(),
         )
         .await
-        .map_err(|e| internal_error(&format!("channel window error: {e}")))?;
+        .map_err(|e| db_read_error("channel window error", &e))?;
 
     // 1. Rows, in keyset order.
     let mut row_ids_hex = Vec::with_capacity(window.rows.len());
@@ -1930,7 +1930,7 @@ async fn query_member_events(
                         remaining,
                     )
                     .await
-                    .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
+                    .map_err(|e| db_read_error("feed mentions error", &e))?,
                 "needs_action" => state
                     .db
                     .query_feed_needs_action_routed(
@@ -1942,7 +1942,7 @@ async fn query_member_events(
                         remaining,
                     )
                     .await
-                    .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
+                    .map_err(|e| db_read_error("feed needs_action error", &e))?,
                 "activity" => state
                     .db
                     .query_feed_activity_routed(
@@ -1953,7 +1953,7 @@ async fn query_member_events(
                         remaining,
                     )
                     .await
-                    .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
+                    .map_err(|e| db_read_error("feed activity error", &e))?,
                 _ => continue,
             };
             for se in type_events {
@@ -2027,7 +2027,7 @@ async fn query_member_events(
                 thread_cursor.as_deref(),
             )
             .await
-            .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
+            .map_err(|e| db_read_error("thread query error", &e))?;
 
         let mut thread_row_ids = Vec::with_capacity(thread_replies.len() + 1);
         thread_row_ids.push(root_hex.to_string());
@@ -10561,6 +10561,64 @@ pub(crate) mod postgres_tests {
             "WS COUNT {arm} ordinary error: {frame}"
         );
 
+        fx.drop().await;
+    }
+
+    /// A shed history read answers 503 `database unavailable` on every
+    /// bridge `/query` branch that serves one: channel window, the three
+    /// feeds and legacy thread replies. A saturated reader (every connection
+    /// checked out, none idle) rejects history reads instead of moving them
+    /// to the writer, the same `PoolTimedOut` as a full history gate.
+    /// Mutation: map any of these branches through `internal_error` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn shed_history_read_maps_to_503_on_every_bridge_branch() {
+        let fx = cancel_fixture().await;
+        let h = [&fx.channel];
+        let cases = [
+            (
+                "channel window",
+                serde_json::json!({"kinds": [9], "#h": h, "top_level": true}),
+            ),
+            (
+                "feed mentions",
+                serde_json::json!({"kinds": [9], "feed_types": ["mentions"]}),
+            ),
+            (
+                "feed needs_action",
+                serde_json::json!({"kinds": [9], "feed_types": ["needs_action"]}),
+            ),
+            (
+                "feed activity",
+                serde_json::json!({"kinds": [9], "feed_types": ["activity"]}),
+            ),
+            (
+                "thread replies",
+                serde_json::json!({"kinds": [9], "#e": [&fx.root], "depth_limit": 1}),
+            ),
+        ];
+        for (branch, filter) in &cases {
+            let (status, body) = fx.http("/query", filter).await;
+            assert_eq!(status, StatusCode::OK, "healthy {branch}: {body}");
+        }
+
+        let mut held = Vec::new();
+        for _ in 0..fx.replica.options().get_max_connections() {
+            held.push(fx.replica.acquire().await.expect("hold reader connection"));
+        }
+        for (branch, filter) in &cases {
+            let (status, body) = fx.http("/query", filter).await;
+            assert_eq!(
+                (status, body["error"].as_str()),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(super::super::DATABASE_UNAVAILABLE)
+                ),
+                "shed {branch}: {body}"
+            );
+        }
+
+        drop(held);
         fx.drop().await;
     }
 

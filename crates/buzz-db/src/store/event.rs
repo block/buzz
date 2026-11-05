@@ -2741,6 +2741,9 @@ impl Db {
                         // writer rather than surfacing a routed error.
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::query_events_with_operation(
                             &self.pool,
                             q,
@@ -2803,6 +2806,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::query_events_with_operation(
                             &self.pool,
                             q,
@@ -2869,6 +2875,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica count failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::count_events(&self.pool, q).await
                     }
                 }
@@ -3128,6 +3137,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::get_events_by_ids_with_operation(
                             &self.pool,
                             community_id,

@@ -390,6 +390,9 @@ impl Db {
                 Err(e) => {
                     tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                     Self::record_route(path, "writer", "replica_error");
+                    // Release the reader and its history permit before the
+                    // writer re-run, so a replica-error burst can't fill the cap.
+                    drop(tx);
                     crate::feed::query_mentions(
                         &self.pool,
                         community,
@@ -481,6 +484,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::feed::query_needs_action(
                             &self.pool,
                             community,
@@ -562,6 +568,9 @@ impl Db {
                 Err(e) => {
                     tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                     Self::record_route(path, "writer", "replica_error");
+                    // Release the reader and its history permit before the
+                    // writer re-run, so a replica-error burst can't fill the cap.
+                    drop(tx);
                     crate::feed::query_activity(
                         &self.pool,
                         community,
