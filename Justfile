@@ -407,8 +407,9 @@ test-unit:
         cargo nextest run -p buzz-auth --test mesh_jwks_proxy
         cargo nextest run -p buzz-audit --lib
         # Cross-pod disconnect payload tests (NIP-FI and community archive
-        # fence); all infra-free.
-        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/)'
+        # fence) and the shared Redis connection's timeout bounds (loopback
+        # fake peers); all infra-free. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/) + test(/^connection::tests::/)'
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
