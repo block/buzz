@@ -418,11 +418,15 @@ void main() {
       );
       var clock = DateTime.utc(2026, 11, 4, 12);
       var issued = 0;
+      Completer<void>? issuerGate;
       final auth = HostedRelayAuth(
         BuilderlabAccountClient(),
         organization: BuilderlabAccountClient(
           accountOrigin: organization,
           httpClient: MockClient((request) async {
+            if (request.url.path.endsWith('/assertions')) {
+              await issuerGate?.future;
+            }
             return switch (request.url.path) {
               '/api/goose/v1/auth/me' => http.Response(
                 jsonEncode({
@@ -540,6 +544,22 @@ void main() {
       );
       completion.complete(<String, Object?>{});
       await tester.pumpAndSettle();
+
+      // Unmounting while a slow issuer is pending presents nothing: the row's
+      // cleanup empties and disposes its reactions before auth completes.
+      issuerGate = Completer<void>();
+      clock = clock.add(const Duration(seconds: 200));
+      expect(auth.cachedHeaders(config), isNull);
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      issuerGate.complete();
+      await tester.pumpAndSettle();
+      expect(payloads, hasLength(1));
+      expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     },
   );

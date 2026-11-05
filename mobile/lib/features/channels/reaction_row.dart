@@ -740,6 +740,10 @@ Future<bool> _showNativeReactionDetails(
       // Send without the assertion; the relay decides, and sign-in is offered
       // elsewhere.
     }
+    // The row can unmount while auth is pending, which empties and disposes
+    // `reactions`; there is then nothing to present. Check mounted first so a
+    // disposed notifier is never read or listened to.
+    if (!context.mounted || reactions.value.isEmpty) return true;
     final nativeMediaHeaders = container.read(nativeMediaHeadersProvider);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     List<String> pubkeys() =>
