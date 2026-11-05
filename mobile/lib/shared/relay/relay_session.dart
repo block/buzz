@@ -155,7 +155,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Throws if discovery, completeness, scope or event validation fails.
   /// [timeout] bounds the snapshot request; discovery uses at most 8 s.
   Future<List<NostrEvent>> fetchReadStateSnapshot({
-    Duration timeout = relayLargeReadTimeout,
+    Duration timeout = relayReadStateSnapshotTimeout,
   }) => _fetchReadStateSnapshot(timeout: timeout);
 
   /// Finds people by profile name, for typeahead surfaces.

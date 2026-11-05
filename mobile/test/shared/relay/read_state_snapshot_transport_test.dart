@@ -135,14 +135,14 @@ void main() {
     expect(events.single.id, event()['id']);
   });
 
-  test('a slow multi-megabyte snapshot gets the large-read timeout', () {
+  test('a slow multi-megabyte snapshot gets the snapshot timeout', () {
     // Busy accounts have multi-megabyte snapshots, and relay bodies have been
     // measured at about 200 KB/s. The ordinary 8 s query timeout cancelled
-    // every attempt. A stalled snapshot must still fail at the 30 s bound,
+    // every attempt. A stalled snapshot must still fail at the 60 s bound,
     // and the small discovery document keeps the ordinary 8 s bound.
     for (final (method, delay, failsAt) in [
-      ('POST', const Duration(seconds: 29), null),
-      ('POST', const Duration(seconds: 31), const Duration(seconds: 30)),
+      ('POST', const Duration(seconds: 59), null),
+      ('POST', const Duration(seconds: 61), const Duration(seconds: 60)),
       ('GET', const Duration(seconds: 9), const Duration(seconds: 8)),
     ]) {
       fakeAsync((async) {

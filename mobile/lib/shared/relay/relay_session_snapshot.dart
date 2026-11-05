@@ -1,13 +1,17 @@
 part of 'relay_session.dart';
 
-/// Per-request timeout for reads whose results can be megabytes: full
-/// channel-membership discovery and the read-state snapshot. On a busy
-/// account these run to several MB, and relay responses have been measured
-/// arriving at about 200 KB/s, so the ordinary 8 s timeout cancelled them
-/// on every attempt. 30 s matches buzz-app's large-read deadline; it is
-/// about 6 MB at that rate, below the 8 MiB snapshot cap, so this is a
-/// stopgap until those reads shrink.
+/// Per-request timeout for full channel-membership discovery pages. Each
+/// page carries the rosters of up to 500 channels: megabytes on an account
+/// in a few channels with thousands of members. Relay bodies have been
+/// measured at 140 to 205 KB/s, so the ordinary 8 s timeout cancelled them
+/// on every attempt. 30 s matches buzz-app's large-read deadline.
 const relayLargeReadTimeout = Duration(seconds: 30);
+
+/// Timeout for the read-state snapshot request. The snapshot is the whole
+/// read state, capped at [readStateSnapshotMaxBytes] (8 MiB); at the slowest
+/// measured relay rate (140 KB/s) a full snapshot takes about 60 s, and a
+/// 5 MB one already exceeds 30 s.
+const relayReadStateSnapshotTimeout = Duration(seconds: 60);
 
 extension on RelaySessionNotifier {
   Future<List<NostrEvent>> _fetchReadStateSnapshot({
