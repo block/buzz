@@ -656,7 +656,7 @@ impl BuzzClient {
 
     /// The NIP-FI assertion for this relay, noting that one was sent.
     async fn evidence(&self) -> Result<Option<String>, CliError> {
-        let assertion = self.credentials.evidence(&self.relay_url).await?;
+        let assertion = self.credentials.evidence().await?;
         if assertion.is_some() {
             self.assertion_sent
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2906,7 +2906,7 @@ mod federated_identity_route_tests {
     /// A client for the relay at `relay` that mints from the adapter at `adapter`.
     fn client_via(relay: &str, adapter: &str) -> BuzzClient {
         let credentials = Credentials::from_keys(Keys::generate())
-            .with_evidence(AdapterSession::new(adapter, "token").unwrap());
+            .with_evidence(AdapterSession::new(adapter, "token", relay).unwrap());
         BuzzClient::new(relay.to_owned(), credentials).unwrap()
     }
 

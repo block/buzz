@@ -44,13 +44,14 @@ const REFRESH_MARGIN_SECS: u64 = 30;
 /// A NIP-FA adapter session that mints NIP-FI assertions.
 pub struct AdapterSession {
     endpoint: url::Url,
+    /// The relay it mints for, in NIP-FA form, bound at creation.
+    relay_url: String,
     token: String,
     http: reqwest::Client,
     cached: Mutex<Option<CachedAssertion>>,
 }
 
 struct CachedAssertion {
-    relay_url: String,
     assertion: String,
     refresh_at: u64,
 }
@@ -199,10 +200,11 @@ fn denial(status: u16, code: Option<&str>, relay_url: &str) -> CliError {
 }
 
 impl AdapterSession {
-    /// A session for the adapter at `adapter_base`. The base must be `https`
-    /// (or `http` on a loopback host, for local development) with no query,
-    /// fragment or credentials.
-    pub fn new(adapter_base: &str, token: &str) -> Result<Self, CliError> {
+    /// A session minting for `relay_url` from the adapter at `adapter_base`.
+    /// The base must be `https` (or `http` on a loopback host, for local
+    /// development) with no query, fragment or credentials.
+    pub fn new(adapter_base: &str, token: &str, relay_url: &str) -> Result<Self, CliError> {
+        let relay_url = canonical_relay_url(relay_url)?;
         let invalid = |why: &str| CliError::Auth(format!("{FEDERATED_IDENTITY_ADAPTER_ENV} {why}"));
         let base = url::Url::parse(adapter_base.trim()).map_err(|_| invalid("is not a URL"))?;
         let loopback = match base.host() {
@@ -242,29 +244,25 @@ impl AdapterSession {
             .build()?;
         Ok(Self {
             endpoint,
+            relay_url,
             token: token.to_owned(),
             http,
             cached: Mutex::new(None),
         })
     }
 
-    /// The assertion for `relay_url`, minted on first use and re-minted
+    /// The assertion for its relay, minted on first use and re-minted
     /// shortly before it expires. Concurrent callers share one mint.
-    pub async fn assertion(
-        &self,
-        relay_url: &str,
-        credentials: &Credentials,
-    ) -> Result<String, CliError> {
-        let relay_url = canonical_relay_url(relay_url)?;
+    pub async fn assertion(&self, credentials: &Credentials) -> Result<String, CliError> {
+        let relay_url = self.relay_url.as_str();
         let mut cached = self.cached.lock().await;
         if let Some(entry) = cached.as_ref() {
-            if entry.relay_url == relay_url && unix_now() < entry.refresh_at {
+            if unix_now() < entry.refresh_at {
                 return Ok(entry.assertion.clone());
             }
         }
-        let (assertion, expires_at) = self.mint(&relay_url, credentials).await?;
+        let (assertion, expires_at) = self.mint(relay_url, credentials).await?;
         *cached = Some(CachedAssertion {
-            relay_url,
             assertion: assertion.clone(),
             refresh_at: refresh_at(unix_now(), expires_at),
         });
@@ -437,6 +435,8 @@ fn jws_exp(token: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    const RELAY: &str = "https://relay.example.com/";
+
     #[test]
     fn canonical_relay_url_follows_nip_fa() {
         for (input, expected) in [
@@ -511,7 +511,7 @@ mod tests {
             "http://[::1]:8080",
             "http://localhost:8080",
         ] {
-            assert!(AdapterSession::new(ok, "token").is_ok(), "{ok}");
+            assert!(AdapterSession::new(ok, "token", RELAY).is_ok(), "{ok}");
         }
         for bad in [
             "http://adapter.example",
@@ -521,11 +521,11 @@ mod tests {
             "https://user:pw@adapter.example",
             "adapter.example",
         ] {
-            assert!(AdapterSession::new(bad, "token").is_err(), "{bad}");
+            assert!(AdapterSession::new(bad, "token", RELAY).is_err(), "{bad}");
         }
-        assert!(AdapterSession::new("https://adapter.example", " ").is_err());
-        assert!(AdapterSession::new("https://adapter.example", "a\nb").is_err());
-        let session = AdapterSession::new("https://adapter.example/base/", "token").unwrap();
+        assert!(AdapterSession::new("https://adapter.example", " ", RELAY).is_err());
+        assert!(AdapterSession::new("https://adapter.example", "a\nb", RELAY).is_err());
+        let session = AdapterSession::new("https://adapter.example/base/", "token", RELAY).unwrap();
         assert_eq!(
             session.endpoint.as_str(),
             "https://adapter.example/base/v1/identity/assertions"
@@ -612,18 +612,12 @@ mod tests {
             adapter(|req| issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + 300)).await;
         let keys = Keys::generate();
         let credentials = Credentials::from_keys(keys.clone());
-        let session = AdapterSession::new(&base, TOKEN).unwrap();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
 
-        let first = session
-            .assertion("https://relay.example.com/", &credentials)
-            .await
-            .unwrap();
+        let first = session.assertion(&credentials).await.unwrap();
         assert!(jws_exp(&first).is_some(), "{first}");
         for _ in 0..2 {
-            let assertion = session
-                .assertion("https://relay.example.com/", &credentials)
-                .await
-                .unwrap();
+            let assertion = session.assertion(&credentials).await.unwrap();
             assert_eq!(assertion, first);
         }
         assert_eq!(seen.lock().unwrap().len(), 1, "one mint serves the process");
@@ -666,13 +660,6 @@ mod tests {
             tag("payload").unwrap(),
             hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&sent))
         );
-
-        // A different relay needs its own assertion.
-        session
-            .assertion("https://other.example.com", &credentials)
-            .await
-            .unwrap();
-        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -681,16 +668,10 @@ mod tests {
         let (base, seen) =
             adapter(|req| issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + 2)).await;
         let credentials = Credentials::from_keys(Keys::generate());
-        let session = AdapterSession::new(&base, TOKEN).unwrap();
-        session
-            .assertion("https://relay.example.com", &credentials)
-            .await
-            .unwrap();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+        session.assertion(&credentials).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2_100)).await;
-        session
-            .assertion("https://relay.example.com", &credentials)
-            .await
-            .unwrap();
+        session.assertion(&credentials).await.unwrap();
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
@@ -849,11 +830,8 @@ mod tests {
             let (base, seen) =
                 adapter(move |req| respond(req["nostr_pubkey"].as_str().unwrap_or_default())).await;
             let credentials = Credentials::from_keys(Keys::generate());
-            let session = AdapterSession::new(&base, TOKEN).unwrap();
-            let err = session
-                .assertion("https://relay.example.com", &credentials)
-                .await
-                .unwrap_err();
+            let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+            let err = session.assertion(&credentials).await.unwrap_err();
             let message = err.to_string();
             assert!(message.contains(expected), "{name}: {message}");
             assert!(!message.contains(TOKEN), "{name}: token leaked: {message}");
@@ -871,9 +849,7 @@ mod tests {
             );
             assert_eq!(seen.lock().unwrap().len(), attempts, "{name}: attempts");
             // A failed mint is not cached: the next call asks again.
-            let _ = session
-                .assertion("https://relay.example.com", &credentials)
-                .await;
+            let _ = session.assertion(&credentials).await;
             assert_eq!(
                 seen.lock().unwrap().len(),
                 2 * attempts,
@@ -905,12 +881,9 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let session = AdapterSession::new(&base, TOKEN).unwrap();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
         let err = session
-            .assertion(
-                "https://relay.example.com",
-                &Credentials::from_keys(Keys::generate()),
-            )
+            .assertion(&Credentials::from_keys(Keys::generate()))
             .await
             .unwrap_err();
         assert!(
@@ -925,12 +898,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
-        let session = AdapterSession::new(&base, TOKEN).unwrap();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
         let err = session
-            .assertion(
-                "https://relay.example.com",
-                &Credentials::from_keys(Keys::generate()),
-            )
+            .assertion(&Credentials::from_keys(Keys::generate()))
             .await
             .unwrap_err();
         assert!(
@@ -947,9 +917,9 @@ mod tests {
     async fn a_truncated_body_keeps_the_status_meaning() {
         let credentials = Credentials::from_keys(Keys::generate());
         let (base, seen) = raw_adapter(test_support::TRUNCATED_403).await;
-        let err = AdapterSession::new(&base, TOKEN)
+        let err = AdapterSession::new(&base, TOKEN, RELAY)
             .unwrap()
-            .assertion("https://relay.example.com", &credentials)
+            .assertion(&credentials)
             .await
             .unwrap_err();
         assert!(
@@ -963,9 +933,9 @@ mod tests {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 200\r\nconnection: close\r\n\r\n{\"assert",
         )
         .await;
-        let err = AdapterSession::new(&base, TOKEN)
+        let err = AdapterSession::new(&base, TOKEN, RELAY)
             .unwrap()
-            .assertion("https://relay.example.com", &credentials)
+            .assertion(&credentials)
             .await
             .unwrap_err();
         assert!(matches!(&err, CliError::Adapter(_)), "{err:?}");
@@ -974,7 +944,8 @@ mod tests {
 
     #[test]
     fn debug_output_never_contains_the_token() {
-        let session = AdapterSession::new("https://adapter.example", "s3cr3t-token").unwrap();
+        let session =
+            AdapterSession::new("https://adapter.example", "s3cr3t-token", RELAY).unwrap();
         assert!(!format!("{session:?}").contains("s3cr3t-token"));
     }
 }

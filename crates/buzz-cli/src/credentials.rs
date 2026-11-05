@@ -76,7 +76,7 @@ pub struct Credentials {
 /// applies: the explicit key, then (on Unix) the Buzz desktop through an
 /// inherited or paired token.
 pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials, CliError> {
-    if let Some(credentials) = resolve_explicit(&settings)? {
+    if let Some(credentials) = resolve_explicit(&settings, relay_url)? {
         return Ok(credentials);
     }
     #[cfg(unix)]
@@ -86,8 +86,6 @@ pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials,
         }
         return Credentials::from_desktop(provider).await;
     }
-    #[cfg(not(unix))]
-    let _ = relay_url;
     Err(CliError::Auth(
         "no credentials: set BUZZ_PRIVATE_KEY, pass --private-key, or run \
          `buzz auth desktop pair` with Buzz running"
@@ -97,11 +95,11 @@ pub async fn resolve(settings: Settings, relay_url: &str) -> Result<Credentials,
 
 /// The explicit-key link, with its headless evidence source. Without an
 /// explicit key the evidence settings are not read: they belong to that key.
-fn resolve_explicit(settings: &Settings) -> Result<Option<Credentials>, CliError> {
+fn resolve_explicit(settings: &Settings, relay_url: &str) -> Result<Option<Credentials>, CliError> {
     if settings.private_key.is_none() {
         return Ok(None);
     }
-    let evidence = evidence_source(settings)?;
+    let evidence = evidence_source(settings, relay_url)?;
     explicit_key(settings, evidence)
 }
 
@@ -156,13 +154,16 @@ fn explicit_key(
 /// The headless NIP-FI evidence source: a NIP-FA adapter session. Both
 /// settings are required together; one without the other is a configuration
 /// error rather than a silent fallback to no evidence.
-fn evidence_source(settings: &Settings) -> Result<Option<AdapterSession>, CliError> {
+fn evidence_source(
+    settings: &Settings,
+    relay_url: &str,
+) -> Result<Option<AdapterSession>, CliError> {
     match (
         settings.federated_identity_token.as_deref(),
         settings.federated_identity_adapter.as_deref(),
     ) {
         (None, None) => Ok(None),
-        (Some(token), Some(adapter)) => AdapterSession::new(adapter, token).map(Some),
+        (Some(token), Some(adapter)) => AdapterSession::new(adapter, token, relay_url).map(Some),
         (Some(_), None) => Err(CliError::Auth(format!(
             "{FEDERATED_IDENTITY_TOKEN_ENV} is set but {FEDERATED_IDENTITY_ADAPTER_ENV} is not"
         ))),
@@ -419,18 +420,15 @@ impl Credentials {
         self.evidence.is_some()
     }
 
-    /// The NIP-FI assertion to present to `relay_url`, or `None` when no
-    /// evidence source is configured.
-    pub async fn evidence(&self, relay_url: &str) -> Result<Option<String>, CliError> {
+    /// The NIP-FI assertion for the relay the credentials were resolved
+    /// for, or `None` when no evidence source is configured.
+    pub async fn evidence(&self) -> Result<Option<String>, CliError> {
         #[cfg(unix)]
         if let Some(provider) = &self.desktop {
-            // The relay the provider was opened for, as given: the client's
-            // request base has its trailing slash trimmed.
-            let _ = relay_url;
             return provider.federated_identity().await;
         }
         match &self.evidence {
-            Some(source) => source.assertion(relay_url, self).await.map(Some),
+            Some(source) => source.assertion(self).await.map(Some),
             None => Ok(None),
         }
     }
@@ -607,7 +605,7 @@ mod tests {
     }
 
     fn explicit(settings: Settings) -> Result<Credentials, CliError> {
-        resolve_explicit(&settings).map(|c| c.expect("explicit key"))
+        resolve_explicit(&settings, "https://relay.example").map(|c| c.expect("explicit key"))
     }
 
     fn settings(key: Option<&str>, token: Option<&str>, adapter: Option<&str>) -> Settings {
@@ -630,9 +628,11 @@ mod tests {
 
     #[test]
     fn no_link_is_an_auth_error_naming_the_settings() {
-        assert!(resolve_explicit(&settings(None, None, None))
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_explicit(&settings(None, None, None), "https://relay.example")
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Headless evidence settings belong to the explicit key: without one
@@ -641,7 +641,9 @@ mod tests {
     fn headless_settings_without_a_key_are_passed_over_and_named() {
         for (token, adapter) in [(Some("t"), None), (Some("t"), Some("https://a.example"))] {
             let unused = settings(None, token, adapter);
-            assert!(resolve_explicit(&unused).unwrap().is_none());
+            assert!(resolve_explicit(&unused, "https://relay.example")
+                .unwrap()
+                .is_none());
             let warning = ignored_headless_settings(&unused).unwrap();
             assert!(warning.contains(FEDERATED_IDENTITY_TOKEN_ENV), "{warning}");
             assert_eq!(
@@ -651,6 +653,19 @@ mod tests {
             );
         }
         assert!(ignored_headless_settings(&settings(None, None, None)).is_none());
+    }
+
+    /// The evidence source is bound to the relay when credentials are
+    /// resolved, so a relay NIP-FA cannot serve fails then, not mid-command.
+    #[test]
+    fn the_evidence_source_binds_its_relay_at_resolution() {
+        let nsec = Keys::generate().secret_key().to_secret_hex();
+        let headless = settings(Some(&nsec), Some("t"), Some("https://adapter.example"));
+        assert!(resolve_explicit(&headless, "https://relay.example").is_ok());
+        let err = resolve_explicit(&headless, "https://relay.example:80")
+            .err()
+            .unwrap();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 
     #[test]

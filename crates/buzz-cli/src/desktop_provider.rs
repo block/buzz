@@ -479,7 +479,6 @@ struct Describe {
 }
 
 struct CachedAssertion {
-    relay_url: String,
     assertion: Option<String>,
     refresh_at: u64,
 }
@@ -648,7 +647,7 @@ impl Provider {
         let relay_url = self.relay.as_str();
         let mut cached = self.cached.lock().await;
         if let Some(entry) = cached.as_ref() {
-            if entry.relay_url == relay_url && unix_now() < entry.refresh_at {
+            if unix_now() < entry.refresh_at {
                 return Ok(entry.assertion.clone());
             }
         }
@@ -678,7 +677,6 @@ impl Provider {
             None => u64::MAX,
         };
         *cached = Some(CachedAssertion {
-            relay_url: relay_url.to_owned(),
             assertion: assertion.clone(),
             refresh_at,
         });
@@ -1917,7 +1915,7 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .unwrap();
-        client.credentials().evidence(TEAM).await.unwrap();
+        client.credentials().evidence().await.unwrap();
         let asked = seen.lock().unwrap().last().unwrap().2.clone();
         assert_eq!(asked["params"], serde_json::json!([TEAM]));
 
