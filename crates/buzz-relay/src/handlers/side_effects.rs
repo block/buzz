@@ -621,6 +621,9 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Why kinds 9000, 9001 and 9022 are refused on a DM.
+const DM_MEMBERSHIP_REFUSAL: &str = "DM members change only through kind:41011";
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -674,6 +677,11 @@ pub async fn validate_admin_event(
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
     if kind != 9002 && channel.archived_at.is_some() && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
+    }
+    // A DM is identified by its people, so its members change only through
+    // kind:41011, which keeps that identity in step.
+    if channel.channel_type == "dm" && matches!(kind, 9001 | 9022) {
+        return Err(anyhow::anyhow!(DM_MEMBERSHIP_REFUSAL));
     }
 
     match kind {
@@ -1929,6 +1937,9 @@ pub(crate) async fn validate_put_user(
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
     if channel.archived_at.is_some() {
         anyhow::bail!("channel is archived");
+    }
+    if channel.channel_type == "dm" {
+        anyhow::bail!(DM_MEMBERSHIP_REFUSAL);
     }
     let targets = put_user_targets(event)?;
 

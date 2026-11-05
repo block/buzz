@@ -535,3 +535,82 @@ async fn messaging_an_agent_alone_ignores_its_add_policy() {
     let dm = open(&state, &tenant, &a, &[&agent]).await.expect("open");
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &agent]));
 }
+
+/// A DM's members change only through kind:41011: a plain add, a removal and
+/// a leave are refused, so its identity never names someone who is not in it
+/// and the people can always reopen it.
+/// Mutation: drop either DM guard → the add or the leave lands → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn generic_membership_kinds_cannot_change_a_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-generic-membership").await;
+    let (a, b, c) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    let h = vec!["h".to_string(), dm.to_string()];
+
+    rejected(
+        submit(
+            &state,
+            &tenant,
+            &a,
+            9000,
+            vec![h.clone(), vec!["p".into(), hex(&c)]],
+        )
+        .await
+        .map(|r| (r.accepted, r.message)),
+        "kind:41011",
+    );
+    rejected(
+        submit(
+            &state,
+            &tenant,
+            &b,
+            9001,
+            vec![h.clone(), vec!["p".into(), hex(&b)]],
+        )
+        .await
+        .map(|r| (r.accepted, r.message)),
+        "kind:41011",
+    );
+    rejected(
+        submit(&state, &tenant, &b, 9022, vec![h])
+            .await
+            .map(|r| (r.accepted, r.message)),
+        "kind:41011",
+    );
+
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+    assert_eq!(open(&state, &tenant, &b, &[&a]).await.expect("reopen"), dm);
+}
+
+/// A moderation kick from a DM still removes the member, and the DM stops
+/// being any group's DM: the person removed, like the rest, can message that
+/// group again, in a new DM.
+/// Mutation: keep the DM's identity after the kick → the removed person is
+/// refused ("already exists") → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_kick_from_a_dm_releases_its_identity() {
+    let state = state().await;
+    let tenant = community(&state, "dm-kick").await;
+    let (a, b, c) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let dm = open(&state, &tenant, &a, &[&b, &c]).await.expect("open");
+
+    state
+        .db
+        .deploy_kick_member(
+            tenant.community(),
+            dm,
+            &c.public_key().to_bytes(),
+            &a.public_key().to_bytes(),
+        )
+        .await
+        .expect("kick");
+
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+    let again = open(&state, &tenant, &c, &[&a, &b])
+        .await
+        .expect("message the group again");
+    assert_ne!(again, dm);
+}

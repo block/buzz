@@ -1198,6 +1198,7 @@ pub async fn remove_member(
     if result.rows_affected() == 0 {
         return Err(DbError::MemberNotFound(channel_id));
     }
+    crate::dm::release_dm_identity(tx.conn(), community_id, channel_id).await?;
 
     tx.commit().await?;
     Ok(())
