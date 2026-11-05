@@ -323,9 +323,12 @@ pub(crate) async fn create_channel_with_event(
             .map_err(|_| DbError::InvalidTimestamp(i64::MAX))?;
         let created_at = DateTime::<Utc>::from_timestamp(seconds, 0)
             .ok_or(DbError::InvalidTimestamp(seconds))?;
+        // Not a cached prepared statement: a generic plan would lock every
+        // `events` partition (PG16 prunes only at executor startup).
         let resent = sqlx::query(
             "SELECT 1 FROM events WHERE community_id = $1 AND id = $2 AND created_at = $3 AND deleted_at IS NULL LIMIT 1",
         )
+        .persistent(false)
         .bind(community_id.as_uuid())
         .bind(event.id.as_bytes().as_slice())
         .bind(created_at)

@@ -1,6 +1,6 @@
 use super::*;
 use nostr::{EventBuilder, Keys, Kind, Timestamp};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -192,9 +192,80 @@ fn executed_relations(node: &serde_json::Value, out: &mut BTreeSet<String>) {
     }
 }
 
+/// Partitions of `events` that `conn`'s open transaction holds a relation lock
+/// on. Indexes are excluded (`relkind = 'r'`), the partitioned parent too.
+async fn locked_event_partitions(conn: &mut PgConnection) -> BTreeSet<String> {
+    sqlx::query_scalar(
+        "SELECT c.relname::text FROM pg_locks l JOIN pg_class c ON c.oid = l.relation \
+         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
+           AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%'",
+    )
+    .fetch_all(conn)
+    .await
+    .unwrap()
+    .into_iter()
+    .collect()
+}
+
+/// Pins what the hydration lookup LOCKS, not just what it executes: the
+/// partitions other than the requested months must stay unlocked.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn hydration_production_sql_prunes_custom_and_generic_plans() {
+async fn hydration_lookup_locks_only_the_requested_partitions() {
+    let (db, community, _, keys) = fixture().await;
+    let jan = event(&keys, "lock January", JAN);
+    let march = event(&keys, "lock March", MAR);
+    for event in [&jan, &march] {
+        db.insert_event(community, event, None).await.unwrap();
+    }
+    // Mixed present/absent keys across both months, at the full batch size.
+    let mut large = vec![key(&jan), key(&march)];
+    for n in 0..MAX_BATCH - large.len() {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+        large.push((id, if n % 2 == 0 { JAN } else { MAR }));
+    }
+    let cases = [
+        (vec![key(&jan)], vec!["events_p2026_01"], 1),
+        (vec![key(&march)], vec!["events_p2026_03"], 1),
+        (
+            vec![key(&jan), key(&march)],
+            vec!["events_p2026_01", "events_p2026_03"],
+            2,
+        ),
+        (large, vec!["events_p2026_01", "events_p2026_03"], 2),
+    ];
+    // Run the production `lookup_on` repeatedly on ONE session. A cached
+    // prepared statement is eligible to flip to a generic plan after five
+    // executions, and on PG16+ a generic plan locks every partition at
+    // executor startup before pruning. The unnamed statement used in
+    // production is planned afresh with its parameter values every time.
+    let mut conn = db.pool.acquire().await.unwrap();
+    for round in 0..8 {
+        for (hits, expected_locks, expected_rows) in &cases {
+            let keys = validate(hits).unwrap();
+            let mut tx = sqlx::Connection::begin(&mut *conn).await.unwrap();
+            let found = lookup_on(&mut tx, community, &keys).await.unwrap();
+            assert_eq!(found.len(), *expected_rows, "round {round}");
+            let locked = locked_event_partitions(&mut tx).await;
+            tx.rollback().await.unwrap();
+            let expected: BTreeSet<String> = expected_locks
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            assert_eq!(
+                locked,
+                expected,
+                "round {round}, {} keys: lookup_on locked unrelated events partitions",
+                keys.len()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn hydration_production_sql_executes_only_requested_partitions() {
     let (db, community, _, keys) = fixture().await;
     let jan = event(&keys, "plan January", JAN);
     let march = event(&keys, "plan March", MAR);
@@ -222,74 +293,62 @@ async fn hydration_production_sql_prunes_custom_and_generic_plans() {
         (large_hits, 2),
     ];
     let mut conn = db.pool.acquire().await.unwrap();
-    // PREPARE the actual production builder, not a copied approximation. A
-    // forced generic plan makes partition pruning depend on executor startup
-    // parameters rather than on literal/custom-plan folding.
-    for mode in ["force_custom_plan", "force_generic_plan"] {
-        for (hits, expected_rows) in &cases {
-            let validated = validate(hits).unwrap();
-            assert_eq!(validated.len(), hits.len(), "plan keys must stay distinct");
-            let query = lookup_sql(community, &validated);
-            sqlx::query(sqlx::AssertSqlSafe(format!("SET plan_cache_mode = {mode}")))
-                .execute(&mut *conn)
-                .await
-                .unwrap();
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "PREPARE hydration_plan AS {}",
-                query.sql().as_str()
-            )))
+    // EXPLAIN ANALYZE the actual production builder, not a copied
+    // approximation, as a custom plan (the plan the production statement is
+    // executed with). It reports relations EXECUTED, not relations LOCKED: the
+    // generic-plan lock behavior is pinned by
+    // `hydration_lookup_locks_only_the_requested_partitions`.
+    for (hits, expected_rows) in &cases {
+        let validated = validate(hits).unwrap();
+        assert_eq!(validated.len(), hits.len(), "plan keys must stay distinct");
+        let query = lookup_sql(community, &validated);
+        sqlx::query("SET plan_cache_mode = force_custom_plan")
             .execute(&mut *conn)
             .await
             .unwrap();
-            let mut arguments = vec![format!("'{}'::uuid", community.as_uuid())];
-            for (id, timestamp) in &validated {
-                arguments.push(format!("'{}'::timestamptz", timestamp.to_rfc3339()));
-                arguments.push(format!("decode('{}', 'hex')", hex::encode(id)));
-            }
-            let plan: serde_json::Value = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE hydration_plan({})",
-                arguments.join(", ")
-            )))
-            .fetch_one(&mut *conn)
-            .await
-            .unwrap()
-            .get(0);
-            let mut relations = BTreeSet::new();
-            executed_relations(&plan[0]["Plan"], &mut relations);
-            let expected: BTreeSet<String> = if hits.len() == 1 {
-                ["events_p2026_01".to_owned()].into()
-            } else {
-                ["events_p2026_01".to_owned(), "events_p2026_03".to_owned()].into()
-            };
-            assert_eq!(
-                relations,
-                expected,
-                "{mode}, {} keys: unrelated partitions executed: {plan}",
-                hits.len()
-            );
-            assert_eq!(
-                plan[0]["Plan"]["Actual Rows"].as_u64(),
-                Some(*expected_rows),
-                "{mode}, {} keys: unexpected hydrated row count: {plan}",
-                hits.len()
-            );
-            let (generic, custom): (i64, i64) = sqlx::query_as(
-                "SELECT generic_plans, custom_plans FROM pg_prepared_statements WHERE name = 'hydration_plan'",
-            ).fetch_one(&mut *conn).await.unwrap();
-            assert_eq!(
-                (generic, custom),
-                if mode == "force_generic_plan" {
-                    (1, 0)
-                } else {
-                    (0, 1)
-                },
-                "wrong plan mode: {plan}"
-            );
-            sqlx::query("DEALLOCATE hydration_plan")
-                .execute(&mut *conn)
-                .await
-                .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PREPARE hydration_plan AS {}",
+            query.sql().as_str()
+        )))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        let mut arguments = vec![format!("'{}'::uuid", community.as_uuid())];
+        for (id, timestamp) in &validated {
+            arguments.push(format!("'{}'::timestamptz", timestamp.to_rfc3339()));
+            arguments.push(format!("decode('{}', 'hex')", hex::encode(id)));
         }
+        let plan: serde_json::Value = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE hydration_plan({})",
+            arguments.join(", ")
+        )))
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap()
+        .get(0);
+        let mut relations = BTreeSet::new();
+        executed_relations(&plan[0]["Plan"], &mut relations);
+        let expected: BTreeSet<String> = if hits.len() == 1 {
+            ["events_p2026_01".to_owned()].into()
+        } else {
+            ["events_p2026_01".to_owned(), "events_p2026_03".to_owned()].into()
+        };
+        assert_eq!(
+            relations,
+            expected,
+            "{} keys: unrelated partitions executed: {plan}",
+            hits.len()
+        );
+        assert_eq!(
+            plan[0]["Plan"]["Actual Rows"].as_u64(),
+            Some(*expected_rows),
+            "{} keys: unexpected hydrated row count: {plan}",
+            hits.len()
+        );
+        sqlx::query("DEALLOCATE hydration_plan")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
     }
     sqlx::query("RESET plan_cache_mode")
         .execute(&mut *conn)

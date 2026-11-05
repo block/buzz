@@ -56,7 +56,15 @@ async fn lookup_on(
     community: CommunityId,
     keys: &[Lookup],
 ) -> Result<Vec<StoredEvent>> {
-    let rows = lookup_sql(community, keys).build().fetch_all(conn).await?;
+    // Not a cached prepared statement: after five runs PostgreSQL may switch it
+    // to a generic plan, which on PG16 prunes only at executor startup, after
+    // every `events` partition and index is already locked. The SQL text also
+    // varies with the batch size, which would fill the statement cache.
+    let rows = lookup_sql(community, keys)
+        .build()
+        .persistent(false)
+        .fetch_all(conn)
+        .await?;
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
         if let Some(event) = crate::event::row_to_stored_event(row)? {
