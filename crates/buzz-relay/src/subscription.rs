@@ -535,7 +535,7 @@ impl SubscriptionRegistry {
 
     /// Snapshot the number of active subscriptions per community.
     ///
-    /// Used by the usage poller to emit `buzz_community_subscriptions{community}`.
+    /// The usage poller sums it into `buzz_total_subscriptions`.
     /// Snapshotting avoids gauge drift from mismatched inc/dec across communities.
     pub fn per_community_subscriptions(&self) -> std::collections::HashMap<CommunityId, u64> {
         let mut counts: std::collections::HashMap<CommunityId, u64> =
