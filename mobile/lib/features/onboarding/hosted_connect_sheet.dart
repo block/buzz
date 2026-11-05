@@ -99,7 +99,7 @@ class HostedConnectSheet extends HookConsumerWidget {
             ? 'Choose a backed-up identity to connect to Builderlab. Your other backups and saved community keys will be kept. This app cannot change the selected Builderlab identity later.'
             : flow.identityChoices.any((choice) => choice.fromCloud)
             ? 'Use your Builderlab identity on this device? It differs from your saved community identities. Those keys and your cloud backups will be kept. This app cannot change the selected Builderlab identity later.'
-            : 'Choose the identity to connect to Builderlab. It will be bound to your account and backed up. Existing keys will be kept. This app cannot change the selected Builderlab identity later.',
+            : 'Choose the identity to connect to Builderlab${flow.canCreateIdentity ? ', or create a new one' : ''}. It will be bound to your account and backed up. Existing keys will be kept. This app cannot change the selected Builderlab identity later.',
       HostedFlowStage.profile =>
         'What should people in this community call you? You can add a photo in Settings.',
       HostedFlowStage.acceptPolicy =>
@@ -161,6 +161,12 @@ class HostedConnectSheet extends HookConsumerWidget {
             ),
           ),
         ),
+      if (stage == HostedFlowStage.chooseIdentity && flow.canCreateIdentity)
+        FilledButton(
+          style: actionStyle,
+          onPressed: flow.createIdentity,
+          child: const Text('Create a new identity'),
+        ),
       if (stage == HostedFlowStage.setupIdentity) ...[
         if (flow.canCreateIdentity) ...[
           FilledButton(
@@ -217,6 +223,11 @@ class HostedConnectSheet extends HookConsumerWidget {
         FilledButton(
           onPressed: flow.skipConflictingCommunity,
           child: const Text('Keep saved identity and skip'),
+        ),
+      if (flow.canChooseDifferentIdentity)
+        FilledButton(
+          onPressed: flow.chooseDifferentIdentity,
+          child: const Text('Choose a different identity'),
         ),
       if (flow.canSkipFailedCommunity)
         TextButton(
