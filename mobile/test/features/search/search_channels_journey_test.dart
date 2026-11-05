@@ -142,6 +142,55 @@ void main() {
     expect(find.text("No results for 'ada'"), findsOneWidget);
   });
 
+  testWidgets('live channel events never reorder shown results', (
+    tester,
+  ) async {
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    final channels = _DirectoryChannels();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(() => channels),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'team');
+    await tester.pump(const Duration(milliseconds: 300));
+    final shown = find.byKey(
+      const ValueKey('search-channel-row-team-4things-id'),
+    );
+    final arrived = find.byKey(const ValueKey('search-channel-row-team-id'));
+    expect(shown, findsOneWidget);
+
+    // A live event adds a better match. Rows stay put under the finger.
+    channels.state = AsyncData([
+      ...channels.state.requireValue,
+      _channel('team', isMember: true),
+    ]);
+    await tester.pump();
+    expect(arrived, findsNothing);
+    expect(shown, findsOneWidget);
+
+    // The next query ranks the current list.
+    await tester.enterText(find.byType(TextField), 'team ');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(arrived, findsOneWidget);
+    expect(
+      tester.getTopLeft(arrived).dy,
+      lessThan(tester.getTopLeft(shown).dy),
+    );
+  });
+
   testWidgets('a failed directory offers a retry instead of no results', (
     tester,
   ) async {

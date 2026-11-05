@@ -190,10 +190,13 @@ class SearchNotifier extends Notifier<SearchState> {
     _usersPending = false;
     _directoryLoad = null;
     _directoryAttempted = false;
-    // Channel rows come from the loaded channel list, which gains open
-    // channels when the directory arrives. Re-rank whenever either changes;
-    // the directory status for this community also drives the spinner.
-    ref.listen(channelsProvider, (_, _) => _refreshChannels());
+    // Channel rows are ranked once per query, so live channel events never
+    // reorder rows under a finger. They are ranked again only when the list
+    // first loads and when the directory adds open channels; the directory
+    // status for this community also drives the spinner.
+    ref.listen(channelsProvider, (previous, next) {
+      if (previous?.asData == null && next.asData != null) _refreshChannels();
+    });
     ref.listen(
       channelDirectoryLoadStatusProvider,
       (_, _) => _refreshChannels(),
