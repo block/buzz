@@ -110,8 +110,8 @@ in `_router`; a `.route(...)` elsewhere is a scanner error. It resolves a
 `.nest(...)` prefix only when the relay's `build_router` passes a literal
 or a resolved string constant and a direct call to another recognized router
 function. It does not expand macros or interpret dynamic paths, prefixes or
-arbitrary router composition. Service-style calls and unsupported nesting or merging are errors,
-rather than silently omitted registrations. The existing root merge aliases and
+arbitrary router composition. Service-style calls and unsupported nesting or
+merging are errors, rather than silently omitted registrations. The existing root merge aliases and
 Git settings merge are explicit, single-use exceptions; their builders' direct
 routes remain inventoried. It also does not derive auth or
 restriction policy from handler code, or prove that the named regression
