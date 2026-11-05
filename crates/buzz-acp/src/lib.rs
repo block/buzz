@@ -24,6 +24,7 @@ use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
 mod usage;
+mod voice;
 
 pub use usage::TurnUsage;
 
@@ -4643,7 +4644,7 @@ fn try_native_steer(
 /// Render the prompt delta sent by [`try_native_steer`].
 fn native_steer_body(channel_id: Uuid, be: &queue::BatchEvent) -> String {
     let (tag, closing) = queue::native_steer_framing();
-    let event_block = queue::format_event_block(channel_id, None, be, None);
+    let event_block = queue::format_event_block(channel_id, None, be, None, None);
     let new_message = prompt_framing::semantic_section(tag, "");
     let event_section = prompt_framing::semantic_section_with_attributes(
         "buzz-event",

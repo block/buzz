@@ -3,6 +3,23 @@ use crate::error::CliError;
 /// Maximum content size in bytes (64 KiB).
 pub const MAX_CONTENT_BYTES: usize = 65_536;
 
+/// Sanitize a local path into a display filename for the imeta `filename` field.
+///
+/// The relay is content-addressed, so the name carries no storage meaning — it
+/// is a client-side label. Strip directory components, drop control characters,
+/// and bound the length to 255 so the value always passes relay ingest
+/// validation (`imeta filename must be 1–255 chars`, no path separators, no
+/// control characters).
+pub fn sanitize_filename(path: &str) -> String {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path).trim();
+    let cleaned: String = base.chars().filter(|c| !c.is_control()).take(255).collect();
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Maximum diff size in bytes (60 KiB).
 pub const MAX_DIFF_BYTES: usize = 61_440;
 
@@ -502,5 +519,20 @@ mod tests {
         // verbatim as if it were the patch content.
         let err = super::read_file_or_stdin("0001-does-not-exist.patch").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn sanitize_filename_strips_paths_and_controls() {
+        // The imeta `filename` field must be 1-255 chars, with no path
+        // separators and no control characters.
+        assert_eq!(
+            super::sanitize_filename("/tmp/voice-note-1.mp4"),
+            "voice-note-1.mp4"
+        );
+        assert_eq!(super::sanitize_filename("../../etc/passwd"), "passwd");
+        assert_eq!(super::sanitize_filename("a\nb.txt"), "ab.txt");
+        assert_eq!(super::sanitize_filename(""), "file");
+        assert_eq!(super::sanitize_filename("/"), "file");
+        assert!(super::sanitize_filename(&"x".repeat(400)).len() <= 255);
     }
 }

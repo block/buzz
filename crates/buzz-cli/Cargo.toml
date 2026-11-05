@@ -69,6 +69,12 @@ url = { workspace = true }
 # Persona pack parsing, validation, and resolution
 buzz-persona = { path = "../buzz-persona" }
 
+# Local speech-to-text — offline ASR for `buzz voice transcribe`
+buzz-voice = { path = "../buzz-voice" }
+
+# WAV reading for the local transcriber's fast path
+sherpa-onnx = "1.12"
+
 # Platform app-data dir resolution — locates the desktop app's
 # channel-templates.json store for `channels create --template`
 dirs = "6"

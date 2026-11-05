@@ -2399,6 +2399,37 @@ fn send_prompt_result(
     });
 }
 
+/// Transcribe every voice note in a batch, keyed by event id.
+///
+/// Returns an empty map when no voice note is present, when no speech model is
+/// configured, or when transcription fails. A voice note the agent cannot hear
+/// is still delivered as an ordinary attachment — the transcript is an
+/// addition, never a gate on delivery.
+async fn resolve_batch_transcripts(
+    batch: &crate::queue::FlushBatch,
+    rest_client: &crate::relay::RestClient,
+) -> std::collections::HashMap<String, String> {
+    let mut transcripts = std::collections::HashMap::new();
+
+    let events: Vec<&nostr::Event> = batch
+        .events
+        .iter()
+        .map(|be| &be.event)
+        .chain(batch.cancelled_events.iter().map(|be| &be.event))
+        .collect();
+
+    for event in events {
+        if crate::voice::voice_note_media(event).is_none() {
+            continue;
+        }
+        if let Some(transcript) = crate::voice::resolve_transcript(event, rest_client).await {
+            transcripts.insert(event.id.to_hex(), transcript);
+        }
+    }
+
+    transcripts
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -3126,6 +3157,11 @@ pub async fn run_prompt_task(
             );
         }
 
+        // Transcribe any voice note in this batch so the agent receives the
+        // words, not just a media URL. Best-effort: a note that cannot be
+        // transcribed still reaches the agent as an ordinary attachment.
+        let transcripts = resolve_batch_transcripts(b, &ctx.rest_client).await;
+
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
@@ -3135,6 +3171,7 @@ pub async fn run_prompt_task(
                 conversation_context: conversation_context.as_ref(),
                 conversation_context_had_session_events,
                 profile_lookup: profile_lookup.as_ref(),
+                transcripts: &transcripts,
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: standing.base_prompt,
                 system_prompt: standing.system_prompt,

@@ -407,6 +407,54 @@ impl RestClient {
         Ok(format!("Nostr {}", self.sign_nip98(method, url, body)?))
     }
 
+    /// Sign a BUD-01 media-read proof (kind:24242) for a blob GET.
+    ///
+    /// The relay's media read path does NOT accept a NIP-98 proof. `get_blob`
+    /// calls `extract_blossom_read_proof`, which hands the event to
+    /// `buzz_media::auth::verify_blossom_get_auth`; that verifier rejects
+    /// anything whose kind is not 24242 (`InvalidAuthKind`) before it looks at
+    /// any tag. It also requires non-empty content, and in Strict mode exactly
+    /// one `t`/`expiration`/`server` tag.
+    ///
+    /// A NIP-98 event (kind:27235) has `u`/`method`/`nonce` tags and empty
+    /// content, so it is rejected on all three counts. `buzz-cli` already
+    /// signs this shape (`sign_blossom_get`); this is the same proof for the
+    /// harness-side client.
+    ///
+    /// The `server` tag must be the authority the blob is served from — the
+    /// relay compares it against the bound tenant host, and a mismatch is a
+    /// `ServerMismatch` rejection in Strict mode.
+    fn sign_blossom_get(&self, url: &str) -> Result<String, RelayError> {
+        use base64::Engine;
+        use nostr::{JsonUtil, Timestamp};
+
+        let server = buzz_core::tenant::relay_url_authority(url);
+        if server.is_empty() {
+            return Err(RelayError::Http(format!(
+                "cannot sign a media GET for an unparseable URL: {url}"
+            )));
+        }
+        let expiration = (Timestamp::now().as_secs() + 60).to_string();
+        let tags = vec![
+            Tag::parse(["t", "get"])
+                .map_err(|e| RelayError::Http(format!("BUD-01 tag error: {e}")))?,
+            Tag::parse(["expiration", &expiration])
+                .map_err(|e| RelayError::Http(format!("BUD-01 tag error: {e}")))?,
+            Tag::parse(["server", &server])
+                .map_err(|e| RelayError::Http(format!("BUD-01 tag error: {e}")))?,
+        ];
+        let event = EventBuilder::new(Kind::from(24242), "Get media")
+            .tags(tags)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| RelayError::Http(format!("BUD-01 sign error: {e}")))?;
+        // The relay accepts URL-safe or standard base64; URL-safe matches what
+        // `buzz-cli` sends, so both clients present an identical header shape.
+        Ok(format!(
+            "Nostr {}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+        ))
+    }
+
     /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
     /// on transient failures (429, 502, 503, 504, timeout, connect errors).
     ///
@@ -497,6 +545,37 @@ impl RestClient {
             req.body(body_owned.clone()).send()
         })
         .await
+    }
+
+    /// Download a Blossom media blob with BUD-01 auth.
+    ///
+    /// The relay's media read path requires a signed request: an unsigned GET
+    /// is rejected with 401, so a voice note's blob is unreachable without
+    /// this. `url` is the full Blossom URL as it appears in an event's `imeta`
+    /// tag.
+    ///
+    /// The proof is kind:24242 (BUD-01), not NIP-98 (27235) — see
+    /// [`RestClient::sign_blossom_get`].
+    pub async fn download_media(&self, url: &str) -> Result<bytes::Bytes, RelayError> {
+        let auth_header = self.sign_blossom_get(url)?;
+        let response = self
+            .http
+            .get(url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| RelayError::Http(format!("media download failed: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(RelayError::Http(format!(
+                "media download returned {status}: {body}"
+            )));
+        }
+        response
+            .bytes()
+            .await
+            .map_err(|e| RelayError::Http(format!("media download body failed: {e}")))
     }
 
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
@@ -4387,6 +4466,181 @@ mod resume_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relay's media read path requires a kind:24242 (BUD-01) proof.
+    ///
+    /// `buzz_relay::api::media::get_blob` verifies the `Authorization` event
+    /// with `buzz_media::auth::verify_blossom_get_auth`, which rejects any
+    /// other kind on the kind alone (`InvalidAuthKind`) and requires non-empty
+    /// content. `download_media` used to sign a NIP-98 event (kind 27235:
+    /// `u`/`method`/`nonce`, empty content) for that GET, so every voice-note
+    /// blob fetch was rejected and transcription silently degraded to "no
+    /// transcript".
+    ///
+    /// This binds the PRODUCTION signer to the PRODUCTION verifier: reverting
+    /// the signer to the NIP-98 shape fails here.
+    mod media_read_auth_kind {
+        use super::*;
+        use buzz_media::auth::{verify_blossom_get_auth, BlossomStrictness};
+        use nostr::JsonUtil;
+
+        /// The blob's sha256, as it appears in the media path.
+        const SHA: &str = "b1bfe1031111111111111111111111111111111111111111111111111111b1";
+        /// The relay authority that serves the blob. The `server` tag has to
+        /// match the host the request is bound to.
+        const SERVER: &str = "vmi3238719.mellori-dojo.ts.net:10444";
+
+        fn rest_client(keys: Keys) -> RestClient {
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url: format!("https://{SERVER}"),
+                keys,
+                auth_tag_json: None,
+            }
+        }
+
+        /// Decode the `Authorization` header value the signer produces back
+        /// into the signed event, the way the relay's
+        /// `extract_blossom_auth` does.
+        fn decode_auth_event(header: &str) -> nostr::Event {
+            use base64::Engine;
+
+            let encoded = header
+                .strip_prefix("Nostr ")
+                .expect("the Authorization header must carry the 'Nostr ' prefix");
+            // The relay accepts URL-safe or standard base64.
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded))
+                .expect("the Authorization header must be base64");
+            let json = String::from_utf8(raw).expect("the decoded proof must be UTF-8 JSON");
+            nostr::Event::from_json(json).expect("the decoded proof must be a signed event")
+        }
+
+        #[test]
+        fn the_signed_media_read_proof_is_accepted_by_the_relays_verifier() {
+            let client = rest_client(Keys::generate());
+            let url = format!("https://{SERVER}/media/{SHA}.mp4");
+
+            let header = client
+                .sign_blossom_get(&url)
+                .expect("signing a media GET must succeed");
+            let event = decode_auth_event(&header);
+
+            // The kind is the first thing the verifier checks.
+            assert_eq!(
+                event.kind.as_u16(),
+                24242,
+                "the media read proof must be a BUD-01 event (24242), not a NIP-98 event (27235)"
+            );
+            // The verifier also requires non-empty content (BUD-11).
+            assert!(
+                !event.content.trim().is_empty(),
+                "the media read proof must carry non-empty content"
+            );
+
+            verify_blossom_get_auth(&event, SHA, Some(SERVER), BlossomStrictness::Strict)
+                .expect("the proof the harness signs must satisfy the relay's own verifier");
+        }
+
+        #[test]
+        fn a_nip98_proof_would_be_rejected_by_the_relays_verifier() {
+            // The shape `download_media` used to send. It must be rejected, so
+            // the test above cannot be satisfied by a NIP-98 event.
+            let keys = Keys::generate();
+            let url = format!("https://{SERVER}/media/{SHA}.mp4");
+            let event = EventBuilder::new(Kind::HttpAuth, "")
+                .tags(vec![
+                    Tag::parse(["u", &url]).expect("u tag"),
+                    Tag::parse(["method", "GET"]).expect("method tag"),
+                    Tag::parse(["nonce", "5c0e9a1e-1b2c-4a7d-9e3f-0a1b2c3d4e5f"])
+                        .expect("nonce tag"),
+                ])
+                .sign_with_keys(&keys)
+                .expect("sign nip98");
+
+            assert!(
+                verify_blossom_get_auth(&event, SHA, Some(SERVER), BlossomStrictness::Permissive)
+                    .is_err(),
+                "EXPECTED: the relay's media read verifier must reject a kind:27235 NIP-98 proof"
+            );
+        }
+
+        /// The end-to-end contract: the `Authorization` header that
+        /// `download_media` actually puts on the wire must satisfy the relay's
+        /// own verifier.
+        ///
+        /// The test above exercises the signer directly, so it would still pass
+        /// if `download_media` went on sending a NIP-98 proof. This one drives
+        /// the real method against a local HTTP server, captures the header the
+        /// production code produced, and hands THAT to the verifier. Reverting
+        /// `download_media` to the NIP-98 shape fails here.
+        #[tokio::test]
+        async fn download_media_presents_a_proof_the_relays_verifier_accepts() {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind media test server");
+            let authority = listener.local_addr().expect("test server address");
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+            let server_captured = captured.clone();
+
+            let server = tokio::spawn(async move {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = vec![0; 8192];
+                let bytes_read = socket.read(&mut request).await.unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..bytes_read]).to_string();
+                let auth = request
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                    .and_then(|line| line.split_once(':'))
+                    .map(|(_, value)| value.trim().to_string());
+                *server_captured.lock().expect("lock captured header") = auth;
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            });
+
+            let client = RestClient {
+                http: reqwest::Client::new(),
+                base_url: format!("http://{authority}"),
+                keys: Keys::generate(),
+                auth_tag_json: None,
+            };
+            // The server's authority is the host the request binds to, so the
+            // `server` tag and the bound host agree by construction.
+            let url = format!("http://{authority}/media/{SHA}.mp4");
+            let result = client.download_media(&url).await;
+            server.await.expect("media test server task");
+
+            assert!(
+                result.is_ok(),
+                "the media GET must succeed against a server that answers 200"
+            );
+            let header = captured
+                .lock()
+                .expect("lock captured header")
+                .clone()
+                .expect("download_media must send an Authorization header");
+            let event = decode_auth_event(&header);
+            assert_eq!(
+                event.kind.as_u16(),
+                24242,
+                "the Authorization header download_media sends must be a BUD-01 event (24242), \
+                 not a NIP-98 event (27235)"
+            );
+            verify_blossom_get_auth(
+                &event,
+                SHA,
+                Some(&authority.to_string()),
+                BlossomStrictness::Strict,
+            )
+            .expect("the proof download_media sends must satisfy the relay's own verifier");
+        }
+    }
 
     #[test]
     fn channel_type_comes_from_the_first_t_tag_not_a_label() {

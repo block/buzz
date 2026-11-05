@@ -2,10 +2,16 @@
 
 pub mod imported;
 pub mod pocket;
+pub mod transcribe;
 
 pub use pocket::{
     april_model_info, load_text_to_speech, load_voice_style, PocketModelInfo, PocketTts,
     VoiceStyle, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
+};
+
+pub use transcribe::{
+    transcribe, transcribe_wav_file, ModelType, TranscribeConfig, TranscribeError,
+    MAX_TRANSCRIBE_SECONDS, TRANSCRIBE_SAMPLE_RATE,
 };
 
 /// One immutable artifact required by the April Pocket bundle.
