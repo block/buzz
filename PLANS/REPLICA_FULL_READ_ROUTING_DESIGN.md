@@ -14,8 +14,12 @@ routing**: the read may be served from a read replica when
 `RoutePredicate::for_query` derives from the query shape. The seam fails closed
 to the writer on replica errors, with one deliberate exception: a statement
 cancelled by `statement_timeout` (SQLSTATE `57014`) is surfaced rather than
-re-run, because the writer would run the same slow statement. It is a genuine
-no-op until the budget is configured (`crates/buzz-db/src/lib.rs`).
+re-run, because the writer would run the same slow statement. A busy reader
+is the other exception: a subscription-history read that cannot get a reader
+connection within its bounded wait is rejected as retryable instead of moving
+to the writer, and history reads are capped per pod below the reader pool
+size (`Db::route_read`). It is a genuine no-op until the budget is configured
+(`crates/buzz-db/src/lib.rs`).
 
 ## Routing rule
 

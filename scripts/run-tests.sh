@@ -404,6 +404,9 @@ run_unit_tests() {
   run_test_step "buzz-relay API query parsing tests" \
     cargo test -p buzz-relay --lib api::parse_query_tests:: -- --nocapture
 
+  run_test_step "buzz-relay API database error mapping tests" \
+    cargo test -p buzz-relay --lib api::db_read_error_tests:: -- --nocapture
+
   run_test_step "buzz-relay profile search request tests" \
     cargo test -p buzz-relay --lib api::profiles:: -- --nocapture
 

@@ -30,8 +30,9 @@ final videoPreviewFrameLoaderProvider = Provider<VideoPreviewFrameLoader>((
   ref,
 ) {
   // The native player fetches the URL itself, outside the hosted HTTP client.
-  final headersFor = ref.watch(nativeMediaHeadersProvider);
-  return (url) => _loadVideoPreviewFrame(url, headers: headersFor(url));
+  final headersFor = ref.watch(freshNativeMediaHeadersProvider);
+  return (url) async =>
+      _loadVideoPreviewFrame(url, headers: await headersFor(url));
 });
 
 class _MessageVideoPreview extends HookConsumerWidget {

@@ -432,6 +432,23 @@ open (`open_transaction`). Each close increments
 `buzz_db_reader_release_closed_total{reason}`, a counter with those three
 series. A rise in `timeout` means reader sockets stopped answering.
 
+Subscription-history reads are the exception to the writer fallback when the
+reader is merely busy. Each pod admits at most its reader pool size less one
+fifth (16 at the default pool size of 20) history reads to the reader at
+once, which normally leaves authorization reads a free reader connection
+(connections still finishing their release can briefly take it). A history read
+that waits more than 1s for admission, or misses the reader's 150ms acquire
+budget while every reader connection is busy, is rejected with the retryable
+`CLOSED` `error: database error` instead of moving to the writer, where it
+would compete with authentication and tenant lookups. Each rejection
+increments `buzz_db_route_decision{decision="rejected"}`, with
+`reason="history_read_cap"` or `"reader_acquire_timeout"`. A history read
+the reader cannot serve for other reasons (unreachable, validation failure,
+proof timeout, stale replica) still falls back to the writer. The
+compatibility families `buzz_db_pool_acquire_wait_seconds` and
+`buzz_db_pool_acquisitions_total` carry `operation` as well as `pool_role`
+and `outcome`.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay

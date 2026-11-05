@@ -942,7 +942,7 @@ impl Db {
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             match crate::thread::get_thread_replies_on(
                 &mut tx,
@@ -1104,7 +1104,8 @@ impl Db {
     ///
     /// Every replica failure except a cancelled statement (57014, which the
     /// writer would only repeat) fails closed to the writer and is recorded
-    /// in `buzz_db_route_decision`.
+    /// in `buzz_db_route_decision`. A busy reader rejects the read as
+    /// retryable instead (see [`Db::route_read`]).
     #[datastore_span(name = "get_channel_window", system = "postgresql")]
     pub async fn get_channel_window_with_session(
         &self,
@@ -1125,7 +1126,7 @@ impl Db {
                 RoutePredicate::from_channel_cursor(channel_id, &cursor),
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::thread::get_channel_window_on(

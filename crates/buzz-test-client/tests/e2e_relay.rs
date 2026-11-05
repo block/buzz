@@ -303,8 +303,14 @@ async fn test_invite_mint_and_claim_admits_new_pubkey() {
 }
 
 /// Claiming an invite joins the new member to the community's default
-/// channels: the relay owner flags one, the claimer receives its kind:44100
-/// and is on its kind:39002 roster, and a repeat claim is a no-op.
+/// channels: the relay owner flags one, the claim puts the claimer on its
+/// kind:39002 roster and stores one relay-signed kind:44100 for them, and a
+/// repeat claim is a no-op.
+///
+/// The claimer opens no WebSocket until the claim has answered. The e2e
+/// relay runs without `BUZZ_REQUIRE_RELAY_MEMBERSHIP`, so a NIP-42 admission
+/// would join them to the default channels itself and leave the claim
+/// nothing to join.
 #[tokio::test]
 #[ignore]
 async fn test_invite_claim_auto_joins_default_channel() {
@@ -319,23 +325,6 @@ async fn test_invite_claim_auto_joins_default_channel() {
         (true, String::new())
     );
 
-    let mut joiner_client = BuzzTestClient::connect(&url, &joiner)
-        .await
-        .expect("connect joiner");
-    let sid = sub_id("auto-join-notif");
-    let filter = Filter::new()
-        .kind(Kind::Custom(44100))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), joiner_hex.as_str())
-        .since(nostr::Timestamp::now() - 5u64);
-    joiner_client
-        .subscribe(&sid, vec![filter])
-        .await
-        .expect("subscribe to membership notifications");
-    joiner_client
-        .collect_until_eose(&sid, Duration::from_secs(5))
-        .await
-        .expect("EOSE for membership sub");
-
     let mint_response = invite_post(&relay_owner, "/api/invites", "{}").await;
     assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
     let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
@@ -344,6 +333,7 @@ async fn test_invite_claim_auto_joins_default_channel() {
         .and_then(serde_json::Value::as_str)
         .expect("mint response includes code");
     let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claimed_since = nostr::Timestamp::now() - 5u64;
     let claim_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
     assert_eq!(claim_response.status(), reqwest::StatusCode::OK);
     let claim_json: serde_json::Value = claim_response.json().await.expect("claim JSON");
@@ -351,34 +341,59 @@ async fn test_invite_claim_auto_joins_default_channel() {
         claim_json.get("status").and_then(serde_json::Value::as_str),
         Some("joined")
     );
-
-    // Other tests may leave their own default channels flagged on this
-    // shared relay; wait for the notification about ours.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let msg = joiner_client
-            .recv_event(remaining)
-            .await
-            .expect("recv kind:44100 notification for the default channel");
-        if let RelayMessage::Event { event, .. } = msg {
-            let channel = event
-                .tags
-                .iter()
-                .find(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
-                .and_then(|tag| tag.as_slice().get(1).cloned());
-            if channel.as_deref() == Some(channel_id.as_str()) {
-                break;
-            }
-        }
-    }
-    joiner_client.disconnect().await.ok();
     assert_eq!(
         member_role(&url, &relay_owner, &channel_id, &joiner_hex)
             .await
             .as_deref(),
         Some("member"),
         "the relay-signed kind:39002 roster lists the claimer"
+    );
+
+    // The claim stores its notice before it answers, so the notice comes
+    // back as history, before EOSE.
+    let mut joiner_client = BuzzTestClient::connect(&url, &joiner)
+        .await
+        .expect("connect joiner");
+    let sid = sub_id("auto-join-notif");
+    let filter = Filter::new()
+        .kind(Kind::Custom(44100))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), joiner_hex.as_str())
+        .since(claimed_since);
+    joiner_client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to membership notifications");
+    let notices = joiner_client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE for membership sub");
+    joiner_client.disconnect().await.ok();
+    // Other tests may leave their own default channels flagged on this
+    // shared relay; count only the notices about ours.
+    let ours: Vec<_> = notices
+        .iter()
+        .filter(|event| {
+            event.tags.iter().any(|tag| {
+                let tag = tag.as_slice();
+                tag.len() >= 2 && tag[0] == "h" && tag[1] == channel_id
+            })
+        })
+        .collect();
+    assert_eq!(
+        ours.len(),
+        1,
+        "one notice for the default channel: {notices:?}"
+    );
+    let info: serde_json::Value = reqwest::get(format!("{}/info", relay_http_url()))
+        .await
+        .expect("GET /info")
+        .json()
+        .await
+        .expect("NIP-11 JSON");
+    assert_eq!(
+        info.get("self").and_then(serde_json::Value::as_str),
+        Some(ours[0].pubkey.to_hex().as_str()),
+        "the relay signs the notice"
     );
 
     let repeat_response = invite_post(&joiner, "/api/invites/claim", &claim_body).await;
