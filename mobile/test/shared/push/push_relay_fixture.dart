@@ -8,18 +8,24 @@ final relayKeys = nostr.Keys('2' * 64);
 class DirectPushHttp extends HttpOverrides {}
 
 class PushRelayFixture {
-  PushRelayFixture(this.server, this.failMetadata);
+  PushRelayFixture(this.server, this.failMetadata, this.requiredIdentity);
   final HttpServer server;
   bool failMetadata;
+  final String? requiredIdentity;
+  final upgradeIdentities = <String?>[];
   final sockets = <WebSocket>[];
   final leases = <Map<String, dynamic>>[];
   int nip11 = 0;
   String get httpUrl => 'http://127.0.0.1:${server.port}';
   String get wsUrl => 'ws://127.0.0.1:${server.port}';
-  static Future<PushRelayFixture> start({bool failMetadata = false}) async {
+  static Future<PushRelayFixture> start({
+    bool failMetadata = false,
+    String? requiredIdentity,
+  }) async {
     final r = PushRelayFixture(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
       failMetadata,
+      requiredIdentity,
     );
     r.server.listen(r.handle);
     return r;
@@ -68,6 +74,13 @@ class PushRelayFixture {
                 },
         ),
       );
+      await request.response.close();
+      return;
+    }
+    final identity = request.headers.value('nostr-federated-identity');
+    upgradeIdentities.add(identity);
+    if (requiredIdentity != null && identity != requiredIdentity) {
+      request.response.statusCode = HttpStatus.unauthorized;
       await request.response.close();
       return;
     }
