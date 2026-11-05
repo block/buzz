@@ -60,7 +60,7 @@ test("saved desktop community: required, retryable failure, recovery and keys su
     card.getByText("Upgrade Buzz to join this community"),
   ).toBeVisible();
   await expect(card).toContainText(
-    "Download the latest Buzz client at builderlab.xyz to continue.",
+    "Download the latest Buzz client at buzz.xyz to continue.",
   );
   await card.getByRole("button", { name: "Download latest Buzz" }).click();
   expect(
@@ -69,13 +69,13 @@ test("saved desktop community: required, retryable failure, recovery and keys su
         ?.filter((call) => call.command === "plugin:opener|open_url")
         .map((call) => call.payload.url),
     ),
-  ).toEqual(["https://builderlab.xyz"]);
+  ).toEqual(["https://buzz.xyz"]);
   await page.evaluate(() => {
     (window as PolicyWindow).__BUZZ_E2E__.mock.openerError =
       "No browser available";
   });
   await card.getByRole("button", { name: "Download latest Buzz" }).click();
-  await expect(card.getByRole("alert")).toContainText("https://builderlab.xyz");
+  await expect(card.getByRole("alert")).toContainText("https://buzz.xyz");
   await card.getByRole("button", { name: "Change community address" }).click();
   await expect(card).toBeHidden();
   // Returning from address editing keeps the required verdict.
@@ -173,7 +173,7 @@ test("required community can switch to a saved free community and join another r
   ).toBeVisible();
   await expect(card).toContainText("new-required.example");
   await expect(card).toContainText(
-    "Download the latest Buzz client at builderlab.xyz to continue.",
+    "Download the latest Buzz client at buzz.xyz to continue.",
   );
   await expect(
     card.getByRole("button", { name: "Download latest Buzz" }),

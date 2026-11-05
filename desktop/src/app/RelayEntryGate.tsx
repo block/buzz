@@ -44,22 +44,20 @@ export function RelayEntryGate({
           </DialogDescription>
           <p className="break-all text-sm text-muted-foreground">{relayUrl}</p>
           <p className="text-sm">
-            Download the latest Buzz client at builderlab.xyz to continue.
+            Download the latest Buzz client at buzz.xyz to continue.
           </p>
           <Button
             onClick={() => {
               setOpenError(false);
-              void openUrl("https://builderlab.xyz").catch(() =>
-                setOpenError(true),
-              );
+              void openUrl("https://buzz.xyz").catch(() => setOpenError(true));
             }}
           >
             Download latest Buzz
           </Button>
           {openError ? (
             <p role="alert" className="text-sm">
-              Could not open the download page. Open https://builderlab.xyz in
-              your browser to download the latest Buzz client.
+              Could not open the download page. Open https://buzz.xyz in your
+              browser to download the latest Buzz client.
             </p>
           ) : null}
           <Button variant="outline" disabled={state.pending} onClick={onRetry}>

@@ -36,8 +36,8 @@ reach a fallback dial. Only explicit required policy opens the upgrade modal. Sw
 communities invalidates pending checks. The card does not
 reset keys or remove saved communities.
 
-The upgrade card directs public users to `https://builderlab.xyz` to download
-an up-to-date Buzz client. This default applies to every supported desktop
-platform and required community, including unconfigured public release builds.
+The upgrade card directs public users to the fixed `https://buzz.xyz` URL to
+download an up-to-date Buzz client on every supported desktop platform and for
+every required community.
 If the browser cannot open, the card shows the public URL for manual navigation.
 Discovery never supplies a trusted download or sign-in origin.
