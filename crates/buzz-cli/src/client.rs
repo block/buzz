@@ -597,6 +597,9 @@ impl BuzzClient {
         proof: Proof<'_>,
     ) -> Result<reqwest::RequestBuilder, CliError> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        // Evidence first: a refresh may wait out adapter retries, and the
+        // proof must be signed after it, just before sending, to stay fresh.
+        let assertion = self.credentials.evidence(&self.relay_url).await?;
         let authorization = match proof {
             Proof::Nip98 { method, url, body } => {
                 format!("Nostr {}", self.credentials.nip98(method, url, body).await?)
@@ -623,7 +626,7 @@ impl BuzzClient {
         if let Some(tag) = self.credentials.auth_tag() {
             req = req.header("x-auth-tag", sensitive(tag.json.clone())?);
         }
-        if let Some(assertion) = self.credentials.evidence(&self.relay_url).await? {
+        if let Some(assertion) = assertion {
             req = req.header(
                 FEDERATED_IDENTITY_HEADER,
                 sensitive(format!("Bearer {assertion}"))?,
@@ -2908,6 +2911,63 @@ mod federated_identity_route_tests {
         seen.sort();
         seen.dedup();
         seen
+    }
+
+    /// The relay proof is signed after the assertion arrives, so a slow
+    /// mint (adapter retries can exceed NIP-98's 60 s window) cannot age it.
+    #[tokio::test]
+    async fn the_relay_proof_is_signed_after_a_slow_mint() {
+        use base64::Engine;
+        let minted_at: Arc<Mutex<u64>> = Arc::default();
+        let proofs: Arc<Mutex<Vec<String>>> = Arc::default();
+        let app = axum::Router::new()
+            .route(
+                "/v1/identity/assertions",
+                axum::routing::post({
+                    let minted_at = minted_at.clone();
+                    move |body: axum::body::Bytes| {
+                        let minted_at = minted_at.clone();
+                        async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                            let req: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            let pubkey = req["nostr_pubkey"].as_str().unwrap_or_default();
+                            let now = nostr::Timestamp::now().as_secs();
+                            *minted_at.lock().unwrap() = now;
+                            axum::Json(serde_json::json!({
+                                "assertion": test_support::assertion(pubkey, now + 300),
+                                "nostr_pubkey": pubkey,
+                                "expires_at": now + 300,
+                            }))
+                        }
+                    }
+                }),
+            )
+            .fallback({
+                let proofs = proofs.clone();
+                move |headers: HeaderMap| {
+                    let proofs = proofs.clone();
+                    async move {
+                        let auth = headers["authorization"].to_str().unwrap().to_owned();
+                        proofs.lock().unwrap().push(auth);
+                        (StatusCode::OK, "{}")
+                    }
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        client(&base, true).get_authed("/api/get").await.unwrap();
+
+        let proof = proofs.lock().unwrap()[0].clone();
+        let json = base64::engine::general_purpose::STANDARD
+            .decode(proof.trim_start_matches("Nostr "))
+            .unwrap();
+        let event: nostr::Event = serde_json::from_slice(&json).unwrap();
+        assert!(
+            event.created_at.as_secs() >= *minted_at.lock().unwrap(),
+            "the proof was signed before the assertion arrived"
+        );
     }
 
     #[tokio::test]
