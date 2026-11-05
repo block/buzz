@@ -9,10 +9,12 @@ async fn policy_state(operator: &Keys) -> Arc<AppState> {
     let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
         .await
         .expect("creation policy tests require Postgres");
-    buzz_db::Db::from_pool(pool)
-        .migrate()
-        .await
-        .expect("test schema");
+    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+        buzz_db::Db::from_pool(pool)
+            .migrate()
+            .await
+            .expect("test schema");
+    }
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned());
     operator_test_state_with_policy_and_redis(std::slice::from_ref(operator), None, &redis_url)
