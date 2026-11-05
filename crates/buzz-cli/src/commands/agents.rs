@@ -3,7 +3,8 @@ use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identit
 use nostr::PublicKey;
 use serde_json::json;
 
-use super::agent_activity;
+use super::agent_control::Control;
+use super::{agent_activity, agent_control};
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -172,6 +173,28 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             limit,
             wait,
         } => agent_activity::run(client, &agent, since, limit, wait).await,
+
+        AgentsCmd::CancelTurn {
+            agent,
+            channel,
+            wait,
+        } => agent_control::run(client, &agent, &channel, Control::CancelTurn, wait).await,
+
+        AgentsCmd::SetModel {
+            agent,
+            channel,
+            model,
+            wait,
+        } => {
+            agent_control::run(
+                client,
+                &agent,
+                &channel,
+                Control::SwitchModel { model_id: model },
+                wait,
+            )
+            .await
+        }
     }
 }
 
@@ -198,7 +221,7 @@ fn ensure_owner(
             "no profile found for agent {agent}"
         ))),
         Err(failure) => Err(CliError::Auth(format!(
-            "could not confirm from the agent's profile that you own it; only the owner can read its activity: {}",
+            "could not confirm from the agent's profile that you own it; only the owner can read its activity or control it: {}",
             failure.message()
         ))),
     }

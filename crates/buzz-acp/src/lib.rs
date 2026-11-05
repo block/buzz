@@ -6790,6 +6790,47 @@ mod owner_control_command_tests {
         }
     }
 
+    #[tokio::test]
+    async fn sdk_control_payloads_are_understood_by_the_harness_handlers() {
+        let ch = Uuid::new_v4();
+        let cancel = buzz_sdk::build_cancel_turn_control_payload(ch, "req-cancel").unwrap();
+        let switch =
+            buzz_sdk::build_switch_model_control_payload(ch, "new-model", "req-switch").unwrap();
+        for (payload, signal, request_id) in [
+            (cancel, ControlSignal::Cancel, "req-cancel"),
+            (
+                switch,
+                ControlSignal::SwitchModel {
+                    model_id: "new-model".into(),
+                    request_id: Some("req-switch".into()),
+                },
+                "req-switch",
+            ),
+        ] {
+            let mut pool = AgentPool::from_slots(vec![]);
+            let scope = scope::SessionScope::Conversation { channel_id: ch };
+            pool.record_scope_owner(scope.clone(), 0);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            insert_task_meta(&mut pool, 0, scope, tx);
+            let observer = observer::ObserverHandle::in_process();
+            match payload["type"].as_str() {
+                Some("cancel_turn") => {
+                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer))
+                }
+                Some("switch_model") => {
+                    handle_switch_model_control(&payload, &mut pool, Some(&observer))
+                }
+                other => panic!("unexpected control type {other:?}"),
+            }
+            assert_eq!(rx.await.unwrap(), signal);
+            let result = &observer.snapshot()[0];
+            assert_eq!(result.payload["type"], payload["type"]);
+            assert_eq!(result.payload["status"], "sent");
+            assert_eq!(result.payload["requestId"], request_id);
+            assert_eq!(result.channel_id, Some(ch.to_string()));
+        }
+    }
+
     // Fix #2: mid-turn steer/interrupt must target the exact thread scope, not
     // “the first task in the channel” — two threads in one channel must not
     // interrupt each other.
