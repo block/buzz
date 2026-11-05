@@ -722,6 +722,34 @@ void main() {
         expect(messageMenus, 1);
         expect(find.text('Copy link'), findsNothing);
 
+        // A finger on the link tints it until the pointer moves away.
+        Color? linkTint() =>
+            (tester
+                        .widget<DecoratedBox>(
+                          find
+                              .ancestor(
+                                of: find.text('report'),
+                                matching: find.byType(DecoratedBox),
+                              )
+                              .first,
+                        )
+                        .decoration
+                    as BoxDecoration)
+                .color;
+        expect(linkTint(), isNull);
+        final press = await tester.startGesture(
+          tester.getCenter(find.text('report')),
+        );
+        await tester.pump();
+        expect(linkTint(), isNotNull);
+        await press.moveBy(const Offset(0, 40));
+        await tester.pump();
+        expect(linkTint(), isNull);
+        await press.up();
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(opened, isEmpty);
+
         // A hold on the link opens its own actions instead.
         await tester.longPress(find.text('report'));
         await tester.pumpAndSettle();

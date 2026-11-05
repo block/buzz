@@ -739,6 +739,9 @@ class MessageContent extends HookConsumerWidget {
     return _LinkLongPress(
       url: url,
       onOpen: () => unawaited(openLink()),
+      highlightColor: (baseStyle.color ?? context.colors.primary).withValues(
+        alpha: 0.2,
+      ),
       child: GestureDetector(onTap: openLink, child: renderedLink),
     );
   }

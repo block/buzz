@@ -7,20 +7,27 @@ part of '../message_content.dart';
 /// Pointer events reach the deepest recognizer first, so at equal deadlines
 /// the link's timer fires and wins the arena before the message row's does,
 /// the same way reaction pills claim their own hold.
-class _LinkLongPress extends StatelessWidget {
+class _LinkLongPress extends HookWidget {
   final String url;
   final VoidCallback onOpen;
+
+  /// Tint painted behind the link while a finger is down on it.
+  final Color highlightColor;
   final Widget child;
 
   const _LinkLongPress({
     required this.url,
     required this.onOpen,
+    required this.highlightColor,
     required this.child,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Only this link rebuilds on press; the surrounding markdown does not.
+    final pressed = useState(false);
     void open() => _showLinkActions(context, url: url, onOpen: onOpen);
+    void release() => pressed.value = false;
 
     return Semantics(
       onLongPress: open,
@@ -33,10 +40,26 @@ class _LinkLongPress extends StatelessWidget {
                       ? iosMessageLongPressDuration
                       : null,
                 ),
-                (recognizer) => recognizer.onLongPress = open,
+                (recognizer) {
+                  // Fires on every pointer down, so a tap highlights too; a
+                  // tap or scroll rejects the hold and clears it via cancel.
+                  recognizer
+                    ..onLongPressDown = (_) {
+                      pressed.value = true;
+                    }
+                    ..onLongPressCancel = release
+                    ..onLongPress = open
+                    ..onLongPressUp = release;
+                },
               ),
         },
-        child: child,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: pressed.value ? highlightColor : null,
+            borderRadius: BorderRadius.circular(Radii.xs),
+          ),
+          child: child,
+        ),
       ),
     );
   }
@@ -50,7 +73,9 @@ void _showLinkActions(
 }) {
   unawaited(HapticFeedback.mediumImpact());
   final uri = Uri.tryParse(url);
-  final shareable =
+  // Web links share as URLs so the share sheet can preview them; any other
+  // link (buzz://, mailto:) shares as its text.
+  final isWebLink =
       uri != null && (uri.scheme == 'http' || uri.scheme == 'https');
   unawaited(
     showBuzzModalBottomSheet<void>(
@@ -109,28 +134,28 @@ void _showLinkActions(
                           );
                         },
                       ),
-                      if (shareable)
-                        ListTile(
-                          leading: const Icon(BuzzIcons.share2),
-                          title: const Text('Share link'),
-                          onTap: () {
-                            final renderBox =
-                                context.findRenderObject() as RenderBox?;
-                            final shareOrigin = renderBox == null
-                                ? null
-                                : renderBox.localToGlobal(Offset.zero) &
-                                      renderBox.size;
-                            Navigator.of(sheetContext).pop();
-                            unawaited(
-                              SharePlus.instance.share(
-                                ShareParams(
-                                  uri: uri,
-                                  sharePositionOrigin: shareOrigin,
-                                ),
+                      ListTile(
+                        leading: const Icon(BuzzIcons.share2),
+                        title: const Text('Share link'),
+                        onTap: () {
+                          final renderBox =
+                              context.findRenderObject() as RenderBox?;
+                          final shareOrigin = renderBox == null
+                              ? null
+                              : renderBox.localToGlobal(Offset.zero) &
+                                    renderBox.size;
+                          Navigator.of(sheetContext).pop();
+                          unawaited(
+                            SharePlus.instance.share(
+                              ShareParams(
+                                uri: isWebLink ? uri : null,
+                                text: isWebLink ? null : url,
+                                sharePositionOrigin: shareOrigin,
                               ),
-                            );
-                          },
-                        ),
+                            ),
+                          );
+                        },
+                      ),
                     ],
                   ),
                 ],
