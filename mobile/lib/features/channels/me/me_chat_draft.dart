@@ -107,7 +107,11 @@ class _MeChatDraft extends HookConsumerWidget {
           saved?.name ?? startingMeChatTitle(content),
           recipient,
           saved?.project ?? project.value,
-          initialContent: saved?.initialMessage?.content ?? content,
+          // A saved creation resends exactly what it froze. Older builds saved
+          // named creations without a first message; those finish without one.
+          initialContent: saved == null
+              ? content
+              : saved.initialMessage?.content,
           initialMediaTags: mediaTags,
         );
         if (context.mounted) {
@@ -119,6 +123,11 @@ class _MeChatDraft extends HookConsumerWidget {
           composerBusy.value = false;
           pending.value = MeChatCreation.pending(sync);
           error.value = failure.toString().replaceFirst('Bad state: ', '');
+          // Conflicting pending Solo edits block every chat creation until the
+          // user decides. The saved creation stays, so Retry finishes it.
+          if (failure is MeRecoveryConflict) {
+            await offerMeRecovery(context, sync);
+          }
         }
         // ComposeBar treats StateError as a community switch. Preserve the
         // actual failure and its draft through its ordinary error path.
@@ -188,6 +197,7 @@ class _MeChatDraft extends HookConsumerWidget {
                       scopeChanged
                           ? 'Your account or community changed. Return to Solo to start a chat.'
                           : pending.value?.initialMessage?.content ??
+                                pending.value?.name ??
                                 'What would you like to work on?',
                       textAlign: TextAlign.center,
                       style: context.textTheme.bodyMedium?.copyWith(
@@ -212,7 +222,7 @@ class _MeChatDraft extends HookConsumerWidget {
                           : () async {
                               try {
                                 await send(
-                                  pending.value!.initialMessage!.content,
+                                  pending.value!.initialMessage?.content ?? '',
                                   const [],
                                 );
                               } catch (_) {
