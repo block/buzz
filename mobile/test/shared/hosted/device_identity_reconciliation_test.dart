@@ -248,6 +248,65 @@ void main() {
     },
   );
 
+  test(
+    'unclaimed account offers a new identity beside saved keys and keeps them',
+    () async {
+      await secure.write(
+        key: 'buzz_communities',
+        value: jsonEncode([record(first, 'Community')]),
+      );
+      await AccountIdentityStore(subject: 'older').create(second.nsec);
+      final before = await secure.readAll();
+      final pending = await service.resolve();
+      expect(pending.state, HostedIdentityState.needsSelection);
+      expect(pending.canCreate, isTrue);
+      final created = await service.resolve(
+        createNew: true,
+        offered: pending.choices.map((item) => item.pubkey).toSet(),
+      );
+      expect(created.state, HostedIdentityState.needsBinding);
+      expect(created.pubkey, isNot(anyOf(first.public, second.public)));
+      expect((await store.read())!.pubkey, created.pubkey);
+      for (final entry in before.entries) {
+        expect(await secure.read(key: entry.key), entry.value);
+      }
+      expect(account.calls.every((path) => path.endsWith('/status')), isTrue);
+    },
+  );
+
+  test(
+    'creation never passes over a device key the user was not shown',
+    () async {
+      await secure.write(key: 'buzz_nsec', value: first.nsec);
+      final result = await service.resolve(createNew: true);
+      expect(result.state, HostedIdentityState.needsAuthoritativeAbsence);
+      expect(await store.read(), isNull);
+    },
+  );
+
+  test(
+    'bound or backed-up accounts never offer or create a new identity',
+    () async {
+      await secure.write(key: 'buzz_nsec', value: first.nsec);
+      account
+        ..backups = [second.public]
+        ..recovery = {
+          'backups': [],
+          'failed_backup_ids': ['pending'],
+        };
+      expect((await service.resolve()).canCreate, isFalse);
+      account
+        ..backups = []
+        ..bound = first.public;
+      final bound = await service.resolve(
+        createNew: true,
+        offered: {first.public},
+      );
+      expect(bound.canCreate, isFalse);
+      expect(bound.pubkey, first.public);
+    },
+  );
+
   test('cancelled resolution cannot adopt or generate', () async {
     await secure.write(key: 'buzz_nsec', value: first.nsec);
     await expectLater(

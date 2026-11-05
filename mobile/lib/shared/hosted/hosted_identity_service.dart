@@ -48,13 +48,15 @@ class HostedIdentityService {
     bool Function()? isCurrent,
     String? selectedPubkey,
     bool createNew = false,
+    Set<String> offered = const {},
     String? importNsec,
-  }) => _resolve(isCurrent, selectedPubkey, createNew, importNsec);
+  }) => _resolve(isCurrent, selectedPubkey, createNew, offered, importNsec);
 
   Future<HostedIdentityResult> _resolve(
     bool Function()? isCurrent,
     String? selectedPubkey,
     bool createNew,
+    Set<String> offered,
     String? importNsec,
   ) async {
     void checkCurrent() {
@@ -142,7 +144,9 @@ class HostedIdentityService {
     // decryption, even when the account retains backups of older identities.
     final matchingDevice =
         bound != null && choices.any((item) => item.pubkey == bound);
-    if ((statusKeys.isEmpty && bound == null) || matchingDevice) {
+    // An unclaimed account may keep its saved keys and start a new identity.
+    final unclaimed = statusKeys.isEmpty && bound == null;
+    if ((unclaimed && !createNew) || matchingDevice) {
       final eligible = choices
           .where((item) => bound == null || item.pubkey == bound)
           .toList();
@@ -156,6 +160,7 @@ class HostedIdentityService {
           return HostedIdentityResult(
             HostedIdentityState.needsSelection,
             choices: eligible,
+            canCreate: unclaimed,
           );
         }
         void checkSelection() {
@@ -190,7 +195,11 @@ class HostedIdentityService {
         authorize: () async {
           _sameAccount(subject);
           checkCurrent();
-          final reconciled = (await deviceIdentities.choices()).isEmpty;
+          // Every device key must have been offered beside creation, so a
+          // new identity never silently passes over an unseen prior one.
+          final reconciled = (await deviceIdentities.choices()).every(
+            (item) => offered.contains(item.pubkey),
+          );
           _sameAccount(subject);
           checkCurrent();
           return reconciled;

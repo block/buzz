@@ -1231,6 +1231,30 @@ void main() {
     );
   }
 
+  journey('new unbound account can create a new identity beside saved keys', (
+    tester,
+    f,
+  ) async {
+    await f.initialize();
+    final original = f.store;
+    await f.mount(tester);
+    await f.container.read(builderlabAccountProvider).clearLocalSession();
+    f.subject = 'new-owner';
+    f.bound = null;
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+    expect(find.text('Saved identity'), findsOneWidget);
+    expect(await f.store.read(), isNull);
+    await f.tap(tester, 'Create a new identity');
+    final saved = (await f.store.read())!;
+    expect(saved.pubkey, isNot(f.keys.public));
+    expect(saved.backup!.subject, 'new-owner');
+    expect(f.bound, saved.pubkey);
+    expect((await original.read())!.pubkey, f.keys.public);
+    expect((await original.read())!.backup!.subject, 'journey-owner');
+  });
+
   journey(
     'choose second cloud identity, dismiss profile, and enter only the selected community',
     (tester, f) async {
