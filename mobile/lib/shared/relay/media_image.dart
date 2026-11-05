@@ -28,7 +28,7 @@ final mediaHttpClientProvider = Provider<http.Client>((ref) {
 ///    headers map in its `==`/`hashCode`, so a freshly signed Authorization
 ///    header on every widget build made the *same URL* a new cache key and
 ///    bypassed the in-memory [ImageCache] entirely. This provider keys on
-///    (url, scale, auth scope, isThumbnailFallback) and injects auth headers
+///    (url, scale, auth scope) and injects auth headers
 ///    at *fetch* time, so header refreshes never invalidate cached images.
 /// 2. **Failure cooldown.** A URL that fails to load is not retried until a
 ///    cooldown elapses (honoring `Retry-After` on 429), so error retries on
@@ -44,15 +44,6 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Optional observer for bytes already fetched by the foreground image path.
   /// Excluded from equality because it is a side effect, not cache identity.
   final ValueChanged<Uint8List>? onBytesLoaded;
-
-  /// Set when [url] is a thumbnail [MediaImage] chose in place of an
-  /// original: its 404 then records a missing thumbnail, so later builds load
-  /// the original, rather than a failure cooldown. Any other 404, including a
-  /// profile URL that is itself a thumbnail, keeps the cooldown. Part of
-  /// equality, the shared download's key and the cooldown's key, so a
-  /// fallback and a direct load of the same URL each keep their own failure
-  /// handling.
-  final bool isThumbnailFallback;
 
   /// Excluded from equality: transport, not identity.
   final http.Client client;
@@ -71,7 +62,6 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.auth,
     required this.client,
     this.onBytesLoaded,
-    this.isThumbnailFallback = false,
     this.scale = 1.0,
     this.stallTimeout = defaultStallTimeout,
     this.maxFetchDuration = defaultMaxFetchDuration,
@@ -83,12 +73,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static const _defaultCooldown = Duration(seconds: 30);
   static const _maxRetryAfter = Duration(minutes: 5);
 
-  /// Keyed by (url, isThumbnailFallback), like [_inFlight] minus auth: a
-  /// direct load's failure must not stop a fallback to the same URL from
-  /// recording a missing thumbnail.
-  static final Map<(String, bool), DateTime> _cooldownUntil = {};
-  static final Map<(String, MediaGetAuthService, bool), _SharedFetch>
-  _inFlight = {};
+  static final Map<String, DateTime> _cooldownUntil = {};
+  static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -98,10 +84,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static void debugResetCooldowns() => _cooldownUntil.clear();
 
   @visibleForTesting
-  static Iterable<String> get debugCooldownUrls =>
-      _cooldownUntil.keys.map((key) => key.$1);
-
-  (String, bool) get _cooldownKey => (url, isThumbnailFallback);
+  static Iterable<String> get debugCooldownUrls => _cooldownUntil.keys;
 
   @override
   Future<MediaImageProvider> obtainKey(ImageConfiguration configuration) {
@@ -137,7 +120,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // Each decode size is its own cache entry (see [ResizeImage]), so one
       // URL shown at two sizes resolves twice. Share the download instead of
       // fetching the same bytes once per size.
-      final fetchKey = (url, auth, isThumbnailFallback);
+      final fetchKey = (url, auth);
       final fetch = _inFlight[fetchKey] ??= _SharedFetch(
         _fetchBytes,
         onFinished: (fetch) {
@@ -186,12 +169,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Downloads [url]. Completing [abort] means every load waiting for this
   /// download was abandoned, so the URL is not put on cooldown.
   Future<Uint8List> _fetchBytes(Future<void> abort) async {
-    final until = _cooldownUntil[_cooldownKey];
+    final until = _cooldownUntil[url];
     if (until != null) {
       if (debugNow().isBefore(until)) {
         throw MediaImageCooldownException(url: url, until: until);
       }
-      _cooldownUntil.remove(_cooldownKey);
+      _cooldownUntil.remove(url);
     }
 
     final uri = Uri.parse(url);
@@ -210,20 +193,12 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       final wasAbandoned = error is FetchCancelledException;
       // Nobody wanted the image any more; the URL itself did not fail.
       if (!wasAbandoned) {
-        _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
+        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
       }
       rethrow;
     }
-    if (response.statusCode == 404 && isThumbnailFallback) {
-      // Older or externally populated media may have no generated thumbnail.
-      // Record that here rather than in a widget's error builder: the widget
-      // that asked may be gone by the time a slow 404 arrives, and a
-      // cooldown would then keep every later build off the original.
-      MediaImage._rememberMissingThumbnail(url);
-      throw NetworkImageLoadException(statusCode: 404, uri: uri);
-    }
     if (response.statusCode != 200) {
-      _cooldownUntil[_cooldownKey] = debugNow().add(_cooldownFor(response));
+      _cooldownUntil[url] = debugNow().add(_cooldownFor(response));
       throw NetworkImageLoadException(
         statusCode: response.statusCode,
         uri: uri,
@@ -231,7 +206,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     }
     final bytes = response.bytes;
     if (bytes.isEmpty) {
-      _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
+      _cooldownUntil[url] = debugNow().add(_defaultCooldown);
       throw NetworkImageLoadException(statusCode: 200, uri: uri);
     }
     return bytes;
@@ -252,12 +227,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     return other is MediaImageProvider &&
         other.url == url &&
         other.scale == scale &&
-        other.auth == auth &&
-        other.isThumbnailFallback == isThumbnailFallback;
+        other.auth == auth;
   }
 
   @override
-  int get hashCode => Object.hash(url, scale, auth, isThumbnailFallback);
+  int get hashCode => Object.hash(url, scale, auth);
 
   @override
   String toString() =>
@@ -319,8 +293,7 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
   }
 }
 
-/// One download shared by every load of the same URL, auth scope and role
-/// (direct or thumbnail fallback). It is aborted once every load waiting for
+/// One download shared by every load of the same URL and auth scope. It is aborted once every load waiting for
 /// it has been abandoned, and a load that arrives after that starts a new
 /// download.
 class _SharedFetch {
@@ -396,8 +369,9 @@ String? relayThumbnailUrl(String url, MediaGetAuthService auth) {
 ///   (the zoomable full-screen viewer).
 ///
 /// With [preferThumbnail], a relay image laid out small enough loads the
-/// relay's generated thumbnail instead of the original upload, falling back
-/// to the original when the relay has no thumbnail for it.
+/// relay's generated thumbnail instead of the original upload. It never falls
+/// back to the original: a missing thumbnail shows [errorBuilder], so a small
+/// image cannot download and decode a multi-megabyte upload.
 class MediaImage extends ConsumerWidget {
   final String url;
   final BoxFit? fit;
@@ -445,22 +419,18 @@ class MediaImage extends ConsumerWidget {
        ),
        assert(
          !preferThumbnail || errorBuilder != null,
-         'a thumbnail failure other than 404 needs an error widget',
+         'a thumbnail failure needs an error widget',
        );
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
-    MediaImageProvider providerFor(
-      String source, {
-      bool isThumbnailFallback = false,
-    }) => MediaImageProvider(
+    MediaImageProvider providerFor(String source) => MediaImageProvider(
       url: source,
       auth: auth,
       client: client,
       onBytesLoaded: onBytesLoaded,
-      isThumbnailFallback: isThumbnailFallback,
     );
 
     if (decodeWidth != null) {
@@ -475,54 +445,14 @@ class MediaImage extends ConsumerWidget {
         final cacheWidth = maxWidth.isFinite && maxWidth > 0
             ? _physicalWidth(context, maxWidth)
             : null;
-        final candidate =
+        final thumbnail =
             preferThumbnail && _fitsThumbnail(context, constraints)
             ? relayThumbnailUrl(url, auth)
             : null;
-        final thumbnail = _missingThumbnails.contains(candidate)
-            ? null
-            : candidate;
-        if (thumbnail == null) return _image(providerFor(url), cacheWidth);
-        return _image(
-          providerFor(thumbnail, isThumbnailFallback: true),
-          cacheWidth,
-          errorBuilder: (context, error, stackTrace) {
-            if (error is! NetworkImageLoadException ||
-                error.statusCode != 404) {
-              return errorBuilder!(context, error, stackTrace);
-            }
-            // The fetch already recorded the missing thumbnail, so later
-            // builds go straight to the original.
-            return _image(providerFor(url), cacheWidth);
-          },
-        );
+        return _image(providerFor(thumbnail ?? url), cacheWidth);
       },
     );
   }
-
-  /// Thumbnails the relay returned 404 for, oldest first. Bounded so a
-  /// community full of pre-thumbnail media cannot grow it without limit; an
-  /// evicted entry costs one more 404 before the original loads again.
-  static final Set<String> _missingThumbnails = <String>{};
-  static const _maxMissingThumbnails = 256;
-
-  /// Called by the fetch that got the 404, which puts no failure cooldown on
-  /// the thumbnail: this set stands in for it, and an entry evicted here then
-  /// costs one more 404 rather than showing the fallback.
-  static void _rememberMissingThumbnail(String url) {
-    _missingThumbnails
-      ..remove(url)
-      ..add(url);
-    if (_missingThumbnails.length > _maxMissingThumbnails) {
-      _missingThumbnails.remove(_missingThumbnails.first);
-    }
-  }
-
-  @visibleForTesting
-  static int get debugMissingThumbnailCount => _missingThumbnails.length;
-
-  @visibleForTesting
-  static void debugResetMissingThumbnails() => _missingThumbnails.clear();
 
   bool _fitsThumbnail(BuildContext context, BoxConstraints constraints) {
     if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
@@ -538,11 +468,7 @@ class MediaImage extends ConsumerWidget {
     return (logicalWidth * MediaQuery.devicePixelRatioOf(context)).ceil();
   }
 
-  Widget _image(
-    MediaImageProvider provider,
-    int? cacheWidth, {
-    ImageErrorWidgetBuilder? errorBuilder,
-  }) {
+  Widget _image(MediaImageProvider provider, int? cacheWidth) {
     final image = ResizeImage.resizeIfNeeded(cacheWidth, null, provider);
     return _AbandonWhenGone(
       image: image,
@@ -552,7 +478,7 @@ class MediaImage extends ConsumerWidget {
         width: width,
         height: height,
         semanticLabel: semanticLabel,
-        errorBuilder: errorBuilder ?? this.errorBuilder,
+        errorBuilder: errorBuilder,
         frameBuilder: frameBuilder,
         filterQuality: filterQuality,
         gaplessPlayback: true,
