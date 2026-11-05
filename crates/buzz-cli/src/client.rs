@@ -94,6 +94,8 @@ fn relay_server_tag(relay_url: &str) -> Option<String> {
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Connections a WebSocket publish may open to complete NIP-42 sign-in.
 const WS_SIGN_IN_ATTEMPTS: u32 = 3;
+/// Times an HTTP proof is signed while its NIP-FI assertion keeps expiring.
+const AUTHORIZE_ROUNDS: u32 = 3;
 const RETRY_MAX_ATTEMPTS: u32 = 3;
 
 /// Base sleep durations for full-jitter exponential backoff.
@@ -601,11 +603,42 @@ impl BuzzClient {
         req: reqwest::RequestBuilder,
         proof: Proof<'_>,
     ) -> Result<reqwest::RequestBuilder, CliError> {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         // Evidence first: a refresh may wait out adapter retries, and the
         // proof must be signed after it, just before sending, to stay fresh.
-        let assertion = self.evidence().await?;
-        let authorization = match proof {
+        // Signing may wait out throttling in turn, so evidence that is due
+        // for refresh by then is fetched again and the proof re-signed.
+        let mut assertion = self.evidence().await?;
+        let mut round = 1;
+        let authorization = loop {
+            let authorization = self.proof(&proof).await?;
+            let current = self.evidence().await?;
+            if current == assertion {
+                break authorization;
+            }
+            if round == AUTHORIZE_ROUNDS {
+                return Err(CliError::Unavailable(
+                    "the NIP-FI assertion kept expiring while the proof was signed".into(),
+                ));
+            }
+            (assertion, round) = (current, round + 1);
+        };
+        let mut req = req.header(reqwest::header::AUTHORIZATION, sensitive(authorization)?);
+        if let Some(tag) = self.credentials.auth_tag() {
+            req = req.header("x-auth-tag", sensitive(tag.json.clone())?);
+        }
+        if let Some(assertion) = assertion {
+            req = req.header(
+                FEDERATED_IDENTITY_HEADER,
+                sensitive(format!("Bearer {assertion}"))?,
+            );
+        }
+        Ok(req)
+    }
+
+    /// `proof`, signed now, as an `Authorization` value.
+    async fn proof(&self, proof: &Proof<'_>) -> Result<String, CliError> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        Ok(match *proof {
             Proof::Nip98 { method, url, body } => {
                 format!("Nostr {}", self.credentials.nip98(method, url, body).await?)
             }
@@ -626,18 +659,7 @@ impl BuzzClient {
                     URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
                 )
             }
-        };
-        let mut req = req.header(reqwest::header::AUTHORIZATION, sensitive(authorization)?);
-        if let Some(tag) = self.credentials.auth_tag() {
-            req = req.header("x-auth-tag", sensitive(tag.json.clone())?);
-        }
-        if let Some(assertion) = assertion {
-            req = req.header(
-                FEDERATED_IDENTITY_HEADER,
-                sensitive(format!("Bearer {assertion}"))?,
-            );
-        }
-        Ok(req)
+        })
     }
 
     /// The NIP-FI assertion as WebSocket upgrade headers (empty without an
@@ -1271,7 +1293,6 @@ impl BuzzClient {
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let ws_url = to_ws_url(&self.relay_url);
-        let headers = self.upgrade_headers().await?;
         // Two kinds of deadline: each network phase is capped as a whole,
         // writes included (the connect below, then buzz_ws_client's challenge,
         // AUTH, EVENT and close phases), and NIP-42 signing between them is
@@ -1291,13 +1312,16 @@ impl BuzzClient {
         //
         // The relay closes a socket that has not signed in within seconds,
         // so a slow or throttled sign-in signature reconnects and signs the
-        // new challenge, a bounded number of times. EVENT, signed before
-        // any of this, is sent only once AUTH succeeds.
+        // new challenge, a bounded number of times, with current evidence:
+        // the old assertion may have expired meanwhile. A throttled sign-in
+        // is waited out between connections, never on one. EVENT, signed
+        // before any of this, is sent only once AUTH succeeds.
         let mut attempt = 1;
         let mut conn = loop {
+            let headers = self.upgrade_headers().await?;
             let mut conn = tokio::time::timeout(
                 WS_CONNECT_TIMEOUT,
-                buzz_ws_client::NostrWsConnection::connect_with_headers(&ws_url, headers.clone()),
+                buzz_ws_client::NostrWsConnection::connect_with_headers(&ws_url, headers),
             )
             .await
             .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
@@ -1312,6 +1336,8 @@ impl BuzzClient {
                 buzz_ws_client::WsClientError::ConnectionClosed
                     | buzz_ws_client::WsClientError::WebSocket(_)
             );
+            let (failure, wait) = failure.unzip();
+            let wait = wait.flatten();
             let throttled = matches!(failure, Some(CliError::Throttled(_)));
             let _ = conn.disconnect().await;
             if !(lost || throttled) {
@@ -1325,7 +1351,7 @@ impl BuzzClient {
                     ))
                 }));
             }
-            tokio::time::sleep(jitter_delay(attempt - 1)).await;
+            tokio::time::sleep(wait.unwrap_or_else(|| jitter_delay(attempt - 1))).await;
             attempt += 1;
         };
         let ok = conn.send_event(event).await.map_err(ws_error)?;
@@ -3465,6 +3491,123 @@ mod desktop_throttle_tests {
         );
     }
 
+    /// A desktop holding `keys` whose assertions live `lifetime` s and
+    /// which answers `sign_event` with `sign` (`None`: sign it), logging the
+    /// sign-in challenges it signs.
+    async fn desktop(
+        relay: &str,
+        keys: &nostr::Keys,
+        lifetime: u64,
+        sign: impl Fn(&nostr::UnsignedEvent) -> Option<serde_json::Value> + Send + Sync + 'static,
+    ) -> (BuzzClient, super::ws_deadline_tests::Log) {
+        let signed: super::ws_deadline_tests::Log = Default::default();
+        let log = signed.clone();
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.into()]);
+        let (endpoint, _) =
+            dp::provider(move |version, request| match request["method"].as_str() {
+                Some("federated_identity") => {
+                    serde_json::json!({ "result": dp::assertion(lifetime) })
+                }
+                Some("sign_event") => {
+                    let unsigned = <nostr::UnsignedEvent as nostr::JsonUtil>::from_json(
+                        request["params"][0].as_str().unwrap(),
+                    )
+                    .unwrap();
+                    if let Some(refusal) = sign(&unsigned) {
+                        return refusal;
+                    }
+                    if let Some(c) = unsigned.tags.find(nostr::TagKind::Challenge) {
+                        log.lock().unwrap().push(c.content().unwrap().to_owned());
+                    }
+                    answer(version, request)
+                }
+                _ => answer(version, request),
+            })
+            .await;
+        let provider = Provider::open(endpoint, "t".into(), false, relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        (BuzzClient::new(relay.into(), credentials).unwrap(), signed)
+    }
+
+    /// A desktop allowing one sign-in signature per 300 ms against a relay
+    /// that drops unsigned sockets after 200 ms: the throttle is waited out
+    /// between connections, so only the live challenge is signed, with a
+    /// fresh assertion on the reconnect after the old one expired.
+    #[tokio::test]
+    async fn a_throttled_sign_in_reconnects_with_fresh_evidence() {
+        use super::ws_deadline_tests::deadline_relay;
+        let keys = nostr::Keys::generate();
+        let (relay, conns, _, bearers) =
+            deadline_relay(std::time::Duration::from_millis(200)).await;
+        let last = std::sync::Mutex::new(std::time::Instant::now());
+        let (c, signed) = desktop(&relay, &keys, 40, move |_| {
+            let mut last = last.lock().unwrap();
+            if last.elapsed() < std::time::Duration::from_millis(300) {
+                crate::cached_assertion::test_clock::advance(60);
+                return Some(
+                    serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
+                );
+            }
+            *last = std::time::Instant::now();
+            None
+        })
+        .await;
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(conns.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *signed.lock().unwrap(),
+            ["c1"],
+            "the dead challenge is never signed"
+        );
+        let bearers = bearers.lock().unwrap();
+        assert_ne!(
+            bearers[0], bearers[1],
+            "the reconnect brings a fresh assertion"
+        );
+    }
+
+    /// A NIP-98 signature that outlives the assertion goes out with a fresh
+    /// one, signed after it.
+    #[tokio::test]
+    async fn a_slow_http_signature_goes_out_with_fresh_evidence() {
+        let seen: super::ws_deadline_tests::Log = Default::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let bearer = headers["nostr-federated-identity"].to_str().unwrap();
+            log.lock()
+                .unwrap()
+                .push(bearer.trim_start_matches("Bearer ").to_owned());
+            async { axum::Json(serde_json::json!([])) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let keys = nostr::Keys::generate();
+        let slow = std::sync::atomic::AtomicBool::new(true);
+        let (c, _) = desktop(&relay, &keys, 40, move |_| {
+            if slow.swap(false, Ordering::SeqCst) {
+                crate::cached_assertion::test_clock::advance(60);
+            }
+            None
+        })
+        .await;
+        c.query(&serde_json::json!({})).await.unwrap();
+        let sent = crate::cached_assertion::jws_exp(&seen.lock().unwrap()[0]).unwrap();
+        assert!(
+            sent > crate::cached_assertion::unix_now(),
+            "the assertion sent is current"
+        );
+    }
+
     /// An HTTP relay answering every query with no events.
     async fn http_relay() -> String {
         let app = axum::Router::new().fallback(|| async { axum::Json(serde_json::json!([])) });
@@ -3714,21 +3857,34 @@ mod ws_deadline_tests {
     /// A relay that, like buzz-relay, drops a socket not signed in within
     /// 5 s; otherwise as [`ws_relay`]. Returns its URL, its connection
     /// count, and the challenges each AUTH answered.
-    async fn deadline_relay() -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
+    /// A relay closing sockets not signed in within `deadline`: the
+    /// connection count, the challenges answered and each upgrade's NIP-FI
+    /// header.
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback type
+    pub(super) async fn deadline_relay(deadline: Duration) -> (String, Arc<AtomicUsize>, Log, Log) {
         let conns = Arc::new(AtomicUsize::new(0));
-        let answered: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-        let (n, log) = (conns.clone(), answered.clone());
+        let (answered, bearers): (Log, Log) = Default::default();
+        let (n, log, seen) = (conns.clone(), answered.clone(), bearers.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let challenge = format!("c{}", n.fetch_add(1, Ordering::SeqCst));
-                let log = log.clone();
+                let (log, seen) = (log.clone(), seen.clone());
                 tokio::spawn(async move {
-                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let record =
+                        |req: &tokio_tungstenite::tungstenite::handshake::server::Request, res| {
+                            let bearer = req.headers().get("nostr-federated-identity");
+                            let bearer = bearer.map(|v| v.to_str().unwrap().to_owned());
+                            seen.lock().unwrap().push(bearer.unwrap_or_default());
+                            Ok(res)
+                        };
+                    let mut ws = tokio_tungstenite::accept_hdr_async(stream, record)
+                        .await
+                        .unwrap();
                     let hello = serde_json::json!(["AUTH", challenge]).to_string();
                     let _ = ws.send(Message::Text(hello.into())).await;
-                    let deadline = tokio::time::sleep(Duration::from_secs(5));
+                    let deadline = tokio::time::sleep(deadline);
                     tokio::pin!(deadline);
                     let mut authed = false;
                     loop {
@@ -3752,15 +3908,17 @@ mod ws_deadline_tests {
                 });
             }
         });
-        (relay, conns, answered)
+        (relay, conns, answered, bearers)
     }
+
+    pub(super) type Log = Arc<std::sync::Mutex<Vec<String>>>;
 
     /// A sign-in signature that comes back after the relay's 5 s deadline
     /// reconnects and signs the new challenge, never the old one.
     #[tokio::test]
     async fn a_late_sign_in_reconnects_and_signs_the_new_challenge() {
         let keys = Keys::generate();
-        let (relay, conns, answered) = deadline_relay().await;
+        let (relay, conns, answered, _) = deadline_relay(Duration::from_secs(5)).await;
         let signer = Arc::new(SlowFirst(
             Slow(keys.clone(), Duration::from_secs(8)),
             std::sync::atomic::AtomicBool::new(true),
@@ -3783,7 +3941,7 @@ mod ws_deadline_tests {
     #[tokio::test]
     async fn a_sign_in_always_too_late_ends_retryable() {
         let keys = Keys::generate();
-        let (relay, conns, _) = deadline_relay().await;
+        let (relay, conns, ..) = deadline_relay(Duration::from_secs(5)).await;
         let c = client(relay, &keys, Duration::from_secs(8));
         let event = EventBuilder::new(Kind::Custom(20001), "")
             .sign_with_keys(&keys)

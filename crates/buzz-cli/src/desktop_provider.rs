@@ -387,7 +387,15 @@ async fn call(
     method: &str,
     params: &[String],
 ) -> Result<String, ProviderError> {
-    call_with(endpoint, token, same_user, method, &|| params.to_vec()).await
+    call_with(
+        endpoint,
+        token,
+        same_user,
+        method,
+        RATE_LIMIT_RETRIES,
+        &|| params.to_vec(),
+    )
+    .await
 }
 
 /// [`call`], building `params` afresh for every envelope, so a re-send after
@@ -397,6 +405,7 @@ async fn call_with(
     token: Option<&str>,
     same_user: bool,
     method: &str,
+    retries: u32,
     params: &(dyn Fn() -> Vec<String> + Sync),
 ) -> Result<String, ProviderError> {
     let mut version = VERSION;
@@ -446,13 +455,9 @@ async fn call_with(
                 }
             }
             "unsupported_version" => return Err(ProviderError::NoCommonVersion),
-            "rate_limited" if throttled < RATE_LIMIT_RETRIES => {
+            "rate_limited" if throttled < retries => {
                 throttled += 1;
-                let wait = envelope
-                    .retry_after
-                    .unwrap_or(1)
-                    .clamp(1, RATE_LIMIT_MAX_WAIT_SECS);
-                tokio::time::sleep(RETRY_AFTER_UNIT * wait as u32).await;
+                tokio::time::sleep(throttle_wait(envelope.retry_after)).await;
             }
             other => {
                 return Err(ProviderError::Code {
@@ -463,6 +468,11 @@ async fn call_with(
             }
         }
     }
+}
+
+/// How long to wait out a `rate_limited` answer.
+pub(crate) fn throttle_wait(retry_after: Option<u64>) -> Duration {
+    RETRY_AFTER_UNIT * retry_after.unwrap_or(1).clamp(1, RATE_LIMIT_MAX_WAIT_SECS) as u32
 }
 
 #[derive(serde::Deserialize)]
@@ -573,6 +583,21 @@ impl Provider {
 
     /// Sign `unsigned` as this identity; the result is checked.
     pub async fn sign(&self, unsigned: UnsignedEvent) -> Result<Event, CliError> {
+        self.sign_or_wait(unsigned).await.map_err(|(e, _)| e)
+    }
+
+    /// [`Self::sign`], except that a throttled NIP-42 sign-in is not waited
+    /// out here: its challenge dies with the socket meanwhile, so it fails
+    /// at once with the wait, for the caller to reconnect after.
+    pub async fn sign_or_wait(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> Result<Event, (CliError, Option<Duration>)> {
+        let retries = if unsigned.kind == nostr::Kind::Authentication {
+            0
+        } else {
+            RATE_LIMIT_RETRIES
+        };
         // A re-sent auth proof is renewed so it is fresh when it reaches the
         // relay; any other event is signed exactly as built.
         let signed = call_with(
@@ -580,16 +605,25 @@ impl Provider {
             Some(&self.token),
             self.same_user,
             "sign_event",
+            retries,
             &|| vec![renewed(unsigned.clone()).as_json()],
         )
         .await
-        .map_err(|e| e.into_cli("sign_event"))?;
-        let event = Event::from_json(&signed)
-            .map_err(|_| CliError::Auth("Buzz desktop returned an unreadable event".into()))?;
+        .map_err(|e| {
+            let wait = match &e {
+                ProviderError::Code {
+                    code: "rate_limited",
+                    retry_after,
+                    ..
+                } => Some(throttle_wait(*retry_after)),
+                _ => None,
+            };
+            (e.into_cli("sign_event"), wait)
+        })?;
+        let refused = |why: &str| (CliError::Auth(format!("Buzz desktop returned {why}")), None);
+        let event = Event::from_json(&signed).map_err(|_| refused("an unreadable event"))?;
         if event.pubkey != self.public_key || event.verify().is_err() {
-            return Err(CliError::Auth(
-                "Buzz desktop returned an invalid signature".into(),
-            ));
+            return Err(refused("an invalid signature"));
         }
         Ok(event)
     }
@@ -1579,6 +1613,11 @@ pub(crate) mod tests {
 
     /// The assertion the mock desktop hands out for any relay.
     pub(crate) fn mock_assertion() -> String {
+        assertion(600)
+    }
+
+    /// An assertion that expires `lifetime` s from now.
+    pub(crate) fn assertion(lifetime: u64) -> String {
         use base64::Engine;
         let b64 = |v: serde_json::Value| {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
@@ -1586,7 +1625,7 @@ pub(crate) mod tests {
         format!(
             "{}.{}.c2ln",
             b64(serde_json::json!({"alg": "ES256", "typ": "nip-fi+jwt"})),
-            b64(serde_json::json!({"exp": unix_now() + 600}))
+            b64(serde_json::json!({"exp": unix_now() + lifetime}))
         )
     }
 

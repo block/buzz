@@ -202,7 +202,7 @@ pub struct CapturingSigner {
     signer: Arc<dyn NostrSigner>,
     #[cfg(unix)]
     desktop: Option<Arc<crate::desktop_provider::Provider>>,
-    failure: std::sync::Mutex<Option<CliError>>,
+    failure: std::sync::Mutex<Option<(CliError, Option<std::time::Duration>)>>,
 }
 
 impl CapturingSigner {
@@ -215,8 +215,9 @@ impl CapturingSigner {
         }
     }
 
-    /// The desktop signing failure, if one happened.
-    pub fn take_failure(&self) -> Option<CliError> {
+    /// The desktop signing failure, if one happened, with how long to wait
+    /// before a fresh sign-in when the desktop throttled one.
+    pub fn take_failure(&self) -> Option<(CliError, Option<std::time::Duration>)> {
         self.failure.lock().ok()?.take()
     }
 }
@@ -239,8 +240,8 @@ impl NostrSigner for CapturingSigner {
         #[cfg(unix)]
         if let Some(provider) = &self.desktop {
             return Box::pin(async move {
-                provider.sign(unsigned).await.map_err(|e| {
-                    let text = nostr::signer::SignerError::from(e.to_string());
+                provider.sign_or_wait(unsigned).await.map_err(|e| {
+                    let text = nostr::signer::SignerError::from(e.0.to_string());
                     if let Ok(mut slot) = self.failure.lock() {
                         slot.get_or_insert(e);
                     }
