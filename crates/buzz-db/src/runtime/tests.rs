@@ -1600,8 +1600,13 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     let base = 1_700_000_000u64;
     for pool in [&writer, &replica] {
         for (content, at) in [("m1", base), ("m2", base + 10)] {
-            insert_top_level(pool, community, channel, &signed_event_at(&author, content, at))
-                .await;
+            insert_top_level(
+                pool,
+                community,
+                channel,
+                &signed_event_at(&author, content, at),
+            )
+            .await;
         }
     }
 

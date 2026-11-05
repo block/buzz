@@ -114,6 +114,9 @@ mod tests {
         assert!(gate.admit().await.is_none(), "a full gate rejects");
         assert_eq!(started.elapsed(), HistoryReadGate::PERMIT_WAIT);
         drop(held);
-        assert!(gate.admit().await.is_some(), "a released permit admits again");
+        assert!(
+            gate.admit().await.is_some(),
+            "a released permit admits again"
+        );
     }
 }
