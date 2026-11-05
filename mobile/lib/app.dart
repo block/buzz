@@ -354,6 +354,19 @@ class App extends HookConsumerWidget {
         ? ref.watch(communityThemeProvider)
         : defaultCommunityTheme;
     final themeMode = communityTheme.mode;
+    // The app rebuilds on every lifecycle change. A new ThemeData never
+    // equals the last one, so MaterialApp would animate between identical
+    // themes, and each frame of that makes every message re-parse its
+    // markdown. Build the themes only when the accent changes.
+    final accent = communityTheme.accent;
+    final lightTheme = useMemoized(
+      () => mobileAppearanceTheme(Brightness.light, accent),
+      [accent],
+    );
+    final darkTheme = useMemoized(
+      () => mobileAppearanceTheme(Brightness.dark, accent),
+      [accent],
+    );
     final authState = ref.watch(authProvider);
     final pairedCommunity = ref.watch(pairedCommunityLandingProvider);
 
@@ -413,8 +426,8 @@ class App extends HookConsumerWidget {
       navigatorObservers: [appRouteObserver],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
-      theme: mobileAppearanceTheme(Brightness.light, communityTheme.accent),
-      darkTheme: mobileAppearanceTheme(Brightness.dark, communityTheme.accent),
+      theme: lightTheme,
+      darkTheme: darkTheme,
       themeMode: themeMode,
       // Above the navigator, so an age restriction cannot be bypassed by a
       // route that was pushed while the store signal request was in flight.
