@@ -582,7 +582,10 @@ impl GitStore {
     ///    (read-after-write).
     /// 2. **`if_match_race`** — `race_width` parallel `put_pointer` calls
     ///    predicated on the same ETag. Exactly one must `Won`; the rest must
-    ///    `LostRace`. Tests A3.
+    ///    `LostRace`, apart from racers whose outcome is unknown (dropped, see
+    ///    `racer_outcome_unknown`). After each round the pointer must read back
+    ///    as the winner's body and ETag, so a dropped racer's write that
+    ///    landed anyway cannot pass. Tests A3.
     /// 3. **`if_none_match_race`** — `race_width` parallel create-only writes
     ///    against the same digest-shaped key (the same `put_immutable` path
     ///    `put_pack`/`put_manifest` use). Tests A1 + A3 on the create-only
@@ -656,13 +659,15 @@ impl GitStore {
         };
         for round in 0..cfg.race_rounds {
             let arc_self: Arc<&Self> = Arc::new(self);
+            let bodies: Vec<Vec<u8>> = (0..cfg.race_width)
+                .map(|i| format!("round={round},racer={i},nonce={nonce}").into_bytes())
+                .collect();
             let mut tasks = Vec::with_capacity(cfg.race_width);
-            for i in 0..cfg.race_width {
+            for body in &bodies {
                 let me = Arc::clone(&arc_self);
                 let pkey = pointer_key.clone();
                 let et = etag.clone();
-                let body = format!("round={round},racer={i},nonce={nonce}").into_bytes();
-                tasks.push(async move { me.put_pointer(&pkey, &body, Precond::IfMatch(et)).await });
+                tasks.push(async move { me.put_pointer(&pkey, body, Precond::IfMatch(et)).await });
             }
             let outcomes = futures_util::future::join_all(tasks).await;
             // Drop-and-floor classification. A `Reqwest`/`Http`/`Io` error
@@ -680,13 +685,13 @@ impl GitStore {
             // which is a real conformance signal.
             let mut classified = 0usize;
             let mut winners = 0usize;
-            let mut new_etag: Option<ETag> = None;
+            let mut winner: Option<(ETag, &[u8])> = None;
             for (i, outcome) in outcomes.into_iter().enumerate() {
                 match outcome {
                     Ok(CasOutcome::Won(e)) => {
                         classified += 1;
                         winners += 1;
-                        new_etag = Some(e);
+                        winner = Some((e, &bodies[i]));
                     }
                     Ok(CasOutcome::LostRace) => {
                         classified += 1;
@@ -727,18 +732,62 @@ impl GitStore {
                 }
                 .into());
             }
-            if winners != 1 {
-                return Err(ProbeFailure {
+            let (won_etag, won_body) = match winner {
+                Some(w) if winners == 1 => w,
+                _ => {
+                    return Err(ProbeFailure {
+                        phase: "if_match_race",
+                        round,
+                        key: pointer_key,
+                        reason: format!(
+                            "expected exactly 1 winner among {classified} classified observers, got {winners}"
+                        ),
+                    }
+                    .into())
+                }
+            };
+            // Counting outcomes alone can't see a dropped racer whose write
+            // landed anyway (a backend that commits a stale `If-Match` PUT
+            // and then answers 5xx). Read the pointer back and require the
+            // winner's exact body and ETag before the next round predicates
+            // on that ETag. Without this, the last round has no next round
+            // to catch it.
+            let stored = self
+                .get_pointer(&pointer_key)
+                .await
+                .map_err(|e| ProbeFailure {
                     phase: "if_match_race",
                     round,
-                    key: pointer_key,
-                    reason: format!(
-                        "expected exactly 1 winner among {classified} classified observers, got {winners}"
-                    ),
+                    key: pointer_key.clone(),
+                    reason: format!("post-race read failed: {e}"),
+                })?;
+            match stored {
+                Some((stored_etag, stored_body))
+                    if stored_etag == won_etag && stored_body[..] == won_body[..] => {}
+                Some((stored_etag, _)) => {
+                    return Err(ProbeFailure {
+                        phase: "if_match_race",
+                        round,
+                        key: pointer_key,
+                        reason: format!(
+                            "post-race read is not the winner's write: \
+                             winner etag {}, stored etag {}",
+                            won_etag.0, stored_etag.0
+                        ),
+                    }
+                    .into())
                 }
-                .into());
+                None => {
+                    return Err(ProbeFailure {
+                        phase: "if_match_race",
+                        round,
+                        key: pointer_key,
+                        reason: "pointer vanished after the race".into(),
+                    }
+                    .into())
+                }
             }
-            etag = new_etag.expect("winner exists");
+            etag = won_etag;
         }
 
         // -- Phase 3: if_none_match_race ------------------------------------------
@@ -1091,6 +1140,12 @@ mod fault_probe {
         /// Their bodies carry `racer=<i>`, so the fault survives the retry.
         if_match_racers: Vec<usize>,
         if_match_status: u16,
+        /// A non-linearizable backend: a faulted `if_match_race` PUT whose
+        /// `If-Match` is already stale is committed anyway before the fault
+        /// status goes out. A faulted PUT whose `If-Match` still matches is
+        /// answered without mutating, so rust-s3's retry 1s later is the one
+        /// that lands, after the round's real winner.
+        if_match_stale_commit: bool,
         inm: InmFault,
     }
 
@@ -1139,6 +1194,13 @@ mod fault_probe {
             None
         }
 
+        fn commit(st: &mut Objects, key: String, body: Bytes) -> String {
+            st.versions += 1;
+            let etag = format!("\"v{}\"", st.versions);
+            st.objects.insert(key, (body, etag.clone()));
+            etag
+        }
+
         fn handle(&self, method: Method, key: String, headers: HeaderMap, body: Bytes) -> Response {
             let mut st = self.state.lock().unwrap();
             match method {
@@ -1153,9 +1215,6 @@ mod fault_probe {
                     StatusCode::NO_CONTENT.into_response()
                 }
                 Method::PUT => {
-                    if let Some(code) = self.fault(&key, &body, &mut st) {
-                        return status(code);
-                    }
                     let current = st.objects.get(&key).map(|(_, etag)| etag.as_str());
                     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
                     let precondition_failed = match (header("if-none-match"), header("if-match")) {
@@ -1163,12 +1222,16 @@ mod fault_probe {
                         (_, Some(tag)) => current != Some(tag),
                         _ => false,
                     };
+                    if let Some(code) = self.fault(&key, &body, &mut st) {
+                        if self.faults.if_match_stale_commit && precondition_failed {
+                            Self::commit(&mut st, key, body);
+                        }
+                        return status(code);
+                    }
                     if precondition_failed {
                         return status(412);
                     }
-                    st.versions += 1;
-                    let etag = format!("\"v{}\"", st.versions);
-                    st.objects.insert(key, (body, etag.clone()));
+                    let etag = Self::commit(&mut st, key, body);
                     ([("etag", etag)], "").into_response()
                 }
                 _ => status(405),
@@ -1222,6 +1285,7 @@ mod fault_probe {
         Faults {
             if_match_racers: Vec::new(),
             if_match_status: 500,
+            if_match_stale_commit: false,
             inm: InmFault::None,
         }
     }
@@ -1298,6 +1362,24 @@ mod fault_probe {
             run(all_5xx).await,
             "if_none_match_race",
             "race not observed",
+        );
+    }
+
+    /// A racer answered 5xx is dropped as unknown, but its stale write
+    /// landed. In the final `if_match_race` round no later `If-Match` round
+    /// trips over it, so only the post-race readback stops the backend
+    /// from being admitted with a failed payload as the pointer.
+    #[tokio::test]
+    async fn dropped_racer_whose_stale_write_lands_fails_closed() {
+        let stale_commit = Faults {
+            if_match_racers: vec![0],
+            if_match_stale_commit: true,
+            ..clean()
+        };
+        assert_probe_failure(
+            run(stale_commit).await,
+            "if_match_race",
+            "not the winner's write",
         );
     }
 
