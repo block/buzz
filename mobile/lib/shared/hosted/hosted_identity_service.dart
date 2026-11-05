@@ -328,6 +328,49 @@ class HostedIdentityService {
     return _result(saved, bound, subject);
   }
 
+  /// After a definitive binding rejection of [pubkey], release this account's
+  /// unconfirmed copy so the user can choose again. Rechecks that the account
+  /// is still unbound with no backups and that the key survives elsewhere;
+  /// returns false and keeps the slot otherwise.
+  Future<bool> releaseRejected(
+    String pubkey, {
+    required String subject,
+    bool Function()? isCurrent,
+  }) async {
+    void checkCurrent() {
+      if (isCurrent != null && !isCurrent()) throw AccountFailure.unavailable;
+    }
+
+    checkCurrent();
+    _sameAccount(subject);
+    final store = this.store.forSubject(subject);
+    final local = await store.read();
+    if (local == null) return true;
+    if (local.pubkey != pubkey || local.backup != null) return false;
+    final current = await account.currentIdentity();
+    _sameAccount(subject);
+    if (current['error'] != null) throw AccountFailure.invalidResponse;
+    if (current['identity'] != null) return false;
+    final status = await account.post('/v1/buzz/nsec-backups/status', {});
+    _sameAccount(subject);
+    final listed = status['backup_nostr_pubkeys'];
+    if (status['error'] != null || listed is! List) {
+      throw AccountFailure.invalidResponse;
+    }
+    if (status['current_nostr_pubkey'] != null || listed.isNotEmpty) {
+      return false;
+    }
+    checkCurrent();
+    return store.releaseUnconfirmed(
+      pubkey,
+      heldElsewhere: deviceIdentities.holds,
+      checkCurrent: () {
+        _sameAccount(subject);
+        checkCurrent();
+      },
+    );
+  }
+
   HostedIdentityResult _result(
     AccountIdentitySnapshot local,
     String? bound,

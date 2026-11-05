@@ -224,6 +224,11 @@ class HostedConnectSheet extends HookConsumerWidget {
           onPressed: flow.skipConflictingCommunity,
           child: const Text('Keep saved identity and skip'),
         ),
+      if (flow.canChooseDifferentIdentity)
+        FilledButton(
+          onPressed: flow.chooseDifferentIdentity,
+          child: const Text('Choose a different identity'),
+        ),
       if (flow.canSkipFailedCommunity)
         TextButton(
           onPressed: flow.skipFailedCommunity,

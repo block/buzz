@@ -1255,6 +1255,86 @@ void main() {
     expect((await original.read())!.backup!.subject, 'journey-owner');
   });
 
+  Future<AccountIdentityStore> rejectedSavedChoice(
+    WidgetTester tester,
+    HostedJourneyFixture f,
+  ) async {
+    await f.initialize();
+    final original = f.store;
+    await f.mount(tester);
+    await f.container.read(builderlabAccountProvider).clearLocalSession();
+    f.subject = 'new-owner';
+    f.bound = null;
+    f.rejectedBindings.add(f.keys.public);
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    await f.tap(tester, fullNpub(f.keys.public)!);
+    return original;
+  }
+
+  journey(
+    'rejected saved choice survives restart, then choosing again can create and bind',
+    (tester, f) async {
+      final original = await rejectedSavedChoice(tester, f);
+      expect(f.flow.problem, HostedFlowProblem.requestRejected);
+      expect(find.text('Choose a different identity'), findsOneWidget);
+      expect((await f.store.read())!.pubkey, f.keys.public);
+      await f.restart(tester);
+      await f.flow.signInAccount();
+      await f.settle(tester);
+      // The saved choice skips selection and retries the same rejection.
+      expect(f.flow.problem, HostedFlowProblem.requestRejected);
+      await f.tap(tester, 'Choose a different identity');
+      expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+      expect(await f.store.read(), isNull);
+      expect(find.text('Saved identity'), findsOneWidget);
+      await f.tap(tester, 'Create a new identity');
+      final saved = (await f.store.read())!;
+      expect(saved.pubkey, isNot(f.keys.public));
+      expect(f.bound, saved.pubkey);
+      expect(saved.backup!.subject, 'new-owner');
+      expect((await original.read())!.pubkey, f.keys.public);
+      expect((await original.read())!.backup!.subject, 'journey-owner');
+    },
+  );
+
+  for (final status in [503, 403]) {
+    journey('ambiguous binding failure ($status) offers no release', (
+      tester,
+      f,
+    ) async {
+      f.bindStatus = status;
+      await rejectedSavedChoice(tester, f);
+      expect(f.flow.stage, HostedFlowStage.blocked);
+      expect(f.flow.canChooseDifferentIdentity, isFalse);
+      expect(find.text('Choose a different identity'), findsNothing);
+      expect((await f.store.read())!.pubkey, f.keys.public);
+    });
+  }
+
+  journey('challenge rejection and stale evidence offer no release', (
+    tester,
+    f,
+  ) async {
+    f.challengeStatus = 409;
+    await rejectedSavedChoice(tester, f);
+    expect(f.flow.problem, HostedFlowProblem.requestRejected);
+    expect(f.flow.canChooseDifferentIdentity, isFalse);
+    f
+      ..challengeStatus = null
+      ..bindStatus = 409;
+    await f.flow.retry();
+    await f.settle(tester);
+    expect(f.flow.canChooseDifferentIdentity, isTrue);
+    f.challengeStatus = 409;
+    await f.flow.retry();
+    await f.settle(tester);
+    // The earlier attempt's rejection is not reused.
+    expect(f.flow.problem, HostedFlowProblem.requestRejected);
+    expect(f.flow.canChooseDifferentIdentity, isFalse);
+    expect((await f.store.read())!.pubkey, f.keys.public);
+  });
+
   journey(
     'choose second cloud identity, dismiss profile, and enter only the selected community',
     (tester, f) async {
