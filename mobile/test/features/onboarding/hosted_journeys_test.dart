@@ -1376,6 +1376,23 @@ void main() {
     expect(find.text('Saved identity'), findsOneWidget);
   });
 
+  journey('leaving from the picker ignores a late creation', (tester, f) async {
+    await f.initialize();
+    await f.mount(tester);
+    await f.container.read(builderlabAccountProvider).clearLocalSession();
+    f.subject = 'new-owner';
+    f.bound = null;
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.canCreateIdentity, isTrue);
+    final leaving = f.flow.leave();
+    await f.flow.createIdentity();
+    await leaving;
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.idle);
+    expect(await f.store.read(), isNull);
+  });
+
   for (final status in [503, 403]) {
     journey('ambiguous binding failure ($status) offers no release', (
       tester,

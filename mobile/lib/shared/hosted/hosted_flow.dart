@@ -546,7 +546,8 @@ class HostedFlow extends ChangeNotifier {
 
   /// Create explicitly from setup, or beside the saved identities offered.
   Future<void> createIdentity() {
-    if (!canCreateIdentity ||
+    if ((_target == null && !accountOnly) ||
+        !canCreateIdentity ||
         (stage != HostedFlowStage.setupIdentity &&
             stage != HostedFlowStage.chooseIdentity)) {
       return Future.value();
