@@ -483,6 +483,9 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 /// NIP-CW thread-mode query-time bounds, bound to a normalized newest-first thread request.
 pub const KIND_THREAD_WINDOW_BOUNDS: u32 = 39007;
 
+/// NIP-CL: request-bound compact viewer membership overlay; query-time only, never stored.
+pub const KIND_MEMBERSHIP_SNAPSHOT: u32 = 39008;
+
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
@@ -747,6 +750,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
     KIND_THREAD_WINDOW_BOUNDS,
+    KIND_MEMBERSHIP_SNAPSHOT,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_AGENT_PRESENCE,
@@ -902,6 +906,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
             | KIND_THREAD_WINDOW_BOUNDS
+            | KIND_MEMBERSHIP_SNAPSHOT
     )
 }
 
@@ -983,6 +988,12 @@ mod tests {
     fn thread_window_bounds_is_relay_only() {
         assert_eq!(KIND_THREAD_WINDOW_BOUNDS, 39007);
         assert!(is_relay_only_kind(KIND_THREAD_WINDOW_BOUNDS));
+    }
+
+    #[test]
+    fn compact_membership_snapshot_is_relay_only() {
+        assert_eq!(KIND_MEMBERSHIP_SNAPSHOT, 39008);
+        assert!(is_relay_only_kind(KIND_MEMBERSHIP_SNAPSHOT));
     }
 
     #[test]

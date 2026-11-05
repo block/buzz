@@ -291,6 +291,246 @@ A relay without this NIP drops label tags on create and refuses
 a system channel on a relay whose NIP-11 document does not contain `"nip-cl"`.
 Lookups by label on such a relay find nothing, which is safe.
 
+## Compact viewer membership snapshot (version 1)
+
+This optional capability replaces full-roster discovery for clients that
+implement the reconciliation rules below. It does not change kinds
+39000–39003 or their legacy query behavior.
+
+### Capability and request
+
+An enabled relay advertises `membership_snapshot` in its host-bound NIP-11
+information document:
+
+```json
+{
+  "membership_snapshot": {
+    "version": 1,
+    "community_id": "<community UUID>",
+    "pubkey": "<relay signing public key>",
+    "kind": 39008,
+    "max_channels": 4096,
+    "max_response_bytes": 2097152
+  }
+}
+```
+
+The operator switch `BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED` defaults to false.
+Disabled relays omit the descriptor and return HTTP 404 with
+`{"error":"membership_snapshot unsupported"}` for this query mode. Capability
+advertisement alone is not authentication or membership authority. Clients
+MUST obtain it from the community's TLS origin and pin the relay signing key
+as they do for group-state events. An unresolved host never advertises it.
+
+Send one exact filter to the existing `POST /query` bridge:
+
+```json
+[{
+  "kinds": [39008],
+  "#p": ["<authenticated viewer public key>"],
+  "#t": ["dm", "forum", "stream", "system", "workflow"],
+  "membership_snapshot": 1
+}]
+```
+
+The nonempty type array MUST be sorted, unique, and contain only known types
+(`dm`, `forum`, `stream`, `system`, `workflow` in version 1). A client MAY
+request a subset. Including `system` is an explicit opt-in to system channels,
+not a change to ordinary NIP-CL reads. Unknown types, versions, extra filter
+keys, constraints, multiple filters or another viewer return 400. A relay
+MUST NOT silently narrow the requested set. Future types need a reviewed
+protocol update; unsupported clients do not discover or revoke them.
+
+This mode requires a valid NIP-98 event whose `u` and `method` bind the
+host-derived query URL and POST, and whose `payload` binds the exact body,
+even when unsigned development bridge reads are enabled. The bridge's normal
+admission, membership/ban policy, rate limit and replay guard apply. The viewer
+MUST be the signer proven by NIP-98, never `token_owner` or the NIP-OA
+owner used for admission. An agent asking for its owner's memberships gets
+400, even when its auth tag names that owner. Use a
+fresh NIP-98 event for every attempt (a random auth-event nonce tag avoids
+same-second duplicates). No second nonce scheme is introduced.
+
+### Signed response and verification
+
+Success is an **object**, never an ordinary Nostr event array:
+
+```json
+{
+  "membership_snapshot": 1,
+  "event": {
+    "kind": 39008,
+    "pubkey": "<relay signing public key>",
+    "tags": [["d", "<NIP-98 event ID>"], ["p", "<viewer>"]],
+    "content": "<JSON object below>",
+    "id": "<event ID>",
+    "created_at": 1793899000,
+    "sig": "<signature>"
+  }
+}
+```
+
+The signed content is:
+
+```json
+{
+  "version": 1,
+  "community_id": "<host-resolved community UUID>",
+  "host": "<canonical resolved request host>",
+  "viewer": "<authenticated viewer public key>",
+  "request_id": "<NIP-98 event ID>",
+  "types": ["dm", "forum", "stream", "system", "workflow"],
+  "complete": true,
+  "snapshot_id": "<SHA-256 content identity>",
+  "channels": [{
+    "id": "<channel UUID>",
+    "role": "guest",
+    "channel_type": "stream",
+    "visibility": "open",
+    "archived": false
+  }]
+}
+```
+
+Kind 39008 is registered as `KIND_MEMBERSHIP_SNAPSHOT` in
+[`buzz-core/src/kind.rs`](../../crates/buzz-core/src/kind.rs). Like the
+39005–39007 query overlays, it occupies the addressable range but is an
+on-demand projection: it is never persisted, replaced, broadcast or returned
+by ordinary REQ, COUNT or `/query`. Clients cannot submit it through EVENT.
+The `d` tag is a request coordinate, not a durable per-viewer list.
+
+The client MUST verify the envelope version, full Nostr ID and signature,
+expected kind and pinned relay key, both tags, and **all** signed binding
+inputs: schema version, host-resolved community UUID, canonical host (the normalized host of the NIP-98 `u` URL used for this
+request, not an alias inferred from another community URL), viewer,
+outstanding NIP-98 event ID and exact requested type array. The request ID
+MUST belong to the current viewer/community/session generation and be consumed
+at most once. A canceled, superseded, timed-out or previous-session request
+cannot establish current membership. `created_at` is informational wall clock;
+it MUST NOT order responses, prove freshness or override a newer revocation.
+
+The signature provides verifiable provenance when the result is cached or
+exported. A saved response is display data, never fresh authorization. Only
+matching the outstanding request proves an on-demand response; neither its
+signature nor `snapshot_id` is proof of current membership on its own.
+
+Arrays, including `[]`, malformed envelopes, missing/false completeness,
+invalid signatures, binding mismatches, unknown fields needed for authority,
+duplicate channels or invalid roles/types/visibility MUST fail validation.
+Never interpret these as an empty complete list. An empty **valid signed**
+`channels` list is authoritative only for its requested types and snapshot cut.
+
+### Canonical selection and bounds
+
+The relay reads the primary database in one SQL statement's MVCC snapshot.
+It selects only the viewer's active `channel_members` rows, joined to live
+`channels` in the same community, ordered by channel UUID. It does not load,
+parse or serialize full rosters, other members' keys, or profiles. The existing
+partial `(community_id, pubkey) WHERE removed_at IS NULL` index supports this
+projection. Channel UUID, role, type, visibility and archive state all come
+from that same statement, never a separately sampled version query.
+
+There is one entry per active membership in the requested type set:
+
+- Roles retain `owner`, `admin`, `member`, `bot`, and `guest`. A guest remains
+  read-only under existing send-time policy; membership is not a write grant.
+- Open, private, unlisted and explicitly requested system memberships are
+  included. Open channels where the viewer is not a member are excluded.
+- Archived channels are included with `archived:true`; deleted channels and
+  removed memberships are excluded.
+- Hidden DMs are included, as in kind-39002 discovery. NIP-DV kind 30622 owns
+  the separate per-viewer hide overlay; hiding is not leaving a DM.
+- Names, avatars, labels, creation identity, join policy and other channel
+  metadata remain in kind 39000. No member list is needed to use this result.
+
+The snapshot identity is SHA-256 of the UTF-8 compact JSON array
+`["nip-cl-membership-state-v1", community_id, viewer, types, channels]`, with
+UUIDs/pubkeys in lowercase and channel object keys in the order shown above.
+Clients MUST recompute this identity from the verified signed fields; it
+describes content, not a monotone revision, transaction ID or live cursor.
+A role change, removal or channel-state transition committed after the cut is
+visible on a subsequent refresh, even if legacy roster re-signing fails.
+
+Version 1 permits at most 4096 channels and 2097152 encoded response bytes.
+Selection probes one extra row. Either overflow returns 413 for the whole
+request, with no success envelope or partial list. Database/signing failure
+returns an error, never complete empty state. There are no pages, tokens,
+server snapshot caches, or resume semantics in v1. Retry the whole projection
+with fresh auth; a larger-account paging design requires a new version with
+an immutable cut, authorization, expiry and resource bounds.
+
+### Authority and snapshot-to-live handoff
+
+A snapshot describes one committed cut; it does **not** fence live delivery.
+The supported client path MUST keep viewer membership and role authority
+separate from full-roster availability:
+
+1. Establish the authenticated viewer's live 44100/44101 subscription for all
+   requested types before issuing the snapshot. Treat these notices as hints,
+   never an ordered or lossless delta log. Observe connection gaps, explicit
+   denials and changes to projected archive/visibility/type/deletion state as
+   invalidations too. Names or avatars alone do not dirty this projection.
+2. Fence the request by account, tenant and session generation. Increment an
+   invalidation generation for every relevant hint received after dispatch.
+   Buffer these hints while loading. A changed generation makes the result
+   dirty: for every channel named by a hint after dispatch, ignore that
+   result's entry entirely (presence, absence and role). Keep prior state
+   marked stale, including any denial already applied; suspend actions that
+   depend on an unconfirmed role. For unhinted channels a dirty result may
+   only add memberships, never alter existing roles or remove by omission.
+   A global invalidation discards the whole result. Coalesce a follow-up
+   refresh after processing the hints. A clean valid
+   snapshot may reconcile omissions only within its exact requested type set.
+3. Serialize refreshes per viewer/community and fence delayed completions.
+   Never order snapshots by timestamps or hashes. Local access denials or
+   removal/deletion hints immediately invalidate subscriptions, dependent UI
+   and roster caches; a delayed response cannot undo them. A later clean
+   request may establish a real re-add. Duplicate/out-of-order hints may cause
+   redundant invalidation, never grant authority.
+4. Lazy kind-39002 responses serve other-member features. They MUST NOT add,
+   remove or change the viewer's own membership or role on this path, even
+   when their timestamp is newer. Contradictions invalidate and schedule a
+   compact refresh. Preserve existing send-time permission checks; a roster
+   or snapshot cannot override a relay denial.
+5. Refresh after every reconnect/gap before claiming freshness. Reconnect costs
+   one compact projection per viewer, never one roster read per channel. On
+   resume, reconnect or capability changes, recheck the host-bound descriptor.
+   Coalesce notices, jitter dispatch and exponential failure backoff, and cap
+   immediate repair to three attempts per recovery episode. Continuous churn
+   then leaves explicit stale/incomplete state until the next bounded episode;
+   it MUST NOT start an endless roster reload or certify dirty omissions.
+6. Because notifications are post-commit and may be lost, refresh on foreground
+   resume and use a jittered 15-minute backstop while active, with no overlapping
+   reads. This bounds **attempts**, not successful convergence during outage or
+   churn. Successful quiescent refresh repairs missed roles, grants, revocations,
+   deletion and metadata transitions. Display stale state when repair fails;
+   the relay still authorizes every operation against current access.
+
+The relay continues to enforce current read/write authorization independently.
+This response is discovery authority, never a bearer capability. Relay-wide
+ban/removal invalidates the session even if channel rows remain active.
+
+### Compatibility and rollout
+
+A client MUST require the descriptor before selecting this mode. An explicit
+absent/disabled capability uses legacy full-roster discovery. If a pod returns
+an ordinary array or the exact disabled 404 error after another pod advertised
+support, mark compact discovery unsupported for that generation, recheck the
+descriptor and back off capability probes. Explicitly select a new legacy
+authority/session generation and run full legacy validation; the array is
+never a complete compact snapshot. This handles mixed-version fleets without
+revocation by empty response. An auth error,
+invalid signature, malformed envelope or transient failure MUST NOT silently
+switch authority models. Old relays may ignore unknown filter fields and
+return an ordinary array; this is not a valid compact response. Rollback may
+explicitly select legacy discovery with a new authority/session generation,
+without deleting saved display/user data. New relays keep legacy 39002 events,
+query shape, type opt-ins and signatures intact. Roll out the image to the
+**entire fleet with the flag off**, then enable the flag in a separate rollout.
+Rollback turns the flag off; clients recheck support and explicitly select
+legacy authority as above. Client opt-in and production-shaped throttled
+validation follow separately.
+
 ## Trust
 
 A client that relies on these tags MUST check that the relay's key signed the
