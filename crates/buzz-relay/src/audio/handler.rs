@@ -356,7 +356,7 @@ pub(crate) async fn handle_audio_connection(
         Uuid::new_v4(),
         community_id,
         control,
-        move || async move { check_state.db.is_community_active(community_id).await },
+        move || async move { check_state.is_community_active_cached(community_id).await },
         move |control| async move {
             let socket = socket_for_run
                 .lock()
