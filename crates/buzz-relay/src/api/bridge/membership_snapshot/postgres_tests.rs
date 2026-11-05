@@ -309,102 +309,294 @@ async fn membership_snapshot_router_disabled_malformed_and_legacy_roster_compati
     assert_eq!(status, StatusCode::OK, "{events}");
     assert_eq!(events, json!([roster]));
     // The relay-only gate is exercised through the real ingest boundary.
-    let forged = EventBuilder::new(Kind::Custom(39008), "{}")
-        .tags([Tag::identifier(viewer.public_key().to_hex())])
-        .sign_with_keys(&viewer)
-        .unwrap();
-    let forged = serde_json::to_value(forged).unwrap();
-    let (auth, _) = proof_at(&viewer, &host, "/events", &forged, true);
-    let response = crate::router::build_router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/events")
-                .header("host", &host)
-                .header("authorization", auth)
-                .body(Body::from(serde_json::to_vec(&forged).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert!(!response.status().is_success());
-    // Ordinary reads never synthesize a compact snapshot (old-relay wire shape).
-    let ordinary = json!([{"kinds":[39008],"#p":[viewer.public_key().to_hex()]}]);
-    let (auth, _) = proof(&viewer, &host, &ordinary, true);
-    let (status, events) = post(state, &host, ordinary, Some(auth), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(events, json!([]));
+    for kind in [39008, 39009] {
+        let forged = EventBuilder::new(Kind::Custom(kind), "{}")
+            .tags([Tag::identifier(viewer.public_key().to_hex())])
+            .sign_with_keys(&viewer)
+            .unwrap();
+        let forged = serde_json::to_value(forged).unwrap();
+        let (auth, _) = proof_at(&viewer, &host, "/events", &forged, true);
+        let response = crate::router::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events")
+                    .header("host", &host)
+                    .header("authorization", auth)
+                    .body(Body::from(serde_json::to_vec(&forged).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!response.status().is_success());
+        // Ordinary reads never synthesize a compact snapshot (old-relay wire shape).
+        let ordinary = json!([{"kinds":[kind],"#p":[viewer.public_key().to_hex()]}]);
+        let (auth, _) = proof(&viewer, &host, &ordinary, true);
+        let (status, events) = post(state.clone(), &host, ordinary, Some(auth), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(events, json!([]));
+    }
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn membership_snapshot_router_scale_overflow_and_backend_failure_never_complete_partial() {
-    let (state, host, community, viewer) = setup().await;
-    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+    for public in [false, true] {
+        let (state, host, community, viewer) = setup().await;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        let ids: Vec<uuid::Uuid> = (0..4097).map(|_| uuid::Uuid::new_v4()).collect();
+        // 468 memberships first: the query and signing path must handle an ordinary
+        // large account without pagination or full roster demand.
+        sqlx::query(
+            "INSERT INTO channels (community_id,id,name,created_by)
+        SELECT $1,id,id::text,$3 FROM unnest($2::uuid[]) id",
+        )
+        .bind(community.as_uuid())
+        .bind(&ids)
+        .bind(viewer.public_key().to_bytes().to_vec())
+        .execute(&pool)
         .await
         .unwrap();
-    let ids: Vec<uuid::Uuid> = (0..4097).map(|_| uuid::Uuid::new_v4()).collect();
-    // 468 memberships first: the query and signing path must handle an ordinary
-    // large account without pagination or full roster demand.
-    sqlx::query(
-        "INSERT INTO channels (community_id,id,name,created_by)
-        SELECT $1,id,id::text,$3 FROM unnest($2::uuid[]) id",
-    )
-    .bind(community.as_uuid())
-    .bind(&ids)
-    .bind(viewer.public_key().to_bytes().to_vec())
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO channel_members (community_id,channel_id,pubkey)
+        sqlx::query(
+            "INSERT INTO channel_members (community_id,channel_id,pubkey)
         SELECT $1,id,$3 FROM unnest($2::uuid[]) id",
-    )
-    .bind(community.as_uuid())
-    .bind(&ids[..468])
-    .bind(viewer.public_key().to_bytes().to_vec())
-    .execute(&pool)
-    .await
-    .unwrap();
-    let body = filter(&viewer);
-    let started = std::time::Instant::now();
-    let (auth, _) = proof(&viewer, &host, &body, true);
-    let (status, response) = post(state.clone(), &host, body.clone(), Some(auth), None).await;
+        )
+        .bind(community.as_uuid())
+        .bind(&ids[..468])
+        .bind(viewer.public_key().to_bytes().to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut enabled = (*state).clone();
+        Arc::make_mut(&mut enabled.config).membership_public_enabled = public;
+        let state = Arc::new(enabled);
+        let body = if public {
+            json!([{"kinds":[39009],"#p":[viewer.public_key().to_hex()],"#t":["stream"],"membership_public":1}])
+        } else {
+            filter(&viewer)
+        };
+        let started = std::time::Instant::now();
+        let (auth, _) = proof(&viewer, &host, &body, true);
+        let (status, response) = post(state.clone(), &host, body.clone(), Some(auth), None).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let signed: nostr::Event = serde_json::from_value(response["event"].clone()).unwrap();
+        signed.verify().unwrap();
+        let content: Value = serde_json::from_str(&signed.content).unwrap();
+        assert_eq!(content["channels"].as_array().unwrap().len(), 468);
+        let bytes = serde_json::to_vec(&response).unwrap().len();
+        println!(
+            "468-channel signed HTTP envelope bytes={bytes}, router_ms={}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        assert!(bytes < 100_000);
+        sqlx::query(
+            "INSERT INTO channel_members (community_id,channel_id,pubkey)
+        SELECT $1,id,$3 FROM unnest($2::uuid[]) id",
+        )
+        .bind(community.as_uuid())
+        .bind(&ids[468..])
+        .bind(viewer.public_key().to_bytes().to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (auth, _) = proof(&viewer, &host, &body, true);
+        let (status, error) = post(state.clone(), &host, body.clone(), Some(auth), None).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{error}");
+        assert!(error.get("event").is_none());
+        sqlx::query("ALTER TABLE channel_members RENAME TO membership_snapshot_unavailable")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (auth, _) = proof(&viewer, &host, &body, true);
+        let (status, error) = post(state, &host, body, Some(auth), None).await;
+        sqlx::query("ALTER TABLE membership_snapshot_unavailable RENAME TO channel_members")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+        assert!(error.get("event").is_none());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn public_memberships_router_bindings_scope_flags_and_strict_filters() {
+    let (state, host, community, requester) = setup().await;
+    let subject = Keys::generate();
+    let channel = state
+        .db
+        .create_channel(
+            community,
+            "public",
+            buzz_db::channel::ChannelType::Stream,
+            buzz_db::channel::ChannelVisibility::Open,
+            None,
+            &subject.public_key().to_bytes(),
+            None,
+        )
+        .await
+        .unwrap();
+    let body = json!([{"kinds":[39009],"#p":[subject.public_key().to_hex()],"#t":["forum","stream","workflow"],"membership_public":1}]);
+    assert!(crate::nip11::nip11_document(&state, &host)
+        .await
+        .unwrap()
+        .membership_public
+        .is_none());
+    let (auth, _) = proof(&requester, &host, &body, true);
+    let (status, error) = post(state.clone(), &host, body.clone(), Some(auth), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error, json!({"error":"membership_public unsupported"}));
+    let mut enabled = (*state).clone();
+    Arc::make_mut(&mut enabled.config).membership_public_enabled = true;
+    Arc::make_mut(&mut enabled.config).membership_snapshot_enabled = false;
+    let state = Arc::new(enabled);
+    let info = crate::nip11::nip11_document(&state, &host).await.unwrap();
+    assert!(info.membership_snapshot.is_none());
+    assert_eq!(info.membership_public.unwrap()["kind"], 39009);
+    assert!(crate::nip11::nip11_document(&state, "unknown.local")
+        .await
+        .is_err());
+    assert_eq!(
+        post(state.clone(), &host, body.clone(), None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for (signed_host, payload, submitted) in [
+        ("wrong.local", true, body.clone()),
+        (host.as_str(), false, body.clone()),
+        (host.as_str(), true, json!([])),
+    ] {
+        let (auth, _) = proof(&requester, signed_host, &body, payload);
+        assert_eq!(
+            post(state.clone(), &host, submitted, Some(auth), None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (auth, event) = proof(&requester, &host, &body, true);
+    let (status, response) =
+        post(state.clone(), &host, body.clone(), Some(auth.clone()), None).await;
     assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["membership_public"], 1);
+    assert!(response.get("membership_snapshot").is_none());
     let signed: nostr::Event = serde_json::from_value(response["event"].clone()).unwrap();
     signed.verify().unwrap();
-    let content: Value = serde_json::from_str(&signed.content).unwrap();
-    assert_eq!(content["channels"].as_array().unwrap().len(), 468);
-    let bytes = serde_json::to_vec(&response).unwrap().len();
-    println!(
-        "468-channel signed HTTP envelope bytes={bytes}, router_ms={}",
-        started.elapsed().as_secs_f64() * 1000.0
+    assert_eq!(signed.kind, Kind::Custom(39009));
+    assert_eq!(signed.pubkey, state.relay_keypair.public_key());
+    assert_eq!(
+        signed
+            .tags
+            .iter()
+            .map(|t| t.as_slice().to_vec())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["d".to_string(), event.id.to_hex()],
+            vec!["p".to_string(), subject.public_key().to_hex()]
+        ]
     );
-    assert!(bytes < 100_000);
-    sqlx::query(
-        "INSERT INTO channel_members (community_id,channel_id,pubkey)
-        SELECT $1,id,$3 FROM unnest($2::uuid[]) id",
-    )
-    .bind(community.as_uuid())
-    .bind(&ids[468..])
-    .bind(viewer.public_key().to_bytes().to_vec())
-    .execute(&pool)
-    .await
-    .unwrap();
-    let (auth, _) = proof(&viewer, &host, &body, true);
-    let (status, error) = post(state.clone(), &host, body.clone(), Some(auth), None).await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{error}");
-    assert!(error.get("event").is_none());
-    sqlx::query("ALTER TABLE channel_members RENAME TO membership_snapshot_unavailable")
-        .execute(&pool)
-        .await
+    let content: Value = serde_json::from_str(&signed.content).unwrap();
+    assert_eq!(content["scope"], "public");
+    assert_eq!(content["requester"], requester.public_key().to_hex());
+    assert_eq!(content["subject"], subject.public_key().to_hex());
+    assert_eq!(content["request_id"], event.id.to_hex());
+    assert_eq!(content["community_id"], community.as_uuid().to_string());
+    assert_eq!(content["host"], host);
+    assert_eq!(content["types"], body[0]["#t"]);
+    assert_eq!(content["complete"], true);
+    assert_eq!(
+        content["channels"],
+        json!([{"id":channel.id,"role":"owner","channel_type":"stream","visibility":"open","archived":false}])
+    );
+    assert_eq!(
+        post(state.clone(), &host, body.clone(), Some(auth), None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    for (key, value) in [
+        ("kinds", json!([39008])),
+        ("membership_public", json!(2)),
+        ("membership_snapshot", json!(1)),
+        ("#t", json!(["dm", "stream"])),
+        ("#t", json!(["system"])),
+        ("#t", json!(["stream", "forum"])),
+        ("#t", json!(["stream", "stream"])),
+        ("#t", json!([])),
+        (
+            "#p",
+            json!([
+                requester.public_key().to_hex(),
+                subject.public_key().to_hex()
+            ]),
+        ),
+        ("#p", json!([subject.public_key().to_hex().to_uppercase()])),
+        ("limit", json!(1)),
+    ] {
+        let mut bad = body.clone();
+        bad[0][key] = value;
+        let (auth, _) = proof(&requester, &host, &bad, true);
+        assert_eq!(
+            post(state.clone(), &host, bad.clone(), Some(auth), None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    let ordinary = json!([{"kinds":[39009],"#p":[subject.public_key().to_hex()]}]);
+    let (auth, _) = proof(&requester, &host, &ordinary, true);
+    assert_eq!(
+        post(state, &host, ordinary, Some(auth), None).await.1,
+        json!([])
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn public_memberships_share_requester_quota_across_subjects_and_fail_closed() {
+    let (base, host, _, requester) = setup().await;
+    let mut quota = (*base).clone();
+    Arc::make_mut(&mut quota.config).membership_public_enabled = true;
+    let mut config = quota.config.auth.clone();
+    config.rate_limits.human_api_calls_per_min = 1;
+    quota.auth = Arc::new(buzz_auth::AuthService::new(config));
+    let state = Arc::new(quota);
+    let body = |subject: &Keys| json!([{"kinds":[39009],"#p":[subject.public_key().to_hex()],"#t":["stream"],"membership_public":1}]);
+    for (subject, expected) in [
+        (Keys::generate(), StatusCode::OK),
+        (Keys::generate(), StatusCode::TOO_MANY_REQUESTS),
+    ] {
+        let body = body(&subject);
+        let (auth, _) = proof(&requester, &host, &body, true);
+        let (status, response) = post(state.clone(), &host, body, Some(auth), None).await;
+        assert_eq!(status, expected, "{response}");
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            assert!(response["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("rate-limited: quota exceeded; retry in "));
+            assert!(response.get("event").is_none());
+        }
+    }
+    let other = Keys::generate();
+    let body = body(&requester);
+    let (auth, _) = proof(&other, &host, &body, true);
+    assert_eq!(
+        post(state.clone(), &host, body.clone(), Some(auth), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let mut unavailable = (*state).clone();
+    let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .unwrap();
-    let (auth, _) = proof(&viewer, &host, &body, true);
-    let (status, error) = post(state, &host, body, Some(auth), None).await;
-    sqlx::query("ALTER TABLE membership_snapshot_unavailable RENAME TO channel_members")
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+    unavailable.admission_rate_limiter =
+        Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(dead));
+    let (auth, _) = proof(&Keys::generate(), &host, &body, true);
+    let (status, error) = post(Arc::new(unavailable), &host, body, Some(auth), None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(error.get("event").is_none());
 }

@@ -440,3 +440,80 @@ async fn cluster_global_membership_snapshot_role_and_removal_commit_during_state
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn public_memberships_exclude_private_unlisted_removed_deleted_and_other_types() {
+    let (db, pool, community, subject, ids) = fixture(9).await;
+    for (index, kind) in [
+        (0, "stream"),
+        (1, "stream"),
+        (2, "stream"),
+        (3, "dm"),
+        (4, "system"),
+        (5, "stream"),
+        (6, "stream"),
+        (7, "forum"),
+        (8, "workflow"),
+    ] {
+        sqlx::query("UPDATE channels SET channel_type=$3::channel_type, visibility=$4::channel_visibility, unlisted=$5, deleted_at=CASE WHEN $6 THEN now() ELSE NULL END, archived_at=CASE WHEN $7 THEN now() ELSE NULL END WHERE community_id=$1 AND id=$2")
+            .bind(community.as_uuid()).bind(ids[index]).bind(kind)
+            .bind(if index == 1 {"private"} else {"open"}).bind(index == 2)
+            .bind(index == 5).bind(index == 7).execute(&pool).await.unwrap();
+    }
+    sqlx::query(
+        "UPDATE channel_members SET removed_at=now() WHERE community_id=$1 AND channel_id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(ids[6])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE channel_members SET role='guest' WHERE community_id=$1 AND channel_id=$2")
+        .bind(community.as_uuid())
+        .bind(ids[7])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let types = vec!["forum".into(), "stream".into(), "workflow".into()];
+    let snapshot = db
+        .public_memberships(community, &subject.public_key(), &types)
+        .await
+        .unwrap();
+    let mut expected = vec![ids[0], ids[7], ids[8]];
+    expected.sort();
+    assert_eq!(
+        snapshot.channels.iter().map(|c| c.id).collect::<Vec<_>>(),
+        expected
+    );
+    assert!(snapshot.channels.iter().all(|c| c.visibility == "open"));
+    let archived = snapshot.channels.iter().find(|c| c.id == ids[7]).unwrap();
+    assert_eq!(archived.role, "guest");
+    assert!(archived.archived);
+    let identity = serde_json::to_vec(&(
+        "nip-cl-public-membership-v1",
+        community.as_uuid(),
+        subject.public_key().to_hex(),
+        &types,
+        &snapshot.channels,
+    ))
+    .unwrap();
+    assert_eq!(snapshot.snapshot_id, hex::encode(Sha256::digest(identity)));
+    assert_ne!(
+        snapshot.snapshot_id,
+        db.membership_snapshot(community, &subject.public_key(), &types)
+            .await
+            .unwrap()
+            .snapshot_id
+    );
+    assert!(db
+        .public_memberships(community, &subject.public_key(), &all_types())
+        .await
+        .is_err());
+    assert!(db
+        .public_memberships(community, &Keys::generate().public_key(), &types)
+        .await
+        .unwrap()
+        .channels
+        .is_empty());
+}
