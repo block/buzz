@@ -301,8 +301,7 @@ These independent, optional query modes reserve distinct response kinds:
 | `membership_snapshot` v1 | 39008 | NIP-98 signer only | Own active memberships, including private channels and DMs as specified below. |
 | `membership_public` v1 | 39009 | Any public key | Active memberships in listed, open forum/stream/workflow channels only. |
 
-Kind 39009 is reserved by this specification for public membership lookups;
-its runtime registration and implementation are separate work. Supporting
+Kinds 39008 and 39009 are relay-only, request-bound projections. Support for
 39008 does not imply support for 39009, or conversely. Each mode key MUST
 appear only with its own kind; a mismatched mode key and kind returns 400.
 
@@ -330,7 +329,7 @@ information document:
 }
 ```
 
-The operator switch `BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED` defaults to false.
+The operator switch for this capability is off by default.
 Disabled relays omit the descriptor and return HTTP 404 with
 `{"error":"membership_snapshot unsupported"}` for this query mode. Capability
 advertisement alone is not authentication or membership authority. Clients
@@ -407,10 +406,8 @@ The signed content is:
 }
 ```
 
-Kind 39008 is registered as `KIND_MEMBERSHIP_SNAPSHOT` in
-[`buzz-core/src/kind.rs`](../../crates/buzz-core/src/kind.rs). Like the
-39005–39007 query overlays, it occupies the addressable range but is an
-on-demand projection: it is never persisted, replaced, broadcast or returned
+Like the 39005–39007 query overlays, kind 39008 occupies the addressable
+range but is an on-demand projection: it is never persisted, replaced, broadcast or returned
 by ordinary REQ, COUNT or `/query`. Clients cannot submit it through EVENT.
 The `d` tag is a request coordinate, not a durable per-viewer list.
 
@@ -437,13 +434,12 @@ Never interpret these as an empty complete list. An empty **valid signed**
 
 ### Canonical selection and bounds
 
-The relay reads the primary database in one SQL statement's MVCC snapshot.
-It selects only the viewer's active `channel_members` rows, joined to live
-`channels` in the same community, ordered by channel UUID. It does not load,
-parse or serialize full rosters, other members' keys, or profiles. The existing
-partial `(community_id, pubkey) WHERE removed_at IS NULL` index supports this
-projection. Channel UUID, role, type, visibility and archive state all come
-from that same statement, never a separately sampled version query.
+The relay MUST derive the complete response from one consistent read of
+committed state that reflects every change committed before the relay
+received the request. Select only the viewer's active memberships in nondeleted
+channels in the same community, ordered by channel UUID. Channel UUID,
+role, type, visibility and archive state MUST reflect that same read.
+The projection MUST NOT include full rosters, other members' keys or profiles.
 
 There is one entry per active membership in the requested type set:
 
@@ -525,7 +521,7 @@ The relay continues to enforce current read/write authorization independently.
 This response is discovery authority, never a bearer capability. Relay-wide
 ban/removal invalidates the session even if channel rows remain active.
 
-### Compatibility and rollout
+### Compatibility
 
 A client MUST require the descriptor before selecting this mode. An explicit
 absent/disabled capability uses legacy full-roster discovery. If a pod returns
@@ -540,11 +536,9 @@ switch authority models. Old relays may ignore unknown filter fields and
 return an ordinary array; this is not a valid compact response. Rollback may
 explicitly select legacy discovery with a new authority/session generation,
 without deleting saved display/user data. New relays keep legacy 39002 events,
-query shape, type opt-ins and signatures intact. Roll out the image to the
-**entire fleet with the flag off**, then enable the flag in a separate rollout.
-Rollback turns the flag off; clients recheck support and explicitly select
-legacy authority as above. Client opt-in and production-shaped throttled
-validation follow separately.
+query shape, type opt-ins and signatures intact. Disabling the capability
+requires clients to recheck support and explicitly select legacy authority
+as above.
 
 ## Compact public membership lookup (version 1)
 
@@ -573,8 +567,8 @@ NIP-11 information document:
 }
 ```
 
-`BUZZ_MEMBERSHIP_PUBLIC_ENABLED` defaults to false, independently of
-`BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED`. Disabled relays omit this descriptor and
+The operator switch for public lookup is off by default and independent of
+the self-snapshot switch. Disabled relays omit this descriptor and
 return HTTP 404 with `{"error":"membership_public unsupported"}` for this
 mode. An unresolved host never advertises it. Clients MUST obtain and pin
 this descriptor using the TLS-origin and relay-key rules of self mode.
@@ -607,9 +601,8 @@ between requester and subject expands the public scope or grants private
 access. A subject need not have a profile or current community membership;
 selection uses their active channel memberships in this community only.
 
-Every attempt MUST consume the existing shared HTTP API-call quota keyed by
-community and requester (the bridge's `ApiCalls` bucket and configured
-`human_api_calls_per_min` limit), before selection. Changing subjects MUST NOT
+Every attempt MUST consume the requester's existing per-community API-call
+quota before selection. Changing subjects MUST NOT
 reset that quota. Exhaustion returns 429 using the bridge's existing
 `rate-limited: quota exceeded; retry in <seconds>s` error convention; shared
 admission unavailability returns 503 and fails closed. Clients MUST respect
@@ -684,13 +677,14 @@ its signature and identity do not prove present visibility or authorization.
 
 ### Selection, completeness and bounds
 
-The relay MUST read the primary database in one SQL statement's MVCC
-snapshot. Select the subject's active `channel_members` rows joined to
-nondeleted channels in the same community, restricted to requested types,
-`visibility=open` and not unlisted, ordered by channel UUID. This is the
-listed-open discovery predicate, with no shared-private-channel exception.
-All entry fields MUST come from that same statement. Do not load, parse or
-serialize full rosters, peers' public keys or profiles.
+The relay MUST derive the complete response from one consistent read of
+committed state that reflects every change committed before the relay
+received the request. Select the subject's active memberships in nondeleted
+channels in the same community, restricted to requested types, open and not
+unlisted, ordered by channel UUID. This is the listed-open discovery
+predicate, with no shared-private-channel exception. All entry fields MUST
+reflect that same read. The projection MUST NOT include full rosters,
+peers' public keys or profiles.
 
 There is one entry per matching membership. Preserve the subject's role
 (`owner`, `admin`, `member`, `bot` or `guest`); include archived channels with
@@ -702,7 +696,8 @@ existing read rules.
 `complete:true` means all of the subject's memberships satisfying this
 public predicate and requested type set at that instant. It never means
 the subject's full membership set. A channel absent on refresh may have
-become private, unlisted or deleted, or its membership may have ended; absence MUST NOT establish loss of membership.
+become private, unlisted or deleted, or its membership may have ended;
+absence MUST NOT establish loss of membership.
 
 The snapshot identity is SHA-256 of the UTF-8 compact JSON array
 `["nip-cl-public-membership-v1", community_id, subject, types, channels]`,
@@ -719,7 +714,7 @@ partial list. Database/signing failure returns an error, never complete
 empty state. There are no pages, tokens, server snapshot caches or resume
 semantics in v1. A retry requires fresh NIP-98 auth.
 
-### Discovery authority and rollout
+### Discovery authority and compatibility
 
 A validated result MAY replace a cached public discovery list keyed by
 community, subject and exact requested types. It MUST NOT populate or alter
@@ -737,12 +732,10 @@ an ordinary array or the exact disabled 404 after another pod advertised
 support, mark public lookup unsupported for that generation, recheck its
 host-bound descriptor and back off capability probes. Keep any saved public
 list explicitly stale; this does not switch the self authority model.
-Auth failures,
-invalid signatures, malformed responses and transient errors MUST NOT be
-accepted as an empty result or silently retried through self mode.
-Deploy support to the entire fleet with the public flag off, then enable
-it separately. Public and self capability rollout and rollback are
-independent. Turning off public lookup stops its use without changing the
+Auth failures, invalid signatures, malformed responses and transient errors
+MUST NOT be accepted as an empty result or silently retried through self mode.
+Public and self capabilities can be enabled and disabled independently.
+Turning off public lookup stops its use without changing the
 self-membership authority/session generation or deleting saved display data.
 
 ### Normative examples and rejection cases

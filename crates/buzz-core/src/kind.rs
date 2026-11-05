@@ -486,6 +486,9 @@ pub const KIND_THREAD_WINDOW_BOUNDS: u32 = 39007;
 /// NIP-CL: request-bound compact viewer membership overlay; query-time only, never stored.
 pub const KIND_MEMBERSHIP_SNAPSHOT: u32 = 39008;
 
+/// NIP-CL: request-bound public membership overlay; query-time only, never stored.
+pub const KIND_MEMBERSHIP_PUBLIC: u32 = 39009;
+
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
@@ -751,6 +754,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_WINDOW_BOUNDS,
     KIND_THREAD_WINDOW_BOUNDS,
     KIND_MEMBERSHIP_SNAPSHOT,
+    KIND_MEMBERSHIP_PUBLIC,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_AGENT_PRESENCE,
@@ -907,6 +911,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_WINDOW_BOUNDS
             | KIND_THREAD_WINDOW_BOUNDS
             | KIND_MEMBERSHIP_SNAPSHOT
+            | KIND_MEMBERSHIP_PUBLIC
     )
 }
 
@@ -994,6 +999,9 @@ mod tests {
     fn compact_membership_snapshot_is_relay_only() {
         assert_eq!(KIND_MEMBERSHIP_SNAPSHOT, 39008);
         assert!(is_relay_only_kind(KIND_MEMBERSHIP_SNAPSHOT));
+        assert_eq!(KIND_MEMBERSHIP_PUBLIC, 39009);
+        assert!(is_relay_only_kind(KIND_MEMBERSHIP_PUBLIC));
+        assert!(ALL_KINDS.contains(&KIND_MEMBERSHIP_PUBLIC));
     }
 
     #[test]
