@@ -477,8 +477,9 @@ async fn growing_does_not_reveal_a_dm_the_actor_is_not_in() {
     );
 }
 
-/// The relay's moderation DM stays two-party.
-/// Mutation: drop the relay-key guard → a person joins → RED.
+/// The relay's moderation DM stays two-party, whether added to or opened with
+/// someone else.
+/// Mutation: drop either relay-key guard → a member joins → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn the_moderation_dm_cannot_grow() {
@@ -499,6 +500,16 @@ async fn the_moderation_dm_cannot_grow() {
     rejected(
         add(&state, &tenant, &a, dm.id, &[&b], false).await,
         "cannot be changed",
+    );
+    let agent = Keys::generate();
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    rejected(
+        open(&state, &tenant, &a, &[&state.relay_keypair, &agent]).await,
+        "cannot be changed",
+    );
+    assert_eq!(
+        members(&state, &tenant, dm.id).await,
+        set_of(&[&a, &state.relay_keypair])
     );
 }
 
@@ -711,5 +722,59 @@ async fn kicking_an_agent_keeps_a_group_dm_its_identity() {
             .await
             .expect("own again"),
         own
+    );
+}
+
+/// Opening a DM that puts someone else's agent with anyone besides the caller
+/// follows its add policy, even when no other person is in it.
+/// Mutation: check policies only when people are named → the DM opens → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn opening_with_several_agents_follows_their_add_policy() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agents-policy").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+    let (theirs, mine) = (Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &theirs, &b, "nobody").await;
+    make_agent(&state, &tenant, &mine, &a, "owner_only").await;
+
+    rejected(
+        open(&state, &tenant, &a, &[&theirs, &mine]).await,
+        "policy:nobody",
+    );
+}
+
+/// Adding an agent to a DM of one person and their agent moves its identity
+/// to all its members: the original pair gets a new DM.
+/// Mutation: keep the old identity → reopening the pair finds the grown DM →
+/// RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_agent_joining_a_one_person_dm_moves_its_identity() {
+    let state = state().await;
+    let tenant = community(&state, "dm-one-person-grow").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+    let (mine, theirs) = (Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &mine, &a, "anyone").await;
+    make_agent(&state, &tenant, &theirs, &b, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&mine]).await.expect("open");
+
+    let (target, _) = add(&state, &tenant, &a, dm, &[&theirs], false)
+        .await
+        .expect("add agent");
+    assert_eq!(target, dm);
+    assert_eq!(
+        members(&state, &tenant, dm).await,
+        set_of(&[&a, &mine, &theirs])
+    );
+    assert_ne!(
+        open(&state, &tenant, &a, &[&mine]).await.expect("reopen"),
+        dm
+    );
+    assert_eq!(
+        open(&state, &tenant, &a, &[&mine, &theirs])
+            .await
+            .expect("grown"),
+        dm
     );
 }

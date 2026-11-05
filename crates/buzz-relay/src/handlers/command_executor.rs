@@ -412,6 +412,9 @@ async fn announce_dm_created(
     }
 }
 
+/// Why the relay's moderation DM cannot take anyone else.
+const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
+
 /// The agents among `pubkeys` (users with an owner): each one's
 /// `channel_add_policy` and owner.
 async fn dm_agents(
@@ -467,12 +470,21 @@ async fn handle_dm_open(
         ));
     }
 
-    // 2. At most 8 other people (9 total); agents do not count. Putting an
-    //    agent in a DM with other people needs its channel_add_policy; a DM
-    //    of just the caller and agents does not.
+    // 2. The relay's moderation DM stays two-party. At most 8 other people
+    //    (9 total); agents do not count. Putting an agent in a DM with anyone
+    //    besides the caller needs its channel_add_policy; messaging one alone
+    //    does not.
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    if others.len() > 1
+        && others
+            .iter()
+            .any(|pk| pk.as_slice() == relay_pubkey.as_slice())
+    {
+        return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
+    }
     let agents = dm_agents(tenant, state, &others).await?;
     let other_people = others.iter().filter(|pk| !agents.contains_key(*pk)).count();
-    if other_people > 0 {
+    if others.len() > 1 {
         check_dm_agent_policies(&agents, &self_bytes)?;
     }
     if other_people > MAX_DM_PEOPLE - 1 {
@@ -641,9 +653,7 @@ async fn handle_dm_add_member(
         .iter()
         .any(|m| m.as_slice() == relay_pubkey.as_slice())
     {
-        return Err(IngestError::Rejected(
-            "invalid: this DM cannot be changed".into(),
-        ));
+        return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
     }
 
     let mut additions: Vec<Vec<u8>> = Vec::new();

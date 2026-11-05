@@ -496,9 +496,9 @@ pub enum DmGrowth {
 
 /// Add `additions` to the DM `channel_id` in place, keeping its history.
 ///
-/// Agents join without changing which DM this is. When people join, the DM's
-/// identity moves to the grown set of people ([`dm_identity_hash`]), so
-/// opening a DM with the original people afterwards starts a new one. If a DM
+/// Agents join a DM of two or more people without changing which DM it is.
+/// Otherwise the DM's identity moves to the grown set ([`dm_identity_hash`]), so
+/// opening a DM with the original members afterwards starts a new one. If a DM
 /// with the grown set already exists, nothing is written and that DM is
 /// returned as [`DmGrowth::Existing`], provided `actor` is in it.
 ///
@@ -586,8 +586,11 @@ pub async fn grow_dm(
         )));
     }
 
-    if count_people(&added, &agents) > 0 {
-        let hash = dm_identity_hash(&grown, &agents);
+    // People move the DM's identity to the grown set of people. So do agents
+    // joining a DM of at most one person, which is identified by all members.
+    let hash = dm_identity_hash(&grown, &agents);
+    let current: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+    if hash != dm_identity_hash(&current, &agents) {
         let existing = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM channels \
              WHERE community_id = $1 AND participant_hash = $2 AND id <> $3 \
