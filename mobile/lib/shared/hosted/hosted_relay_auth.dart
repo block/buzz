@@ -91,7 +91,13 @@ class HostedRelayAuth extends ChangeNotifier {
         ({String token, DateTime expiry, BuilderlabAccount account})
       >{};
   // Per account client, so a stalled issuer never delays an unrelated one.
-  final _pending = <BuilderlabAccountClient, Future<void>>{};
+  // Waiters share account restoration, but only an issuance for their own
+  // relay and key can fail on their behalf.
+  final _pending =
+      <
+        BuilderlabAccountClient,
+        ({Future<void> operation, String relay, String pubkey})
+      >{};
   bool _disposed = false;
   // Orders issuance and refusals, so a stale result never replaces a newer
   // failure for another relay or key.
@@ -164,7 +170,8 @@ class HostedRelayAuth extends ChangeNotifier {
 
   /// The assertion for [config]'s relay and key. A [background] caller (such
   /// as a push revocation for a removed community) never records its failure
-  /// or success, so it cannot hide or clear the active session's recovery.
+  /// or success, so it cannot hide or clear the active session's recovery,
+  /// and never backs up the key.
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
@@ -203,18 +210,25 @@ class HostedRelayAuth extends ChangeNotifier {
       if (pending != null) {
         // Different communities share account restoration, never assertions.
         try {
-          await pending;
+          await pending.operation;
         } on AccountFailure {
-          if (failedRelay == config.baseUrl && failedPubkey == pubkey) rethrow;
+          if (pending.relay == relay &&
+              pending.pubkey == pubkey &&
+              failedRelay == config.baseUrl &&
+              failedPubkey == pubkey) {
+            rethrow;
+          }
         }
         continue;
       }
       final operation = _issue(config, client, relay, pubkey, background);
-      _pending[client] = operation;
+      _pending[client] = (operation: operation, relay: relay, pubkey: pubkey);
       try {
         await operation;
       } finally {
-        if (identical(_pending[client], operation)) _pending.remove(client);
+        if (identical(_pending[client]?.operation, operation)) {
+          _pending.remove(client);
+        }
       }
     }
     throw AccountFailure.unavailable;
@@ -298,7 +312,9 @@ class HostedRelayAuth extends ChangeNotifier {
       );
       // Issuance alone cannot prove admission after a relay refusal.
       if (!background && failure != AccountFailure.denied) connected(config);
-      if (identical(account, organization)) {
+      // A background caller may be removing this community, so its key must
+      // not be backed up after the user discarded it.
+      if (!background && identical(account, organization)) {
         unawaited(organizationBackup?.afterAssertion(config.nsec!, pubkey));
       }
     } on AccountFailure catch (error) {

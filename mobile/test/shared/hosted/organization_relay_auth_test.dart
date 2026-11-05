@@ -5,6 +5,7 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
+import 'package:buzz/shared/hosted/organization_key_backup.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -134,20 +135,21 @@ void main() {
       }),
     );
 
-    HostedRelayAuth relayAuth(BuilderlabAccountClient organizationAccount) =>
-        HostedRelayAuth(
-          BuilderlabAccountClient(
-            httpClient: MockClient(
-              (request) async => fail('Hosted account must not be used'),
-            ),
-          ),
-          organization: organizationAccount,
-          organizationRelay: (relay) => OrganizationEnvironment.matches(relay, [
-            relayHost,
-            otherRelayHost,
-          ]),
-          enabled: true,
-        );
+    HostedRelayAuth relayAuth(
+      BuilderlabAccountClient organizationAccount, {
+      OrganizationKeyBackup? backup,
+    }) => HostedRelayAuth(
+      BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => fail('Hosted account must not be used'),
+        ),
+      ),
+      organization: organizationAccount,
+      organizationBackup: backup,
+      organizationRelay: (relay) =>
+          OrganizationEnvironment.matches(relay, [relayHost, otherRelayHost]),
+      enabled: true,
+    );
 
     setUp(() {
       requests = [];
@@ -231,8 +233,14 @@ void main() {
           baseUrl: 'https://$otherRelayHost',
           nsec: keys.nsec,
         );
-        final auth = relayAuth(organizationClient());
+        final organizationAccount = organizationClient();
+        final backup = _RecordingKeyBackup(organizationAccount);
+        final auth = relayAuth(organizationAccount, backup: backup);
         await auth.headers(relay);
+        // A background task such as a push revocation for a removed community
+        // never backs up the key the user is discarding.
+        await auth.headers(other, background: true);
+        expect(backup.backedUp, [keys.public]);
         // A background task such as a push revocation issues for an inactive
         // community while `relay` stays the active session.
         await auth.headers(other);
@@ -256,6 +264,21 @@ void main() {
         );
         expect(auth.failedRelay, relay.baseUrl);
         expect(auth.failure, AccountFailure.denied);
+        // The active relay's reconnect, arriving while that background
+        // issuance is still in flight, gets its own assertion rather than
+        // the other community's failure.
+        boundIdentity = null;
+        tokenFor = (relayUrl) => Uri.parse(relayUrl).host == otherRelayHost
+            ? ''
+            : 'token-for-${Uri.parse(relayUrl).host}';
+        final revocation = expectLater(
+          auth.headers(other, background: true),
+          throwsA(AccountFailure.invalidResponse),
+        );
+        expect(await auth.headers(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
+        });
+        await revocation;
       },
     );
 
@@ -595,5 +618,16 @@ class _PausedReadStorage extends FlutterSecureStorage {
       await resume.future;
     }
     return super.read(key: key);
+  }
+}
+
+class _RecordingKeyBackup extends OrganizationKeyBackup {
+  _RecordingKeyBackup(super.account);
+
+  final backedUp = <String>[];
+
+  @override
+  Future<void> afterAssertion(String nsec, String pubkey) async {
+    backedUp.add(pubkey);
   }
 }
