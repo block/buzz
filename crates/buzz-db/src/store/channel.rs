@@ -452,7 +452,7 @@ async fn insert_channel_rows(
     Ok(was_created)
 }
 
-/// The unique index (migration 0081) that keeps two channels the channel
+/// The unique index (migration 0083) that keeps two channels the channel
 /// directory lists from sharing a name in a community, ignoring case. It
 /// covers open, not unlisted streams and forums that are not deleted; an
 /// archived channel keeps its name. Private channels, DMs and the other

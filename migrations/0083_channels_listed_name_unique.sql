@@ -9,9 +9,10 @@
 -- scripts/maintenance/rename_duplicate_listed_channel_names.sh must have
 -- renamed the existing duplicates. See docs/channel-name-uniqueness-deployment.md.
 --
--- A populated database must prebuild the index concurrently (docs/database.md
--- Rule 6): this migration refuses to build it there under a write-blocking
--- lock. It builds the index itself only on an empty `channels` table.
+-- The migration builds the index itself, as 0049 does, under the lock and
+-- statement budgets below (docs/database.md Rule 6). A deployment too large
+-- for them migrates out of band and builds the index concurrently first; the
+-- migration then only verifies it.
 SET LOCAL lock_timeout = '1s';
 SET LOCAL statement_timeout = '5s';
 -- pg_get_indexdef qualifies the enum casts below (`public.channel_visibility`)
@@ -30,10 +31,7 @@ BEGIN
             GROUP BY community_id, lower(name)
             HAVING count(*) > 1
         ) THEN
-            RAISE EXCEPTION 'Migration 0081 stopped: listed channels with duplicate names remain. Rename them with scripts/maintenance/rename_duplicate_listed_channel_names.sh (docs/channel-name-uniqueness-deployment.md, steps 2 and 3), then migrate again.';
-        END IF;
-        IF EXISTS (SELECT 1 FROM public.channels LIMIT 1) THEN
-            RAISE EXCEPTION 'Migration 0081 stopped: channels has rows, so prebuild idx_channels_listed_name concurrently (docs/channel-name-uniqueness-deployment.md, step 4), then migrate again.';
+            RAISE EXCEPTION 'Migration 0083 stopped: listed channels with duplicate names remain. Rename them with scripts/maintenance/rename_duplicate_listed_channel_names.sh (docs/channel-name-uniqueness-deployment.md, steps 2 and 3), then migrate again.';
         END IF;
 
         CREATE UNIQUE INDEX idx_channels_listed_name
@@ -51,6 +49,6 @@ BEGIN
           AND pg_get_indexdef(i.indexrelid) =
               'CREATE UNIQUE INDEX idx_channels_listed_name ON public.channels USING btree (community_id, lower((name)::text)) WHERE ((visibility = ''open''::channel_visibility) AND (NOT unlisted) AND (channel_type = ANY (ARRAY[''stream''::channel_type, ''forum''::channel_type])) AND (deleted_at IS NULL))'
     ) THEN
-        RAISE EXCEPTION 'Migration 0081 stopped: idx_channels_listed_name is invalid or has a different definition. Drop it and build it again (docs/channel-name-uniqueness-deployment.md, Recovery), then migrate again.';
+        RAISE EXCEPTION 'Migration 0083 stopped: idx_channels_listed_name is invalid or has a different definition. Drop it and build it again (docs/channel-name-uniqueness-deployment.md, Recovery), then migrate again.';
     END IF;
 END $$;

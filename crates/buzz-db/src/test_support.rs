@@ -459,8 +459,8 @@ pub(crate) async fn named_pool(application_name: &str) -> sqlx::PgPool {
         .expect("connect named test pool")
 }
 
-/// Prebuild `idx_channels_listed_name` concurrently, as an operator does
-/// before migration 0081 on a populated `channels` table
+/// Prebuild `idx_channels_listed_name` concurrently, as an operator of a
+/// deployment that migrates out of band does before migration 0083
 /// (docs/channel-name-uniqueness-deployment.md). Run it with no open
 /// transaction in the database: the build waits for every one.
 pub(crate) async fn prebuild_listed_channel_name_index(pool: &sqlx::PgPool) {

@@ -3,16 +3,16 @@
 //! ignoring case. It keeps the name on the oldest unarchived channel and picks
 //! a new name that no other listed channel has.
 //!
-//! Migration 0081 then adds the unique index. It refuses to run over
-//! duplicates that were not renamed or, on a populated table, without a
-//! concurrent prebuild; it accepts a valid prebuild without replacing it and
-//! rejects an invalid one.
+//! Migration 0083 then adds the unique index. It refuses to run over
+//! duplicates that were not renamed. Otherwise it builds the index itself on a
+//! populated table under its lock budget, accepts a valid concurrent prebuild
+//! without replacing it, and rejects an invalid one.
 
 use super::*;
 
-/// The last migration before 0081. Duplicates can exist, and the plan has
+/// The last migration before 0083. Duplicates can exist, and the plan has
 /// work to do, only before the index does.
-const BEFORE_INDEX: i64 = 80;
+const BEFORE_INDEX: i64 = 82;
 
 const PLAN_SQL: &str =
     include_str!("../../../../../scripts/maintenance/plan_duplicate_listed_channel_renames.sql");
@@ -514,7 +514,7 @@ async fn index_oid(pool: &PgPool) -> Option<i64> {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn migration_schema_listed_name_index_needs_the_renames_and_a_prebuild() {
+async fn migration_schema_listed_name_index_needs_the_renames_then_builds_inline() {
     let (pool, _scratch) =
         ScratchDb::migrated_through(&admin_url().await, "listed_name_index", BEFORE_INDEX).await;
     let seed = Seed::new(&pool).await;
@@ -534,20 +534,28 @@ async fn migration_schema_listed_name_index_needs_the_renames_and_a_prebuild() {
 
     assert_eq!(rename_duplicates(&pool, &seed.host).await, 1);
     assert!(rename_plan(&pool, &seed.host).await.is_empty());
+
+    // A channel writer that holds its lock past the 1s lock budget makes the
+    // inline build fail closed: nothing is recorded and startup can retry.
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE channels IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
     let error = migration::run_migrations(&pool).await.unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("prebuild idx_channels_listed_name concurrently"),
-        "a populated table is not indexed under a write-blocking lock: {error}"
+        error.to_string().contains("lock timeout"),
+        "the build must not queue behind a writer: {error}"
     );
+    writer.rollback().await.unwrap();
     assert_eq!(ledger_version(&pool).await, BEFORE_INDEX);
     assert_eq!(index_oid(&pool).await, None);
 
-    crate::test_support::prebuild_listed_channel_name_index(&pool).await;
+    // With no writer in the way, the populated table migrates with no
+    // operator step: the migration builds the index itself.
     migration::run_migrations(&pool)
         .await
-        .expect("migrate after the renames and the prebuild");
+        .expect("migrate a populated table after the renames");
     assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
     let mut expected = vec![
         (kept, "square-ios".to_owned()),
@@ -614,7 +622,7 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
     crate::test_support::prebuild_listed_channel_name_index(&pool).await;
     let oid = index_oid(&pool).await;
     // A channel writer holds its lock through the migration. Over a prebuild,
-    // 0081 must not request the ShareLock a CREATE INDEX takes, even with
+    // 0083 must not request the ShareLock a CREATE INDEX takes, even with
     // IF NOT EXISTS: that waits behind writers and queues new ones.
     let mut writer = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE channels IN ROW EXCLUSIVE MODE")

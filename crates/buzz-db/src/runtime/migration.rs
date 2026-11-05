@@ -786,11 +786,11 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ADD COLUMN auto_join BOOLEAN NOT NULL DEFAULT false"));
-        // Listed channel names (0081): a bounded contract index that refuses
+        // Listed channel names (0083): a bounded contract index that refuses
         // to build over unrepaired duplicates. The desired schema carries the
         // same plain index.
-        assert_eq!(migrations[80].version, 81);
-        let listed_names = strip_sql_comments(migrations[80].sql.as_str());
+        assert_eq!(migrations[82].version, 83);
+        let listed_names = strip_sql_comments(migrations[82].sql.as_str());
         assert!(listed_names.contains("SET LOCAL lock_timeout = '1s';"));
         assert!(listed_names.contains("SET LOCAL statement_timeout = '5s';"));
         assert!(listed_names.contains("CREATE UNIQUE INDEX idx_channels_listed_name"));
@@ -2936,7 +2936,7 @@ mod postgres_tests {
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
         );
-        // The listed-name index (0081) is compared on its own for that reason.
+        // The listed-name index (0083) is compared on its own for that reason.
         let listed_name = |shapes: Vec<(String, String, String)>| {
             shapes
                 .into_iter()
@@ -2949,7 +2949,7 @@ mod postgres_tests {
             desired_listed_name,
             listed_name(index_shapes(&migrated, "channels").await),
             "idx_channels_listed_name parity mismatch: update \
-             schema/tables/public/channels.sql to match migration 0081"
+             schema/tables/public/channels.sql to match migration 0083"
         );
         assert_eq!(
             events_key_defs(&desired).await,

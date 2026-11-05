@@ -15,7 +15,7 @@ The rule ships in two releases:
    so it can run beside that index. It lets a relay operator rename a listed
    channel, archived or not, with a name-only kind:9002, and ships the rename
    script `scripts/maintenance/rename_duplicate_listed_channel_names.sh`.
-2. **Contract release.** Migration `0081_channels_listed_name_unique.sql` adds
+2. **Contract release.** Migration `0083_channels_listed_name_unique.sql` adds
    the unique index that makes the database enforce the rule:
 
    ```sql
@@ -112,7 +112,7 @@ that release no longer checks names in the relay.
    ```
 
    The relay applies no rename in a community that is being deleted either,
-   and the script stops for one. Its duplicates block migration 0081 until its
+   and the script stops for one. Its duplicates block migration 0083 until its
    deletion completes. If the deletion is blocked, fix the recorded failure
    and resume it as
    [operator-community-deletion.md](operator-community-deletion.md)
@@ -131,10 +131,16 @@ that release no longer checks names in the relay.
 
    Expect zero rows. Each row names a host to run the script for: an archived
    community, or one being deleted, needs the steps in step 2.
-4. Build the index concurrently. Migration 0081 builds it only on an empty
-   `channels` table; on a populated one it refuses to start the relay without
-   the prebuilt index, because a plain build blocks channel writes.
-   `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block:
+4. Only for a deployment that migrates out of band (auto-migration off) and
+   whose `channels` table is too large for the migration's budgets: build the
+   index concurrently first. Otherwise skip this step. Migration 0083 builds
+   the index itself with a plain `CREATE UNIQUE INDEX`, under a 1s
+   `lock_timeout` and a 5s `statement_timeout`, which takes milliseconds on a
+   table of a few thousand channels. If the build cannot get its lock or
+   finish within those budgets, the migration fails, records nothing, and the
+   relay retries at its next start. A plain build blocks channel writes while
+   it runs; a concurrent one does not. `CREATE INDEX CONCURRENTLY` cannot run
+   inside a transaction block:
 
    ```sql
    CREATE UNIQUE INDEX CONCURRENTLY idx_channels_listed_name
@@ -144,7 +150,7 @@ that release no longer checks names in the relay.
    ```
 
    Then verify that PostgreSQL considers the index valid, ready, live, and an
-   exact match for the definition that migration 0081 expects. Set the
+   exact match for the definition that migration 0083 expects. Set the
    `search_path` first: without `public` on it, PostgreSQL prints the enum casts
    as `public.channel_visibility` and the text no longer matches.
 
@@ -165,13 +171,14 @@ that release no longer checks names in the relay.
    ```
 
    The writer release works with the index in place.
-5. Apply migration 0081. Over the prebuilt index it skips its own `CREATE`,
-   checks the index again, and records the migration. It refuses to run while
-   duplicates remain or without a valid index.
+5. Apply migration 0083. It refuses to run while duplicates remain. With no
+   index, it builds one; over a prebuilt index it skips its own `CREATE`.
+   Then it checks the index and records the migration.
    - **Auto-migration on:** deploy the contract release. The relay applies
-     0081 at startup and does not start until steps 2 to 4 are complete.
+     0083 at startup. It does not start while a duplicate remains, so finish
+     steps 2 and 3 first.
    - **Auto-migration off:** run `buzz-admin migrate` with the target
-     `DATABASE_URL`, confirm that it records 0081, then deploy the contract
+     `DATABASE_URL`, confirm that it records 0083, then deploy the contract
      release. Nothing at startup checks the index, and the contract release
      no longer checks names in the relay. Do not run the file with `psql`: that
      does not record the migration ledger, and outside a transaction both
@@ -180,9 +187,9 @@ that release no longer checks names in the relay.
 ## Recovery
 
 A concurrent build fails if a duplicate remains or appears while it runs, and
-leaves an invalid index. Migration 0081 rejects an invalid, unready, non-live,
+leaves an invalid index. Migration 0083 rejects an invalid, unready, non-live,
 or differently defined index. Remove only that index, outside a transaction,
-run the rename script again, and repeat steps 3 and 4:
+run the rename script again, repeat step 3, and build again (step 4 or 5):
 
 ```sql
 DROP INDEX CONCURRENTLY IF EXISTS public.idx_channels_listed_name;
@@ -194,5 +201,5 @@ Roll back from the contract release to the writer release, not further: an
 older relay cannot report the index's refusal as `invalid:`. Keep the index.
 Run the writer release with auto-migration off (`BUZZ_AUTO_MIGRATE=false`, or
 `migrate.autoMigrate=false` in the Helm chart). With it on, the writer release
-refuses a database that has migration 0081, which it does not know
+refuses a database that has migration 0083, which it does not know
 (`VersionMissing`).

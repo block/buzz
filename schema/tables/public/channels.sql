@@ -64,7 +64,7 @@ CREATE INDEX idx_channels_id_live ON channels (id) INCLUDE (community_id)
     WHERE deleted_at IS NULL;
 -- Two listed channels in a community never share a name, ignoring case. A
 -- listed channel is an open, not unlisted stream or forum that is not deleted;
--- an archived one still counts. Created by migration 0081; the relay maps a
+-- an archived one still counts. Created by migration 0083; the relay maps a
 -- refused write to ChannelNameTaken (LISTED_NAME_INDEX in
 -- crates/buzz-db/src/store/channel.rs).
 CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))
