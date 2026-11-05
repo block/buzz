@@ -614,3 +614,46 @@ async fn a_kick_from_a_dm_releases_its_identity() {
         .expect("message the group again");
     assert_ne!(again, dm);
 }
+
+/// Agents are not part of a DM of people's identity, so kicking one leaves
+/// the DM as that group's DM; kicking an agent from a DM of someone and
+/// their agent releases it, since all its members identify it.
+/// Mutation: release on every removal → the group gets a new DM → RED;
+/// never release when an agent is kicked → the owner's reopen finds the
+/// emptied agent DM → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn kicking_an_agent_keeps_a_group_dm_its_identity() {
+    let state = state().await;
+    let tenant = community(&state, "dm-kick-agent").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let group = open(&state, &tenant, &a, &[&b, &agent])
+        .await
+        .expect("group");
+    let own = open(&state, &tenant, &a, &[&agent]).await.expect("own");
+
+    for dm in [group, own] {
+        state
+            .db
+            .deploy_kick_member(
+                tenant.community(),
+                dm,
+                &agent.public_key().to_bytes(),
+                &a.public_key().to_bytes(),
+            )
+            .await
+            .expect("kick");
+    }
+
+    assert_eq!(
+        open(&state, &tenant, &b, &[&a]).await.expect("reopen"),
+        group
+    );
+    assert_ne!(
+        open(&state, &tenant, &a, &[&agent])
+            .await
+            .expect("own again"),
+        own
+    );
+}
