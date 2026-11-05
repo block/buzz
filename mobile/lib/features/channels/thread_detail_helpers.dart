@@ -152,33 +152,6 @@ class _ThreadTailIntent {
   }
 }
 
-/// Thread-scoped typing status with optional size animation.
-class _ThreadTypingIndicator extends StatelessWidget {
-  final String channelId;
-  final List<TypingEntry> entries;
-  final bool animated;
-
-  const _ThreadTypingIndicator({
-    required this.channelId,
-    required this.entries,
-    this.animated = true,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final child = entries.isEmpty
-        ? const SizedBox.shrink()
-        : ChannelTypingIndicator(channelId: channelId, entries: entries);
-    if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.bottomCenter,
-      child: child,
-    );
-  }
-}
-
 /// Display evidence while the authoritative thread query has no value (still
 /// loading, or failed on first load): the route snapshot plus live, cached
 /// and optimistic replies. The page keeps the query's loading/error status,

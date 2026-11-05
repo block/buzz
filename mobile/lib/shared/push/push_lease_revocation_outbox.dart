@@ -13,8 +13,9 @@ import '../storage/secure_storage.dart';
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../relay/relay_provider.dart';
 import '../relay/signed_event_relay.dart';
-import '../relay/relay_provider.dart' show Env;
 import 'dev_push_lease.dart';
 import 'push_bridge.dart';
 
@@ -36,7 +37,7 @@ typedef BuzzPushLeaseRevocationWakeScheduler =
 /// Durable state for retracting one precise NIP-PL lease address.
 ///
 /// The signing key is intentionally retained in secure storage only until the
-/// relay accepts the tombstone or the old endpoint grant expires.
+/// relay accepts the tombstone or the old endpoint grant is known to expire.
 @immutable
 class BuzzPushLeaseRevocationRecord {
   final String relayUrl;
@@ -47,7 +48,9 @@ class BuzzPushLeaseRevocationRecord {
 
   /// Generation reserved for the next relay attempt.
   final int generation;
-  final int expiresAt;
+
+  /// Null when the grant is unavailable and its expiry cannot be established.
+  final int? expiresAt;
   final int attemptCount;
   final int nextAttemptAt;
 
@@ -123,7 +126,9 @@ class BuzzPushLeaseRevocationRecord {
     if (generation <= 0 || generation > _maxSafeJsonInteger) {
       throw const FormatException('Push revocation generation is invalid.');
     }
-    if (expiresAt <= 0 || attemptCount < 0 || nextAttemptAt < 0) {
+    if ((expiresAt != null && expiresAt! <= 0) ||
+        attemptCount < 0 ||
+        nextAttemptAt < 0) {
       throw const FormatException('Push revocation retry state is invalid.');
     }
   }
@@ -194,7 +199,7 @@ class BuzzPushLeaseRevocationRecord {
         json['nsec'] is! String ||
         json['installationId'] is! String ||
         json['generation'] is! int ||
-        json['expiresAt'] is! int ||
+        (json['expiresAt'] != null && json['expiresAt'] is! int) ||
         json['attemptCount'] is! int ||
         json['nextAttemptAt'] is! int) {
       throw const FormatException('Invalid push revocation record.');
@@ -206,7 +211,7 @@ class BuzzPushLeaseRevocationRecord {
       nsec: json['nsec'] as String,
       installationId: json['installationId'] as String,
       generation: json['generation'] as int,
-      expiresAt: json['expiresAt'] as int,
+      expiresAt: json['expiresAt'] as int?,
       attemptCount: json['attemptCount'] as int,
       nextAttemptAt: json['nextAttemptAt'] as int,
       gatewayOnly: json['gatewayOnly'] == true,
@@ -400,30 +405,33 @@ class BuzzPushLeaseRevocationOutbox {
         .where((grant) => grant.relayOrigin == relayOrigin)
         .toList();
     if (gatewayOnly && matching.isEmpty) return false;
-    if (matching.length != 1) {
+    if (matching.length > 1 ||
+        (matching.isEmpty && community.pushLeaseInstallationId == null)) {
       throw StateError(
         'Expected exactly one endpoint grant for push lease revocation.',
       );
     }
     final currentSeconds = now().millisecondsSinceEpoch ~/ 1000;
-    final grant = matching.single;
-    final shared = remainingCommunities.any(
-      (other) =>
-          other.id != community.id &&
-          other.pushNotificationsEnabled &&
-          grants.any(
-            (candidate) =>
-                candidate.relayOrigin ==
-                    canonicalBuzzPushRelayOrigin(other.relayUrl) &&
-                candidate.relayPubkey == grant.relayPubkey &&
-                (grant.pending
-                    ? candidate.relayOrigin == grant.relayOrigin
-                    : candidate.gatewayInstallationHandle ==
-                          grant.gatewayInstallationHandle),
-          ),
-    );
-    if (grant.expiresAt <= currentSeconds) return false;
-    if (gatewayOnly && (shared || grant.gatewayRevocationTarget == null)) {
+    final grant = matching.singleOrNull;
+    final shared =
+        grant != null &&
+        remainingCommunities.any(
+          (other) =>
+              other.id != community.id &&
+              other.pushNotificationsEnabled &&
+              grants.any(
+                (candidate) =>
+                    candidate.relayOrigin ==
+                        canonicalBuzzPushRelayOrigin(other.relayUrl) &&
+                    candidate.relayPubkey == grant.relayPubkey &&
+                    (grant.pending
+                        ? candidate.relayOrigin == grant.relayOrigin
+                        : candidate.gatewayInstallationHandle ==
+                              grant.gatewayInstallationHandle),
+              ),
+        );
+    if (grant != null && grant.expiresAt <= currentSeconds) return false;
+    if (gatewayOnly && (shared || grant?.gatewayRevocationTarget == null)) {
       return false;
     }
     if (highestGeneration + 2 > _maxSafeJsonInteger) {
@@ -436,12 +444,12 @@ class BuzzPushLeaseRevocationOutbox {
         memberPubkey: memberPubkey,
         nsec: gatewayOnly ? '' : nsec!,
         installationId:
-            community.pushLeaseInstallationId ?? grant.installationId,
+            community.pushLeaseInstallationId ?? grant!.installationId,
         generation: highestGeneration + 2,
-        expiresAt: grant.expiresAt,
+        expiresAt: grant?.expiresAt,
         attemptCount: 0,
         nextAttemptAt: currentSeconds,
-        gatewayRevocation: shared ? null : grant.gatewayRevocationTarget,
+        gatewayRevocation: shared ? null : grant?.gatewayRevocationTarget,
         gatewayOnly: gatewayOnly,
       ),
     );
@@ -536,7 +544,8 @@ class BuzzPushLeaseRevocationOutbox {
       final active = records
           .where(
             (record) =>
-                record.expiresAt > currentSeconds ||
+                record.expiresAt == null ||
+                record.expiresAt! > currentSeconds ||
                 record.gatewayRevocation != null,
           )
           .toList();
@@ -613,7 +622,8 @@ class BuzzPushLeaseRevocationOutbox {
         final active = records
             .where(
               (record) =>
-                  record.expiresAt > currentSeconds ||
+                  record.expiresAt == null ||
+                  record.expiresAt! > currentSeconds ||
                   record.gatewayRevocation != null,
             )
             .toList();
@@ -626,7 +636,10 @@ class BuzzPushLeaseRevocationOutbox {
         final wakeAt = active
             .map(
               (record) => record.gatewayRevocation == null
-                  ? min(record.nextAttemptAt, record.expiresAt)
+                  ? min(
+                      record.nextAttemptAt,
+                      record.expiresAt ?? record.nextAttemptAt,
+                    )
                   : record.nextAttemptAt,
             )
             .reduce(min);
@@ -689,6 +702,7 @@ Uri _buzzPushRelayUri(String relayUrl) {
 
 Future<void> publishBuzzPushLeaseRevocation(
   BuzzPushLeaseRevocationRecord record, {
+  required HostedRelayAuth relayAuth,
   bool revokeGateway = true,
   Map<String, dynamic>? gatewayRevocation,
 }) async {
@@ -697,7 +711,8 @@ Future<void> publishBuzzPushLeaseRevocation(
     await revokeBuzzPushDelegation(target);
   }
   if (record.gatewayOnly ||
-      record.expiresAt <= DateTime.now().millisecondsSinceEpoch ~/ 1000) {
+      (record.expiresAt != null &&
+          record.expiresAt! <= DateTime.now().millisecondsSinceEpoch ~/ 1000)) {
     return;
   }
   final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
@@ -714,15 +729,21 @@ Future<void> publishBuzzPushLeaseRevocation(
     generation: record.generation,
     nsec: record.nsec,
     memberPubkey: record.memberPubkey,
-    submit: ({required kind, required content, required tags, createdAt}) =>
-        submitSignedEventOnce(
-          wsUrl: wsUrl,
-          nsec: record.nsec,
-          kind: kind,
-          content: content,
-          tags: tags,
-          createdAt: createdAt,
-        ),
+    submit:
+        ({required kind, required content, required tags, createdAt}) async =>
+            submitSignedEventOnce(
+              wsUrl: wsUrl,
+              // A hosted relay refuses the socket upgrade without an assertion.
+              headers: await relayAuth.headers(
+                RelayConfig(baseUrl: record.relayUrl, nsec: record.nsec),
+                background: true,
+              ),
+              nsec: record.nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
   );
 }
 
@@ -779,6 +800,7 @@ final buzzPushLeaseRevocationOutboxProvider =
           }
           await publishBuzzPushLeaseRevocation(
             record,
+            relayAuth: ref.read(hostedRelayAuthProvider),
             revokeGateway: revokeGateway,
             gatewayRevocation: target,
           );

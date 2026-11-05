@@ -28,8 +28,8 @@ test("sortEvents — same-second events sort by id, order-independent", () => {
   const forward = sortEvents([a, b, c]).map((e) => e.id);
   const shuffled = sortEvents([c, b, a]).map((e) => e.id);
 
-  // Stable (created_at, id) order regardless of input order, matching the
-  // cache sort (sortMessages) and the relay's id-ASC same-second tiebreak.
+  // Stable (created_at, id) order regardless of input order, using the
+  // relay's id-ASC same-second tiebreak.
   assert.deepEqual(forward, ["aaa", "bbb", "ccc"]);
   assert.deepEqual(shuffled, ["aaa", "bbb", "ccc"]);
 });

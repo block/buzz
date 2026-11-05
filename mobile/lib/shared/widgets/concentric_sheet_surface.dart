@@ -26,6 +26,7 @@ class ConcentricSheetSurface extends HookWidget {
     ),
     this.providesSheetSurface = true,
     this.usesGlass = false,
+    this.capsule = false,
     this.glassTintColor,
     this.minimumRadius = Radii.dialog,
     this.contentClipRadius,
@@ -40,6 +41,9 @@ class ConcentricSheetSurface extends HookWidget {
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
+
+  /// Rounds the native surface into a capsule independent of screen corners.
+  final bool capsule;
 
   /// Optional tint applied to the native Liquid Glass material.
   final Color? glassTintColor;
@@ -102,6 +106,7 @@ class ConcentricSheetSurface extends HookWidget {
     try {
       await channel.invokeMethod<void>('updateGeometry', <String, Object>{
         'minimumRadius': minimumRadius,
+        'capsule': capsule,
         'brightness': brightness.name,
       });
     } on MissingPluginException {
@@ -173,6 +178,7 @@ class ConcentricSheetSurface extends HookWidget {
         nativeSurfaceSupported,
         nativeSurfaceChannel.value,
         minimumRadius,
+        capsule,
         brightness,
       ],
     );
@@ -206,6 +212,7 @@ class ConcentricSheetSurface extends HookWidget {
                     if (backdropColor case final color?)
                       'backdropColor': color.toARGB32(),
                     'minimumRadius': minimumRadius,
+                    'capsule': capsule,
                     'corners': corners.name,
                     if (providesSheetSurface &&
                         corners == ConcentricSurfaceCorners.all)

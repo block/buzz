@@ -34,6 +34,7 @@ mod postgres_tests {
         let other_owner = Keys::generate();
         let tag =
             buzz_sdk::nip_oa::compute_auth_tag(&other_owner, &agent.public_key(), "").unwrap();
+        let (guard, out) = crate::access::tests::capture_scoped();
         let response = post_with_owner_tag(
             state.clone(),
             &host,
@@ -45,6 +46,12 @@ mod postgres_tests {
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(read_json(response).await["error"], "invite_owner_mismatch");
+        drop(guard);
+        // The mismatch, not the membership admission before it, decides the line.
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "denied", "{}", lines[0]);
+        assert_eq!(lines[0]["reason"], "owner_mismatch", "{}", lines[0]);
         assert!(state
             .db
             .is_agent_owner(

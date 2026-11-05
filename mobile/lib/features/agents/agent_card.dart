@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/progressive_animated_avatar.dart';
 
@@ -16,10 +17,14 @@ class AgentCard extends StatelessWidget {
     this.location,
     this.footer,
     this.subtitle,
+    this.isBestie = false,
     super.key,
   });
 
   final String name;
+
+  /// Whether this is the current community's selected Bestie.
+  final bool isBestie;
   final String? subtitle;
   final String? imageUrl;
 
@@ -40,6 +45,9 @@ class AgentCard extends StatelessWidget {
         style: context.textTheme.headlineMedium,
       ),
     );
+    final portraitFit = usesInsetAgentArtwork(imageUrl)
+        ? BoxFit.contain
+        : BoxFit.cover;
     final portrait =
         animation != null &&
             !MediaQuery.disableAnimationsOf(context) &&
@@ -47,12 +55,13 @@ class AgentCard extends StatelessWidget {
         ? ProgressiveAnimatedAvatar(
             descriptor: animation,
             fallback: fallback,
-            fit: BoxFit.contain,
+            fit: portraitFit,
           )
         : AvatarImageContent(
             imageUrl: poster,
+            preferThumbnail: true,
             fallback: fallback,
-            fit: BoxFit.contain,
+            fit: portraitFit,
           );
     return ClipRRect(
       borderRadius: BorderRadius.circular(Radii.card),
@@ -81,6 +90,7 @@ class AgentCard extends StatelessWidget {
                             scale: 1.8,
                             child: AvatarImageContent(
                               imageUrl: poster,
+                              preferThumbnail: true,
                               fallback: const SizedBox.shrink(),
                             ),
                           ),
@@ -103,9 +113,11 @@ class AgentCard extends StatelessWidget {
                         child: Semantics(
                           container: true,
                           button: true,
-                          label: subtitle == null
-                              ? 'Open $name'
-                              : 'Open $name, $subtitle',
+                          label: [
+                            'Open $name',
+                            if (subtitle != null) subtitle,
+                            if (isBestie) 'Your Bestie',
+                          ].join(', '),
                           onTap: onOpen,
                           child: ExcludeSemantics(
                             child: Column(
@@ -116,10 +128,8 @@ class AgentCard extends StatelessWidget {
                                     child: RepaintBoundary(
                                       child: SizedBox.square(
                                         dimension: 104,
-                                        child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(
-                                            Radii.card,
-                                          ),
+                                        child: AvatarClip(
+                                          isAgent: true,
                                           child: portrait,
                                         ),
                                       ),
@@ -167,6 +177,20 @@ class AgentCard extends StatelessWidget {
                 ),
               ),
             ),
+            if (isBestie)
+              Positioned(
+                top: Grid.twelve,
+                right: Grid.twelve,
+                child: IgnorePointer(
+                  child: ExcludeSemantics(
+                    child: Icon(
+                      Icons.star,
+                      size: 18,
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),

@@ -373,6 +373,8 @@ s3:
 
 # Isolated S3 accounting worker. Disabled by default. The relay is ready to
 # consume snapshots whenever an operator enables a worker in this environment.
+# To push each new snapshot's per-community totals to a usage endpoint, set
+# BUZZ_STORAGE_USAGE_URL through relay.extraEnv (see .env.example).
 storageAccounting:
   enabled: false
   schedule: "0 3 * * *"

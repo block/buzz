@@ -11,12 +11,80 @@ const SCROLL_INTENT_KEYS = new Set([
   " ",
 ]);
 
-function isEditableKeyboardTarget(target: EventTarget | null) {
+// Space activates these controls instead of scrolling. A focused link is not
+// one: links activate on Enter, and Space scrolls past them.
+const SPACE_ACTIVATED_CONTROLS = [
+  "button",
+  "summary",
+  "[role='button']",
+  "[role='checkbox']",
+  "[role='menuitem']",
+  "[role='menuitemcheckbox']",
+  "[role='menuitemradio']",
+  "[role='option']",
+  "[role='radio']",
+  "[role='switch']",
+  "[role='tab']",
+].join(", ");
+
+/** True when the focused control consumes `key` rather than scrolling. */
+function isControlKeyboardTarget(target: EventTarget | null, key: string) {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
-  return (
+  if (
     target.closest("input, textarea, select, [contenteditable='true']") !== null
-  );
+  ) {
+    return true;
+  }
+  return key === " " && target.closest(SPACE_ACTIVATED_CONTROLS) !== null;
+}
+
+/**
+ * Calls `onReaderScroll` when the reader takes scroll ownership of
+ * `scroller`: a wheel, a touch drag, a pointerdown on the scroller itself
+ * (scrollbar or background), or a scroll key aimed at it or at row content.
+ * Space on a row control (Reply, a reaction) activates it and doesn't count.
+ * Returns the unsubscribe function.
+ */
+export function listenForReaderScroll(
+  scroller: HTMLElement,
+  onReaderScroll: () => void,
+): () => void {
+  const onTouchMove = () => onReaderScroll();
+  const onPointerDown = (event: PointerEvent) => {
+    // A descendant pointerdown is ordinary row interaction (link, reaction,
+    // thread action), not evidence that the reader took scroll ownership.
+    // Direct scroller hits cover scrollbar/background drag initiation.
+    if (event.target === scroller) onReaderScroll();
+  };
+  const onWheel = (event: WheelEvent) => {
+    // Ctrl+wheel is browser zoom, not reader navigation. The resulting
+    // viewport/content reflow must still settle at the new physical floor.
+    if (!event.ctrlKey) onReaderScroll();
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      event.target instanceof Node &&
+      scroller.contains(event.target) &&
+      SCROLL_INTENT_KEYS.has(event.key) &&
+      !isControlKeyboardTarget(event.target, event.key)
+    ) {
+      onReaderScroll();
+    }
+  };
+  scroller.addEventListener("pointerdown", onPointerDown, { passive: true });
+  scroller.addEventListener("touchmove", onTouchMove, { passive: true });
+  scroller.addEventListener("wheel", onWheel, { passive: true });
+  window.addEventListener("keydown", onKeyDown, true);
+  return () => {
+    scroller.removeEventListener("pointerdown", onPointerDown);
+    scroller.removeEventListener("touchmove", onTouchMove);
+    scroller.removeEventListener("wheel", onWheel);
+    window.removeEventListener("keydown", onKeyDown, true);
+  };
 }
 
 export function useVirtualizedBottomSettle(
@@ -58,44 +126,7 @@ export function useVirtualizedBottomSettle(
   React.useLayoutEffect(() => {
     const scroller = hostRef.current?.firstElementChild;
     if (!(scroller instanceof HTMLDivElement)) return;
-    const retire = () => cancel();
-    const retireForPointer = (event: PointerEvent) => {
-      // A descendant pointerdown is ordinary row interaction (link, reaction,
-      // thread action), not evidence that the reader took scroll ownership.
-      // Direct scroller hits cover scrollbar/background drag initiation.
-      if (event.target === scroller) cancel();
-    };
-    const retireForWheel = (event: WheelEvent) => {
-      // Ctrl+wheel is browser zoom, not reader navigation. Keep bottom intent
-      // armed so the resulting viewport/content reflow can settle at the new
-      // physical floor.
-      if (!event.ctrlKey) cancel();
-    };
-    const retireForScrollKey = (event: KeyboardEvent) => {
-      if (
-        !event.altKey &&
-        !event.ctrlKey &&
-        !event.metaKey &&
-        event.target instanceof Node &&
-        scroller.contains(event.target) &&
-        !isEditableKeyboardTarget(event.target) &&
-        SCROLL_INTENT_KEYS.has(event.key)
-      ) {
-        cancel();
-      }
-    };
-    scroller.addEventListener("pointerdown", retireForPointer, {
-      passive: true,
-    });
-    scroller.addEventListener("touchmove", retire, { passive: true });
-    scroller.addEventListener("wheel", retireForWheel, { passive: true });
-    window.addEventListener("keydown", retireForScrollKey, true);
-    return () => {
-      scroller.removeEventListener("pointerdown", retireForPointer);
-      scroller.removeEventListener("touchmove", retire);
-      scroller.removeEventListener("wheel", retireForWheel);
-      window.removeEventListener("keydown", retireForScrollKey, true);
-    };
+    return listenForReaderScroll(scroller, cancel);
   }, [cancel, hostRef]);
 
   React.useLayoutEffect(() => {

@@ -9,23 +9,29 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
 import 'navigation_button_surface.dart';
+import 'agent_navigation_icon.dart';
 
 /// Expands an Android shortcut into a rounded, translucent action menu.
 class AndroidExpandingMenuButton extends HookWidget {
   const AndroidExpandingMenuButton({
     required this.actions,
     this.label = 'New',
+    this.expansionBoundsContext,
     this.trigger,
     this.width = 112,
     this.height = 56,
     this.dividerBefore = const {},
+    this.sectionTitles = const {},
     super.key,
   });
 
+  /// Optional control row whose bounds the expanded menu should cover.
+  final BuildContext? expansionBoundsContext;
   final String label;
   final Widget? trigger;
   final double width, height;
   final Set<int> dividerBefore;
+  final Map<int, String> sectionTitles;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -57,12 +63,22 @@ class AndroidExpandingMenuButton extends HookWidget {
                     box.getTransformTo(overlay),
                     Offset.zero & box.size,
                   );
+                  final expansionBox =
+                      expansionBoundsContext?.findRenderObject() as RenderBox?;
+                  final expansionBounds = expansionBox == null
+                      ? null
+                      : MatrixUtils.transformRect(
+                          expansionBox.getTransformTo(overlay),
+                          Offset.zero & expansionBox.size,
+                        );
                   final captured = actions;
                   final route = _CreateMenuRoute(
                     anchor: rect,
+                    expansionBounds: expansionBounds,
                     label: label,
                     trigger: trigger ?? const _NewLabel(),
                     dividerBefore: dividerBefore,
+                    sectionTitles: sectionTitles,
                     actions: captured,
                     reducedMotion: MediaQuery.disableAnimationsOf(context),
                     dismissLabel: MaterialLocalizations.of(
@@ -111,17 +127,21 @@ class _NewLabel extends StatelessWidget {
 class _CreateMenuRoute extends PopupRoute<int> {
   _CreateMenuRoute({
     required this.anchor,
+    required this.expansionBounds,
     required this.label,
     required this.trigger,
     required this.dividerBefore,
+    required this.sectionTitles,
     required this.actions,
     required this.reducedMotion,
     required this.dismissLabel,
   });
   final Rect anchor;
+  final Rect? expansionBounds;
   final String label;
   final Widget trigger;
   final Set<int> dividerBefore;
+  final Map<int, String> sectionTitles;
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
   final bool reducedMotion;
   final String dismissLabel;
@@ -146,23 +166,30 @@ class _CreateMenuRoute extends PopupRoute<int> {
   ) {
     final media = MediaQuery.of(context);
     final width = math.min(
-      240.0,
+      expansionBounds?.width ?? 240.0,
       media.size.width - media.padding.horizontal - Grid.lg,
     );
     final rowHeight = math.max(48.0, media.textScaler.scale(20) + Grid.sm);
+    final sectionHeight = media.textScaler.scale(12) + Grid.sm;
     final height = math.min(
-      actions.length * rowHeight + Grid.xs + dividerBefore.length,
+      actions.length * rowHeight +
+          Grid.xs +
+          dividerBefore.length +
+          sectionTitles.length * sectionHeight,
       media.size.height - media.padding.vertical - Grid.lg,
     );
     final expandDown = anchor.center.dy < media.size.height / 2;
     final left =
-        (expandDown ? anchor.right - width : anchor.center.dx - width / 2)
+        (expansionBounds?.left ??
+                (expandDown
+                    ? anchor.right - width
+                    : anchor.center.dx - width / 2))
             .clamp(
               media.padding.left + Grid.xs,
               media.size.width - media.padding.right - Grid.xs - width,
             )
             .toDouble();
-    final bottom = anchor.bottom
+    final bottom = (expansionBounds ?? anchor).bottom
         .clamp(
           media.padding.top + Grid.xs + height,
           media.size.height - media.padding.bottom,
@@ -246,6 +273,33 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                         ) ...[
                                           if (dividerBefore.contains(i))
                                             const Divider(height: 1),
+                                          if (sectionTitles[i]
+                                              case final title?)
+                                            SizedBox(
+                                              height: sectionHeight,
+                                              child: Padding(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: Grid.gutter,
+                                                    ),
+                                                child: Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Semantics(
+                                                    header: true,
+                                                    child: Text(
+                                                      title,
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        color: context
+                                                            .colors
+                                                            .onSurfaceVariant,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           SizedBox(
                                             height: rowHeight,
                                             child: InkWell(
@@ -262,39 +316,49 @@ class _CreateMenuRoute extends PopupRoute<int> {
                                                     ),
                                                 child: Row(
                                                   children: [
-                                                    Icon(switch (actions[i]
-                                                        .symbol) {
-                                                      '' => null,
-                                                      'checkmark' =>
-                                                        BuzzIcons.check,
-                                                      'star' =>
-                                                        Icons.star_border,
-                                                      'info.circle' =>
-                                                        Icons.info_outline,
-                                                      'desktopcomputer' =>
-                                                        Icons
-                                                            .desktop_windows_outlined,
-                                                      'square.and.pencil' =>
-                                                        BuzzIcons.edit,
-                                                      'folder.badge.plus' =>
-                                                        BuzzIcons.folderPlus,
-                                                      'bubble.left' =>
-                                                        BuzzIcons.messageSquare,
-                                                      'number' =>
-                                                        BuzzIcons.hash,
-                                                      'arrow.left.arrow.right' =>
-                                                        BuzzIcons
-                                                            .arrowLeftRight,
-                                                      'person.badge.plus' =>
-                                                        BuzzIcons.userPlus,
-                                                      'circle.lefthalf.filled' =>
-                                                        BuzzIcons.sunMoon,
-                                                      'person.2' =>
-                                                        BuzzIcons.users,
-                                                      'gearshape' =>
-                                                        BuzzIcons.settings,
-                                                      _ => BuzzIcons.plus,
-                                                    }, size: 22),
+                                                    actions[i].symbol == 'agent'
+                                                        ? const AgentNavigationIcon()
+                                                        : Icon(switch (actions[i]
+                                                              .symbol) {
+                                                            '' => null,
+                                                            'checkmark' =>
+                                                              BuzzIcons.check,
+                                                            'star' =>
+                                                              Icons.star_border,
+                                                            'info.circle' =>
+                                                              Icons
+                                                                  .info_outline,
+                                                            'desktopcomputer' =>
+                                                              Icons
+                                                                  .desktop_windows_outlined,
+                                                            'square.and.pencil' =>
+                                                              BuzzIcons.edit,
+                                                            'workspace' =>
+                                                              BuzzIcons
+                                                                  .workspace,
+                                                            'folder.badge.plus' =>
+                                                              BuzzIcons
+                                                                  .folderPlus,
+                                                            'bubble.left' =>
+                                                              BuzzIcons
+                                                                  .messageSquare,
+                                                            'number' =>
+                                                              BuzzIcons.hash,
+                                                            'arrow.left.arrow.right' =>
+                                                              BuzzIcons
+                                                                  .arrowLeftRight,
+                                                            'person.badge.plus' =>
+                                                              BuzzIcons
+                                                                  .userPlus,
+                                                            'circle.lefthalf.filled' =>
+                                                              BuzzIcons.sunMoon,
+                                                            'person.2' =>
+                                                              BuzzIcons.users,
+                                                            'gearshape' =>
+                                                              BuzzIcons
+                                                                  .settings,
+                                                            _ => BuzzIcons.plus,
+                                                          }, size: 22),
                                                     const SizedBox(
                                                       width: Grid.sm,
                                                     ),

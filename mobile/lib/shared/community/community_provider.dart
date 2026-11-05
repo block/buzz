@@ -16,7 +16,7 @@ import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/signed_event_relay.dart';
-import '../relay/relay_provider.dart' show pubkeyFromNsec;
+import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -102,8 +102,11 @@ typedef CommunityPushLeaseDeactivator =
 
 final communityPushLeaseDeactivatorProvider =
     Provider<CommunityPushLeaseDeactivator>((ref) {
-      return (community, {generation}) =>
-          _deactivateCommunityPushLease(community, generation: generation);
+      return (community, {generation}) => _deactivateCommunityPushLease(
+        community,
+        generation: generation,
+        relayAuth: ref.read(hostedRelayAuthProvider),
+      );
     });
 
 typedef CommunityPushLeaseRevocationEnqueuer =
@@ -139,6 +142,7 @@ final communityPushLeaseRevocationTriggerProvider =
 Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
+  required HostedRelayAuth relayAuth,
 }) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
@@ -170,6 +174,12 @@ Future<void> _deactivateCommunityPushLease(
   };
   final wsScheme = httpScheme == 'https' ? 'wss' : 'ws';
   final wsUrl = uri.replace(scheme: wsScheme).toString();
+  // The community being removed may not be the active session, so ask for its
+  // own assertion: a hosted relay refuses the socket upgrade without one.
+  final relayConfig = RelayConfig(
+    baseUrl: uri.replace(scheme: httpScheme).toString(),
+    nsec: nsec,
+  );
   // Skip over the one renewal generation that could already be in flight
   // when removal begins. Strict relay monotonicity then makes any stale
   // active publication lose to this tombstone.
@@ -181,15 +191,17 @@ Future<void> _deactivateCommunityPushLease(
     generation: tombstoneGeneration,
     nsec: nsec,
     memberPubkey: memberPubkey,
-    submit: ({required kind, required content, required tags, createdAt}) =>
-        submitSignedEventOnce(
-          wsUrl: wsUrl,
-          nsec: nsec,
-          kind: kind,
-          content: content,
-          tags: tags,
-          createdAt: createdAt,
-        ),
+    submit:
+        ({required kind, required content, required tags, createdAt}) async =>
+            submitSignedEventOnce(
+              wsUrl: wsUrl,
+              headers: await relayAuth.headers(relayConfig, background: true),
+              nsec: nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
   );
   pushLeaseCleanupError.value = null;
 }
@@ -314,24 +326,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) =>
-      _removeCommunity(id, invalidateAuthentication: true);
-
-  /// Removes the active community through the same local-first path as the
-  /// community list while allowing [AuthNotifier] to publish its final state.
-  Future<void> removeActiveCommunityForSignOut() =>
-      _removeCommunity(null, invalidateAuthentication: false);
-
-  Future<void> _removeCommunity(
-    String? requestedId, {
-    required bool invalidateAuthentication,
-  }) {
+  Future<void> removeCommunity(String id) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
-      final id = requestedId ?? activeId;
-      if (id == null) return;
       if (activeId == id) {
         await ref.read(communityTransitionProvider).run();
       }
@@ -362,12 +361,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           await storage.saveActiveId(remaining.first.id);
           // Reassign list state so activeCommunityProvider picks up the new ID.
           state = AsyncData([...remaining]);
-          if (invalidateAuthentication) ref.invalidate(authProvider);
+          ref.invalidate(authProvider);
         } else {
           await storage.clearActiveId();
           // Invalidate auth so it re-evaluates against the now-empty storage
           // and transitions to unauthenticated.
-          if (invalidateAuthentication) ref.invalidate(authProvider);
+          ref.invalidate(authProvider);
         }
       }
       if (revocationJournaled) {
@@ -672,21 +671,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         state = AsyncData(updatedList);
         await syncCommunitySnapshot(ref, updatedList);
       });
-
-  Future<void> renameCommunity(String id, String name) async {
-    final storage = ref.read(communityStorageProvider);
-    final current = state.value ?? [];
-    final index = current.indexWhere((w) => w.id == id);
-    if (index < 0) return;
-
-    final updated = current[index].copyWith(name: name);
-    await storage.save(updated);
-
-    final updatedList = [...current];
-    updatedList[index] = updated;
-    state = AsyncData(updatedList);
-    await syncCommunitySnapshot(ref, updatedList);
-  }
 }
 
 final communityListProvider =

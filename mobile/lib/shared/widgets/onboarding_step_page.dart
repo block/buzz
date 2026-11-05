@@ -5,6 +5,7 @@ import 'package:flutter/semantics.dart';
 
 import '../theme/theme.dart';
 import 'ios_navigation_bar.dart';
+import 'navigation_backdrop.dart';
 
 /// Opaque onboarding chrome shared by account setup and identity import.
 /// A scrollable minimum-height body keeps actions at the bottom without
@@ -27,28 +28,35 @@ class OnboardingStepPage extends StatelessWidget {
   final VoidCallback? onConnectionOptions;
   final double foregroundProgress;
   final double keyboardBottomSpacing;
-  final VoidCallback onBack;
+  final VoidCallback? onBack;
   final Widget content;
   final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = Theme.of(context);
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
     final buttonStyle = FilledButton.styleFrom(
+      backgroundColor: theme.colorScheme.primary,
+      foregroundColor: theme.colorScheme.onPrimary,
       minimumSize: const Size.fromHeight(52),
       shape: const StadiumBorder(),
     );
     return Theme(
       data: theme.copyWith(
         filledButtonTheme: FilledButtonThemeData(style: buttonStyle),
-        outlinedButtonTheme: OutlinedButtonThemeData(style: buttonStyle),
-        textButtonTheme: TextButtonThemeData(style: buttonStyle),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            foregroundColor: theme.colorScheme.onSurface,
+            minimumSize: const Size.fromHeight(52),
+            shape: const StadiumBorder(),
+          ),
+        ),
       ),
       child: PopScope(
         canPop: false,
         onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) onBack();
+          if (!didPop) onBack?.call();
         },
         child: Scaffold(
           backgroundColor: theme.colorScheme.surface,
@@ -89,24 +97,28 @@ class OnboardingStepPage extends StatelessWidget {
                                     ).compactHeight,
                                 child: IosNavigationBar(
                                   title: '',
-                                  leading: IosNavigationAction(
-                                    label: 'Back',
-                                    symbol: 'chevron.backward',
-                                    onPressed: onBack,
-                                  ),
+                                  leading: onBack == null
+                                      ? null
+                                      : IosNavigationAction(
+                                          label: 'Back',
+                                          symbol: 'chevron.backward',
+                                          onPressed: onBack,
+                                        ),
                                 ),
                               )
-                            else
-                              Align(
-                                alignment: AlignmentDirectional.centerStart,
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: Grid.xxs,
-                                  ),
-                                  child: IconButton(
-                                    tooltip: 'Back',
-                                    onPressed: onBack,
-                                    icon: const BackButtonIcon(),
+                            else if (onBack != null)
+                              NavigationBackdrop(
+                                child: Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: Grid.xxs,
+                                    ),
+                                    child: IconButton(
+                                      tooltip: 'Back',
+                                      onPressed: onBack,
+                                      icon: const BackButtonIcon(),
+                                    ),
                                   ),
                                 ),
                               ),

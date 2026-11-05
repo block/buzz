@@ -53,6 +53,10 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    for (version, doc, indexes) in INLINE_INDEX_BUILDS {
+        MIGRATOR.run_to(version - 1, &mut *conn).await?;
+        build_indexes_before_migration(conn, *version, doc, indexes).await?;
+    }
     MIGRATOR.run(&mut *conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
@@ -63,6 +67,122 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
     Ok(())
+}
+
+/// Indexes that a migration verifies but refuses to build on a populated
+/// table, keyed by that migration's version, with the document that describes
+/// its concurrent prebuild, as `(name, definition)`.
+///
+/// Migrations 0076, 0078 and 0081 are checksum-frozen and expect every
+/// populated database to prebuild these indexes with `CREATE INDEX
+/// CONCURRENTLY`. Startup migration builds a missing index here instead, under
+/// the same bounded budgets 0049 uses, so a small populated database upgrades
+/// like an empty one and a large one still fails closed. `CONCURRENTLY` is not
+/// used: a replica blocked on the migration lock holds a snapshot that a
+/// concurrent build would wait for. New migrations build their own indexes
+/// inline (docs/database.md Rule 6); the `frozen_prebuild_guards_have_inline_builds`
+/// test keeps this list equal to the migrations that refuse populated tables.
+type InlineIndexBuilds = &'static [(&'static str, &'static str)];
+
+const INLINE_INDEX_BUILDS: &[(i64, &str, InlineIndexBuilds)] = &[
+    (
+        76,
+        "docs/artifact-sync-deployment.md",
+        &[(
+            "idx_artifact_revisions_artifact",
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )],
+    ),
+    (
+        78,
+        "docs/artifact-sync-deployment.md",
+        &[
+            (
+                "artifact_heads_modified",
+                "CREATE INDEX artifact_heads_modified \
+                 ON public.artifact_heads (community_id, modified_at, artifact_id)",
+            ),
+            (
+                "artifact_heads_channel",
+                "CREATE INDEX artifact_heads_channel \
+                 ON public.artifact_heads (community_id, channel_id, artifact_id)",
+            ),
+            (
+                "channel_members_sync",
+                "CREATE INDEX channel_members_sync \
+                 ON public.channel_members (community_id, pubkey, sync_modified_at, channel_id)",
+            ),
+            (
+                "artifact_revisions_moves",
+                "CREATE INDEX artifact_revisions_moves \
+                 ON public.artifact_revisions (community_id, modified_at, event_id) \
+                 WHERE source_channel_id IS NOT NULL",
+            ),
+        ],
+    ),
+    (
+        81,
+        "docs/profile-search.md",
+        &[(
+            "idx_nip_fi_profile_heads_names",
+            // The exact pg_get_indexdef form migration 0081 verifies.
+            r#"CREATE INDEX idx_nip_fi_profile_heads_names ON public.nip_fi_profile_heads USING gin (to_tsvector('simple'::regconfig, ((((COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "display_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "username")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text)) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "full_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text))))"#,
+        )],
+    ),
+];
+
+/// Build each missing index in `indexes` in its own bounded transaction
+/// unless migration `version` is already recorded, so no build holds its
+/// writer-conflicting lock past its own budget. An existing index, valid or
+/// not, is left for the migration to verify, and is skipped before
+/// `CREATE INDEX` so a prebuilt deployment never requests that lock.
+async fn build_indexes_before_migration(
+    conn: &mut PgConnection,
+    version: i64,
+    doc: &str,
+    indexes: InlineIndexBuilds,
+) -> Result<()> {
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1)")
+            .bind(version)
+            .fetch_one(&mut *conn)
+            .await?;
+    if applied {
+        return Ok(());
+    }
+    let build = async {
+        for (name, definition) in indexes {
+            let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("public.{name}"))
+                .fetch_one(&mut *conn)
+                .await?;
+            if !exists {
+                let mut tx = conn.begin().await?;
+                sqlx::raw_sql("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::raw_sql(*definition).execute(&mut *tx).await?;
+                tx.commit().await?;
+            }
+        }
+        Ok::<(), sqlx::Error>(())
+    };
+    build.await.map_err(|error| {
+        // Only a lock or statement timeout means the table is too large or
+        // too busy for the startup budget; pass any other failure through.
+        let over_budget = error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code == "55P03" || code == "57014");
+        if !over_budget {
+            return error.into();
+        }
+        crate::DbError::InvalidData(format!(
+            "migration {version} blocked: building its indexes within the startup budget failed \
+             ({error}); prebuild them concurrently as described in {doc}, then retry"
+        ))
+    })
 }
 
 /// Run `op` while holding the exclusive schema/destruction session lock.
@@ -195,6 +315,7 @@ mod retirement_postgres_tests;
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use std::{
         collections::BTreeSet,
         fs,
@@ -563,6 +684,7 @@ mod postgres_tests {
             "storage_accounting_snapshots",
             "operator_listener_pubkeys",
             "operator_listener_outbox",
+            "community_auth_upgrades",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -776,10 +898,26 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 76);
+        assert_eq!(migrations.len(), 84);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
+        assert!(migrations[79]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN auto_join BOOLEAN NOT NULL DEFAULT false"));
+        // Listed channel names (0083): a bounded contract index that refuses
+        // to build over unrepaired duplicates. The desired schema carries the
+        // same plain index.
+        assert_eq!(migrations[82].version, 83);
+        let listed_names = strip_sql_comments(migrations[82].sql.as_str());
+        assert!(listed_names.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(listed_names.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(listed_names.contains("CREATE UNIQUE INDEX idx_channels_listed_name"));
+        assert!(!listed_names.contains("CONCURRENTLY"));
+        assert!(crate::test_support::desired_state_schema_sql().contains(
+            "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))"
+        ));
         assert!(migrations[70]
             .sql
             .as_str()
@@ -2056,9 +2194,9 @@ mod postgres_tests {
             if *path == this_file {
                 assert_eq!(
                     (macro_hits, run_hits, run_to_hits),
-                    (1, 1, 1),
+                    (1, 1, 2),
                     "migration.rs must embed the migrator once, run it once in production, \
-                     and expose exactly one test-only bounded run"
+                     and have one test-only and one production bounded run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
@@ -2095,9 +2233,16 @@ mod postgres_tests {
             source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
             "run_migrations must delegate through the exclusive schema/destruction lock"
         );
+        let production_run_to_site = source[run_to_site + 1..]
+            .find(&migrator_run_to)
+            .map(|offset| run_to_site + 1 + offset)
+            .expect("production bounded migrator run site");
         assert!(
-            run_site > locked && run_site < wrapper,
-            "the production migrator run site must live inside run_migrations_locked"
+            run_site > locked
+                && run_site < wrapper
+                && production_run_to_site > locked
+                && production_run_to_site < run_site,
+            "the production migrator run sites must live inside run_migrations_locked"
         );
         assert!(
             run_to_site > entry
@@ -2567,23 +2712,13 @@ mod postgres_tests {
     async fn cancelled_migration_cannot_expose_shared_lock_while_ddl_backend_lives() {
         use std::time::Instant;
 
-        use sqlx::AssertSqlSafe;
-
         // Dedicated database: the probe table and the orphaned backend must
         // stay invisible to concurrent tests in the shared database.
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let probe_db = format!("buzz_lock_cancel_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {probe_db}")))
-            .execute(&admin)
-            .await
-            .expect("create probe database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
-        let pool = PgPool::connect(&format!("{base_prefix}/{probe_db}"))
+        let probe_db = ScratchDb::create(&base_url, "buzz_lock_cancel").await;
+        let pool = PgPool::connect(probe_db.url())
             .await
             .expect("connect probe database");
         sqlx::query("CREATE TABLE schema_lock_cancel_probe (id int)")
@@ -2716,14 +2851,6 @@ mod postgres_tests {
             committed,
             "orphaned migration DDL commits after cancellation; the lock must cover it"
         );
-
-        pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {probe_db} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await
-        .expect("drop probe database");
     }
 
     pub(super) async fn connect_test_pool() -> PgPool {
@@ -2787,8 +2914,6 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
-        use sqlx::AssertSqlSafe;
-
         async fn columns(
             pool: &PgPool,
             table: &str,
@@ -2869,25 +2994,13 @@ mod postgres_tests {
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
         let conn = parse_pg_url(&base_url);
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
 
-        let desired_db = format!("buzz_admin_desired_{}", uuid::Uuid::new_v4().simple());
-        let migrated_db = format!("buzz_admin_migrated_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {desired_db}")))
-            .execute(&admin)
-            .await
-            .expect("create desired-state probe database");
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {migrated_db}")))
-            .execute(&admin)
-            .await
-            .expect("create migrated probe database");
+        let desired_db = ScratchDb::create(&base_url, "buzz_admin_desired").await;
+        let migrated_db = ScratchDb::create(&base_url, "buzz_admin_migrated").await;
 
         // Bootstrap the desired-state probe the way the test-relay launchers do:
         // the real pgschema binary, then the post-apply reconcile script.
-        let apply = pgschema(&conn, &desired_db, &["apply", "--auto-approve"]);
+        let apply = pgschema(&conn, desired_db.name(), &["apply", "--auto-approve"]);
         assert!(
             apply.status.success(),
             "pgschema apply failed: {}\n{}",
@@ -2895,7 +3008,7 @@ mod postgres_tests {
             String::from_utf8_lossy(&apply.stderr),
         );
 
-        let desired = PgPool::connect(&format!("{base_prefix}/{desired_db}"))
+        let desired = PgPool::connect(desired_db.url())
             .await
             .expect("connect desired-state probe database");
         sqlx::raw_sql(include_str!(
@@ -2904,7 +3017,7 @@ mod postgres_tests {
         .execute(&desired)
         .await
         .expect("reconcile desired-state probe database");
-        let migrated = PgPool::connect(&format!("{base_prefix}/{migrated_db}"))
+        let migrated = PgPool::connect(migrated_db.url())
             .await
             .expect("connect migrated probe database");
         MIGRATOR
@@ -2916,8 +3029,13 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "community_auth_upgrades",
             "entity_deletion_approvals",
             "entity_deletion_requests",
+            "artifact_heads",
+            "artifact_revisions",
+            "channel_members",
+            "communities",
             "entity_deletion_stage_history",
             "user_deletion_fences",
         ] {
@@ -2945,6 +3063,21 @@ mod postgres_tests {
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
         );
+        // The listed-name index (0083) is compared on its own for that reason.
+        let listed_name = |shapes: Vec<(String, String, String)>| {
+            shapes
+                .into_iter()
+                .filter(|(name, _, _)| name == "idx_channels_listed_name")
+                .collect::<Vec<_>>()
+        };
+        let desired_listed_name = listed_name(index_shapes(&desired, "channels").await);
+        assert_eq!(desired_listed_name.len(), 1, "desired state has the index");
+        assert_eq!(
+            desired_listed_name,
+            listed_name(index_shapes(&migrated, "channels").await),
+            "idx_channels_listed_name parity mismatch: update \
+             schema/tables/public/channels.sql to match migration 0083"
+        );
         assert_eq!(
             events_key_defs(&desired).await,
             events_key_defs(&migrated).await,
@@ -2954,6 +3087,8 @@ mod postgres_tests {
         );
 
         for table in [
+            "communities",
+            "community_auth_upgrades",
             "entity_deletion_requests",
             "entity_deletion_stage_history",
             "user_deletion_fences",
@@ -2964,17 +3099,6 @@ mod postgres_tests {
                 constraints(&migrated, table).await,
                 "constraint parity mismatch for {table}"
             );
-        }
-
-        desired.close().await;
-        migrated.close().await;
-        for probe_db in [desired_db, migrated_db] {
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP DATABASE {probe_db} WITH (FORCE)"
-            )))
-            .execute(&admin)
-            .await
-            .expect("drop probe database");
         }
     }
 
@@ -2997,27 +3121,18 @@ mod postgres_tests {
         use crate::store::partition::{
             maintain_partitions, PartitionMaintenancePolicy, PARTITION_MANAGER_MONTHS_AHEAD,
         };
-        use sqlx::AssertSqlSafe;
 
         let base_url = crate::test_support::database_url();
         let conn = parse_pg_url(&base_url);
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
-        let database = format!("buzz_pgschema_reapply_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {database}")))
-            .execute(&admin)
-            .await
-            .expect("create probe database");
+        let database = ScratchDb::create(&base_url, "buzz_pgschema_reapply").await;
 
-        let pool = PgPool::connect(&format!("{base_prefix}/{database}"))
+        let pool = PgPool::connect(database.url())
             .await
             .expect("connect probe database");
         // The bootstrap every pgschema caller runs; the reconcile script
         // attaches the declared children.
         let bootstrap = |round: &str| {
-            let apply = pgschema(&conn, &database, &["apply", "--auto-approve"]);
+            let apply = pgschema(&conn, database.name(), &["apply", "--auto-approve"]);
             assert!(
                 apply.status.success(),
                 "{round} pgschema apply failed: {}\n{}",
@@ -3102,7 +3217,7 @@ mod postgres_tests {
             );
         }
 
-        let plan = pgschema(&conn, &database, &["plan", "--output-sql", "stdout"]);
+        let plan = pgschema(&conn, database.name(), &["plan", "--output-sql", "stdout"]);
         let plan_sql = String::from_utf8_lossy(&plan.stdout);
         assert!(
             plan.status.success(),
@@ -3117,14 +3232,226 @@ mod postgres_tests {
         bootstrap("second")
             .await
             .expect("second post-apply reconciliation");
-        pool.close().await;
+    }
 
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {database} WITH (FORCE)"
-        )))
-        .execute(&admin)
+    /// Migrations 0076 and 0078 refuse a populated table whose index was not
+    /// prebuilt concurrently. A relay that auto-migrated through earlier
+    /// releases and holds artifact data must still boot through every migration. When a
+    /// bounded inline build cannot take its lock it must fail closed without
+    /// recording that migration, keeping earlier migrations and each index
+    /// already built in its own transaction.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_artifact_tables_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(75, &pool)
+            .await
+            .expect("apply migrations 1-75");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("artifact-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let artifact_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO artifact_revisions (community_id, event_id, artifact_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community_id)
+        .bind(vec![1_u8; 32])
+        .bind(artifact_id)
+        .execute(&pool)
         .await
-        .expect("drop probe database");
+        .expect("insert artifact revision");
+        sqlx::query(
+            "INSERT INTO artifact_heads \
+             (community_id, artifact_id, event_id, channel_id, artifact_type) \
+             VALUES ($1, $2, $3, $4, 'doc')",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .bind(vec![1_u8; 32])
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("insert artifact head");
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a build that cannot take its lock must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 76 blocked")
+                && blocked.contains("docs/artifact-sync-deployment.md"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(75));
+        holder.rollback().await.expect("release writer lock");
+
+        // A prebuilt index is skipped without requesting the build lock, so
+        // the same held writer lock first blocks 0077's ALTER TABLE instead.
+        sqlx::query(
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("prebuild the 0076 index");
+        let mut holder = pool.begin().await.expect("begin second lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock again");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("0077 cannot alter a table under a held writer lock")
+            .to_string();
+        assert!(
+            !blocked.contains("migration 76 blocked"),
+            "a prebuilt index must not be rebuilt: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(76));
+        holder.rollback().await.expect("release second writer lock");
+
+        // Block the third 0078 build. The two artifact_heads builds before it
+        // commit separately, so neither holds its lock while the third waits.
+        run_migrations_through(&pool, 77)
+            .await
+            .expect("apply migration 77");
+        let mut holder = pool.begin().await.expect("begin third lock holder");
+        sqlx::query("LOCK TABLE channel_members IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a channel_members writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a blocked 0078 build must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 78 blocked"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(77));
+        let committed: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.artifact_heads_modified') IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .expect("read earlier 0078 build");
+        assert!(
+            committed,
+            "an earlier build must commit before the next one"
+        );
+        holder.rollback().await.expect("release third writer lock");
+
+        run_migrations(&pool)
+            .await
+            .expect("populated small database auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(
+                &pool,
+                &[
+                    "idx_artifact_revisions_artifact",
+                    "artifact_heads_modified",
+                    "artifact_heads_channel",
+                    "channel_members_sync",
+                    "artifact_revisions_moves",
+                ]
+            )
+            .await,
+            5
+        );
+    }
+
+    /// Migration 0081 refuses a populated `nip_fi_profile_heads`. A relay that
+    /// has published NIP-FI verified profiles must still boot through every
+    /// migration.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_verified_profiles_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(80, &pool)
+            .await
+            .expect("apply migrations 1-80");
+        sqlx::query(
+            "INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event) \
+             VALUES ($1, $2, $3, 1, $4)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind("a".repeat(64))
+        .bind("b".repeat(64))
+        .bind(serde_json::json!({"tags": [["display_name", "Wes Johnson"]]}))
+        .execute(&pool)
+        .await
+        .expect("insert verified profile head");
+
+        run_migrations(&pool)
+            .await
+            .expect("database with verified profiles auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(&pool, &["idx_nip_fi_profile_heads_names"]).await,
+            1
+        );
+    }
+
+    async fn assert_boots_through_every_migration(pool: &PgPool) {
+        let embedded: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        assert_eq!(
+            applied_versions(pool).await,
+            embedded,
+            "a populated database must boot through every embedded migration"
+        );
+    }
+
+    async fn valid_indexes(pool: &PgPool, names: &[&str]) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             WHERE c.relname = ANY($1) AND i.indisvalid AND i.indisready AND i.indislive",
+        )
+        .bind(names)
+        .fetch_one(pool)
+        .await
+        .expect("read index flags")
+    }
+
+    /// A migration that refuses a populated table crash-loops every
+    /// auto-migrating relay with data. Only the frozen ones may, and each must
+    /// have an inline build the startup runner applies first.
+    #[test]
+    fn frozen_prebuild_guards_have_inline_builds() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut guarded: Vec<i64> = std::fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .filter_map(|entry| {
+                let path = entry.expect("read migration entry").path();
+                let name = path.file_name()?.to_str()?.to_owned();
+                let version: i64 = name.split('_').next()?.parse().ok()?;
+                let sql = std::fs::read_to_string(&path).expect("read migration");
+                sql.contains("RAISE EXCEPTION 'prebuild ")
+                    .then_some(version)
+            })
+            .collect();
+        guarded.sort_unstable();
+        let inline: Vec<i64> = INLINE_INDEX_BUILDS.iter().map(|(v, _, _)| *v).collect();
+        assert_eq!(
+            guarded, inline,
+            "a migration must build its own index instead of refusing a populated table \
+             (docs/database.md Rule 6); only frozen guards listed in INLINE_INDEX_BUILDS may remain"
+        );
+        assert_eq!(inline, [76, 78, 81], "do not add new prebuild guards");
     }
 
     #[tokio::test]

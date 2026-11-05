@@ -3,11 +3,64 @@ import 'dart:ui' show SemanticsAction;
 import 'package:buzz/features/agents/agent_card.dart';
 import 'package:buzz/features/agents/agent_card_grid.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/widgets/avatar_shape.dart';
+import 'package:buzz/shared/widgets/progressive_animated_avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets(
+    'uploaded portraits cover the frame while character artwork stays contained',
+    (tester) async {
+      for (final (url, expectedFit) in [
+        ('https://example.com/portrait.png', BoxFit.cover),
+        (
+          'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-10.png',
+          BoxFit.contain,
+        ),
+        (
+          'https://example.com/portrait.png#buzz-anim=https%3A%2F%2Fexample.com%2Fanimated.png',
+          BoxFit.contain,
+        ),
+      ]) {
+        await tester.pumpWidget(
+          ProviderScope(
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Center(
+                child: SizedBox(
+                  width: 180,
+                  height: 240,
+                  child: AgentCard(
+                    name: 'Portrait',
+                    imageUrl: url,
+                    onOpen: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        final portrait = find.descendant(
+          of: find.byType(AvatarClip),
+          matching: find.byType(AvatarImageContent),
+        );
+        expect(portrait, findsOneWidget);
+        expect(tester.widget<AvatarImageContent>(portrait).fit, expectedFit);
+        final animation = find.byType(ProgressiveAnimatedAvatar);
+        if (animation.evaluate().isNotEmpty) {
+          expect(
+            tester.widget<ProgressiveAnimatedAvatar>(animation).fit,
+            expectedFit,
+          );
+        }
+        expect(tester.takeException(), isNull);
+      }
+    },
+  );
+
   testWidgets('whole card opens profile without stealing footer taps', (
     tester,
   ) async {
