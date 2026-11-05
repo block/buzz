@@ -34,7 +34,9 @@ import {
 import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
 
 export type MessageTimelineHandle = {
-  scrollToBottomOnNextUpdate: () => void;
+  /** Release the frozen tail and pin the next append for a send to
+   *  `sendChannelId`. Ignored when this timeline shows another channel. */
+  scrollToBottomOnNextUpdate: (sendChannelId: string) => void;
   /** Undo `scrollToBottomOnNextUpdate` for a send that failed. */
   cancelScrollToBottomOnNextUpdate: () => void;
   settleAtBottom: () => boolean;
@@ -361,6 +363,7 @@ const MessageTimelineBase = React.forwardRef<
     scrollToBottom,
     scrollToBottomOnNextUpdate,
     isOwnSendPending,
+    isVirtualizerAtBottom,
     cancelScrollToBottomOnNextUpdate,
     scrollToMessage,
     onVirtualizerAtBottomStateChange,
@@ -382,7 +385,6 @@ const MessageTimelineBase = React.forwardRef<
   });
 
   const hasConfirmedVirtualizerBottomRef = React.useRef(false);
-  const virtualizerAtBottomRef = React.useRef(true);
   const bottomConfirmationChannelRef = React.useRef(channelId);
   if (bottomConfirmationChannelRef.current !== channelId) {
     bottomConfirmationChannelRef.current = channelId;
@@ -416,7 +418,6 @@ const MessageTimelineBase = React.forwardRef<
       // scroll-to-end is still converging. Do not turn that mount transient
       // into a semantic dataset freeze: wait until this channel has reached a
       // confirmed bottom once, then track genuine bottom -> history movement.
-      virtualizerAtBottomRef.current = atBottom;
       if (atBottom) {
         hasConfirmedVirtualizerBottomRef.current = true;
         onVirtualizerAtBottomStateChange(true);
@@ -487,20 +488,25 @@ const MessageTimelineBase = React.forwardRef<
   const showPinnedIntroOnly = activePinnedIntro !== null && !showMessageList;
   const omitHistoryLeadIn = showChannelIntroOnly || showPinnedIntroOnly;
 
-  const prepareForOwnMessage = React.useCallback(() => {
-    // The user's own send is the deliberate Zulip exception: release buffered
-    // output before arming the next-append bottom pin so the sent row can enter
-    // Virtua's model and become the new physical floor. Drop a freeze queued
-    // before the send, or it would land after this release, and the bottom
-    // report suppression that freeze armed.
-    if (semanticBottomRafRef.current !== null) {
-      window.cancelAnimationFrame(semanticBottomRafRef.current);
-      semanticBottomRafRef.current = null;
-    }
-    suppressNextSemanticBottomRef.current = false;
-    setIsSemanticallyAtBottom(true);
-    scrollToBottomOnNextUpdate();
-  }, [scrollToBottomOnNextUpdate]);
+  const prepareForOwnMessage = React.useCallback(
+    (sendChannelId: string) => {
+      // A send that settles after a channel switch belongs to the channel it
+      // left, so it must neither release nor pin the one shown now.
+      if (!scrollToBottomOnNextUpdate(sendChannelId)) return;
+      // The user's own send is the deliberate Zulip exception: release buffered
+      // output along with the next-append bottom pin so the sent row can enter
+      // Virtua's model and become the new physical floor. Drop a freeze queued
+      // before the send, or it would land after this release, and the bottom
+      // report suppression that freeze armed.
+      if (semanticBottomRafRef.current !== null) {
+        window.cancelAnimationFrame(semanticBottomRafRef.current);
+        semanticBottomRafRef.current = null;
+      }
+      suppressNextSemanticBottomRef.current = false;
+      setIsSemanticallyAtBottom(true);
+    },
+    [scrollToBottomOnNextUpdate],
+  );
   const cancelOwnMessage = React.useCallback(() => {
     // While the send was pending, its hold skipped any freeze, including one
     // queued before the send. If the reader is off the floor now, freeze as
@@ -508,13 +514,18 @@ const MessageTimelineBase = React.forwardRef<
     const skippedFreeze =
       isOwnSendPending() &&
       hasConfirmedVirtualizerBottomRef.current &&
-      !virtualizerAtBottomRef.current;
+      !isVirtualizerAtBottom();
     cancelScrollToBottomOnNextUpdate();
     if (skippedFreeze) {
       suppressNextSemanticBottomRef.current = true;
       queueSemanticBottom(false);
     }
-  }, [cancelScrollToBottomOnNextUpdate, isOwnSendPending, queueSemanticBottom]);
+  }, [
+    cancelScrollToBottomOnNextUpdate,
+    isOwnSendPending,
+    isVirtualizerAtBottom,
+    queueSemanticBottom,
+  ]);
 
   React.useImperativeHandle(
     ref,

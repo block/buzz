@@ -63,6 +63,7 @@ import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
+import { useOwnSendArm } from "@/features/channels/ui/useOwnSendArm";
 import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
 import { useRoutedMessageEdit } from "@/features/channels/ui/useRoutedMessageEdit";
 import { Button } from "@/shared/ui/button";
@@ -280,17 +281,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     }
     return pubkeys;
   }, [activityAgents, agentPubkeys, agentSessionAgents]);
-  // Arms the timeline's own-send pin and returns its disarm for a failed send.
-  // The generation keeps a late failure from disarming a later send's pin.
-  const ownSendGenerationRef = React.useRef(0);
-  const armOwnSend = React.useCallback(() => {
-    const generation = ++ownSendGenerationRef.current;
-    messageTimelineRef.current?.scrollToBottomOnNextUpdate();
-    return () => {
-      if (ownSendGenerationRef.current !== generation) return;
-      messageTimelineRef.current?.cancelScrollToBottomOnNextUpdate();
-    };
-  }, []);
+  const getTimelineChannelId = React.useCallback(
+    () => activeChannelIdRef.current,
+    [],
+  );
+  const armOwnSend = useOwnSendArm(messageTimelineRef, getTimelineChannelId);
   const handleSendMessage = React.useCallback(
     async (
       content: string,
@@ -309,9 +304,9 @@ export const ChannelPane = React.memo(function ChannelPane({
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
       // A send prepared into another channel (a DM message that mentions an
       // agent outside the DM) lands its row there, so this timeline never sees
-      // it. The pane navigates there once the send succeeds.
-      const disarmOwnSend =
-        !channelId || channelId === activeChannelId ? armOwnSend() : null;
+      // it, and the arm skips it. The pane navigates there once the send
+      // succeeds.
+      const disarmOwnSend = armOwnSend(channelId ?? activeChannelId);
       try {
         await onSendMessage(
           content,
@@ -322,7 +317,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           forceRest,
         );
       } catch (error) {
-        disarmOwnSend?.();
+        disarmOwnSend();
         throw error;
       }
       if (
