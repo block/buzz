@@ -200,6 +200,25 @@ void main() {
     expect(disposed.where(retainedIds.contains), isEmpty);
     expect(recorder.cancelled, isTrue);
     expect(sent, 0);
+    // Shared native glass is hidden during delivery and recovery. The expanded
+    // control must retain its own visible surface and its left-side hit targets.
+    recorder = Recorder();
+    fail = true;
+    final retryGesture = await hold(tester);
+    await retryGesture.up();
+    await tester.pumpAndSettle();
+    final recoverySurface = tester.widget<DecoratedBox>(
+      find.byKey(const ValueKey('default-agent-voice-surface')),
+    );
+    expect(
+      (recoverySurface.decoration as BoxDecoration).color,
+      tester.element(find.byType(DefaultAgentVoiceControl)).controlSurface,
+    );
+    expect(tester.element(surface.first), same(touchedSurface));
+    await tester.tap(find.byTooltip('Discard voice note'));
+    await tester.pumpAndSettle();
+    expect(draft.note, isNull);
+    expect(find.text('Retry voice note'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
     debugDefaultTargetPlatformOverride = null;

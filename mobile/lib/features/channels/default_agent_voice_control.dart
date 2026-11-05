@@ -366,9 +366,15 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                         Positioned.fill(
                           child: IgnorePointer(
                             child: DecoratedBox(
+                              key: const ValueKey(
+                                'default-agent-voice-surface',
+                              ),
                               decoration: BoxDecoration(
                                 color: recording.value
                                     ? context.colors.primary
+                                    : active &&
+                                          NavigationGlassGroup.maybeOf(context)
+                                    ? context.controlSurface
                                     : Colors.transparent,
                                 borderRadius: BorderRadius.circular(
                                   Radii.navigationCapsule,
