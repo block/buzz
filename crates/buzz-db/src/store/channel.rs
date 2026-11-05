@@ -319,11 +319,16 @@ pub(crate) async fn create_channel_with_event(
     tx.set_push_enqueue(push_enqueue);
 
     if !insert_channel_rows(&mut tx, channel_id, channel).await? {
+        let seconds = i64::try_from(event.created_at.as_secs())
+            .map_err(|_| DbError::InvalidTimestamp(i64::MAX))?;
+        let created_at = DateTime::<Utc>::from_timestamp(seconds, 0)
+            .ok_or(DbError::InvalidTimestamp(seconds))?;
         let resent = sqlx::query(
-            "SELECT 1 FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL LIMIT 1",
+            "SELECT 1 FROM events WHERE community_id = $1 AND id = $2 AND created_at = $3 AND deleted_at IS NULL LIMIT 1",
         )
         .bind(community_id.as_uuid())
         .bind(event.id.as_bytes().as_slice())
+        .bind(created_at)
         .fetch_optional(tx.conn())
         .await?
         .is_some();

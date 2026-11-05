@@ -2786,18 +2786,21 @@ async fn handle_bridge_search(
             .await
             .map_err(|e| search_read_error("search error", &e))?;
 
-        // Fetch full events from DB by ID. Hit ids are already raw 32-byte
+        // Fetch full events by exact hit keys. Hit ids are already raw 32-byte
         // arrays from the FTS layer — no hex decode.
-        let hit_ids: Vec<[u8; 32]> = search_result.hits.into_iter().map(|h| h.event_id).collect();
+        let hit_keys: Vec<_> = search_result
+            .hits
+            .iter()
+            .map(|h| (h.event_id, h.created_at))
+            .collect();
 
-        if hit_ids.is_empty() {
+        if hit_keys.is_empty() {
             continue;
         }
 
-        let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
         let stored_events = state
             .db
-            .get_events_by_ids_routed("bridge_search_hydrate", tenant.community(), &id_refs)
+            .get_events_by_ids_at_routed("bridge_search_hydrate", tenant.community(), &hit_keys)
             .await
             .map_err(|e| db_read_error("search fetch error", &e))?;
 
@@ -2807,7 +2810,7 @@ async fn handle_bridge_search(
             .map(|ev| (ev.event.id.to_bytes(), ev))
             .collect();
 
-        for id_array in &hit_ids {
+        for (id_array, _) in &hit_keys {
             let stored = match event_map.get(id_array) {
                 Some(ev) => ev,
                 None => continue,

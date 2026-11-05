@@ -4075,6 +4075,9 @@ mod listed_channel_name_postgres_tests;
 #[path = "tests/reader_pool_postgres_tests.rs"]
 mod reader_pool_postgres_tests;
 
+#[path = "tests/event_hydration_postgres_tests.rs"]
+mod event_hydration_postgres_tests;
+
 /// `insert_event_with_serving_write_guard` indexes mentions in the event's own
 /// transaction, and an indexing failure stays best-effort: the savepoint rolls
 /// back only the mention rows, never the event.

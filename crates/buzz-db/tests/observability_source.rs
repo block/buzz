@@ -574,6 +574,10 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         ),
         ("archived_identities", archived_identities),
         ("event", event),
+        (
+            "event_hydration",
+            include_str!("../src/store/event_hydration.rs"),
+        ),
         ("git_repo", include_str!("../src/store/git_repo.rs")),
         ("push", include_str!("../src/store/push.rs")),
         ("replica_fence", replica_fence),
