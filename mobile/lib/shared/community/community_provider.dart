@@ -1,4 +1,5 @@
 import '../hosted/hosted_relay_auth.dart';
+
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
@@ -10,6 +11,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../profile/profile_snapshot.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
@@ -359,12 +361,16 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   Future<void> _removeChannelListSnapshot(Community community) async {
     final snapshots = ref.read(channelListSnapshotStorageProvider);
+    final profiles = ref.read(profileSnapshotStorageProvider);
     final pubkey = _channelSnapshotPubkey(community);
-    if (snapshots == null || pubkey == null) return;
+    if (pubkey == null) return;
     try {
       // Retire writers before the revocation journal or credential changes.
       // A disposable cache must never prevent local sign-out.
-      await snapshots.remove(pubkey, community.relayUrl);
+      await Future.wait([
+        ?snapshots?.remove(pubkey, community.relayUrl),
+        ?profiles?.remove(pubkey, community.relayUrl),
+      ]);
     } catch (error, stackTrace) {
       developer.log(
         'Channel snapshot deletion failed; orphan cleanup will retry',
@@ -379,12 +385,22 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     List<Community> communities,
   ) async {
     final snapshots = ref.read(channelListSnapshotStorageProvider);
-    if (snapshots == null) return;
-    await snapshots.removeOrphans({
+    final profiles = ref.read(profileSnapshotStorageProvider);
+    final scopes = [
       for (final community in communities)
         if (_channelSnapshotPubkey(community) case final pubkey?)
-          ChannelListSnapshotStorage.key(pubkey, community.relayUrl),
-    });
+          (pubkey: pubkey, relay: community.relayUrl),
+    ];
+    await Future.wait([
+      ?snapshots?.removeOrphans({
+        for (final scope in scopes)
+          ChannelListSnapshotStorage.key(scope.pubkey, scope.relay),
+      }),
+      ?profiles?.removeOrphans({
+        for (final scope in scopes)
+          ProfileSnapshotStorage.key(scope.pubkey, scope.relay),
+      }),
+    ]);
   }
 
   Future<void> switchCommunity(String id) {
