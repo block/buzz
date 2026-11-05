@@ -307,7 +307,6 @@ Widget _buildTestable({
   List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
-  VideoPreviewFrameLoader? videoPreviewLoader,
   Widget? home,
   Stream<MeGroups>? organization,
   SendMessage? sender,
@@ -354,8 +353,6 @@ Widget _buildTestable({
         meMessagesProvider(_channelId).overrideWith(() => fakeMessagesNotifier),
         meAssistantsProvider.overrideWith((ref) async => []),
       ],
-      if (videoPreviewLoader != null)
-        videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
             ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)

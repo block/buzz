@@ -2702,7 +2702,8 @@ impl Db {
     /// unset, even covered-eligible queries stay on the writer, so merging
     /// this seam is a true no-op until the budget is configured. Every
     /// failure fails closed to the writer, except a statement-timeout cancel
-    /// (57014), which is surfaced rather than re-run.
+    /// (57014), which is surfaced rather than re-run, and a busy reader,
+    /// which rejects the read as retryable (see [`Db::route_read`]).
     #[datastore_span(name = "query_events_routed", system = "postgresql")]
     pub async fn query_events_routed(
         &self,
@@ -2719,7 +2720,7 @@ impl Db {
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2740,6 +2741,9 @@ impl Db {
                         // writer rather than surfacing a routed error.
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::query_events_with_operation(
                             &self.pool,
                             q,
@@ -2783,7 +2787,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2802,6 +2806,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::query_events_with_operation(
                             &self.pool,
                             q,
@@ -2849,7 +2856,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::count_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2868,6 +2875,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica count failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::count_events(&self.pool, q).await
                     }
                 }
@@ -3110,7 +3120,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
@@ -3127,6 +3137,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::get_events_by_ids_with_operation(
                             &self.pool,
                             community_id,

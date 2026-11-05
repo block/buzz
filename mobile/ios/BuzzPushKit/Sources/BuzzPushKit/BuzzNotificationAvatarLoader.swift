@@ -107,19 +107,28 @@ public final class BuzzNotificationAvatarLoader {
       if let assertion {
         request.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
       }
-      self.download(request, scope: scope, completion: completion)
+      self.download(request, scope: scope, assertion: assertion, completion: completion)
     }
   }
 
+  /// Bytes fetched with `assertion` are accepted only while the organization session that
+  /// issued it is still the shared one, so a retired session's avatar never reaches the cache.
   private func download(
     _ request: URLRequest, scope: BuzzNotificationCacheScope,
+    assertion: BuzzRelayAssertion? = nil,
     completion: @escaping (Result<Data, Error>) -> Void
   ) {
     let configuration = URLSessionConfiguration.default
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
-    configuration.urlCache = httpCache(scope)
+    let cache = httpCache(scope)
+    configuration.urlCache = cache
     startDownload(request, configuration, Self.maximumDownloadBytes) { result in
+      if let assertion, self.assertionIssuer?.isCurrent(assertion) != true {
+        cache.removeCachedResponse(for: request)
+        completion(.failure(BuzzNotificationCacheError.revoked))
+        return
+      }
       guard self.isCurrent(scope) else {
         completion(.failure(BuzzNotificationCacheError.revoked))
         return
