@@ -14,6 +14,23 @@ fn snapshot(ids: Vec<Uuid>) -> ReadAt<Vec<Uuid>> {
 }
 
 #[tokio::test]
+async fn membership_check_future_stays_small_in_nested_handlers() {
+    let state = crate::state::tests::test_state().await;
+    let user = vec![1; 32];
+    let channel = Uuid::from_u128(1);
+    state
+        .membership_cache
+        .seed_member((community(1), channel, user.clone()), true);
+    let check = state.is_member_cached(community(1), channel, &user);
+    let bytes = std::mem::size_of_val(&check);
+    assert!(
+        bytes < 4096,
+        "membership checks compose inside large handler futures: {bytes} bytes"
+    );
+    assert!(check.await.unwrap());
+}
+
+#[tokio::test]
 async fn concurrent_channels_share_one_membership_read() {
     let cache = Arc::new(MembershipCache::new(Duration::from_secs(5)));
     let key = (community(1), vec![1; 32]);

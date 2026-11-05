@@ -2636,7 +2636,7 @@ mod postgres_tests {
                 let channel = Uuid::new_v4();
                 channels.push(channel);
                 for community in [a, b] {
-                    sqlx::query("INSERT INTO channels (community_id, id, name, channel_type, visibility, created_by, archived_at) VALUES ($1, $2, 'membership-test', $3::channel_type, $4::channel_visibility, $5, NOW())")
+                    sqlx::query("INSERT INTO channels (community_id, id, name, channel_type, visibility, created_by, archived_at) VALUES ($1, $2, $2::text, $3::channel_type, $4::channel_visibility, $5, NOW())")
                         .bind(community.as_uuid()).bind(channel).bind(kind).bind(visibility).bind(&user)
                         .execute(&pool).await.unwrap();
                     // Same user and channel IDs in two communities, but different memberships.

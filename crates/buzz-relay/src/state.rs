@@ -1988,11 +1988,16 @@ impl AppState {
             .contains(
                 (community_id, pubkey.to_vec()),
                 channel_id,
-                self.db.get_active_membership_ids_read_at(
-                    community_id,
-                    pubkey,
-                    (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
-                ),
+                async {
+                    // Database futures are large in debug builds. Allocate
+                    // only on a miss, without inflating every caller's stack.
+                    Box::pin(self.db.get_active_membership_ids_read_at(
+                        community_id,
+                        pubkey,
+                        (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
+                    ))
+                    .await
+                },
                 async {
                     // Keep the fallback query out of every caller's future
                     // layout, and allocate it only when a point check is needed.
