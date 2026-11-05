@@ -1370,31 +1370,47 @@ void main() {
       );
     });
 
-    for (final (name, error, message) in [
-      (
-        'a disconnected relay',
-        RelayNotConnectedError(),
-        'Not sent. No connection.',
-      ),
-      (
-        'an unacknowledged publish',
-        TimeoutException('not acknowledged'),
-        "Not sent. The relay didn't respond.",
-      ),
-      (
-        'a relay rejection',
-        Exception('restricted: not a member'),
-        'Not sent: restricted: not a member',
-      ),
-      (
-        'any other state error',
-        StateError('Relay session is disposed'),
-        'Not sent: Relay session is disposed',
-      ),
-    ]) {
+    for (final (name, fail, message)
+        in <(String, Future<void> Function(ProviderContainer), String)>[
+          (
+            'a disconnected relay',
+            // The real session: never connected in this harness, so publish
+            // classifies the failure itself.
+            (container) => container
+                .read(relaySessionProvider.notifier)
+                .publish(
+                  const NostrEvent(
+                    id: 'event-1',
+                    pubkey: 'pubkey-1',
+                    createdAt: 0,
+                    kind: 9,
+                    tags: [],
+                    content: 'hello',
+                    sig: 'sig-1',
+                  ),
+                ),
+            'Not sent. No connection.',
+          ),
+          (
+            'an unacknowledged publish',
+            (_) => Future.error(TimeoutException('not acknowledged')),
+            "Not sent. The relay didn't respond.",
+          ),
+          (
+            'a relay rejection',
+            (_) => Future.error(Exception('restricted: not a member')),
+            'Not sent: restricted: not a member',
+          ),
+          (
+            'any other state error',
+            (_) => Future.error(StateError('Relay session is disposed')),
+            'Not sent: Relay session is disposed',
+          ),
+        ]) {
       testWidgets('reports $name as itself, not a community switch', (
         tester,
       ) async {
+        late final ProviderContainer container;
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
@@ -1403,8 +1419,11 @@ void main() {
                   content,
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
-                }) => Future.error(error),
+                }) => fail(container),
           ),
+        );
+        container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
         );
 
         await _expandComposer(tester);
