@@ -76,6 +76,8 @@ pub struct AdmittedTx {
     ttl_refresh_channels: BTreeSet<Uuid>,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
     push_events: Vec<Vec<u8>>,
+    operator_listener_commits: Option<crate::operator_listener::CommittedDeliveries>,
+    operator_listener_deliveries: Vec<Uuid>,
 }
 
 impl AdmittedTx {
@@ -92,6 +94,8 @@ impl AdmittedTx {
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
+            operator_listener_commits: None,
+            operator_listener_deliveries: Vec::new(),
         })
     }
 
@@ -111,11 +115,25 @@ impl AdmittedTx {
             ttl_refresh_channels: BTreeSet::new(),
             push_enqueue: None,
             push_events: Vec::new(),
+            operator_listener_commits: None,
+            operator_listener_deliveries: Vec::new(),
         })
     }
 
     pub(crate) fn set_push_enqueue(&mut self, producer: Option<super::push_enqueue::PushEnqueue>) {
         self.push_enqueue = producer;
+    }
+
+    /// Arm the post-commit hand-offs a [`crate::Db`] handle owns.
+    pub(crate) fn set_post_commit(&mut self, db: &crate::Db) {
+        self.set_push_enqueue(db.push_enqueue.clone());
+        self.operator_listener_commits = Some(db.operator_listener_commits.clone());
+    }
+
+    pub(crate) fn record_operator_listener_deliveries(&mut self, ids: Vec<Uuid>) {
+        if self.operator_listener_commits.is_some() {
+            self.operator_listener_deliveries.extend(ids);
+        }
     }
 
     pub(crate) fn record_push_event(&mut self, event_id: &[u8], kind: i32) {
@@ -173,6 +191,9 @@ impl AdmittedTx {
             for event_id in self.push_events {
                 producer.submit(self.community, event_id);
             }
+        }
+        if let Some(commits) = self.operator_listener_commits {
+            commits.submit(self.operator_listener_deliveries);
         }
         Ok(())
     }

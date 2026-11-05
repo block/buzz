@@ -424,7 +424,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.set_post_commit(self);
         let transaction_timer = observability::TransactionTimer::start(
             observability::TransactionOperation::ReplaceAddressableEvent,
         );
@@ -604,7 +604,7 @@ impl Db {
             observability::WriterOperation::EventWrite,
         )
         .await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        tx.set_post_commit(self);
         let transaction_timer =
             observability::TransactionTimer::start(TransactionOperation::ReplaceParameterizedEvent);
         transaction_timer
