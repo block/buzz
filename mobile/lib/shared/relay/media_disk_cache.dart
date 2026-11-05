@@ -116,29 +116,36 @@ class MediaDiskCache {
   /// [root]: removed communities and replaced accounts, including writes
   /// that landed after their removal. A failed delete is retried on the
   /// next call.
+  ///
+  /// [retained] is read again before each delete, so a community or account
+  /// added while the sweep runs is kept.
   static Future<void> removeOrphans(
     Directory root,
-    Map<String, String?> retained,
+    Map<String, String?> Function() retained,
   ) async {
-    final communities = Directory(p.join(root.path, 'communities'));
-    final keep = {
-      for (final MapEntry(key: id, value: signer) in retained.entries)
+    Set<String> keep() => {
+      for (final MapEntry(key: id, value: signer) in retained().entries)
         if (signer != null) directoryFor(root, id, signer).path,
     };
-    final keepCommunities = {
-      for (final path in keep) p.dirname(p.dirname(path)),
-    };
-    await _deleteExcept(communities, keepCommunities);
-    for (final community in keepCommunities) {
-      await _deleteExcept(Directory(p.join(community, 'media')), keep);
+    final communities = Directory(p.join(root.path, 'communities'));
+    await _deleteExcept(communities, () {
+      return {for (final path in keep()) p.dirname(p.dirname(path))};
+    });
+    if (!await communities.exists()) return;
+    await for (final community in communities.list(followLinks: false)) {
+      if (community is! Directory) continue;
+      await _deleteExcept(Directory(p.join(community.path, 'media')), keep);
     }
   }
 
   /// Deletes the entries of [parent] whose paths are not in [keep].
-  static Future<void> _deleteExcept(Directory parent, Set<String> keep) async {
+  static Future<void> _deleteExcept(
+    Directory parent,
+    Set<String> Function() keep,
+  ) async {
     if (!await parent.exists()) return;
     await for (final entry in parent.list(followLinks: false)) {
-      if (keep.contains(entry.path)) continue;
+      if (keep().contains(entry.path)) continue;
       try {
         await entry.delete(recursive: true);
       } on FileSystemException catch (error) {

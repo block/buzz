@@ -203,20 +203,24 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   }
 
   /// [url]'s bytes from [diskCache] when saved there, else downloaded (and
-  /// saved once they decode). Stale saved bytes are shown while a background download
-  /// replaces them.
+  /// saved once they decode). Stale saved bytes are shown, and once they
+  /// decode a background download replaces them; saved bytes that fail to
+  /// decode are removed instead.
   Future<Uint8List> _loadBytes(_SharedFetch fetch) async {
     final cache = diskCache;
     if (cache == null) return _fetchBytes(fetch.aborted);
     final hit = await cache.read(url);
     if (hit != null) {
-      if (hit.isStale) _scheduleRefresh(cache);
-      fetch.discard = () => unawaited(cache.remove(url));
+      // Refresh only after the decode, so a refresh can never land before
+      // the removal of bytes that failed it.
+      if (hit.isStale) fetch.onDecoded = () => _scheduleRefresh(cache);
+      fetch.onFailed = () => unawaited(cache.remove(url));
       return hit.bytes;
     }
     final bytes = await _fetchBytes(fetch.aborted);
     final immutable = _isContentAddressed;
-    fetch.save = () => unawaited(cache.write(url, bytes, immutable: immutable));
+    fetch.onDecoded = () =>
+        unawaited(cache.write(url, bytes, immutable: immutable));
     return bytes;
   }
 
@@ -476,19 +480,18 @@ class _SharedFetch {
   /// Completes when every load waiting for this download was abandoned.
   Future<void> get aborted => _abort.future;
 
-  /// Saves downloaded bytes to disk. Set by a download, and run by the
-  /// first load that decodes a frame.
-  VoidCallback? save;
+  /// Run by the first load that decodes a frame: saves downloaded bytes,
+  /// or refreshes stale saved ones.
+  VoidCallback? onDecoded;
 
-  /// Removes saved bytes from disk. Set by a disk hit, and run when a load
-  /// fails before decoding a frame from them.
-  VoidCallback? discard;
+  /// Run when a load fails before decoding a frame: removes saved bytes.
+  VoidCallback? onFailed;
 
-  /// Runs [save] or [discard] once, by whether a load decoded a frame.
+  /// Runs [onDecoded] or [onFailed] once, by whether a load decoded a frame.
   void settle({required bool decoded}) {
-    final pending = decoded ? save : discard;
-    save = null;
-    discard = null;
+    final pending = decoded ? onDecoded : onFailed;
+    onDecoded = null;
+    onFailed = null;
     pending?.call();
   }
 

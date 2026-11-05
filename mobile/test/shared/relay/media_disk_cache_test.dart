@@ -213,6 +213,27 @@ void main() {
     });
     expect(fetched, [_externalUrls.first]);
 
+    // A stale saved copy that fails to decode is dropped without starting a
+    // refresh, which could otherwise save a new copy just before the drop.
+    fetched.clear();
+    malformedExternal = false;
+    MediaImageProvider.debugResetCooldowns();
+    await launch((cache) async {
+      await cache.write(
+        _externalUrls[1],
+        Uint8List.fromList(utf8.encode('not an image')),
+        immutable: false,
+      );
+    });
+    now = now.add(const Duration(days: 8));
+    await launch((cache) async {
+      expect(await show(cache, _externalUrls[1]), isNotNull);
+      await _settle();
+      expect(fetched, isEmpty);
+      expect(await show(cache, _externalUrls[1]), isNull);
+    });
+    expect(fetched, [_externalUrls[1]]);
+
     // Refreshes queued when the community or account retires never run.
     fetched.clear();
     malformedExternal = false;
@@ -238,12 +259,12 @@ void main() {
     // A replaced account's directory goes, including writes that land after
     // its delete; removing the community deletes its directory.
     expect(await directory.exists(), isTrue);
-    await MediaDiskCache.removeOrphans(root, {'community-1': 'signer-2'});
+    await MediaDiskCache.removeOrphans(root, () => {'community-1': 'signer-2'});
     expect(await directory.exists(), isFalse);
     await directory.create(recursive: true);
-    await MediaDiskCache.removeOrphans(root, {'community-1': 'signer-1'});
+    await MediaDiskCache.removeOrphans(root, () => {'community-1': 'signer-1'});
     expect(await directory.exists(), isTrue);
-    await MediaDiskCache.removeOrphans(root, {'community-2': 'signer-1'});
+    await MediaDiskCache.removeOrphans(root, () => {'community-2': 'signer-1'});
     expect(
       await MediaDiskCache.communityDirectory(root, 'community-1').exists(),
       isFalse,

@@ -541,6 +541,7 @@ void main() {
       const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
       final oldKeys = nostr.Keys.generate();
       final newKeys = nostr.Keys.generate();
+      final midKeys = nostr.Keys.generate();
       final community = Community.create(
         name: 'Stored',
         relayUrl: 'wss://cached.example.com:443',
@@ -576,10 +577,17 @@ void main() {
       expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
       expect(await cache.write(oldToken, snapshot), isTrue);
       expect(await oldMedia.exists(), isTrue);
+      final midMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, midKeys.public),
+      );
       final newMedia = await seedMedia(
         MediaDiskCache.directoryFor(mediaRoot, community.id, newKeys.public),
       );
+      // Two quick replacements: the first one's sweep must not delete the
+      // newest account's cache.
+      await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
       await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
+      expect(await eventuallyExists(midMedia), isFalse);
       expect(cache.read(oldKeys.public, community.relayUrl), isNull);
       expect(await cache.write(oldToken, snapshot), isFalse);
       expect(await eventuallyExists(oldMedia), isFalse);
