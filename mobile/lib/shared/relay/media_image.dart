@@ -85,14 +85,6 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// URLs with a background refresh of stale disk bytes under way.
   static final Set<String> _refreshing = {};
 
-  /// Downloaded bytes not yet saved to disk, by URL: they are saved once one
-  /// load decodes a frame from them, so a corrupt body is never persisted.
-  static final Map<
-    String,
-    ({MediaDiskCache cache, Uint8List bytes, bool immutable})
-  >
-  _unsaved = {};
-
   /// Injectable clock for cooldown tests.
   @visibleForTesting
   static DateTime Function() debugNow = DateTime.now;
@@ -114,16 +106,23 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     ImageDecoderCallback decode,
   ) {
     final abandoned = Completer<void>();
+    _SharedFetch? fetched;
     // The image cache listens to a pending load, so this fires mid-download
     // only once a consumer evicts the entry and stops listening (see
     // [abandonPendingImage]), as [MediaImage] does when it stops showing an
     // image before its first frame. Abort the download then.
     return _MediaImageStreamCompleter(
-      codec: _loadAsync(key, decode, abandoned.future),
+      codec: _loadAsync(
+        key,
+        decode,
+        abandoned.future,
+        onFetch: (fetch) => fetched = fetch,
+      ),
       scale: key.scale,
       debugLabel: url,
-      onFirstFrame: _saveDecoded,
-      onError: () => _unsaved.remove(url),
+      // Save only bytes this load decoded a frame from: a codec can open
+      // from bytes whose frames then fail to decode.
+      onFirstFrame: () => fetched?.saveOnce(),
     )..addOnLastListenerRemovedCallback(() {
       if (!abandoned.isCompleted) abandoned.complete();
     });
@@ -132,8 +131,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   Future<ui.Codec> _loadAsync(
     MediaImageProvider key,
     ImageDecoderCallback decode,
-    Future<void> abandoned,
-  ) async {
+    Future<void> abandoned, {
+    required void Function(_SharedFetch) onFetch,
+  }) async {
     var wasAbandoned = false;
     try {
       // Each decode size is its own cache entry (see [ResizeImage]), so one
@@ -147,6 +147,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         },
       );
       fetch.join();
+      onFetch(fetch);
       var left = false;
       void leave() {
         if (left) return;
@@ -188,27 +189,18 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// [url]'s bytes from [diskCache] when saved there, else downloaded (and
   /// saved once they decode). Stale saved bytes are shown while a background download
   /// replaces them.
-  Future<Uint8List> _loadBytes(Future<void> abort) async {
+  Future<Uint8List> _loadBytes(_SharedFetch fetch) async {
     final cache = diskCache;
-    if (cache == null) return _fetchBytes(abort);
+    if (cache == null) return _fetchBytes(fetch.aborted);
     final hit = await cache.read(url);
     if (hit != null) {
       if (hit.isStale) unawaited(_refresh(cache));
       return hit.bytes;
     }
-    final bytes = await _fetchBytes(abort);
-    _unsaved[url] = (
-      cache: cache,
-      bytes: bytes,
-      immutable: _isContentAddressed,
-    );
+    final bytes = await _fetchBytes(fetch.aborted);
+    final immutable = _isContentAddressed;
+    fetch.save = () => unawaited(cache.write(url, bytes, immutable: immutable));
     return bytes;
-  }
-
-  void _saveDecoded() {
-    if (_unsaved.remove(url) case final save?) {
-      unawaited(save.cache.write(url, save.bytes, immutable: save.immutable));
-    }
   }
 
   Future<void> _refresh(MediaDiskCache cache) async {
@@ -351,14 +343,12 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
     required super.codec,
     required super.scale,
     required this.onFirstFrame,
-    required this.onError,
     super.debugLabel,
   });
 
   /// Called once, when the first frame has decoded. A codec can be created
   /// from bytes whose frames then fail to decode.
   final VoidCallback onFirstFrame;
-  final VoidCallback onError;
   var _hasFrame = false;
 
   final _listeners = <ImageStreamListener>[];
@@ -370,24 +360,6 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
       onFirstFrame();
     }
     super.setImage(image);
-  }
-
-  @override
-  void reportError({
-    DiagnosticsNode? context,
-    required Object exception,
-    StackTrace? stack,
-    InformationCollector? informationCollector,
-    bool silent = false,
-  }) {
-    onError();
-    super.reportError(
-      context: context,
-      exception: exception,
-      stack: stack,
-      informationCollector: informationCollector,
-      silent: silent,
-    );
   }
 
   @override
@@ -408,10 +380,10 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
 /// download.
 class _SharedFetch {
   _SharedFetch(
-    Future<Uint8List> Function(Future<void> abort) fetch, {
+    Future<Uint8List> Function(_SharedFetch fetch) load, {
     required this.onFinished,
   }) {
-    bytes = fetch(_abort.future).whenComplete(() {
+    bytes = load(this).whenComplete(() {
       _done = true;
       onFinished(this);
     });
@@ -424,6 +396,19 @@ class _SharedFetch {
   late final Future<Uint8List> bytes;
   var _waiting = 0;
   var _done = false;
+
+  /// Completes when every load waiting for this download was abandoned.
+  Future<void> get aborted => _abort.future;
+
+  /// Saves the downloaded bytes to disk, when they are not there yet. Set by
+  /// the download, and run by the first load that decodes a frame.
+  VoidCallback? save;
+
+  void saveOnce() {
+    final pending = save;
+    save = null;
+    pending?.call();
+  }
 
   void join() => _waiting++;
 
