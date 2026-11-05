@@ -60,7 +60,30 @@ async fn open(
     actor: &Keys,
     others: &[&Keys],
 ) -> Result<Uuid, IngestError> {
-    let tags = others.iter().map(|k| vec!["p".into(), hex(k)]).collect();
+    open_tagged(state, tenant, actor, others, false).await
+}
+
+/// Open a DM with `others`, agreeing to share an existing DM's history.
+async fn open_with_history(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    others: &[&Keys],
+) -> Result<Uuid, IngestError> {
+    open_tagged(state, tenant, actor, others, true).await
+}
+
+async fn open_tagged(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    others: &[&Keys],
+    history: bool,
+) -> Result<Uuid, IngestError> {
+    let mut tags: Vec<Vec<String>> = others.iter().map(|k| vec!["p".into(), hex(k)]).collect();
+    if history {
+        tags.push(vec!["history".into(), "include".into()]);
+    }
     submit(state, tenant, actor, 41010, tags)
         .await
         .map(|r| response_channel(&r).0)
@@ -223,9 +246,12 @@ async fn growing_into_an_existing_group_returns_that_dm() {
     );
 }
 
-/// An agent joins in place, with or without the history tag, and never
-/// changes which DM it is: the same people still find it.
-/// Mutation: fork on agents without the tag → a different channel → RED.
+/// With the history tag, an agent joins in place and never changes which DM it
+/// is: the same people still find it. Without it, the agent starts a new DM of
+/// everyone, as before, and this DM is untouched: an older client cannot share
+/// a DM's history unseen.
+/// Mutations: fork on agents with the tag → a different channel → RED; join
+/// in place without it → the same channel → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn an_agent_joins_in_place_without_changing_the_dm() {
@@ -235,9 +261,16 @@ async fn an_agent_joins_in_place_without_changing_the_dm() {
     make_agent(&state, &tenant, &agent, &a, "owner_only").await;
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
 
-    let (target, created) = add(&state, &tenant, &a, dm, &[&agent], false)
+    let (forked, created) = add(&state, &tenant, &a, dm, &[&agent], false)
         .await
-        .expect("add");
+        .expect("add without history");
+    assert!(created);
+    assert_ne!(forked, dm);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+
+    let (target, created) = add(&state, &tenant, &a, dm, &[&agent], true)
+        .await
+        .expect("add with history");
 
     assert_eq!((target, created), (dm, false));
     assert_eq!(
@@ -247,9 +280,11 @@ async fn an_agent_joins_in_place_without_changing_the_dm() {
     assert_eq!(open(&state, &tenant, &b, &[&a]).await.expect("reopen"), dm);
 }
 
-/// Opening a DM with people and an agent finds the people's DM and adds the
-/// agent to it.
-/// Mutation: skip adding named agents to a found DM → agent missing → RED.
+/// Opening a DM with people and an agent, with the history tag, finds the
+/// people's DM and adds the agent to it. Without the tag it finds or makes the
+/// DM of exactly those members, as before, and the people's DM is untouched.
+/// Mutations: skip adding named agents to a found DM → agent missing → RED;
+/// find the people's DM without the tag → the same channel → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn opening_with_an_agent_finds_the_peoples_dm_and_adds_it() {
@@ -259,10 +294,22 @@ async fn opening_with_an_agent_finds_the_peoples_dm_and_adds_it() {
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
 
+    let separate = open(&state, &tenant, &a, &[&b, &agent])
+        .await
+        .expect("open without history");
+    assert_ne!(separate, dm);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
     assert_eq!(
         open(&state, &tenant, &a, &[&b, &agent])
             .await
-            .expect("open"),
+            .expect("again without history"),
+        separate
+    );
+
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&b, &agent])
+            .await
+            .expect("open with history"),
         dm
     );
     assert_eq!(
@@ -311,7 +358,7 @@ async fn the_limit_counts_people_not_agents() {
         .await
         .expect("nine people");
 
-    add(&state, &tenant, &a, dm, &[&agent], false)
+    add(&state, &tenant, &a, dm, &[&agent], true)
         .await
         .expect("agent beyond nine");
     let tenth = Keys::generate();
@@ -337,7 +384,7 @@ async fn adding_an_agent_follows_its_add_policy() {
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
 
     rejected(
-        add(&state, &tenant, &a, dm, &[&agent], false).await,
+        add(&state, &tenant, &a, dm, &[&agent], true).await,
         "policy:owner_only",
     );
     rejected(
@@ -346,7 +393,7 @@ async fn adding_an_agent_follows_its_add_policy() {
     );
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
 
-    let (target, _) = add(&state, &tenant, &b, dm, &[&agent], false)
+    let (target, _) = add(&state, &tenant, &b, dm, &[&agent], true)
         .await
         .expect("owner adds");
     assert_eq!(target, dm);
@@ -419,7 +466,7 @@ async fn an_agent_cannot_share_a_dms_history() {
     );
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
-    add(&state, &tenant, &a, dm, &[&agent], false)
+    add(&state, &tenant, &a, dm, &[&agent], true)
         .await
         .expect("add agent");
 
@@ -455,7 +502,7 @@ async fn growing_does_not_reveal_a_dm_the_actor_is_not_in() {
     );
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
-    add(&state, &tenant, &a, dm, &[&agent], false)
+    add(&state, &tenant, &a, dm, &[&agent], true)
         .await
         .expect("add agent");
     open(&state, &tenant, &a, &[&b, &c]).await.expect("trio");
@@ -489,7 +536,12 @@ async fn the_moderation_dm_cannot_grow() {
     let relay = state.relay_keypair.public_key().to_bytes();
     let (dm, _) = state
         .db
-        .open_dm(tenant.community(), &[&a.public_key().to_bytes()], &relay)
+        .open_dm(
+            tenant.community(),
+            &[&a.public_key().to_bytes()],
+            &relay,
+            false,
+        )
         .await
         .expect("moderation dm");
 
@@ -628,7 +680,7 @@ async fn an_owner_can_remove_their_agent_from_a_dm() {
     let tenant = community(&state, "dm-remove-agent").await;
     let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
-    let dm = open(&state, &tenant, &a, &[&b, &agent])
+    let dm = open_with_history(&state, &tenant, &a, &[&b, &agent])
         .await
         .expect("open");
     let remove = vec![
@@ -695,7 +747,7 @@ async fn kicking_an_agent_keeps_a_group_dm_its_identity() {
     let tenant = community(&state, "dm-kick-agent").await;
     let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
-    let group = open(&state, &tenant, &a, &[&b, &agent])
+    let group = open_with_history(&state, &tenant, &a, &[&b, &agent])
         .await
         .expect("group");
     let own = open(&state, &tenant, &a, &[&agent]).await.expect("own");
@@ -759,7 +811,7 @@ async fn an_agent_joining_a_one_person_dm_moves_its_identity() {
     make_agent(&state, &tenant, &theirs, &b, "anyone").await;
     let dm = open(&state, &tenant, &a, &[&mine]).await.expect("open");
 
-    let (target, _) = add(&state, &tenant, &a, dm, &[&theirs], false)
+    let (target, _) = add(&state, &tenant, &a, dm, &[&theirs], true)
         .await
         .expect("add agent");
     assert_eq!(target, dm);

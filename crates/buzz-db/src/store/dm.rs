@@ -88,14 +88,20 @@ pub fn dm_identity_hash(members: &[&[u8]], agents: &HashSet<Vec<u8>>) -> [u8; 32
     }
 }
 
-/// The fingerprint a DM of `members` opened by `creator` gets. An agent
-/// opening a DM gets one identified by all its members, as before agents were
-/// told apart: only people decide which DM their people share.
-fn opened_identity_hash(members: &[&[u8]], agents: &HashSet<Vec<u8>>, creator: &[u8]) -> [u8; 32] {
-    if agents.contains(creator) {
-        compute_participant_hash(members)
-    } else {
+/// The fingerprint a DM of `members` opened by `creator` gets. With
+/// `by_people`, the DM of its people ([`dm_identity_hash`]). Otherwise, and
+/// always for an agent, the DM of exactly these members, as before agents were
+/// told apart: only people, choosing to, decide which DM their people share.
+fn opened_identity_hash(
+    members: &[&[u8]],
+    agents: &HashSet<Vec<u8>>,
+    creator: &[u8],
+    by_people: bool,
+) -> [u8; 32] {
+    if by_people && !agents.contains(creator) {
         dm_identity_hash(members, agents)
+    } else {
+        compute_participant_hash(members)
     }
 }
 
@@ -163,13 +169,14 @@ pub async fn find_dm_by_participants(
 /// - `participants` must contain at least 2 entries, and at most
 ///   [`MAX_DM_PEOPLE`] people; agents do not count (enforced here).
 /// - `created_by` must be one of the participants.
-/// - The operation is idempotent: the same people (see [`dm_identity_hash`])
-///   -> the same channel returned.
+/// - The operation is idempotent: the same identity (see
+///   [`opened_identity_hash`] for `by_people`) -> the same channel returned.
 pub async fn create_dm(
     pool: &PgPool,
     community_id: CommunityId,
     participants: &[&[u8]],
     created_by: &[u8],
+    by_people: bool,
 ) -> Result<ChannelRecord> {
     if participants.len() < 2 {
         return Err(DbError::InvalidData(
@@ -191,7 +198,7 @@ pub async fn create_dm(
         )));
     }
 
-    let hash = opened_identity_hash(participants, &agents, created_by);
+    let hash = opened_identity_hash(participants, &agents, created_by, by_people);
 
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -424,11 +431,12 @@ pub async fn list_dms_for_user(
 /// `created_by` is automatically added to `pubkeys` if not already present,
 /// ensuring the caller is always a participant in their own DM.
 ///
-/// The DM is found by its people ([`dm_identity_hash`]), so it may hold agents
-/// that `pubkeys` does not name, and lack agents it does. Adding those is
-/// [`grow_dm`]'s job. A DM made before agents were told apart is still found by
-/// all its members. An agent opening a DM finds or makes one identified by all
-/// its members. A found DM is returned only to an active member of it:
+/// With `by_people`, the DM is found by its people ([`dm_identity_hash`]), so
+/// it may hold agents that `pubkeys` does not name, and lack agents it does.
+/// Adding those is [`grow_dm`]'s job. A DM made before agents were told apart
+/// is still found by all its members. Without `by_people`, and always for an
+/// agent opening a DM, only a DM of exactly these members, agents included, is
+/// found or made. A found DM is returned only to an active member of it:
 /// an agent naming its people cannot use this to see or join their DM.
 ///
 /// Returns `(channel, was_created)`:
@@ -439,6 +447,7 @@ pub async fn open_dm(
     community_id: CommunityId,
     pubkeys: &[&[u8]],
     created_by: &[u8],
+    by_people: bool,
 ) -> Result<(ChannelRecord, bool)> {
     let mut all: Vec<&[u8]> = vec![created_by];
     for pk in pubkeys {
@@ -454,7 +463,7 @@ pub async fn open_dm(
         )));
     }
 
-    let hash = opened_identity_hash(&all, &agents, created_by);
+    let hash = opened_identity_hash(&all, &agents, created_by, by_people);
     // DMs made before agents were told apart are identified by all members.
     let legacy = compute_participant_hash(&all);
 
@@ -475,7 +484,7 @@ pub async fn open_dm(
     }
 
     // Create new DM.
-    let channel = create_dm(pool, community_id, &all, created_by).await?;
+    let channel = create_dm(pool, community_id, &all, created_by, by_people).await?;
 
     Ok((channel, true))
 }
@@ -886,8 +895,16 @@ impl Db {
         community_id: CommunityId,
         participants: &[&[u8]],
         created_by: &[u8],
+        by_people: bool,
     ) -> Result<ChannelRecord> {
-        crate::dm::create_dm(&self.pool, community_id, participants, created_by).await
+        crate::dm::create_dm(
+            &self.pool,
+            community_id,
+            participants,
+            created_by,
+            by_people,
+        )
+        .await
     }
 
     /// List all DMs for a user.
@@ -909,8 +926,9 @@ impl Db {
         community_id: CommunityId,
         pubkeys: &[&[u8]],
         created_by: &[u8],
+        by_people: bool,
     ) -> Result<(ChannelRecord, bool)> {
-        crate::dm::open_dm(&self.pool, community_id, pubkeys, created_by).await
+        crate::dm::open_dm(&self.pool, community_id, pubkeys, created_by, by_people).await
     }
 
     /// Add members to a DM in place, keeping its history.
