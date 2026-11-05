@@ -101,6 +101,12 @@ class BuzzPushAttemptGate {
     _endFailureStreak();
   }
 
+  /// Records that [attempt] succeeded without making it runnable again, so a
+  /// later failure starts from the first retry delay.
+  void succeeded(String attempt) {
+    if (_attempt == attempt) _endFailureStreak();
+  }
+
   void _endFailureStreak() {
     _failingAttempt = null;
     _consecutiveFailures = 0;
@@ -161,6 +167,7 @@ class BuzzPushRegistrationBootstrap extends HookWidget {
       unawaited(() async {
         try {
           await startRegistration();
+          attemptGate.succeeded(attemptKey);
         } catch (error, stack) {
           attemptGate.failed(
             attemptKey,

@@ -159,6 +159,42 @@ void main() {
     );
   });
 
+  testWidgets('a registration success ends its failure streak', (tester) async {
+    var failing = true;
+    var registrations = 0;
+    Widget bootstrap(String key) => BuzzPushRegistrationBootstrap(
+      shouldRegister: true,
+      attemptKey: key,
+      startRegistration: () async {
+        registrations += 1;
+        if (failing) throw StateError('refused');
+      },
+      child: const SizedBox(),
+    );
+
+    // Community A fails long enough to back off past a minute.
+    await tester.pumpWidget(bootstrap('a'));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(minutes: 3));
+    }
+    expect(registrations, 6);
+    failing = false;
+    await tester.pump(const Duration(minutes: 15));
+    expect(registrations, 7);
+
+    // Switch to B and back. A's next failure retries within the first delay.
+    await tester.pumpWidget(bootstrap('b'));
+    expect(registrations, 8);
+    failing = true;
+    await tester.pumpWidget(bootstrap('a'));
+    expect(registrations, 9);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    expect(registrations, 10);
+
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('a different attempt starts its own backoff', (tester) async {
     final gate = BuzzPushAttemptGate(jitter: () => 1);
     addTearDown(gate.dispose);
