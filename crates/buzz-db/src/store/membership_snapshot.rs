@@ -42,13 +42,21 @@ pub struct MembershipSnapshot {
 
 // No events, rosters, profiles, other-member aggregates or replica routing.
 // Probe one additional row; never silently certify a capped set as complete.
+// Keep the lookup dependent on the viewer row. LIMIT 1 is valid because the
+// channel key is unique, and prevents flattening this into a scan of every
+// channel in the community. The outer probe counts AFTER type/deletion filters.
 const SNAPSHOT_SQL: &str = "SELECT cm.channel_id AS id, cm.role::text AS role,
-    c.channel_type::text AS channel_type, c.visibility::text AS visibility,
-    c.archived_at IS NOT NULL AS archived
+    c.channel_type, c.visibility, c.archived
     FROM channel_members cm
-    JOIN channels c ON c.community_id = cm.community_id AND c.id = cm.channel_id
+    CROSS JOIN LATERAL (
+        SELECT c.channel_type::text AS channel_type, c.visibility::text AS visibility,
+               c.archived_at IS NOT NULL AS archived
+        FROM channels c
+        WHERE c.community_id = cm.community_id AND c.id = cm.channel_id
+          AND c.deleted_at IS NULL AND c.channel_type = ANY($3::text[]::channel_type[])
+        LIMIT 1
+    ) c
     WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
-      AND c.deleted_at IS NULL AND c.channel_type::text = ANY($3::text[])
     ORDER BY cm.channel_id LIMIT $4";
 
 /// Validate the explicit type scope without silently dropping unknown types.

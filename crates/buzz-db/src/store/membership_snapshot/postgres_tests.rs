@@ -145,6 +145,46 @@ async fn membership_snapshot_scope_roles_types_archive_hidden_and_overflow() {
         .unwrap()
         .channels
         .is_empty());
+    // Same UUID in another tenant is legal. Insert that tenant's row FIRST,
+    // so dropping the lateral community predicate returns its different fields.
+    let shared_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO channels (community_id,id,name,created_by,channel_type,visibility,archived_at)
+        VALUES ($1,$2,'collision-other',$3,'system','private',now())",
+    )
+    .bind(other_tenant.as_uuid())
+    .bind(shared_id)
+    .bind(Keys::generate().public_key().to_bytes().to_vec())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channels (community_id,id,name,created_by,channel_type,visibility)
+        VALUES ($1,$2,'collision-own',$3,'stream','open')",
+    )
+    .bind(community.as_uuid())
+    .bind(shared_id)
+    .bind(viewer.public_key().to_bytes().to_vec())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO channel_members (community_id,channel_id,pubkey,role) VALUES ($1,$2,$3,'guest')")
+        .bind(community.as_uuid()).bind(shared_id).bind(viewer.public_key().to_bytes().to_vec())
+        .execute(&pool).await.unwrap();
+    let collision_cut = db
+        .membership_snapshot(community, &viewer.public_key(), &all_types())
+        .await
+        .unwrap();
+    let entries: Vec<_> = collision_cut
+        .channels
+        .iter()
+        .filter(|c| c.id == shared_id)
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].channel_type, "stream");
+    assert_eq!(entries[0].visibility, "open");
+    assert_eq!(entries[0].role, "guest");
+    assert!(!entries[0].archived);
     assert!(db
         .membership_snapshot(community, &viewer.public_key(), &["unknown".into()])
         .await
@@ -179,6 +219,30 @@ async fn membership_snapshot_468_channels_size_independent_of_other_members_and_
         .await
         .unwrap();
     }
+    // The community also has DMs and open channels the viewer cannot discover.
+    // This prevents a tiny all-member community from rewarding a directory scan.
+    let other = Keys::generate().public_key().to_bytes().to_vec();
+    sqlx::query(
+        "INSERT INTO channels (community_id,id,name,created_by,channel_type,visibility)
+        SELECT $1, md5('nonmember-'||n::text)::uuid, 'nonmember-'||n::text, $2,
+            CASE WHEN n%2=0 THEN 'dm' ELSE 'stream' END::channel_type,
+            CASE WHEN n%2=0 THEN 'private' ELSE 'open' END::channel_visibility
+        FROM generate_series(1,20000) n",
+    )
+    .bind(community.as_uuid())
+    .bind(&other)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_members (community_id,channel_id,pubkey)
+        SELECT $1,md5('nonmember-'||n::text)::uuid,$2 FROM generate_series(1,20000) n",
+    )
+    .bind(community.as_uuid())
+    .bind(other)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::raw_sql("ANALYZE channel_members; ANALYZE channels")
         .execute(&pool)
         .await
@@ -191,24 +255,60 @@ async fn membership_snapshot_468_channels_size_independent_of_other_members_and_
     assert_eq!(before.channels, after.channels);
     assert_eq!(before.snapshot_id, after.snapshot_id);
     assert_eq!(bytes, serde_json::to_vec(&after.channels).unwrap().len());
-    let plan = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "EXPLAIN (ANALYZE, BUFFERS) {SNAPSHOT_SQL}"
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {SNAPSHOT_SQL}"
     )))
     .bind(community.as_uuid())
     .bind(viewer.public_key().to_bytes().to_vec())
     .bind(all_types())
     .bind((MAX_CHANNELS + 1) as i64)
-    .fetch_all(&pool)
+    .fetch_one(&pool)
     .await
-    .unwrap()
-    .into_iter()
-    .map(|r| r.get::<String, _>(0))
-    .collect::<Vec<_>>()
-    .join("\n");
-    assert!(plan.contains("idx_channel_members_pubkey"), "{plan}");
+    .unwrap();
+    let plan: serde_json::Value = row.get(0);
+    let mut nodes = vec![&plan[0]["Plan"]];
+    let mut scanned_members = false;
+    let mut viewer_index = false;
+    let mut channel_key_lookup = false;
+    while let Some(node) = nodes.pop() {
+        if let Some(children) = node["Plans"].as_array() {
+            nodes.extend(children);
+        }
+        if node["Index Name"] == "idx_channel_members_pubkey" {
+            viewer_index = true;
+        }
+        if node["Relation Name"] == "channel_members" {
+            assert_eq!(node["Actual Rows"], 468, "{plan}");
+            assert_eq!(node["Actual Loops"], 1, "{plan}");
+            scanned_members = true;
+        }
+        if node["Relation Name"] == "channels" {
+            assert!(
+                matches!(
+                    node["Index Name"].as_str(),
+                    Some("channels_pkey" | "idx_channels_id_live")
+                ),
+                "{plan}"
+            );
+            assert_eq!(node["Actual Loops"], 468, "{plan}");
+            let rows = node["Actual Rows"].as_u64().unwrap();
+            let filtered = node["Rows Removed by Filter"].as_u64().unwrap_or(0);
+            assert!(rows <= 1 && filtered <= 1, "{plan}");
+            assert!(
+                rows * node["Actual Loops"].as_u64().unwrap() <= 468,
+                "{plan}"
+            );
+            channel_key_lookup = true;
+        }
+    }
+    assert!(
+        scanned_members && viewer_index && channel_key_lookup,
+        "{plan}"
+    );
     println!(
-        "468-channel projection: bytes={bytes}, query_ms={}\n{plan}",
-        start.elapsed().as_secs_f64() * 1000.0
+        "468-channel projection with 20000 unrelated channels: bytes={bytes}, query_ms={}\n{}",
+        start.elapsed().as_secs_f64() * 1000.0,
+        serde_json::to_string_pretty(&plan).unwrap()
     );
 }
 

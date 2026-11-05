@@ -181,6 +181,7 @@ async fn membership_snapshot_router_signature_scope_strict_auth_replay_and_owner
     let agent = Keys::generate();
     let mut enforced = (*state).clone();
     Arc::make_mut(&mut enforced.config).require_relay_membership = true;
+    Arc::make_mut(&mut enforced.config).allow_nip_oa_auth = true;
     let _ = enforced
         .db
         .add_relay_member(
