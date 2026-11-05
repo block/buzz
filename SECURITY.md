@@ -99,7 +99,10 @@ a rotated key from a leftover file.
 When no keyring backend is available (headless Linux with no Secret Service, for
 example), keys fall back to a `0o600` owner-only file. The `BUZZ_PRIVATE_KEY`
 environment variable, when set, always takes precedence over both stores — this
-is how harnessed agents and CI receive their identity.
+is how harnessed agents and CI receive their identity. The `buzz` CLI also
+accepts `--private-key-file` / `--private-key-stdin`; passing `--private-key` on
+argv is deprecated because the secret enters shell history and process listings
+(see #4032).
 
 ### Input Validation
 
