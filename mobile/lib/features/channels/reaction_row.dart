@@ -237,7 +237,7 @@ class ReactionRow extends HookWidget {
             _ReactionPill(
               messageId: messageId,
               reaction: reaction,
-              onTap: canReact ? () => onToggle(reaction.emoji) : () {},
+              onTap: canReact ? () => onToggle(reaction.emoji) : null,
               onLongPress: () => showReactionDetailSheet(
                 context: context,
                 channelId: channelId,
@@ -297,7 +297,7 @@ class _PillSurface extends StatelessWidget {
 class _ReactionPill extends HookConsumerWidget {
   final String messageId;
   final TimelineReaction reaction;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final VoidCallback onLongPress;
 
   const _ReactionPill({
@@ -317,7 +317,7 @@ class _ReactionPill extends HookConsumerWidget {
     // timeline each time a burst is armed or claimed, and the only moments that
     // matter are this pill's first build and the frame our own reaction lands.
     useEffect(() {
-      if (!reacted) return null;
+      if (!reacted || onTap == null) return null;
       final target = PendingReactionBurst(
         messageId: messageId,
         emoji: reaction.emoji,
@@ -356,14 +356,16 @@ class _ReactionPill extends HookConsumerWidget {
         },
         child: GestureDetector(
           key: ValueKey('reaction-pill-${reaction.emoji}'),
-          onTap: () {
-            // The pill is already here, so burst straight away rather than waiting
-            // for the relay echo — desktop does the same on a pill click.
-            if (!reacted && isPositiveEmojiParticle(reaction.emoji)) {
-              burstEmojiFromContext(ref, context, reaction.emoji);
-            }
-            onTap();
-          },
+          onTap: onTap == null
+              ? null
+              : () {
+                  // The pill is already here, so burst straight away rather than waiting
+                  // for the relay echo — desktop does the same on a pill click.
+                  if (!reacted && isPositiveEmojiParticle(reaction.emoji)) {
+                    burstEmojiFromContext(ref, context, reaction.emoji);
+                  }
+                  onTap!();
+                },
           child: _PillSurface(
             highlighted: reacted,
             minWidth: _pillMinWidth,

@@ -77,6 +77,7 @@ Future<ProviderContainer> _pumpRow(
   void Function(String emoji)? onToggle,
   bool showAddButton = false,
   bool combined = false,
+  bool canReact = true,
   VoidCallback? onAddReaction,
   String messageId = _messageId,
   VoidCallback? onMessageLongPress,
@@ -96,6 +97,7 @@ Future<ProviderContainer> _pumpRow(
         child: ReactionRow(
           messageId: messageId,
           combined: combined,
+          canReact: canReact,
           channelId: 'channel',
           reactions: reactions,
           onToggle: onToggle ?? (_) {},
@@ -138,6 +140,31 @@ class _RecordingReactionActions implements ChannelActions {
 
 void main() {
   combinedReactionTests();
+
+  testWidgets('viewers have no reaction tap action or burst', (tester) async {
+    var toggles = 0;
+    final container = await _pumpRow(
+      tester,
+      reactions: [_reaction()],
+      canReact: false,
+      onToggle: (_) => toggles++,
+    );
+    final semantics = tester.ensureSemantics();
+    final pill = find.byKey(const ValueKey('reaction-pill-$_fire'));
+    expect(tester.widget<GestureDetector>(pill).onTap, isNull);
+    expect(
+      tester
+          .getSemantics(pill)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isFalse,
+    );
+    await tester.tap(pill);
+    await tester.pump();
+    expect(toggles, 0);
+    expect(container.read(emojiBurstControllerProvider).hasParticles, isFalse);
+    semantics.dispose();
+  });
 
   testWidgets('removing the sole reaction closes the sheet', (tester) async {
     final reactions = ValueNotifier<List<TimelineReaction>>([

@@ -313,6 +313,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                     messageId: message.id,
                     channelId: channelId,
                     reactions: reactions,
+                    canReact: mayContribute && !isArchived,
                     onToggle: groupedMessages == null
                         ? (emoji) => toggleReaction(ref, message, emoji)
                         : toggleGroupedReaction,

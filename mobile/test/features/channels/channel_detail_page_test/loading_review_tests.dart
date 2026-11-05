@@ -1,6 +1,37 @@
 part of '../channel_detail_page_test.dart';
 
 void _loadingReviewTests() {
+  testWidgets('Guest system rows keep reactions readable without toggles', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _systemMsg(
+            id: 'viewer-system',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'bob',
+            },
+            createdAt: 1000,
+          ),
+          _reaction(id: 'viewer-reaction', targetId: 'viewer-system'),
+        ],
+        members: [
+          ChannelMember(
+            pubkey: 'self',
+            role: 'guest',
+            joinedAt: DateTime(2026),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = tester.widget<ReactionRow>(find.byType(ReactionRow));
+    expect(row.canReact, isFalse);
+    expect(row.reactions, isNotEmpty);
+  });
   for (final (count, target) in [(0, null), (3, null), (40, null), (40, 5)]) {
     testWidgets(
       'thread stays visible while loading $count replies target=$target',
