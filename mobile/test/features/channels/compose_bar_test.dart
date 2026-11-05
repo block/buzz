@@ -4079,6 +4079,18 @@ void main() {
       expect(controller.text, ' ${urls.skip(1).take(2).join(' ')} ');
       expect(controller.selection.baseOffset, 0);
       expect(linkChips(), findsNWidgets(2));
+
+      // Forward delete stays forward when the character before the caret
+      // matches the chip's first character (`b|buzz://...`).
+      controller.value = TextEditingValue(
+        text: 'b${urls[1]}',
+        selection: const TextSelection.collapsed(offset: 1),
+      );
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(controller.text, 'b');
+      expect(controller.selection.baseOffset, 1);
     });
 
     testWidgets('preserves underscore d-tags and Markdown delimiters', (

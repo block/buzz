@@ -130,10 +130,13 @@ class _MarkdownEditingController extends TextEditingController {
         (newValue.composing.isValid && !newValue.composing.isCollapsed)) {
       return newValue;
     }
+    final newSelection = newValue.selection;
+    if (!newSelection.isValid || !newSelection.isCollapsed) return newValue;
     final deleted = _caretDeletion(
       oldValue.text,
       newValue.text,
       oldSelection.baseOffset,
+      newSelection.baseOffset,
     );
     if (deleted == null) return newValue;
     var expandedStart = deleted.start;
@@ -153,9 +156,16 @@ class _MarkdownEditingController extends TextEditingController {
     );
   }
 
-  /// The run a collapsed caret deleted: one ending at it (backspace) or
-  /// starting at it (forward delete), or null for any other edit.
-  static TextRange? _caretDeletion(String oldText, String newText, int caret) {
+  /// The run a collapsed caret deleted: one ending at it (backspace, which
+  /// moves the caret back) or starting at it (forward delete, which leaves
+  /// the caret in place), or null for any other edit. The caret's movement
+  /// tells the two apart when repeated characters make the text ambiguous.
+  static TextRange? _caretDeletion(
+    String oldText,
+    String newText,
+    int caret,
+    int newCaret,
+  ) {
     final removed = oldText.length - newText.length;
     if (removed <= 0) return null;
     bool removes(int start, int end) =>
@@ -163,10 +173,10 @@ class _MarkdownEditingController extends TextEditingController {
         end <= oldText.length &&
         newText.startsWith(oldText.substring(0, start)) &&
         newText.endsWith(oldText.substring(end));
-    if (removes(caret - removed, caret)) {
+    if (newCaret == caret - removed && removes(caret - removed, caret)) {
       return TextRange(start: caret - removed, end: caret);
     }
-    if (removes(caret, caret + removed)) {
+    if (newCaret == caret && removes(caret, caret + removed)) {
       return TextRange(start: caret, end: caret + removed);
     }
     return null;
