@@ -10195,7 +10195,17 @@ pub(crate) mod postgres_tests {
                 .await
                 .expect("replica statement_timeout");
             }
-            let pool = sqlx::PgPool::connect(&format!("{base}/{name}"))
+            // The replica gets a short acquire timeout, like production's
+            // reader pool, so a shed read against a held-full replica fails
+            // fast instead of waiting out sqlx's 30s default.
+            let options = sqlx::postgres::PgPoolOptions::new();
+            let options = if role == "r" {
+                options.acquire_timeout(std::time::Duration::from_secs(1))
+            } else {
+                options
+            };
+            let pool = options
+                .connect(&format!("{base}/{name}"))
                 .await
                 .expect("connect scratch");
             buzz_db::migration::run_migrations(&pool)
