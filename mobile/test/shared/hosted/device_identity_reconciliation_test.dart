@@ -492,6 +492,83 @@ void main() {
     });
   });
 
+  group('release boundaries', () {
+    late _SwitchingAccount switching;
+    late _HookedDevice device;
+    late HostedIdentityService release;
+    var cancelled = false;
+    setUp(() async {
+      cancelled = false;
+      switching = _SwitchingAccount();
+      device = _HookedDevice();
+      release = HostedIdentityService(
+        account: switching,
+        store: store,
+        deviceIdentities: device,
+      );
+      await secure.write(key: 'buzz_nsec', value: first.nsec);
+      await store.create(first.nsec);
+      await AccountIdentityStore(subject: 'other').create(second.nsec);
+    });
+    tearDown(() => switching.dispose());
+
+    Future<void> kept() async {
+      expect((await store.read())!.pubkey, first.public);
+      expect(
+        (await AccountIdentityStore(subject: 'other').read())!.pubkey,
+        second.public,
+      );
+      expect(await secure.read(key: 'buzz_nsec'), first.nsec);
+    }
+
+    for (final point in ['current', 'status', 'holds']) {
+      test('an account switch at $point releases nothing', () async {
+        switching.switchAt = point;
+        device.beforeHolds = () async => switching.reach('holds');
+        await expectLater(
+          release.releaseRejected(first.public, subject: 'fixture'),
+          throwsA(AccountFailure.differentAccount),
+        );
+        await kept();
+      });
+    }
+
+    test(
+      'cancelling between the recheck and the delete releases nothing',
+      () async {
+        device.beforeHolds = () async => cancelled = true;
+        await expectLater(
+          release.releaseRejected(
+            first.public,
+            subject: 'fixture',
+            isCurrent: () => !cancelled,
+          ),
+          throwsA(AccountFailure.unavailable),
+        );
+        await kept();
+      },
+    );
+
+    test(
+      'an unreadable device inventory releases nothing, then converges',
+      () async {
+        device.beforeHolds = () async => throw StateError('keychain locked');
+        await expectLater(
+          release.releaseRejected(first.public, subject: 'fixture'),
+          throwsStateError,
+        );
+        await kept();
+        device.beforeHolds = null;
+        expect(
+          await release.releaseRejected(first.public, subject: 'fixture'),
+          isTrue,
+        );
+        expect(await store.read(), isNull);
+        expect(await secure.read(key: 'buzz_nsec'), first.nsec);
+      },
+    );
+  });
+
   test('cancelled resolution cannot adopt or generate', () async {
     await secure.write(key: 'buzz_nsec', value: first.nsec);
     await expectLater(
@@ -500,6 +577,44 @@ void main() {
     );
     expect(await store.read(), isNull);
   });
+}
+
+/// Moves to another account when release reaches [switchAt].
+class _SwitchingAccount extends InventoryAccount {
+  String subject = 'fixture';
+  String? switchAt;
+  void reach(String point) {
+    if (point == switchAt) subject = 'other';
+  }
+
+  @override
+  BuilderlabAccount get account =>
+      BuilderlabAccount(subject: subject, expiresAt: DateTime.utc(2100));
+  @override
+  Future<Map<String, dynamic>> currentIdentity() async {
+    reach('current');
+    return super.currentIdentity();
+  }
+
+  @override
+  Future<Map<String, dynamic>> post(
+    String path,
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) async {
+    if (path.endsWith('/status')) reach('status');
+    return super.post(path, body, expectedSubject: expectedSubject);
+  }
+}
+
+/// Runs [beforeHolds] as release checks the device for another copy.
+class _HookedDevice extends DeviceIdentitySource {
+  Future<void> Function()? beforeHolds;
+  @override
+  Future<bool> holds(String nsec) async {
+    await beforeHolds?.call();
+    return super.holds(nsec);
+  }
 }
 
 /// Reports a binding through /current while /status still lists none.

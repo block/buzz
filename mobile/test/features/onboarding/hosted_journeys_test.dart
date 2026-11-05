@@ -9,6 +9,7 @@ import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -1298,6 +1299,83 @@ void main() {
     },
   );
 
+  journey('a release outlived by leaving cannot reopen the flow', (
+    tester,
+    f,
+  ) async {
+    final original = await rejectedSavedChoice(tester, f);
+    final gate = Completer<void>();
+    f.beforeStatusReturn = () => gate.future;
+    final statuses = f.sent('/status').length;
+    await tester.tap(find.text('Choose a different identity').hitTestable());
+    while (f.sent('/status').length == statuses) {
+      await tester.pump(const Duration(milliseconds: 10));
+    }
+    await f.flow.leave();
+    f.beforeStatusReturn = null;
+    gate.complete();
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.idle);
+    expect((await f.store.read())!.pubkey, f.keys.public);
+    expect((await original.read())!.backup, isNotNull);
+  });
+
+  journey('an account switch during release keeps both accounts intact', (
+    tester,
+    f,
+  ) async {
+    final original = await rejectedSavedChoice(tester, f);
+    final chosen = f.store;
+    // Account requests are serialized, so the switch lands right after the
+    // recheck, before the slot is released.
+    f.beforeStatusReturn = () async {
+      f.beforeStatusReturn = null;
+      f.subject = 'third-owner';
+      unawaited(
+        f.container.read(builderlabAccountProvider).clearLocalSession(),
+      );
+    };
+    await f.tap(tester, 'Choose a different identity');
+    expect(f.flow.stage, HostedFlowStage.blocked);
+    expect(f.flow.canChooseDifferentIdentity, isFalse);
+    expect((await chosen.read())!.pubkey, f.keys.public);
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+    expect(f.flow.canCreateIdentity, isTrue);
+    expect(await f.store.read(), isNull);
+    expect((await chosen.read())!.pubkey, f.keys.public);
+    expect((await original.read())!.pubkey, f.keys.public);
+    expect((await original.read())!.backup, isNotNull);
+  });
+
+  journey('a failed release keeps the choice across restart, then retries', (
+    tester,
+    f,
+  ) async {
+    await rejectedSavedChoice(tester, f);
+    final slot =
+        '${AccountIdentityStore.storageKey}_subject_'
+        '${base64Url.encode(utf8.encode('new-owner'))}';
+    final keychain = _StickyKeychain(
+      Map.of(await const FlutterSecureStorage().readAll()),
+    )..sticky = slot;
+    FlutterSecureStorage.setMockInitialValues(keychain);
+    await f.tap(tester, 'Choose a different identity');
+    expect(f.flow.stage, HostedFlowStage.blocked);
+    expect((await f.store.read())!.pubkey, f.keys.public);
+    await f.restart(tester);
+    await f.flow.signInAccount();
+    await f.settle(tester);
+    expect(f.flow.problem, HostedFlowProblem.requestRejected);
+    expect(f.flow.canChooseDifferentIdentity, isTrue);
+    keychain.sticky = null;
+    await f.tap(tester, 'Choose a different identity');
+    expect(f.flow.stage, HostedFlowStage.chooseIdentity);
+    expect(await f.store.read(), isNull);
+    expect(find.text('Saved identity'), findsOneWidget);
+  });
+
   for (final status in [503, 403]) {
     journey('ambiguous binding failure ($status) offers no release', (
       tester,
@@ -1842,4 +1920,24 @@ void main() {
     },
     requiresAuthDomain: true,
   );
+}
+
+/// A keychain whose [sticky] entry cannot be deleted.
+class _StickyKeychain extends MapBase<String, String> {
+  _StickyKeychain(this._entries);
+  final Map<String, String> _entries;
+  String? sticky;
+  @override
+  String? operator [](Object? key) => _entries[key];
+  @override
+  void operator []=(String key, String value) => _entries[key] = value;
+  @override
+  void clear() => _entries.clear();
+  @override
+  Iterable<String> get keys => _entries.keys;
+  @override
+  String? remove(Object? key) {
+    if (key == sticky) throw StateError('keychain item is in use');
+    return _entries.remove(key);
+  }
 }
