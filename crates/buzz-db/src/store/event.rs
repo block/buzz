@@ -524,6 +524,7 @@ async fn insert_event_on(
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
+            created_at,
             kind_i32,
             channel_id,
         )
@@ -2135,6 +2136,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
+            created_at,
             kind_i32,
             channel_id,
         )
