@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   revalidateAgentMentionPubkeys,
   AgentMentionAuthorizationError,
+  AgentMentionRelayError,
 } from "./agentMentionRevalidation.ts";
 
 const CURRENT = "a".repeat(64);
@@ -61,8 +62,29 @@ test("relay-only agents still fail closed when relay discovery fails", async () 
         throw new Error("relay directory unavailable");
       },
     }),
-    AgentMentionAuthorizationError,
+    AgentMentionRelayError,
   );
+});
+
+test("a relay read that fails once is retried before the mention is denied", async () => {
+  let attempts = 0;
+  const result = await revalidateAgentMentionPubkeys({
+    ...options(),
+    fetchRelayAgents: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("relay unreachable: timeout");
+      return [
+        {
+          pubkey: AGENT,
+          respondTo: "anyone",
+          respondToAllowlist: [],
+          channelIds: ["general"],
+        },
+      ];
+    },
+  });
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, [HUMAN, AGENT]);
 });
 
 test("mixed evidence cannot silently drop an intended relay recipient", async () => {
@@ -82,7 +104,7 @@ test("mixed evidence cannot silently drop an intended relay recipient", async ()
         throw new Error("relay directory unavailable");
       },
     }),
-    AgentMentionAuthorizationError,
+    AgentMentionRelayError,
   );
 });
 

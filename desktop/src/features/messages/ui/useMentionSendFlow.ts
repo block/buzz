@@ -45,7 +45,7 @@ import {
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
 import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
-import { AgentMentionAuthorizationError } from "@/features/messages/lib/agentMentionRevalidation";
+import { agentMentionFailureMessage } from "@/features/messages/lib/agentMentionRevalidation";
 import type { UseMentionSendFlowOptions } from "./useMentionSendFlow.types";
 
 export function useMentionSendFlow({
@@ -637,9 +637,8 @@ export function useMentionSendFlow({
               } catch (error) {
                 restoreComposerAfterFailure();
                 toast.error(
-                  error instanceof AgentMentionAuthorizationError
-                    ? error.message
-                    : formatMessageSendError(error),
+                  agentMentionFailureMessage(error) ??
+                    formatMessageSendError(error),
                 );
               } finally {
                 settleUpload();
@@ -669,9 +668,7 @@ export function useMentionSendFlow({
           } catch (error) {
             restoreComposerAfterFailure();
             toast.error(
-              error instanceof AgentMentionAuthorizationError
-                ? error.message
-                : formatMessageSendError(error),
+              agentMentionFailureMessage(error) ?? formatMessageSendError(error),
             );
           }
         }
