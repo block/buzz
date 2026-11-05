@@ -15,11 +15,13 @@ export function RelayEntryGate({
   communities,
   onSwitch,
   onRetry,
+  onAddressChanged,
 }: {
   relayUrl: string;
   communities: { id: string; name: string; relayUrl: string }[];
   onSwitch: (id: string) => void;
   onRetry: () => void;
+  onAddressChanged: () => void;
 }) {
   const entry = relayClient.entryRequirements;
   const state = useSyncExternalStore(entry.subscribe, entry.getSnapshot);
@@ -82,7 +84,10 @@ export function RelayEntryGate({
       {editing ? (
         <CommunityChangeOverlay
           onClose={() => setEditing(false)}
-          onUpdated={() => setEditing(false)}
+          onUpdated={(_name, updatedRelayUrl) => {
+            if (updatedRelayUrl !== relayUrl) onAddressChanged();
+            setEditing(false);
+          }}
         />
       ) : null}
     </>

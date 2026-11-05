@@ -392,6 +392,14 @@ function CommunityApp({
   // an atomic check of both ID and stage before mutating state.
   const transactionRef = useRef(communityOnboarding.transaction);
   transactionRef.current = communityOnboarding.transaction;
+  const cancelEntryOnboarding = useCallback(() => {
+    // Address edits and switches abandon this relay's join. Fence pending
+    // profile results immediately, before React commits the cleared state.
+    transactionRef.current = null;
+    connectingTransactionRef.current = null;
+    profileCheckTransactionRef.current = null;
+    communityOnboarding.clear();
+  }, [communityOnboarding]);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
@@ -694,8 +702,9 @@ function CommunityApp({
           relayUrl={activeCommunity.relayUrl}
           communities={communities}
           onRetry={reconnectCommunity}
+          onAddressChanged={cancelEntryOnboarding}
           onSwitch={(id) => {
-            communityOnboarding.clear();
+            cancelEntryOnboarding();
             void transitionCommunity(id);
           }}
         />

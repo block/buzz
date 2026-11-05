@@ -204,3 +204,110 @@ test("required community can switch to a saved free community and join another r
     ),
   ).toBe(3);
 });
+
+test("changing a required join address cancels old onboarding and its held profile check", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      relayEntryPolicy: {
+        required: true,
+        requiredRelay: "wss://required.example",
+      },
+      deferProfileReads: true,
+      profileHasEvent: true,
+    },
+    { skipCommunitySeed: true },
+  );
+  await page.addInitScript(() => {
+    const now = new Date().toISOString();
+    localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify([
+        {
+          id: "required",
+          name: "Required",
+          relayUrl: "wss://required.example",
+          addedAt: now,
+        },
+      ]),
+    );
+    localStorage.setItem("buzz-active-community-id", "required");
+    localStorage.setItem(
+      "buzz-community-onboarding-transaction.v1",
+      JSON.stringify({
+        id: "old-required-join",
+        source: "add-community",
+        stage: "connecting",
+        relayUrl: "wss://required.example",
+        communityName: "Required",
+        communityId: "required",
+        addedCommunity: true,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+  });
+  await page.routeWebSocket(
+    /required\.example|replacement\.example/,
+    (socket) => socket.close(),
+  );
+  await page.goto("/");
+  const card = page.getByTestId("relay-entry-guidance");
+  await expect(card).toBeVisible();
+  await page.waitForFunction(
+    () =>
+      ((
+        window as Window & {
+          __BUZZ_E2E_PROFILE_READS_PENDING__?: () => number;
+        }
+      ).__BUZZ_E2E_PROFILE_READS_PENDING__?.() ?? 0) > 0,
+  );
+  // A label change keeps the live join; changing the relay cancels it.
+  await card.getByRole("button", { name: "Change community address" }).click();
+  const editor = page.getByTestId("community-change-overlay");
+  await editor.locator("#community-edit-name").fill("Renamed");
+  await editor.getByRole("button", { name: "Save changes" }).click();
+  await editor.getByRole("button", { name: "Use anyway" }).click();
+  await expect(card).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        JSON.parse(
+          localStorage.getItem("buzz-community-onboarding-transaction.v1") ??
+            "null",
+        )?.id,
+    ),
+  ).toBe("old-required-join");
+  await card.getByRole("button", { name: "Change community address" }).click();
+  await editor.locator("#community-edit-url").fill("wss://replacement.example");
+  await editor.getByRole("button", { name: "Save changes" }).click();
+  await editor.getByRole("button", { name: "Use anyway" }).click();
+  await expect(card).toBeHidden();
+  expect(
+    await page.evaluate(() =>
+      localStorage.getItem("buzz-community-onboarding-transaction.v1"),
+    ),
+  ).toBeNull();
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_RELEASE_PROFILE_READS__?: () => number;
+      }
+    ).__BUZZ_E2E_RELEASE_PROFILE_READS__?.();
+  });
+  await expect(
+    page.getByRole("button", { name: "Search everything", exact: true }),
+  ).toBeVisible();
+  const state = await page.evaluate(() => ({ ...localStorage }));
+  expect(state["buzz-communities"]).toContain("wss://replacement.example");
+  expect(
+    Object.keys(state).filter((key) =>
+      key.startsWith(
+        `buzz-community-onboarding-complete.v1:${encodeURIComponent("wss://required.example")}:`,
+      ),
+    ),
+  ).toEqual([]);
+  expect(state["buzz-community-onboarding-transaction.v1"]).toBeUndefined();
+});
