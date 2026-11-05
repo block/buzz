@@ -1,5 +1,14 @@
 part of 'relay_session.dart';
 
+/// Per-request timeout for reads whose results can be megabytes: full
+/// channel-membership discovery and the read-state snapshot. On a busy
+/// account these run to several MB, and relay responses have been measured
+/// arriving at about 200 KB/s, so the ordinary 8 s timeout cancelled them
+/// on every attempt. 30 s matches buzz-app's large-read deadline; it is
+/// about 6 MB at that rate, below the 8 MiB snapshot cap, so this is a
+/// stopgap until those reads shrink.
+const relayLargeReadTimeout = Duration(seconds: 30);
+
 extension on RelaySessionNotifier {
   Future<List<NostrEvent>> _fetchReadStateSnapshot({
     required Duration timeout,
@@ -24,7 +33,11 @@ extension on RelaySessionNotifier {
       }
     }
 
-    Future<http.Response> send(http.Request request, int maxBytes) async {
+    Future<http.Response> send(
+      http.Request request,
+      int maxBytes, {
+      required Duration timeout,
+    }) async {
       final response = await _httpQueryClient.sendBounded(
         request,
         maxBytes: maxBytes,
@@ -57,7 +70,14 @@ extension on RelaySessionNotifier {
     // RelayHttpQueryClient), and the relay's CDN gzips both responses. The
     // inflated size is capped too: the transport cap only sees the
     // compressed bytes.
-    final discovered = await send(discovery, 64 * 1024);
+    // Discovery is a small document, so a stall there fails fast even when
+    // the snapshot itself is given a large-read timeout.
+    const discoveryTimeout = Duration(seconds: 8);
+    final discovered = await send(
+      discovery,
+      64 * 1024,
+      timeout: timeout < discoveryTimeout ? timeout : discoveryTimeout,
+    );
     final info = jsonDecode(
       relayResponseText(
         discovered.bodyBytes,
@@ -91,7 +111,11 @@ extension on RelaySessionNotifier {
           nsec: nsec,
         ),
       });
-    final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
+    final response = await send(
+      request,
+      readStateSnapshotMaxEnvelopeBytes,
+      timeout: timeout,
+    );
     // Inflating, parsing and Schnorr verification must not block Flutter's
     // UI isolate.
     final events = await _snapshotDecoder((

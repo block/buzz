@@ -153,8 +153,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Fetches a complete, validated own-author kind-30078 snapshot.
   /// Throws if discovery, completeness, scope or event validation fails.
+  /// [timeout] bounds the snapshot request; discovery uses at most 8 s.
   Future<List<NostrEvent>> fetchReadStateSnapshot({
-    Duration timeout = const Duration(seconds: 8),
+    Duration timeout = relayLargeReadTimeout,
   }) => _fetchReadStateSnapshot(timeout: timeout);
 
   /// Finds people by profile name, for typeahead surfaces.
