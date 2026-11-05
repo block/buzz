@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'accent_colors.dart';
-
 // Buzz desktop design-system tokens: neutral surfaces/text and Radix status roles.
 // Source: buzz-app/src/shared/design-system/styles/tokens.css.
 const lightColorScheme = ColorScheme(
@@ -88,15 +86,4 @@ Color contrastForeground(Color bg) {
   return contrastWithBlack >= contrastWithWhite
       ? const Color(0xFF000000)
       : const Color(0xFFFFFFFF);
-}
-
-/// Returns a [ColorScheme] with the given accent applied as primary.
-ColorScheme applyAccent(ColorScheme base, int accentIndex) {
-  if (accentIndex < 0 || accentIndex >= accentColors.length) {
-    return base;
-  }
-  final color = accentColorForScheme(base, accentIndex);
-  final onColor = contrastForeground(color);
-
-  return base.copyWith(primary: color, onPrimary: onColor, surfaceTint: color);
 }

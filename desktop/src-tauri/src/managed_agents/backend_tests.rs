@@ -145,6 +145,7 @@ fn write_test_provider(path: &Path, body: &str) {
 #[cfg(unix)]
 #[test]
 fn provider_deploy_negotiates_and_deploys_the_same_staged_bytes() {
+    let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
     let directory = tempfile::tempdir().unwrap();
     let provider = directory.path().join("provider");
     let log = directory.path().join("invocations");
@@ -191,6 +192,7 @@ esac
 #[cfg(unix)]
 #[test]
 fn provider_deploy_uses_staged_bytes_after_same_inode_source_rewrite() {
+    let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
     use std::os::unix::fs::MetadataExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -233,6 +235,7 @@ esac"#,
 #[cfg(unix)]
 #[test]
 fn provider_deploy_uses_staged_bytes_after_source_pathname_replacement() {
+    let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let directory = tempfile::tempdir().unwrap();
@@ -274,6 +277,7 @@ esac"#,
 #[cfg(unix)]
 #[test]
 fn provider_deploy_refuses_mismatch_before_sending_agent_secret() {
+    let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
     let directory = tempfile::tempdir().unwrap();
     let provider = directory.path().join("provider");
     let marker = directory.path().join("deploy-received");
@@ -301,6 +305,7 @@ esac"#,
 #[cfg(unix)]
 #[test]
 fn provider_deploy_requires_an_explicit_integer_protocol_version() {
+    let _nest = crate::managed_agents::pin_temp_nest_dir_for_thread();
     let directory = tempfile::tempdir().unwrap();
     let provider = directory.path().join("provider");
     write_test_provider(

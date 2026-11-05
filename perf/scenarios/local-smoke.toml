@@ -32,6 +32,13 @@ query_interval_secs = 2.0
 events_per_hour = 360.0
 observer_frames_per_hour = 360.0
 
+# One thread that keeps growing while the population runs.
+[hot_thread]
+seed_replies = 200
+authors = 3
+replies_per_hour = 1800.0
+fetches_per_hour = 360.0
+
 [[ramp]]
 users = 1.0
 hold_secs = 30

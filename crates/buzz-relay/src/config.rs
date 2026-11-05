@@ -32,7 +32,7 @@ pub enum ConfigError {
 /// # Role resolution (nip98 mode only)
 ///
 /// In `nip98` mode the authenticated pubkey is resolved to an
-/// `AdminPrincipal` at request time via [`crate::api::admin::auth::resolve_admin_principal`]:
+/// `AdminPrincipal` at request time via [`crate::api::admin::auth::lookup_admin_principal`]:
 /// - `Operator/Config` if pubkey ∈ `RELAY_OPERATOR_PUBKEYS`
 /// - `Operator/OwnerFallback` if pubkey == `RELAY_OWNER_PUBKEY` **and**
 ///   `RELAY_OPERATOR_PUBKEYS` is empty (evaluated from config, never runtime rows)
@@ -127,10 +127,6 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
-    /// Replica freshness budget for fleet usage telemetry
-    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
-    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
-    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -180,6 +176,9 @@ pub struct Config {
     pub max_frame_bytes: usize,
     /// Number of consecutive buffer-full events tolerated before cancelling a slow client.
     pub slow_client_grace_limit: u8,
+    /// `BUZZ_CLIENT_IP_HEADER`: the request header whose IP access lines log
+    /// as `client_ip`. `None` logs only the TCP `peer_addr`.
+    pub client_ip_header: Option<axum::http::HeaderName>,
     /// Authentication provider configuration.
     pub auth: buzz_auth::AuthConfig,
     /// Whether REST API requests must present a valid token. Independent of
@@ -291,6 +290,10 @@ pub struct Config {
 
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
+
+    /// Endpoint receiving each new per-community storage snapshot
+    /// (`BUZZ_STORAGE_USAGE_URL`). Unset disables storage-usage delivery.
+    pub storage_usage_delivery_url: Option<url::Url>,
 
     /// Allow NIP-OA owner attestation for relay membership.
     ///
@@ -407,6 +410,10 @@ pub struct Config {
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
 
+    /// Permit new irreversible FI upgrade acceptances. Default off; receipt
+    /// recovery/status remain available (`BUZZ_NIP_FI_UPGRADES_ENABLED`).
+    pub nip_fi_upgrades_enabled: bool,
+
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
     /// fails the deploy that sets it, not the later switch to shadow.
@@ -438,6 +445,19 @@ fn invite_v1_cutoff_from_env() -> Result<Option<u64>, ConfigError> {
             "BUZZ_INVITE_V1_INVALID_AFTER must be valid Unicode".into(),
         )),
     }
+}
+
+/// An empty value turns the setting off; header names match case-insensitively.
+fn parse_client_ip_header(raw: &str) -> Result<Option<axum::http::HeaderName>, ConfigError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    axum::http::HeaderName::from_bytes(raw.to_ascii_lowercase().as_bytes())
+        .map(Some)
+        .map_err(|_| {
+            ConfigError::InvalidValue(format!("BUZZ_CLIENT_IP_HEADER is not a header name: {raw}"))
+        })
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -688,16 +708,6 @@ impl Config {
             })?,
             Err(_) => 0,
         };
-        let usage_metrics_replica_max_age_ms =
-            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
-                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
-                    ConfigError::InvalidValue(
-                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
-                            .to_string(),
-                    )
-                })?,
-                Err(_) => 30_000,
-            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -785,6 +795,9 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(15);
+
+        let client_ip_header =
+            parse_client_ip_header(&std::env::var("BUZZ_CLIENT_IP_HEADER").unwrap_or_default())?;
 
         let require_auth_token = std::env::var("BUZZ_REQUIRE_AUTH_TOKEN")
             .map(|v| v == "true" || v == "1")
@@ -923,6 +936,18 @@ impl Config {
             Err(error) => {
                 return Err(ConfigError::InvalidValue(format!(
                     "BUZZ_OPERATOR_LISTENERS must be valid UTF-8: {error}"
+                )));
+            }
+        };
+        let storage_usage_delivery_url = match std::env::var("BUZZ_STORAGE_USAGE_URL") {
+            Ok(raw) => Some(
+                crate::storage_usage_delivery::parse_delivery_url(&raw)
+                    .map_err(ConfigError::InvalidValue)?,
+            ),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_STORAGE_USAGE_URL must be valid UTF-8: {error}"
                 )));
             }
         };
@@ -1425,7 +1450,6 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
-            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
             redis_pool_size,
@@ -1438,6 +1462,7 @@ impl Config {
             send_buffer_size,
             max_frame_bytes,
             slow_client_grace_limit,
+            client_ip_header,
             auth,
             require_auth_token,
             buzz_v1_enabled,
@@ -1459,6 +1484,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             operator_listener_delivery_urls,
+            storage_usage_delivery_url,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1487,6 +1513,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_upgrades_enabled: parse_bool("BUZZ_NIP_FI_UPGRADES_ENABLED", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1557,6 +1584,37 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
+    }
+
+    #[test]
+    fn nip_fi_upgrade_acceptance_is_explicitly_default_off() {
+        let (_fi, _cfg) = env_guards();
+        let before = std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED").ok();
+        std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED");
+        assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        for value in ["true", "TRUE", "1", "on", " On "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        for value in ["false", "FALSE", "0", "off", "", " Off "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                !Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "treu");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::InvalidValue(message))
+            if message.contains("BUZZ_NIP_FI_UPGRADES_ENABLED must be true or false"))
+        );
+        match before {
+            Some(value) => std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value),
+            None => std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED"),
+        }
     }
 
     // The three `source=database` startup guards. Mutation: dropping any one
@@ -2453,35 +2511,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
-
-        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        let defaults = Config::from_env().expect("config");
-
-        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
-        let disabled = Config::from_env().expect("config");
-
-        if let Some(value) = previous_usage {
-            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        }
-        if let Some(value) = previous_serving {
-            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        }
-
-        assert_eq!(defaults.replica_read_max_age_ms, 0);
-        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
-        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
-    }
-
-    #[test]
     fn drain_jitter_defaults_off_and_rejects_junk() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DRAIN_JITTER_MS");
@@ -2935,6 +2964,17 @@ mod tests {
             !config.huddle_audio_available,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
         );
+    }
+
+    #[test]
+    fn client_ip_header_is_off_when_empty_and_case_insensitive() {
+        assert_eq!(parse_client_ip_header("").unwrap(), None);
+        assert_eq!(parse_client_ip_header("  ").unwrap(), None);
+        assert_eq!(
+            parse_client_ip_header(" CF-Connecting-IP ").unwrap(),
+            Some(axum::http::HeaderName::from_static("cf-connecting-ip"))
+        );
+        assert!(parse_client_ip_header("not a header").is_err());
     }
 
     #[test]

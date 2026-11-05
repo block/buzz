@@ -1,3 +1,6 @@
+import 'package:buzz/features/channels/channel_typing_provider.dart';
+import 'package:buzz/features/channels/me/solo_working_dots.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 import 'package:flutter/material.dart';
@@ -123,7 +126,112 @@ const organization = MeGroups(
   channels: ['solo', 'archived', 'nonmember'],
 );
 
+class _Typing extends ChannelTypingNotifier {
+  _Typing() : super('solo');
+  @override
+  List<TypingEntry> build() => [];
+  void show(List<TypingEntry> entries) => state = entries;
+}
+
 void main() {
+  for (final dark in [false, true]) {
+    testWidgets(
+      'Solo working signal, quiet navigation, and colours dark=$dark',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final typing = _Typing();
+        final reads = _Reads();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              channelsProvider.overrideWith(_Channels.new),
+              readStateProvider.overrideWith(() => reads),
+              meGroupsProvider.overrideWith(
+                (ref) => Stream.value(organization),
+              ),
+              meAssistantsProvider.overrideWith(
+                (ref) async => [
+                  const AgentDirectoryEntry(
+                    pubkey: 'agent',
+                    displayName: 'Terp',
+                  ),
+                ],
+              ),
+              channelTypingProvider('solo').overrideWith(() => typing),
+            ],
+            child: MaterialApp(
+              theme: dark ? AppTheme.dark() : AppTheme.light(),
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(disableAnimations: true),
+                child: child!,
+              ),
+              home: const MePage(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(SoloWorkingDots), findsNothing);
+        expect(
+          tester.widget<Text>(find.text('solo')).style?.fontWeight,
+          FontWeight.w600,
+        );
+        expect(
+          tester.widget<Text>(find.text('solo')).style?.color,
+          dark ? const Color(0xFFFFFFFF) : const Color(0xFF262626),
+        );
+        expect(
+          tester.widget<Text>(find.text('Project')).style?.color,
+          dark ? const Color(0xFFC7C7C7) : const Color(0xFF525252),
+        );
+        expect(find.bySemanticsLabel('Project, unread'), findsNothing);
+        typing.show([const TypingEntry(pubkey: 'human', expiresAtMs: 999999)]);
+        await tester.pump();
+        expect(find.byType(SoloWorkingDots), findsNothing);
+        // A thread's working agent still appears on its containing Solo row.
+        typing.show([
+          const TypingEntry(
+            pubkey: 'agent',
+            threadHeadId: 'thread',
+            expiresAtMs: 999999,
+          ),
+          const TypingEntry(pubkey: 'agent', expiresAtMs: 999999),
+        ]);
+        await tester.pumpAndSettle();
+        expect(find.byType(SoloWorkingDots), findsOneWidget);
+        expect(
+          find.bySemanticsLabel('solo, unread, Terp working'),
+          findsOneWidget,
+        );
+        final dots = find.descendant(
+          of: find.byType(SoloWorkingDots),
+          matching: find.byType(Opacity),
+        );
+        expect(tester.widgetList<Opacity>(dots).map((dot) => dot.opacity), [
+          1,
+          1,
+          1,
+        ]);
+        reads.read('msg:reply', 20);
+        await tester.pump();
+        expect(
+          tester.widget<Text>(find.text('solo')).style?.fontWeight,
+          FontWeight.w400,
+        );
+        expect(
+          tester.widget<Text>(find.text('solo')).style?.color,
+          dark ? const Color(0xFFC7C7C7) : const Color(0xFF404040),
+        );
+        expect(find.bySemanticsLabel('solo, Terp working'), findsOneWidget);
+        typing.show([]);
+        await tester.pumpAndSettle();
+        expect(find.byType(SoloWorkingDots), findsNothing);
+        expect(find.bySemanticsLabel('solo'), findsOneWidget);
+      },
+    );
+  }
+
   for (final duringSeed in [false, true]) {
     test(
       'fresh Solo history is gated; new reply during seeding=$duringSeed badges',
@@ -196,7 +304,7 @@ void main() {
   }
   for (final loading in [false, true]) {
     testWidgets(
-      'Solo retains row, section, and tab unread after loading=$loading',
+      'Solo retains row unread without section or tab dots after loading=$loading',
       (tester) async {
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
@@ -216,22 +324,21 @@ void main() {
             child: MaterialApp(
               theme: AppTheme.light(),
               home: Consumer(
-                builder: (context, ref, _) => HomePage(
-                  onAgents: showAgents,
-                  defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                    onChooseAgent: () => showAgents(context),
-                  ),
-                  settingsPageBuilder: (_) => const SizedBox(),
-                  mePageBuilder: (_, action, workspace) => MePage(
-                    sliver: true,
-                    newChatAction: action,
-                    newWorkspaceAction: workspace,
-                  ),
-                  hasUnreadInbox: false,
-                  hasUnreadSolo: ref
-                      .watch(meUnreadChannelIdsProvider)
-                      .isNotEmpty,
-                ),
+                builder: (context, ref, _) {
+                  ref.listen(meUnreadChannelIdsProvider, (_, _) {});
+                  return HomePage(
+                    onAgents: showAgents,
+                    defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                      onChooseAgent: () => showAgents(context),
+                    ),
+                    settingsPageBuilder: (_) => const SizedBox(),
+                    mePageBuilder: (_, action, workspace) => MePage(
+                      sliver: true,
+                      newChatAction: action,
+                      newWorkspaceAction: workspace,
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -269,13 +376,13 @@ void main() {
           );
         }
         expect(container.read(meUnreadChannelIdsProvider), {'solo'});
-        expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
+        expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
         expect(find.text('solo').hitTestable(), findsNothing);
         await tester.tap(find.text('Solo'));
         await tester.pumpAndSettle();
         expect(
           tester.widget<Text>(find.text('solo')).style?.fontWeight,
-          FontWeight.w700,
+          FontWeight.w600,
         );
         expect(find.bySemanticsLabel('solo, unread'), findsOneWidget);
         await tester.tap(find.text('Project'));
@@ -283,7 +390,7 @@ void main() {
         expect(find.text('solo').hitTestable(), findsNothing);
         expect(
           find.byKey(const ValueKey('solo-section-unread-Project')),
-          findsOneWidget,
+          findsNothing,
         );
         reads.read('msg:reply', channels.timestamp);
         await tester.pumpAndSettle();
@@ -301,13 +408,13 @@ void main() {
         expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
         channels.reply();
         await tester.pumpAndSettle();
-        expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
+        expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
         reads.read('thread:root', channels.timestamp);
         await tester.pumpAndSettle();
         expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
         reads.force();
         await tester.pumpAndSettle();
-        expect(find.bySemanticsLabel('Solo, unread'), findsOneWidget);
+        expect(find.bySemanticsLabel('Solo, unread'), findsNothing);
       },
     );
   }

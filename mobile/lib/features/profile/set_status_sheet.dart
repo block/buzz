@@ -14,7 +14,7 @@ import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../channels/emoji_picker.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'user_status.dart';
 import 'user_status_provider.dart';
 

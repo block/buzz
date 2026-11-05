@@ -173,9 +173,6 @@ void main() {
               return _descriptor;
             }),
             appLifecycleProvider.overrideWith(_Lifecycle.new),
-            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-              () async => BuzzPushAuthorizationStatus.denied,
-            ),
           ],
           child: BuzzPushBootstrap(
             child: MaterialApp(

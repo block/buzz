@@ -19,6 +19,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   const channelId = 'chan-1';
   const otherChannelId = 'chan-2';
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   final msgKey = msgContextKey('msg-1');
   final otherMsgKey = msgContextKey('msg-2');
 
@@ -104,14 +105,15 @@ void main() {
     container.read(readStateProvider);
     await settle();
     expect(state().effectiveTimestamp(msgKey), readAt);
-    expect(state().effectiveTimestamp(channelId), isNull);
+    expect(state().contexts[channelId], isNull);
+    expect(state().effectiveTimestamp(channelId), state().retentionFloor);
   });
 
   test('a disconnect and reconnect keeps the manager and forced unread '
       'flags, and resyncs once on connect', () async {
     final notifier = await pumpNotifier();
     // Persists on the same manager, so it survives only if that manager does.
-    notifier.markContextRead(channelId, 500);
+    notifier.markContextRead(channelId, now);
     notifier.markContextUnread(msgKey, channelId: channelId);
     expect(session.fetchCount, 1);
     expect(session.subscribeCount, 1);
@@ -127,7 +129,7 @@ void main() {
       // No rebuild: still ready, flags kept, and nothing refetched.
       expect(state().isReady, isTrue, reason: status.name);
       expect(state().isForcedUnread(msgKey), isTrue, reason: status.name);
-      expect(state().effectiveTimestamp(channelId), 500);
+      expect(state().effectiveTimestamp(channelId), now);
       expect(session.fetchCount, 1, reason: status.name);
       expect(session.subscribeCount, 1, reason: status.name);
     }
@@ -143,7 +145,7 @@ void main() {
     expect(state().isReady, isTrue);
     expect(state().isForcedUnread(msgKey), isTrue);
     expect(state().locallyForcedChannelIds, {channelId});
-    expect(state().effectiveTimestamp(channelId), 500);
+    expect(state().effectiveTimestamp(channelId), now);
     expect(state().version, greaterThanOrEqualTo(version));
 
     // A second reconnect resyncs the same way.
@@ -198,16 +200,16 @@ void main() {
 
     // Mark read: the force flag must drop out of the production map AND the
     // marker must land in the manager's effective contexts.
-    notifier.markContextRead(msgKey, 1000);
+    notifier.markContextRead(msgKey, now);
     expect(state().isForcedUnread(msgKey), isFalse);
     expect(state().forcedUnreadContexts, isEmpty);
-    expect(state().effectiveTimestamp(msgKey), 1000);
+    expect(state().effectiveTimestamp(msgKey), now);
 
     // Force unread again: read markers are monotonic, so the flag is the
     // only mechanism — it must win even though the marker persists.
     notifier.markContextUnread(msgKey, channelId: channelId);
     expect(state().isForcedUnread(msgKey), isTrue);
-    expect(state().effectiveTimestamp(msgKey), 1000);
+    expect(state().effectiveTimestamp(msgKey), now);
   });
 
   test('explicit channel-level Mark read clears forced message entries in '
@@ -218,12 +220,12 @@ void main() {
     notifier.markContextUnread(otherMsgKey, channelId: otherChannelId);
 
     // Channel tile "Mark as read" passes clearForcedMessages: true.
-    notifier.markContextRead(channelId, 2000, clearForcedMessages: true);
+    notifier.markContextRead(channelId, now, clearForcedMessages: true);
 
     expect(state().isForcedUnread(msgKey), isFalse);
     expect(state().isForcedUnread(otherMsgKey), isTrue);
     expect(state().locallyForcedChannelIds, {otherChannelId});
-    expect(state().effectiveTimestamp(channelId), 2000);
+    expect(state().effectiveTimestamp(channelId), now);
   });
 
   test(
@@ -234,11 +236,11 @@ void main() {
       notifier.markContextUnread(msgKey, channelId: channelId);
 
       // Channel open marks the channel read without clearForcedMessages.
-      notifier.markContextRead(channelId, 3000);
+      notifier.markContextRead(channelId, now);
 
       expect(state().isForcedUnread(msgKey), isTrue);
       expect(state().locallyForcedChannelIds, {channelId});
-      expect(state().effectiveTimestamp(channelId), 3000);
+      expect(state().effectiveTimestamp(channelId), now);
     },
   );
 
@@ -255,7 +257,8 @@ void main() {
 
       expect(state().isForcedUnread(channelId), isFalse);
       expect(state().isForcedUnread(msgKey), isTrue);
-      expect(state().effectiveTimestamp(channelId), isNull);
+      expect(state().contexts[channelId], isNull);
+      expect(state().effectiveTimestamp(channelId), state().retentionFloor);
     },
   );
 
@@ -267,7 +270,7 @@ void main() {
     notifier.markContextUnread(channelId, channelId: channelId);
     notifier.markContextUnread(msgKey, channelId: channelId);
 
-    notifier.markContextRead(channelId, 4000);
+    notifier.markContextRead(channelId, now);
 
     // Opening the channel satisfies the channel-scoped force, but the
     // deliberate message-level force survives until acted on.
@@ -309,12 +312,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
       const SessionState(status: SessionStatus.disconnected);
 
   @override
-  Future<List<NostrEvent>> fetchHistory(
-    NostrFilter filter, {
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    // The manager's pre-publish own-slot lookup is not a full history fetch.
-    if (filter.tags.containsKey('#t')) fetchCount++;
+    fetchCount++;
     return [];
   }
 
