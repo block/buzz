@@ -3309,6 +3309,34 @@ mod tests {
                 .expect("member role")
         }
 
+        /// How many `member_joined` kind:40099 notices in `channel` target
+        /// `keys`.
+        async fn member_joined_notice_count(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            channel: uuid::Uuid,
+            keys: &Keys,
+        ) -> usize {
+            let member_hex = keys.public_key().to_hex();
+            state
+                .db
+                .query_events(&buzz_db::EventQuery {
+                    kinds: Some(vec![40099]),
+                    channel_id: Some(channel),
+                    ..buzz_db::EventQuery::for_community(community)
+                })
+                .await
+                .expect("query 40099")
+                .iter()
+                .filter_map(|stored| {
+                    serde_json::from_str::<serde_json::Value>(&stored.event.content).ok()
+                })
+                .filter(|content| {
+                    content["type"] == "member_joined" && content["target"] == member_hex
+                })
+                .count()
+        }
+
         async fn seed_relay_member(
             state: &crate::state::AppState,
             community: buzz_core::tenant::CommunityId,
@@ -3432,11 +3460,17 @@ mod tests {
         /// an admission joins nothing; after a kind:9031 removal,
         /// re-admission is a first entry again and restores both, through
         /// `put_first_member_since` with the new roster row's `created_at`.
+        /// A recovery paused before the default channel's write, while a
+        /// racing join (an invite claim) and a leave land, writes nothing:
+        /// the leave stands and the admission adds no second notice.
         ///
         /// Mutations: use `None` for `admitted_at` in roster mode → the
         /// re-admission joins nothing (RED); drop the roster-mode defaults
         /// recovery → the default channel is not joined (RED); gate the spawn
-        /// on `!require_relay_membership` again → nothing is joined (RED).
+        /// on `!require_relay_membership` again → nothing is joined (RED);
+        /// recover the defaults with `join_channel_as_self` instead of
+        /// `put_first_member_since` → the leave is undone and a second
+        /// `member_joined` notice appears (RED).
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn roster_auth_recovers_landing_and_defaults_for_a_first_entry() {
@@ -3492,6 +3526,71 @@ mod tests {
             assert_eq!(
                 roles("readmitted").await,
                 [member("readmitted"), member("readmitted")]
+            );
+
+            // Another first entry, paused before the default channel's write
+            // while a racing join and a leave land.
+            use crate::nip_fi_test_hooks::{auto_join_channel_hook, auto_join_done_hook};
+            for channel in [landing, announcements] {
+                state
+                    .db
+                    .remove_member(community, channel, &person_key, &person_key)
+                    .await
+                    .expect("leave");
+            }
+            state
+                .db
+                .remove_relay_member(community, &person.public_key().to_hex(), &Keys::generate())
+                .await
+                .map(|write| write.outcome)
+                .expect("kind:9031 removal");
+            seed_relay_member(&state, community, &person, "member").await;
+            let notices_before =
+                member_joined_notice_count(&state, community, announcements, &person).await;
+            let (done, done_release) = auto_join_done_hook::arm(community);
+            let (reached, release) = auto_join_channel_hook::arm(community);
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-raced");
+            handle_auth(
+                signed_auth(&person, "roster-raced", None),
+                std::sync::Arc::clone(&conn),
+                std::sync::Arc::clone(&state),
+            )
+            .await;
+            assert!(matches!(
+                conn.auth_state_snapshot(),
+                AuthState::Authenticated(_)
+            ));
+            reached.await.expect("task reaches the landing channel");
+            // Re-arm before the task can run again: it does not yield
+            // between the release and the arm.
+            release.notify_one();
+            let (reached, release) = auto_join_channel_hook::arm(community);
+            reached.await.expect("task reaches the default channel");
+            crate::handlers::side_effects::join_channel_as_self(
+                &conn.tenant,
+                &state,
+                announcements,
+                &person_key,
+            )
+            .await
+            .expect("the racing join");
+            state
+                .db
+                .remove_member(community, announcements, &person_key, &person_key)
+                .await
+                .expect("leave again");
+            release.notify_one();
+            done.await.expect("task finishes");
+            done_release.notify_one();
+            assert_eq!(
+                roles("raced").await,
+                [member("raced"), ("raced", None)],
+                "the leave since admission stands"
+            );
+            assert_eq!(
+                member_joined_notice_count(&state, community, announcements, &person).await,
+                notices_before + 1,
+                "the racing join's notice is the admission's only one"
             );
         }
 

@@ -300,10 +300,12 @@ is never more than one. Clients read it from NIP-11:
   `["landing"]` tag, and `["welcome", "<text>"]` while a custom message is
   set. These are a projection of the stored designation, re-signed whenever
   it moves; NIP-11 is the authoritative read. The re-emission runs after the
-  designation has committed, so a failed one, or two moves whose
-  re-emissions race, can leave a stale `landing` or `welcome` tag on a
-  channel that is no longer the landing channel, or a `landing` tag missing
-  from the one that is, until that channel's next kind:39000. When the tags
+  designation has committed and is not retried, so anything that loses or
+  reorders it (a failed emission, two moves whose re-emissions race, or a
+  relay pod from before this feature re-signing a channel's 39000 during a
+  rolling deploy) can leave a stale `landing` or `welcome` tag on a channel
+  that is no longer the landing channel, or a `landing` tag missing from the
+  one that is, until that channel's next kind:39000. When the tags
   and NIP-11 disagree, NIP-11 is right: a client takes the landing channel
   from NIP-11 and ignores `landing` and `welcome` on any other channel's
   39000. The welcome text is plain text: `\n` is a line break and nothing
@@ -316,8 +318,9 @@ preferring a listed one. If there is none, it creates a listed, open
 `general` owned by the community's earliest relay owner, else its earliest
 admin; that person gets the channel-creation kind:44100. A private `general`
 is never adopted. Nothing is created when the community has no owner or
-admin, or when `general` is taken by a channel that cannot be adopted (an
-archived `general`, or a forum). The relay tries at community provisioning,
+admin, or when `general` is taken by a listed channel that cannot be adopted
+(an archived `general`, a forum, or one with a TTL); a private or unlisted
+`general` does not hold the name. The relay tries at community provisioning,
 at boot for the deployment community, and at every person's AUTH, so an
 existing community converges at its first connection after an upgrade.
 
@@ -379,6 +382,17 @@ message. Renames, `about`, `topic`, `purpose`, labels, `unlisted`,
 `join_role`, `auto_join`, and member adds, removals and moderation stay
 allowed.
 
+**Rollout.** During a rolling deploy, relay pods from before this feature do
+not advertise `landing_channel`, enroll nobody at AUTH, do not enforce the
+protections, and re-sign a channel's kind:39000 without its `landing` and
+`welcome` tags. The designation itself is unaffected, and a newer pod
+re-signs the tags at the channel's next change. A landing channel archived,
+made private or given a TTL through an old pod stays designated but
+ineligible: the relay counts it
+(`buzz_landing_adoption_total{outcome="existing_ineligible"}`) and logs a
+warning at each adoption attempt, and nobody is enrolled into it until an
+owner or admin moves the designation with kind:9002 `landing`.
+
 **Enrollment.** People are joined to the landing channel first, then to the
 [default channels](#default-channels), as kind:9021 self-joins (the
 channel's `join_role`, `member_joined` kind:40099, kind:39002 and kind:44100).
@@ -392,8 +406,11 @@ joined to it.
   private channels they created themselves. That recovers an admission whose
   joins did not finish and enrolls a `buzz-admin add-member` row, and it
   joins the default channels they have not been in since then too (see
-  [Default channels](#default-channels)). After a kind:9031 removal, the
-  next admission is a first entry again.
+  [Default channels](#default-channels)). After a kind:9031 removal and a
+  new roster row, the next admission is a first entry again unless a
+  shared-channel membership from before is still active: kind:9031 removes
+  nobody from channels, and an active membership always counts, whenever it
+  began.
 - On a community without a roster, a person's AUTH joins them to the landing
   channel if they have no such evidence at all; then the default channels
   they have never been in follow, as before.
