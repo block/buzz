@@ -176,13 +176,9 @@ void main() {
     });
     await mount(tester, nativeAvatar: true);
     await tester.pumpAndSettle();
-    final surface = find.descendant(
-      of: find.byType(DefaultAgentVoiceControl),
-      matching: find.byWidgetPredicate(
-        (widget) =>
-            widget is UiKitView &&
-            widget.viewType == 'buzz/concentric_sheet_surface',
-      ),
+    final surface = find.byWidgetPredicate(
+      (widget) =>
+          widget is UiKitView && widget.viewType == 'buzz/navigation_glass',
     );
     expect(surface, findsOneWidget);
     final touchedSurface = tester.element(surface.first);

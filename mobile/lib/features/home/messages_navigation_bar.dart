@@ -85,7 +85,7 @@ class MessagesNavigationBar extends HookWidget {
                   ),
                   Positioned(
                     right: 0,
-                    width: 72,
+                    width: 256,
                     top: 0,
                     bottom: 0,
                     child: OverflowBox(

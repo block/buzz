@@ -98,7 +98,7 @@ void main() {
           }),
           meSyncProvider.overrideWithValue(scope),
           myPubkeyProvider.overrideWithValue('account'),
-          relaySessionProvider.overrideWith(() => relay),
+          relaySessionProvider.overrideWith(FakeRelay.new),
           defaultAgentVoiceDraftProvider.overrideWith(
             (ref, identity) => _SavedDraft(
               identity,
@@ -160,7 +160,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Slide up to cancel'), findsNothing);
       expect(haptics, isEmpty);
-      expect(relay.writes, 0);
+      expect(
+        (ProviderScope.containerOf(
+                  tester.element(find.byType(DefaultAgentLauncher)),
+                ).read(relaySessionProvider.notifier)
+                as FakeRelay)
+            .writes,
+        0,
+      );
       final semantics = tester.ensureSemantics();
       expect(find.bySemanticsLabel('Record voice note'), findsNothing);
       semantics.dispose();
