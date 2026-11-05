@@ -613,11 +613,29 @@ pub(crate) async fn query_events_on(
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
+        let mentioned: Option<String> = match q.p_tag_hex {
+            Some(_) => Some(row.try_get("pubkey_hex")?),
+            None => None,
+        };
         if let Some(ev) = row_to_stored_event(row)? {
-            out.push(ev);
+            out.push(with_derived_reaction_recipient(ev, mentioned));
         }
     }
     Ok(out)
+}
+
+/// Sets a `#p`-read reaction's `derived_recipients` to the pubkey its
+/// mention row matched, which may be its target's author rather than a `p`
+/// tag. Other kinds match `#p` by literal tags only, because their mention
+/// rows can name a pubkey no tag matches, such as a workflow owner's
+/// attribution.
+fn with_derived_reaction_recipient(ev: StoredEvent, mentioned: Option<String>) -> StoredEvent {
+    match mentioned {
+        Some(recipient) if ev.event.kind == nostr::Kind::Reaction => {
+            ev.with_derived_recipients(vec![recipient])
+        }
+        _ => ev,
+    }
 }
 
 /// The result of `q` when its shape alone decides it: an invalid query, or one
@@ -703,7 +721,7 @@ fn build_query_events_sql(
         });
         b.push(
             "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
-             e.sig, e.received_at, e.channel_id \
+             e.sig, e.received_at, e.channel_id, m.pubkey_hex \
              FROM events e \
              INNER JOIN event_mentions m ON ",
         );

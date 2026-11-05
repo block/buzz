@@ -723,10 +723,17 @@ pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
     None
 }
 
-/// Result of resolving a reaction's target channel.
+/// Result of resolving a reaction's target channel. `target_author` is the
+/// target's effective author ([`effective_message_author`]), the reaction's
+/// derived `#p` recipient.
 pub(crate) enum ReactionChannelResult {
-    Channel(Uuid),
-    NoChannel,
+    Channel {
+        channel_id: Uuid,
+        target_author: Vec<u8>,
+    },
+    NoChannel {
+        target_author: Vec<u8>,
+    },
     /// Missing, soft-deleted, or not readable by the reactor.
     NotFound,
     NoTarget,
@@ -745,6 +752,7 @@ pub(crate) async fn derive_reaction_channel(
     db: &buzz_db::Db,
     event: &Event,
     reader: &[u8],
+    relay_pubkey: &nostr::PublicKey,
 ) -> ReactionChannelResult {
     let target_hex = match event.tags.iter().rev().find_map(|tag| {
         if tag.kind().to_string() == "e" {
@@ -775,13 +783,45 @@ pub(crate) async fn derive_reaction_channel(
         Ok(Some(target)) if !super::req::event_visible_to_reader(&target.event, reader) => {
             ReactionChannelResult::NotFound
         }
-        Ok(Some(target)) => match target.channel_id {
-            Some(ch_id) => ReactionChannelResult::Channel(ch_id),
-            None => ReactionChannelResult::NoChannel,
-        },
+        Ok(Some(target)) => {
+            let target_author = effective_message_author(&target.event, relay_pubkey);
+            match target.channel_id {
+                Some(channel_id) => ReactionChannelResult::Channel {
+                    channel_id,
+                    target_author,
+                },
+                None => ReactionChannelResult::NoChannel { target_author },
+            }
+        }
         Ok(None) => ReactionChannelResult::NotFound,
         Err(e) => ReactionChannelResult::DbError(e.to_string()),
     }
+}
+
+/// Count a reaction's derived `#p` recipient. A relay-signed target whose
+/// `actor` and `p` tags name no author resolves to the relay key itself.
+fn record_reaction_recipient_derived(
+    reaction: &Event,
+    target_author: &[u8],
+    relay_pubkey: &nostr::PublicKey,
+    inserted: bool,
+) {
+    let outcome = if target_author == relay_pubkey.to_bytes().as_slice() {
+        tracing::debug!(
+            reaction_id = %reaction.id,
+            "reaction target is relay-signed without a resolvable author"
+        );
+        "fallback_pubkey"
+    } else if inserted {
+        "inserted"
+    } else {
+        "duplicate"
+    };
+    metrics::counter!(
+        "buzz_relay_reaction_recipient_derived_total",
+        "outcome" => outcome
+    )
+    .increment(1);
 }
 
 /// Kinds that are always global (`channel_id = NULL`).
@@ -2820,11 +2860,30 @@ async fn ingest_event_inner(
         None
     };
     let target_denied = |reason: &str| IngestError::Rejected(format!("invalid: {reason}"));
+    let mut reaction_target_author = None;
     let mut channel_id = if kind_u32 == KIND_REACTION {
-        let reader = effective_message_author(&event, &state.relay_keypair.public_key());
-        match derive_reaction_channel(tenant.community(), &state.db, &event, &reader).await {
-            ReactionChannelResult::Channel(ch_id) => Some(ch_id),
-            ReactionChannelResult::NoChannel => None,
+        let relay_pubkey = state.relay_keypair.public_key();
+        let reader = effective_message_author(&event, &relay_pubkey);
+        match derive_reaction_channel(
+            tenant.community(),
+            &state.db,
+            &event,
+            &reader,
+            &relay_pubkey,
+        )
+        .await
+        {
+            ReactionChannelResult::Channel {
+                channel_id,
+                target_author,
+            } => {
+                reaction_target_author = Some(target_author);
+                Some(channel_id)
+            }
+            ReactionChannelResult::NoChannel { target_author } => {
+                reaction_target_author = Some(target_author);
+                None
+            }
             ReactionChannelResult::NotFound => {
                 return Err(target_denied(REACTION_TARGET_NOT_FOUND));
             }
@@ -3485,6 +3544,11 @@ async fn ingest_event_inner(
             .map_err(|_| IngestError::Rejected("invalid: malformed reaction target id".into()))?;
 
         let actor_bytes = effective_message_author(&event, &state.relay_keypair.public_key());
+        let Some(target_author) = reaction_target_author.as_deref() else {
+            return Err(IngestError::Internal(
+                "error: reaction target author unresolved".into(),
+            ));
+        };
         let emoji = if event.content.is_empty() {
             "+"
         } else {
@@ -3507,6 +3571,7 @@ async fn ingest_event_inner(
                 &target_id,
                 &actor_bytes,
                 emoji,
+                target_author,
             )
             .await
             .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
@@ -3526,7 +3591,16 @@ async fn ingest_event_inner(
             buzz_db::ReactionEventInsertOutcome::Inserted {
                 stored_event,
                 was_inserted,
-            } => (stored_event, was_inserted),
+                derived_recipient_inserted,
+            } => {
+                record_reaction_recipient_derived(
+                    &event,
+                    target_author,
+                    &state.relay_keypair.public_key(),
+                    derived_recipient_inserted,
+                );
+                (stored_event, was_inserted)
+            }
         };
 
         let pubkey_hex = auth.pubkey().to_hex();
