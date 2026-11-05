@@ -21,6 +21,8 @@ import 'hosted_community_connection.dart';
 import 'web_connect_binding.dart';
 import 'hosted_join_policy.dart';
 
+part 'hosted_flow_identity_recovery.dart';
+
 enum HostedFlowStage {
   idle,
   working,
@@ -133,18 +135,7 @@ class HostedFlow extends ChangeNotifier {
   bool accountOnly = false;
   bool _importRequested = false;
   bool canCreateIdentity = false;
-
-  /// Definitive rejection of binding this account's chosen key, valid only
-  /// for the attempt that observed it.
-  ({String subject, String pubkey, int generation})? _rejectedBinding;
-  bool get canChooseDifferentIdentity {
-    final rejected = _rejectedBinding;
-    return stage == HostedFlowStage.blocked &&
-        problem == HostedFlowProblem.requestRejected &&
-        rejected != null &&
-        rejected.generation == _generation &&
-        rejected.subject == account.account?.subject;
-  }
+  _RejectedBinding? _rejectedBinding;
 
   String? requiredIdentityPubkey;
   String? _pairedPubkey;
@@ -553,30 +544,6 @@ class HostedFlow extends ChangeNotifier {
     return _enqueue(() => _continue(generation, selectedPubkey: pubkey));
   }
 
-  static const _verifyPath = '/v1/buzz/nostr-identities/verify';
-
-  /// After a definitive binding rejection, release this account's copy of the
-  /// rejected key (kept elsewhere) and return to identity choice.
-  Future<void> chooseDifferentIdentity() {
-    final rejected = _rejectedBinding;
-    if (!canChooseDifferentIdentity || rejected == null) return Future.value();
-    final generation = _nextGeneration();
-    _set(HostedFlowStage.working);
-    return _enqueue(() async {
-      final released = await identity.releaseRejected(
-        rejected.pubkey,
-        subject: rejected.subject,
-        isCurrent: _isCurrent(generation),
-      );
-      if (_disposed || generation != _generation) return;
-      if (!released) {
-        _set(HostedFlowStage.blocked, HostedFlowProblem.requestRejected);
-        return;
-      }
-      await _continue(generation);
-    });
-  }
-
   /// Create explicitly from setup, or beside the saved identities offered.
   Future<void> createIdentity() {
     if (!canCreateIdentity ||
@@ -738,29 +705,20 @@ class HostedFlow extends ChangeNotifier {
           if (response['error'] != null || request == null) {
             throw AccountFailure.invalidResponse;
           }
-          account.lastRejectedRequest = null;
-          try {
-            await WebConnectBindingService().complete(
+          final pubkey = resolved.pubkey!;
+          await _observeBinding(
+            session.subject,
+            pubkey,
+            generation,
+            () => WebConnectBindingService().complete(
               request: request,
               subject: session.subject,
-              expectedPubkey: resolved.pubkey!,
+              expectedPubkey: pubkey,
               withKeys: store.withKeys,
               verify: _verifyBinding,
               isCurrent: _isCurrent(generation),
-            );
-          } on AccountFailure catch (failure) {
-            // Only a definitive 4xx on verify is evidence against this key.
-            if (failure == AccountFailure.rejected &&
-                account.lastRejectedRequest?.path == _verifyPath &&
-                account.account?.subject == session.subject) {
-              _rejectedBinding = (
-                subject: session.subject,
-                pubkey: resolved.pubkey!,
-                generation: generation,
-              );
-            }
-            rethrow;
-          }
+            ),
+          );
         } else if (resolved.state == HostedIdentityState.needsBackup) {
           await HostedBackupService(
             account,
