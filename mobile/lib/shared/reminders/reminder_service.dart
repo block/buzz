@@ -44,10 +44,16 @@ class ReminderTarget {
 /// Matches the JSON desktop writes in `reminderService.ts#createReminder`:
 /// `{"target": {...}, "note": <optional>, "status": "pending"}`. `note` is
 /// omitted entirely when absent so both clients parse each other's payloads.
-String buildReminderPlaintext({required ReminderTarget target, String? note}) {
+/// A note-only reminder omits `target` the same way; NIP-ER requires one of
+/// the two, so a call with neither throws.
+String buildReminderPlaintext({ReminderTarget? target, String? note}) {
+  final hasNote = note != null && note.isNotEmpty;
+  if (target == null && !hasNote) {
+    throw ArgumentError('A reminder needs a target or a note');
+  }
   return jsonEncode({
-    'target': target.toJson(),
-    if (note != null && note.isNotEmpty) 'note': note,
+    if (target != null) 'target': target.toJson(),
+    if (hasNote) 'note': note,
     'status': 'pending',
   });
 }
@@ -110,8 +116,24 @@ class ReminderService {
     required ReminderTarget target,
     required int notBefore,
     String? note,
+  }) => _publish(
+    plaintext: buildReminderPlaintext(target: target, note: note),
+    notBefore: notBefore,
+  );
+
+  /// Publish a standalone reminder: [note] and [notBefore], no target message.
+  Future<void> createNoteReminder({
+    required String note,
+    required int notBefore,
+  }) => _publish(
+    plaintext: buildReminderPlaintext(note: note),
+    notBefore: notBefore,
+  );
+
+  Future<void> _publish({
+    required String plaintext,
+    required int notBefore,
   }) async {
-    final plaintext = buildReminderPlaintext(target: target, note: note);
     final ciphertext = _crypto.encrypt(plaintext);
     await _signedEventRelay.submit(
       kind: EventKind.eventReminder,
