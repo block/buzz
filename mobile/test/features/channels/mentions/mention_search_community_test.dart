@@ -66,7 +66,7 @@ class _HeldSearchSession extends RelaySessionNotifier {
   }) => throw StateError('name search must use searchProfiles');
 
   @override
-  Future<List<NostrEvent>> searchProfiles(
+  Future<({List<NostrEvent> events, bool complete})> searchProfiles(
     String query, {
     int limit = 50,
     Duration timeout = const Duration(seconds: 8),
@@ -74,7 +74,9 @@ class _HeldSearchSession extends RelaySessionNotifier {
     final search = Completer<List<NostrEvent>>();
     searches.add(search);
     queries.add(query);
-    return search.future;
+    return search.future.then(
+      (events) => (events: events, complete: events.length < limit),
+    );
   }
 
   @override
@@ -285,18 +287,68 @@ void main() {
     );
 
     test('a longer query starts from the people its prefix found', () async {
+      const prefix = (channelId: _channelId, query: 'ali', opening: 2);
+      open(prefix);
+      await passTypingPause();
+      session.searchFor('ali').complete([
+        _profile(_alice, 'Alice'),
+        _profile(_bob, 'Alina'),
+      ]);
+      await container.pump();
+      final searched = session.searches.length;
+
+      const longer = (channelId: _channelId, query: 'alic', opening: 2);
+      open(longer);
+      expect(shownFor(longer), [_alice]);
+      // The complete page answers it, so it runs no search of its own.
+      expect(container.read(mentionSearchPendingProvider(longer)), isFalse);
+      await passTypingPause();
+      expect(session.searches, hasLength(searched));
+    });
+
+    test('a last word too short for verified names answers nothing', () async {
+      await passTypingPause();
+      session.searchFor('al').complete([_profile(_alice, 'Alice')]);
+      await container.pump();
+
+      // Verified names match only from three characters, so `ale` can
+      // find a verified person `al` could not.
+      const longer = (channelId: _channelId, query: 'ale', opening: 1);
+      open(longer);
+      expect(container.read(mentionSearchPendingProvider(longer)), isTrue);
+      await passTypingPause();
+      expect(session.queries.last, 'ale');
+    });
+
+    test('a prefix with no plain word answers nothing', () async {
+      const emoji = (channelId: _channelId, query: '🤖', opening: 2);
+      open(emoji);
+      await passTypingPause();
+      session.searchFor('🤖').complete(const []);
+      await container.pump();
+
+      // The relay finds no word in `🤖` but finds `alex` in `🤖alex`.
+      const longer = (channelId: _channelId, query: '🤖alex', opening: 2);
+      open(longer);
+      expect(container.read(mentionSearchPendingProvider(longer)), isTrue);
+      await passTypingPause();
+      expect(session.queries.last, '🤖alex');
+    });
+
+    test('a truncated page does not answer a longer query', () async {
       await passTypingPause();
       session.searches.first.complete([
-        _profile(_alice, 'Alice'),
-        _profile(_bob, 'Alba'),
+        for (var i = 0; i < mentionSearchPageLimit; i++)
+          _profile(i.toRadixString(16).padLeft(64, 'c'), 'Al $i'),
       ]);
       await container.pump();
 
-      const longer = (channelId: _channelId, query: 'ali', opening: 1);
+      const longer = (channelId: _channelId, query: 'al 1', opening: 1);
       open(longer);
-      expect(shownFor(longer), [_alice]);
-      // Its own search can still add people, so it is pending.
+      // The relay may have more people, so the longer query searches.
       expect(container.read(mentionSearchPendingProvider(longer)), isTrue);
+      await passTypingPause();
+      expect(session.searches, hasLength(2));
     });
   });
 }

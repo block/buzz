@@ -230,7 +230,13 @@ Widget _buildComposeBar({
           await Future<void>.delayed(mentionSearchDebounce);
           final people = await searchPeople(query.trim());
           // Like the real search, a finished page is cached by query.
-          ref.read(mentionSearchCacheProvider).put(query.trim(), people);
+          ref
+              .read(mentionSearchCacheProvider)
+              .put(
+                query.trim(),
+                people,
+                complete: people.length < mentionSearchPageLimit,
+              );
           return people;
         }),
       customEmojiListProvider.overrideWithValue(customEmoji),
@@ -1876,6 +1882,175 @@ void main() {
 
         expect(controller.text, 'hi @Alice ');
         expect(popover(), findsNothing);
+        await settleSearch(tester);
+      });
+
+      Finder channelPopover() =>
+          find.byKey(const ValueKey('channel-suggestions-popover'));
+
+      testWidgets('text after a selected mention is prose', (tester) async {
+        final searched = <String>[];
+        final controller = await pumpMembers(
+          tester,
+          ['Alice', 'Bob', 'Alicent'],
+          searchPeople: (query) async {
+            searched.add(query);
+            return const [];
+          },
+        );
+        await tester.enterText(find.byType(TextField), 'hi @alice');
+        await tester.pump();
+        await settleSearch(tester);
+        await tester.enterText(find.byType(TextField), 'hi @alice ');
+        await tester.pump();
+        expect(controller.text, 'hi @Alice ');
+
+        // `#` after the chip opens channel suggestions once the words after
+        // it name no one, and the finished search for `alice` answers them.
+        searched.clear();
+        await tester.enterText(find.byType(TextField), 'hi @Alice e.g. #cur');
+        await tester.pump();
+        expect(channelPopover(), findsOneWidget);
+        expect(popover(), findsNothing);
+        expect(searched, isEmpty);
+
+        // A new `@` still opens the chooser.
+        await tester.enterText(find.byType(TextField), 'hi @Alice e.g. @bo');
+        await tester.pump();
+        expect(find.text('Bob'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
+      testWidgets('selecting a name with a `#` leaves no channel query', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice #current']);
+        await tester.enterText(find.byType(TextField), '@Alice #cur');
+        await tester.pump();
+        expect(channelPopover(), findsNothing);
+        await tester.tap(find.text('Alice #current'));
+        await tester.pump();
+
+        expect(controller.text, '@Alice #current ');
+        expect(channelPopover(), findsNothing);
+        expect(popover(), findsNothing);
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
+      testWidgets('a longer name can follow a selected shorter one', (
+        tester,
+      ) async {
+        final controller = await pumpMembers(tester, ['Alice', 'Alice Smith']);
+        await tester.enterText(find.byType(TextField), 'hi @ali');
+        await tester.pump();
+        await tester.tap(find.text('Alice'));
+        await tester.pump();
+        expect(controller.text, 'hi @Alice ');
+
+        // Typed, after moving the caret away and back, and pasted in one
+        // edit: each derives the same open query.
+        await tester.enterText(
+          find.byType(TextField),
+          'hi @Alice and @Alice S',
+        );
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        controller.selection = const TextSelection.collapsed(offset: 0);
+        await tester.pump();
+        expect(popover(), findsNothing);
+        controller.selection = TextSelection.collapsed(
+          offset: controller.text.length,
+        );
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), 'hi @Alice and ');
+        await tester.pump();
+        await tester.enterText(
+          find.byType(TextField),
+          'hi @Alice and @Alice Smith',
+        );
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
+        await settleSearch(tester);
+      });
+
+      testWidgets(
+        'prose settles into channel suggestions and stops searching',
+        (tester) async {
+          final searched = <String>[];
+          await pumpMembers(
+            tester,
+            ['Alice Smith'],
+            searchPeople: (query) async {
+              searched.add(query);
+              return const [];
+            },
+          );
+          // Typed in one go: while its search runs it may still be a name.
+          await tester.enterText(find.byType(TextField), '@alice said hi #cur');
+          await tester.pump();
+          expect(channelPopover(), findsNothing);
+          // The finished search settles it without another edit.
+          await settleSearch(tester);
+          expect(channelPopover(), findsOneWidget);
+          expect(popover(), findsNothing);
+          expect(searched, ['alice said hi #cur']);
+
+          // That search answers every longer query.
+          await tester.enterText(
+            find.byType(TextField),
+            '@alice said hi #curr',
+          );
+          await tester.pump();
+          await settleSearch(tester);
+          expect(searched, hasLength(1));
+
+          // Shortening it back to a name's start reopens the chooser.
+          await tester.enterText(find.byType(TextField), '@alice s');
+          await tester.pump();
+          expect(find.text('Alice Smith'), findsOneWidget);
+          await tester.enterText(find.byType(TextField), '');
+          await settleSearch(tester);
+        },
+      );
+
+      testWidgets('members loading later turn prose back into a query', (
+        tester,
+      ) async {
+        final members = Completer<List<ChannelMember>>();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            membersFuture: members.future,
+            channels: [_makeCurrentChannel()],
+            onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            searchPeople: (_) async => const [],
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), '@alice sm #cur');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(channelPopover(), findsOneWidget);
+
+        await tester.enterText(find.byType(TextField), '@alice sm');
+        await tester.pump();
+        await settleSearch(tester);
+        members.complete([
+          ChannelMember(
+            pubkey: '1' * 64,
+            role: 'member',
+            joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            displayName: 'Alice Smith',
+          ),
+        ]);
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Alice Smith'), findsOneWidget);
+        await tester.enterText(find.byType(TextField), '');
         await settleSearch(tester);
       });
 

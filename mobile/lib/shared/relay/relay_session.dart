@@ -168,8 +168,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// A relay without that endpoint answers 404 or 405. The search then uses
   /// NIP-50 ([NostrFilters.searchUsers]), and so do later searches on that
   /// relay for [profileSearchRetry]; after that the endpoint is tried again.
-  /// A query or limit the endpoint does not accept also uses NIP-50.
-  Future<List<NostrEvent>> searchProfiles(
+  /// A query or limit the endpoint does not accept also uses NIP-50. A page
+  /// is `complete` when the endpoint returned fewer than [limit] people
+  /// (counting verified-name events, which are dropped); never from NIP-50.
+  Future<({List<NostrEvent> events, bool complete})> searchProfiles(
     String query, {
     int limit = 50,
     Duration timeout = const Duration(seconds: 8),
@@ -189,10 +191,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           'query': text,
           'limit': limit,
         }, timeout: timeout);
-        return [
-          for (final event in events)
-            if (event.kind == 0) event,
-        ];
+        return (
+          events: events.where((event) => event.kind == 0).toList(),
+          complete: events.length < limit,
+        );
       } on RelayException catch (error) {
         if (error.statusCode != 404 && error.statusCode != 405) rethrow;
         _profileSearchFallback = (
@@ -201,9 +203,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
       }
     }
-    return queryRelay([
-      NostrFilters.searchUsers(text, limit: limit),
-    ], timeout: timeout);
+    return (
+      events: await queryRelay([
+        NostrFilters.searchUsers(text, limit: limit),
+      ], timeout: timeout),
+      complete: false,
+    );
   }
 
   /// How long a relay's 404 or 405 keeps [searchProfiles] on NIP-50.

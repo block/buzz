@@ -81,6 +81,15 @@ MentionCandidate? _spaceMention(
   return shown.rows.where((row) => row.pubkey == key).firstOrNull;
 }
 
+/// Whether [query] is prose (portable mention rules, section 2): it has a
+/// space, and with every search for it finished it names no one. Members or
+/// a search arriving later turn it back into a query.
+bool _mentionIsProse(String query, _MentionRows rows) =>
+    query.contains(' ') &&
+    rows.rows.isEmpty &&
+    !rows.searching &&
+    !rows.searchFailed;
+
 /// Whether [caret] is inside a mention the user already selected at [start].
 /// Such an `@` does not open a query.
 bool _insideSelectedMention(

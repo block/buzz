@@ -3224,7 +3224,9 @@ void main() {
         ),
         findsOneWidget,
       );
-      // A longer query keeps the shown rows while its own search runs.
+      // A longer query starts from the people `b` found. A one-letter page
+      // cannot answer it, since verified names match only from three
+      // characters, so it still searches.
       await tester.enterText(find.byKey(const Key('new-dm-search')), 'bo');
       await tester.pump();
       expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);

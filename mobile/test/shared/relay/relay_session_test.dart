@@ -570,7 +570,9 @@ void main() {
       );
       addTearDown(harness.container.dispose);
 
-      final events = await harness.session.searchProfiles('wes');
+      final (:events, complete: _) = await harness.session.searchProfiles(
+        'wes',
+      );
 
       expect(events.map((e) => e.kind), [0]);
     });
@@ -837,7 +839,7 @@ void main() {
         ),
       );
 
-      final events = await h.container
+      final (:events, complete: _) = await h.container
           .read(relaySessionProvider.notifier)
           .searchProfiles('  wes ', limit: 8);
 
@@ -873,7 +875,10 @@ void main() {
         );
         final session = h.container.read(relaySessionProvider.notifier);
 
-        final events = await session.searchProfiles('wes', limit: 8);
+        final (:events, complete: _) = await session.searchProfiles(
+          'wes',
+          limit: 8,
+        );
         expect(events.map((event) => event.content), [
           jsonEncode({'name': 'wes'}),
         ]);
@@ -918,6 +923,43 @@ void main() {
         '/profiles/search',
         '/query',
       ]);
+    });
+
+    test('a page is complete only when the relay returns fewer people than '
+        'the limit, counting verified names it drops', () async {
+      final h = harness(
+        (request) => http.Response(
+          jsonEncode([
+            profileJson(0, 'wes'),
+            if ((jsonDecode(request.body) as Map)['limit'] == 2)
+              profileJson(30382, 'wesley'),
+          ]),
+          200,
+        ),
+      );
+      final session = h.container.read(relaySessionProvider.notifier);
+
+      final full = await session.searchProfiles('wes', limit: 2);
+      expect(full.events.map((event) => event.kind), [0]);
+      expect(full.complete, isFalse);
+
+      final short = await session.searchProfiles('wes', limit: 3);
+      expect(short.complete, isTrue);
+    });
+
+    test('a NIP-50 page is never complete', () async {
+      final h = harness(
+        (request) => request.url.path == '/profiles/search'
+            ? http.Response('not found', 404)
+            : http.Response('[]', 200),
+      );
+
+      final page = await h.container
+          .read(relaySessionProvider.notifier)
+          .searchProfiles('wes', limit: 8);
+
+      expect(page.events, isEmpty);
+      expect(page.complete, isFalse);
     });
 
     test('surfaces other endpoint errors without a fallback', () async {
