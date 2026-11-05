@@ -33,20 +33,25 @@ async fn index_presence(pool: &PgPool) -> (bool, i64) {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn migration_0084_drops_the_index_within_its_lock_budget() {
-    let (pool, _scratch) = ScratchDb::migrated_through(
-        &admin_url().await,
-        "events_deleted_drop",
-        BEFORE_DROP,
-    )
-    .await;
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "events_deleted_drop", BEFORE_DROP).await;
     let keys = nostr::Keys::generate();
     let community = Uuid::new_v4();
     let channel = Uuid::new_v4();
     seed_community_channel(&pool, community, channel, &keys).await;
     let now = nostr::Timestamp::now().as_secs();
-    insert_top_level(&pool, community, channel, &signed_event_at(&keys, "before", now)).await;
+    insert_top_level(
+        &pool,
+        community,
+        channel,
+        &signed_event_at(&keys, "before", now),
+    )
+    .await;
     let (parent, partitions) = index_presence(&pool).await;
-    assert!(parent && partitions > 0, "0083 carries the partitioned index");
+    assert!(
+        parent && partitions > 0,
+        "0083 carries the partitioned index"
+    );
 
     // A long read holds ACCESS SHARE on `events` and its partitions.
     let mut reader = pool.begin().await.expect("begin reader");
@@ -86,5 +91,11 @@ async fn migration_0084_drops_the_index_within_its_lock_budget() {
     .await
     .expect("look for partition copies");
     assert_eq!(leftover, 0, "no partition keeps a detached copy");
-    insert_top_level(&pool, community, channel, &signed_event_at(&keys, "after", now + 1)).await;
+    insert_top_level(
+        &pool,
+        community,
+        channel,
+        &signed_event_at(&keys, "after", now + 1),
+    )
+    .await;
 }

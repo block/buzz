@@ -909,8 +909,7 @@ mod postgres_tests {
         let drop_deleted = strip_sql_comments(migrations[83].sql.as_str());
         assert!(drop_deleted.contains("SET LOCAL lock_timeout = '1s';"));
         assert!(drop_deleted.contains("SET LOCAL statement_timeout = '5s';"));
-        assert!(drop_deleted
-            .contains("DROP INDEX IF EXISTS public.idx_events_community_deleted;"));
+        assert!(drop_deleted.contains("DROP INDEX IF EXISTS public.idx_events_community_deleted;"));
         assert!(!drop_deleted.contains("CONCURRENTLY"));
         assert!(!crate::test_support::desired_state_schema_sql()
             .contains("idx_events_community_deleted"));

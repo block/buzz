@@ -863,8 +863,11 @@ mod postgres_tests {
         let global = version(0, "global");
         let in_a = version(1, "a");
         let in_b = version(2, "b");
-        for (event, channel) in [(&global, None), (&in_a, Some(channel_a)), (&in_b, Some(channel_b))]
-        {
+        for (event, channel) in [
+            (&global, None),
+            (&in_a, Some(channel_a)),
+            (&in_b, Some(channel_b)),
+        ] {
             assert!(
                 db.replace_addressable_event(community, event, channel)
                     .await
@@ -895,7 +898,10 @@ mod postgres_tests {
             "a global write is ordered against the global head only"
         );
         assert!(!live(&global).await, "the old global head is superseded");
-        assert!(live(&newer_a).await && live(&in_b).await, "channel heads are untouched");
+        assert!(
+            live(&newer_a).await && live(&in_b).await,
+            "channel heads are untouched"
+        );
     }
 
     /// Both channel spellings of the head read and the supersede must reach a
@@ -916,7 +922,7 @@ mod postgres_tests {
             let (head_sql, supersede_sql) = replacement_sql(in_channel);
             for sql in [head_sql, supersede_sql] {
                 let explain = format!("EXPLAIN {sql}");
-                let mut query = sqlx::query_scalar::<_, String>(&explain)
+                let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(explain))
                     .bind(Uuid::new_v4())
                     .bind(10_050_i32)
                     .bind(vec![0_u8; 32]);
