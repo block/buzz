@@ -494,6 +494,8 @@ pub struct BuzzClient {
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
     /// Identity, signer, NIP-OA auth tag and NIP-FI evidence source.
     credentials: Credentials,
+    /// Whether any request has carried a NIP-FI assertion, for error hints.
+    assertion_sent: std::sync::atomic::AtomicBool,
 }
 
 /// A credential header value, marked sensitive so `Debug` output redacts it.
@@ -528,6 +530,7 @@ impl BuzzClient {
             http,
             relay_url,
             credentials,
+            assertion_sent: Default::default(),
         })
     }
 
@@ -601,7 +604,7 @@ impl BuzzClient {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         // Evidence first: a refresh may wait out adapter retries, and the
         // proof must be signed after it, just before sending, to stay fresh.
-        let assertion = self.credentials.evidence(&self.relay_url).await?;
+        let assertion = self.evidence().await?;
         let authorization = match proof {
             Proof::Nip98 { method, url, body } => {
                 format!("Nostr {}", self.credentials.nip98(method, url, body).await?)
@@ -641,7 +644,7 @@ impl BuzzClient {
     /// evidence source).
     async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
-        if let Some(assertion) = self.credentials.evidence(&self.relay_url).await? {
+        if let Some(assertion) = self.evidence().await? {
             let mut value =
                 buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
                     .map_err(|_| CliError::Auth("assertion is not a valid header value".into()))?;
@@ -649,6 +652,16 @@ impl BuzzClient {
             headers.insert(FEDERATED_IDENTITY_HEADER, value);
         }
         Ok(headers)
+    }
+
+    /// The NIP-FI assertion for this relay, noting that one was sent.
+    async fn evidence(&self) -> Result<Option<String>, CliError> {
+        let assertion = self.credentials.evidence(&self.relay_url).await?;
+        if assertion.is_some() {
+            self.assertion_sent
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(assertion)
     }
 
     /// Map a non-2xx relay response to a `CliError`.
@@ -660,7 +673,18 @@ impl BuzzClient {
     fn relay_error(&self, status: u16, body: String) -> CliError {
         let message = extract_relay_message_field(&body).unwrap_or(body);
         let message = message.trim_end().to_owned();
-        if status == 401 && !self.credentials.has_evidence_source() {
+        let sent = self
+            .assertion_sent
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let desktop = self.credentials.is_desktop();
+        if status == 401 && !sent && desktop {
+            return CliError::Auth(format!(
+                "relay requires authentication ({message}); if it enforces federated identity \
+                 (NIP-FI), the Buzz desktop has no assertion for this relay: sign in to this \
+                 community in Buzz, then retry"
+            ));
+        }
+        if status == 401 && !sent && !self.credentials.has_evidence_source() {
             return CliError::Auth(format!(
                 "relay requires authentication ({message}); if it enforces federated identity \
                  (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} to your own NIP-FA sign-in session \
@@ -669,11 +693,15 @@ impl BuzzClient {
             ));
         }
         if status == 403 && self.credentials.auth_tag().is_some() {
+            let hint = if desktop {
+                "the Buzz desktop's NIP-OA auth tag may be stale or revoked; check this \
+                 identity's owner in Buzz"
+            } else {
+                "BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it"
+            };
             return CliError::Relay {
                 status,
-                body: format!(
-                    "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it)"
-                ),
+                body: format!("{message} ({hint})"),
             };
         }
         CliError::Relay {
@@ -3371,6 +3399,70 @@ mod desktop_throttle_tests {
             .await
             .unwrap();
         BuzzClient::new(relay.into(), credentials).unwrap()
+    }
+
+    /// A desktop user's 401 and 403 hints name what they can act on in Buzz,
+    /// not the headless settings.
+    #[tokio::test]
+    async fn desktop_users_get_hints_for_the_desktop() {
+        let app = axum::Router::new().fallback(|req: axum::extract::Request| async move {
+            let status = if req.uri().path() == "/forbidden" {
+                403
+            } else {
+                401
+            };
+            (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                r#"{"error":"no"}"#,
+            )
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let keys = nostr::Keys::generate();
+        let owner = nostr::Keys::generate();
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &keys.public_key(), "").unwrap();
+        let answer = dp::desktop_answers(keys.clone(), vec![relay.clone()]);
+        let (endpoint, _) =
+            dp::provider(move |version, request| match request["method"].as_str() {
+                Some("federated_identity") => serde_json::json!({"result": ""}),
+                Some("auth_tag") => serde_json::json!({"result": tag}),
+                Some("describe") => {
+                    let mut described = answer(version, request);
+                    let mut body: serde_json::Value =
+                        serde_json::from_str(described["result"].as_str().unwrap()).unwrap();
+                    body["methods"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push("auth_tag".into());
+                    described["result"] = body.to_string().into();
+                    described
+                }
+                _ => answer(version, request),
+            })
+            .await;
+        let provider = Provider::open(endpoint, "t".into(), false, &relay)
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        let credentials = crate::credentials::Credentials::from_desktop(provider)
+            .await
+            .unwrap();
+        let client = BuzzClient::new(relay, credentials).unwrap();
+
+        let err = client.get_authed("/api").await.unwrap_err();
+        assert!(
+            matches!(&err, CliError::Auth(m) if m.contains("in Buzz")),
+            "{err:?}"
+        );
+        let err = client.get_authed("/forbidden").await.unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("in Buzz") && !text.contains("BUZZ_AUTH_TAG"),
+            "{text}"
+        );
     }
 
     /// An HTTP relay answering every query with no events.

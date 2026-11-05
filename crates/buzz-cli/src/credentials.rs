@@ -402,6 +402,14 @@ impl Credentials {
         }
     }
 
+    /// Whether the Buzz desktop is the link that holds the key.
+    pub fn is_desktop(&self) -> bool {
+        #[cfg(unix)]
+        return self.desktop.is_some();
+        #[cfg(not(unix))]
+        false
+    }
+
     /// Whether a NIP-FI evidence source is configured.
     pub fn has_evidence_source(&self) -> bool {
         #[cfg(unix)]
