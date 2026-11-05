@@ -1,13 +1,10 @@
 import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
-
 import 'dart:async';
 import 'dart:convert';
-
 import 'package:http/testing.dart';
 import 'package:buzz/shared/widgets/media_loading_placeholder.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
-
 import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;

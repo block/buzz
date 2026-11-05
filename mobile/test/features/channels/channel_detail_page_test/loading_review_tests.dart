@@ -328,6 +328,85 @@ void _loadingReviewTests() {
     expect(bottomPoint.dy, greaterThan(800));
   });
 
+  testWidgets('thread hydration mounts one video preview head', (tester) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final root = _textMsg(
+      id: threadIdVideoDashRoot,
+      pubkey: 'alice',
+      content: '![video](https://example.com/head.mp4)',
+      extraTags: const [
+        [
+          'imeta',
+          'url https://example.com/head.mp4',
+          'm video/mp4',
+          'dim 320x180',
+        ],
+      ],
+    );
+    final replies = Completer<List<NostrEvent>>();
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [root],
+        pendingThreadReplies: {threadIdVideoDashRoot: replies.future},
+        home: ThreadDetailPage(
+          threadHead: formatTimeline([root]).single,
+          allMessages: formatTimeline([root]),
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    final head = find.byKey(
+      const ValueKey(
+        'message-media-video-preview:https://example.com/head.mp4',
+      ),
+      skipOffstage: false,
+    );
+    for (var frame = 0; frame < 10; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(head, findsOneWidget, reason: 'frame $frame');
+    }
+    replies.complete([
+      _textMsg(
+        id: 'video-reply',
+        pubkey: 'bob',
+        content: 'Reply to video',
+        extraTags: const [
+          ['e', threadIdVideoDashRoot, '', 'reply'],
+        ],
+      ),
+    ]);
+    for (var frame = 0; frame < 30; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(head, findsOneWidget, reason: 'frame $frame');
+      expect(head.hitTestable(), findsOneWidget);
+    }
+    final semantics = tester.ensureSemantics();
+    await tester.pump();
+    final video = find.byKey(
+      const ValueKey(
+        'message-media-video-preview:https://example.com/head.mp4',
+      ),
+    );
+    final node = tester.getSemantics(video);
+    var semanticRect = node.rect;
+    for (var ancestor = node; ;) {
+      final transform = ancestor.transform;
+      if (transform != null) {
+        semanticRect = MatrixUtils.transformRect(transform, semanticRect);
+      }
+      final parent = ancestor.parent;
+      if (parent == null) break;
+      ancestor = parent;
+    }
+    expect(semanticRect.contains(tester.getCenter(video)), isTrue);
+    semantics.dispose();
+  });
+
   testWidgets('loaded page formats the timeline only when its events change', (
     tester,
   ) async {
