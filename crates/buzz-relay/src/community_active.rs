@@ -160,6 +160,27 @@ mod tests {
         })
     }
 
+    /// Tasks holding or waiting on `community`'s gate: its leader and every
+    /// waiter queued behind it (the cache's own clone and this probe's are
+    /// excluded).
+    fn gate_holders(cache: &CommunityActiveCache, community: CommunityId) -> usize {
+        cache
+            .reads
+            .gate(&community)
+            .map_or(0, |gate| Arc::strong_count(&gate) - 2)
+    }
+
+    /// Waits, at most 5 s, until `ready` holds.
+    async fn until(ready: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("readiness");
+    }
+
     #[tokio::test]
     async fn concurrent_misses_share_one_read_and_expire_after_max_age() {
         let cache = Arc::new(CommunityActiveCache::new(Duration::from_secs(5)));
@@ -183,8 +204,8 @@ mod tests {
                 })
             })
             .collect();
-        // Let every task reach the gate before the leader's read finishes.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The leader is in its read and the other 15 wait behind its gate.
+        until(|| reads.load(Ordering::SeqCst) == 1 && gate_holders(&cache, community) == 16).await;
         release.send_replace(true);
         for task in tasks {
             assert!(task.await.expect("task").expect("read"));
@@ -217,20 +238,24 @@ mod tests {
         let cache = Arc::new(CommunityActiveCache::new(Duration::from_secs(5)));
         let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
         let (release, mut released) = tokio::sync::watch::channel(false);
+        let leader_reading = Arc::new(AtomicUsize::new(0));
 
         // A leader reads "active" from a snapshot that predates the archive.
         let leader = {
             let cache = Arc::clone(&cache);
+            let leader_reading = Arc::clone(&leader_reading);
             tokio::spawn(async move {
                 cache
                     .get(community, || async move {
+                        leader_reading.fetch_add(1, Ordering::SeqCst);
                         let _ = released.wait_for(|go| *go).await;
                         read_at(true)
                     })
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // In its read, so it observed the epoch before the invalidation.
+        until(|| leader_reading.load(Ordering::SeqCst) == 1).await;
         // A socket that registers after the sweep joins the in-flight read.
         let fresh_reads = Arc::new(AtomicUsize::new(0));
         let waiter = {
@@ -245,7 +270,8 @@ mod tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Queued behind the leader's gate before the sweep's invalidation.
+        until(|| gate_holders(&cache, community) == 2).await;
         cache.invalidate(community);
         release.send_replace(true);
 
