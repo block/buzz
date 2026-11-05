@@ -286,6 +286,29 @@ against them; each cites the PRs where reviewers litigated it.
    non-primary ones — that's where the defects were. (PRs #5958, #5972,
    #6793, #6860, #6862, #6908, #7006)
 
+9. **Design every client-driven path for the whole fleet running it at
+   once.** This rule comes from relay load tests rather than review
+   mining. A rollout drain, node eviction, relay restart, or network blip
+   makes every connected client run its reconnect, renewal, and catch-up
+   paths in the same few seconds, so cost per client times clients is the
+   load that matters. Before adding or changing a connect, reconnect,
+   renewal, poll, or catch-up path:
+   - **Count its relay reads per client** and keep reconnect to a delta
+     from the client's cursor, not a rebuild. One replay filter per
+     channel meant ~306 filters per reconnect for a 300-channel client
+     (block/buzz-app#2308). Re-reading channels whose replay was already
+     complete is the same problem (block/buzz-app#2206).
+   - **Jitter its start and back off on failure with a cap.** Spread the
+     server side of a mass close, too (drain close jitter, PR #4542).
+   - **Prefer an event-driven refresh with a long backstop over a short
+     poll.** For example, a full channel-list re-read every 60 s became
+     every 15 min (block/buzz-app#2215).
+   - **On the relay, check every cache on a connect or auth path at a 0%
+     hit rate.** Concurrent misses for one key share one read. Entries must
+     survive a saturated pool: 1 s caches stamped before the pool wait
+     expired on insert, so storms ran uncached (PRs #8846, #9012).
+     (PRs #4542, #8846, #9012; block/buzz-app#2206, #2215, #2308)
+
 ---
 
 ## Key Patterns
