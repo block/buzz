@@ -62,6 +62,20 @@ pub enum Role {
     Target,
 }
 
+/// Public channel binding for independently authenticated application approval.
+/// This identifies the locked peers and transcript, not their account identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingBinding {
+    /// Identifier derived from this QR session's random secret.
+    pub session_id: [u8; 32],
+    /// The initiating device's ephemeral public key.
+    pub source_pubkey: PublicKey,
+    /// The receiving device's ephemeral public key.
+    pub target_pubkey: PublicKey,
+    /// The commitment verified by `sas-confirm`.
+    pub transcript_hash: [u8; 32],
+}
+
 /// Protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -115,6 +129,8 @@ pub struct PairingSession {
     desktop_code_requested: bool,
     desktop_code: Option<Zeroizing<String>>,
     code_attempts: u8,
+    /// Strict target-side code-entry negotiation and request correlation.
+    target_desktop_code: Option<desktop_code::TargetDesktopCode>,
 }
 
 impl PairingSession {
@@ -150,6 +166,7 @@ impl PairingSession {
             desktop_code_requested: false,
             desktop_code: None,
             code_attempts: 0,
+            target_desktop_code: None,
         };
 
         (session, qr)
@@ -357,6 +374,13 @@ impl PairingSession {
     ///
     /// Returns the session and the `offer` event to publish.
     pub fn new_target(qr: &QrPayload) -> Result<(Self, Event), PairingError> {
+        Self::new_target_with_confirmation(qr, false)
+    }
+
+    fn new_target_with_confirmation(
+        qr: &QrPayload,
+        desktop_code: bool,
+    ) -> Result<(Self, Event), PairingError> {
         let keys = Keys::generate();
         let session_id = derive_session_id(&qr.session_secret);
 
@@ -383,13 +407,14 @@ impl PairingSession {
             desktop_code_requested: false,
             desktop_code: None,
             code_attempts: 0,
+            target_desktop_code: desktop_code.then(desktop_code::TargetDesktopCode::default),
         };
 
         // Build and return the offer event.
         let msg = PairingMessage::Offer {
             session_id: hex::encode(session_id),
             version: 1,
-            confirmation: None,
+            confirmation: desktop_code.then(|| "desktop-code-v1".into()),
         };
         let event = session.build_event(&msg)?;
         session.state = SessionState::Confirming;
@@ -408,6 +433,14 @@ impl PairingSession {
         self.expect_state(SessionState::Confirming)?;
         self.expect_role(Role::Target)?;
         self.validate_event_from_peer(event)?;
+        if let Some(code) = &self.target_desktop_code {
+            if !code.challenged || code.pending_request_id.is_none() {
+                return Err(PairingError::UnexpectedMessage {
+                    expected: "desktop code challenge and submission".into(),
+                    got: "sas-confirm".into(),
+                });
+            }
+        }
 
         let msg = self.decrypt_message(event)?;
         let received_hash = match &msg {
@@ -443,6 +476,9 @@ impl PairingSession {
         }
 
         self.state = SessionState::AwaitingConfirmation;
+        if let Some(code) = &mut self.target_desktop_code {
+            code.pending_request_id = None;
+        }
         self.record_event(event);
         let code = self.sas_code.ok_or(PairingError::SasMismatch)?;
         Ok(format_sas(code))
@@ -487,13 +523,23 @@ impl PairingSession {
 
     /// (Target) Build the `complete` event to publish.
     pub fn send_complete(&mut self) -> Result<Event, PairingError> {
+        self.send_complete_with_result(true)
+    }
+
+    /// (Target) Acknowledge whether the received payload was durably imported.
+    /// Call only after the application has completed its secure-storage attempt.
+    pub fn send_complete_with_result(&mut self, success: bool) -> Result<Event, PairingError> {
         self.check_expired()?;
         self.expect_state(SessionState::PayloadExchanged)?;
         self.expect_role(Role::Target)?;
 
-        let msg = PairingMessage::Complete { success: true };
+        let msg = PairingMessage::Complete { success };
         let event = self.build_event(&msg)?;
-        self.state = SessionState::Completed;
+        self.state = if success {
+            SessionState::Completed
+        } else {
+            SessionState::Aborted
+        };
         Ok(event)
     }
 }
@@ -607,6 +653,45 @@ impl PairingSession {
             session_secret: self.session_secret,
             relays: self.relay_urls.clone(),
         }))
+    }
+
+    /// Capture the live exchange's public channel binding, in source/target
+    /// order on both devices. Source must first accept an offer. Applications
+    /// submit this independently through each user's authenticated session;
+    /// no application credential needs to travel over the pairing protocol.
+    /// This method does not authorize exporting identity material.
+    pub fn binding(&self) -> Result<PairingBinding, PairingError> {
+        self.check_expired()?;
+        if !matches!(
+            self.state,
+            SessionState::Confirming
+                | SessionState::AwaitingConfirmation
+                | SessionState::Transferring
+        ) {
+            return Err(PairingError::UnexpectedMessage {
+                expected: "live pairing with a locked peer".into(),
+                got: "unbound or terminal session".into(),
+            });
+        }
+        let peer = self.peer_pubkey.ok_or(PairingError::SasMismatch)?;
+        let sas_input = self.sas_input.ok_or(PairingError::SasMismatch)?;
+        let own = self.keys.public_key();
+        let (source_pubkey, target_pubkey) = match self.role {
+            Role::Source => (own, peer),
+            Role::Target => (peer, own),
+        };
+        Ok(PairingBinding {
+            session_id: self.session_id,
+            source_pubkey,
+            target_pubkey,
+            transcript_hash: derive_transcript_hash(
+                &self.session_id,
+                &source_pubkey.to_bytes(),
+                &target_pubkey.to_bytes(),
+                &sas_input,
+                &self.session_secret,
+            ),
+        })
     }
 }
 

@@ -293,6 +293,9 @@ enum Cmd {
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
+    /// List huddles and their participants (read-only)
+    #[command(subcommand)]
+    Huddles(HuddlesCmd),
     /// Look up users and manage profiles and presence
     #[command(subcommand)]
     Users(UsersCmd),
@@ -518,7 +521,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n  buzz messages send --channel <UUID> --content \"decision: ship it\" --from-thread <ROOT_EVENT_ID>"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -533,6 +536,9 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
+        /// Thread root event ID: send this as a new top-level message tagged as sent from that thread (like desktop's "Send to channel")
+        #[arg(long, conflicts_with_all = ["reply_to", "broadcast"])]
+        from_thread: Option<String>,
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
@@ -605,6 +611,31 @@ pub enum MessagesCmd {
         /// Optional human-readable public reason for the tombstone
         #[arg(long)]
         public_reason: Option<String>,
+    },
+    /// Report a message or user to the community moderators (NIP-56)
+    #[command(
+        group = clap::ArgGroup::new("target").required(true).args(["event", "pubkey"]),
+        after_help = "Examples:\n  buzz messages report --event <EVENT_ID> --reason spam\n  buzz messages report --channel <UUID> --event <EVENT_ID> --reason other --note \"off-topic ads\"\n  buzz messages report --pubkey <PUBKEY> --reason impersonation\n\nReasons: illegal, nudity, malware, spam, impersonation, profanity, other.\nA report goes to the moderation queue only; it is never shown in the channel."
+    )]
+    Report {
+        /// Channel UUID the message is in; checked against the message when given
+        #[arg(long, conflicts_with = "pubkey")]
+        channel: Option<String>,
+        /// Event ID of the message to report (64-char hex)
+        #[arg(long)]
+        event: Option<String>,
+        /// Pubkey of a user to report without a message (64-char hex)
+        #[arg(long)]
+        pubkey: Option<String>,
+        /// Why you are reporting
+        #[arg(
+            long,
+            value_parser = clap::builder::PossibleValuesParser::new(buzz_sdk::REPORT_TYPES)
+        )]
+        reason: String,
+        /// Optional note for the moderators
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Retrieve messages from a channel
     #[command(
@@ -691,6 +722,19 @@ pub enum ChannelsCmd {
         #[arg(long, default_value_t = false)]
         member: bool,
         /// Maximum number of channels to return [default: 500]
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Unread message counts from your synced read state (read-only)
+    #[command(
+        after_help = "Examples:\n  buzz channels unread\n  buzz channels unread --channel <uuid> --channel <uuid>\n  buzz channels unread --limit 20\n\nOutput: [{channel_id, name, last_read_at, unread_count, capped}]. `capped: true` means unread_count is a lower bound. When more channels exist than --limit (at most 200), the rest are listed in a stderr warning count and not counted. Fails if a read-state slot cannot be decrypted or decoded."
+    )]
+    Unread {
+        /// Count only these channels (repeatable, at most 200). Default: every
+        /// non-archived channel you are a member of
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Most channels to count [default: 200, max: 200]
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -1108,8 +1152,18 @@ pub enum UsersCmd {
         #[arg(long)]
         emoji: Option<String>,
         /// Remove your status entirely
-        #[arg(long, conflicts_with_all = ["text", "emoji"])]
+        #[arg(long, conflicts_with_all = ["text", "emoji", "expires"])]
         clear: bool,
+        /// Clear the status automatically: a future unix timestamp or a
+        /// duration such as 30m, 2h, 1d, 1w
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    /// Read user statuses (NIP-38 kind:30315); expired or cleared statuses are omitted
+    Status {
+        /// Pubkey (hex or npub) or exact display name (repeatable, max 100; default: you)
+        #[arg(long = "pubkey")]
+        pubkeys: Vec<String>,
     },
 }
 
@@ -1189,6 +1243,31 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HuddlesCmd {
+    /// List a channel's huddles with their state and start/end times
+    List {
+        /// Channel UUID the huddles were started in
+        #[arg(long)]
+        channel: String,
+        /// Only huddles that are still active
+        #[arg(long)]
+        active: bool,
+        /// Maximum number of huddles to return, newest first
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
+    },
+    /// Show who is currently in a huddle
+    Participants {
+        /// Channel UUID the huddle was started in
+        #[arg(long)]
+        channel: String,
+        /// Huddle ID (the `huddle` field of `huddles list`)
+        #[arg(long)]
+        huddle: String,
     },
 }
 
@@ -2330,6 +2409,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
+        Cmd::Huddles(sub) => commands::huddles::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
@@ -2420,6 +2500,29 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn messages_send_from_thread_conflicts_with_reply_and_broadcast() {
+        let base = [
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "--content",
+            "x",
+            "--from-thread",
+        ];
+        let with = |extra: &[&'static str]| {
+            let mut args = base.to_vec();
+            args.push("a");
+            args.extend(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(with(&[]).is_ok());
+        assert!(with(&["--reply-to", "b"]).is_err());
+        assert!(with(&["--broadcast"]).is_err());
     }
 
     #[test]
@@ -2521,6 +2624,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "huddles",
             "issues",
             "media",
             "mem",
@@ -2594,6 +2698,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "report",
                 "search",
                 "send",
                 "send-diff",
@@ -2619,6 +2724,7 @@ mod tests {
                 "set-add-policy",
                 "topic",
                 "unarchive",
+                "unread",
                 "update"
             ]
         );
@@ -2642,7 +2748,8 @@ mod tests {
                 "presence",
                 "set-presence",
                 "set-profile",
-                "set-status"
+                "set-status",
+                "status"
             ]
         );
         assert_eq!(
@@ -2730,13 +2837,14 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("huddles", 2),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
@@ -2745,7 +2853,7 @@ mod tests {
             ("repos", 6),
             ("social", 7),
             ("upload", 1),
-            ("users", 5),
+            ("users", 6),
             ("workflows", 8),
         ];
 

@@ -127,10 +127,6 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
-    /// Replica freshness budget for fleet usage telemetry
-    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
-    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
-    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -413,6 +409,10 @@ pub struct Config {
     /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+
+    /// Permit new irreversible FI upgrade acceptances. Default off; receipt
+    /// recovery/status remain available (`BUZZ_NIP_FI_UPGRADES_ENABLED`).
+    pub nip_fi_upgrades_enabled: bool,
 
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
@@ -708,16 +708,6 @@ impl Config {
             })?,
             Err(_) => 0,
         };
-        let usage_metrics_replica_max_age_ms =
-            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
-                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
-                    ConfigError::InvalidValue(
-                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
-                            .to_string(),
-                    )
-                })?,
-                Err(_) => 30_000,
-            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -1460,7 +1450,6 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
-            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
             redis_pool_size,
@@ -1524,6 +1513,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_upgrades_enabled: parse_bool("BUZZ_NIP_FI_UPGRADES_ENABLED", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1594,6 +1584,37 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
+    }
+
+    #[test]
+    fn nip_fi_upgrade_acceptance_is_explicitly_default_off() {
+        let (_fi, _cfg) = env_guards();
+        let before = std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED").ok();
+        std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED");
+        assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        for value in ["true", "TRUE", "1", "on", " On "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        for value in ["false", "FALSE", "0", "off", "", " Off "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                !Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "treu");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::InvalidValue(message))
+            if message.contains("BUZZ_NIP_FI_UPGRADES_ENABLED must be true or false"))
+        );
+        match before {
+            Some(value) => std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value),
+            None => std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED"),
+        }
     }
 
     // The three `source=database` startup guards. Mutation: dropping any one
@@ -2487,35 +2508,6 @@ mod tests {
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
-
-        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        let defaults = Config::from_env().expect("config");
-
-        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
-        let disabled = Config::from_env().expect("config");
-
-        if let Some(value) = previous_usage {
-            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        }
-        if let Some(value) = previous_serving {
-            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        }
-
-        assert_eq!(defaults.replica_read_max_age_ms, 0);
-        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
-        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
     }
 
     #[test]

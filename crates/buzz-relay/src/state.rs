@@ -1347,7 +1347,8 @@ pub const RESTRICTION_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::
 /// How long a pod serves a cached host → community mapping after the
 /// database read that produced it began, at its connection checkout (see
 /// [`AppState::tenant_host_cache`]).
-pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
+pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration =
+    buzz_db::community_auth::POLICY_LEASE_MAX_AGE;
 
 /// How long a cache miss waits for a shared read's statement, beyond the
 /// writer pool's acquire timeout that its holder may spend waiting for a
@@ -1553,11 +1554,12 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
-    /// Ephemeral-path cache of `is_serving_active` (community not archived or
-    /// deleted). Key: community. TTL only (10s). Persistent ingest keeps the
-    /// uncached read as its durable write fence; on the ephemeral path archive
-    /// also disconnects the community's live sockets.
-    pub serving_active_cache: Arc<moka::sync::Cache<CommunityId, bool>>,
+    /// Community lifecycle answers for socket admission and the ephemeral
+    /// write fence, served for
+    /// [`crate::community_active::COMMUNITY_ACTIVE_MAX_AGE`] after their read's
+    /// connection checkout. Persistent ingest keeps its uncached read as its
+    /// durable write fence, and lifecycle revalidation reads fresh.
+    pub(crate) community_active: Arc<crate::community_active::CommunityActiveCache>,
     /// Cache of the raw ban/timeout row, not the verdict, so a timeout still
     /// lifts the moment `muted_until` passes. (`banned` is computed at read
     /// time, so an expiring ban can outlive its expiry by up to
@@ -1580,7 +1582,7 @@ pub struct AppState {
     /// an entry is served only for [`TENANT_HOST_CACHE_MAX_AGE`] after its
     /// read's connection checkout: a host remapped, archived or deleted
     /// elsewhere resolves to its old community for at most that long.
-    pub tenant_host_cache: Arc<moka::sync::Cache<String, (CommunityId, Instant)>>,
+    pub tenant_host_cache: Arc<crate::host_cache::HostCache>,
     /// Lets concurrent misses on [`Self::tenant_host_cache`] share one read.
     pub(crate) tenant_host_reads: Arc<crate::shared_reads::SharedReads<String>>,
 
@@ -1601,7 +1603,8 @@ pub struct AppState {
     /// NIP-FI federated-identity assertion verifier, shared across all HTTP
     /// ingress and WebSocket upgrade checks.
     ///
-    /// `None` when `config.nip_fi.mode` is `Off`. When present, the verifier
+    /// `None` when FI evaluation is disabled, including database-sourced Off
+    /// deployments. When present, the verifier
     /// is the single offline authority for assertion validation on every
     /// protected HTTP surface and WebSocket upgrade. The backing `ProductionJwksSource` is also
     /// shared and performs bounded periodic JWKS refresh internally.
@@ -1613,6 +1616,9 @@ pub struct AppState {
     /// erased form costs one vtable dispatch per request, which is negligible
     /// relative to the JWT crypto.
     pub nip_fi_verifier: Option<Arc<dyn buzz_auth::VerifyAssertion>>,
+
+    /// Primary-database policy lookup; tests can substitute the same source seam.
+    pub(crate) nip_fi_policy: Arc<dyn crate::nip_fi_policy::PolicySource>,
 
     /// The shared JWKS source backing `nip_fi_verifier`, exposed so `main.rs`
     /// can warm it at startup and drive the background refresh loop.
@@ -1650,6 +1656,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Whether local FI admission dependencies can serve a stored requirement.
+    /// This is not fleet activation or registry-baseline verification.
+    pub fn nip_fi_required_admission_ready(&self) -> bool {
+        crate::nip_fi_policy::required_dependencies_ready(self)
+    }
+
     /// The NIP-FI community source admission resolves against.
     pub(crate) fn nip_fi_communities(&self) -> crate::nip_fi_core::Communities<'_> {
         use crate::nip_fi_config::CommunitySource;
@@ -1679,6 +1691,7 @@ impl AppState {
         relay_keypair: nostr::Keys,
         media_storage: MediaStorage,
     ) -> (Self, AuditShutdownHandle) {
+        let nip_fi_policy = Arc::new(db.clone());
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
@@ -1860,12 +1873,9 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
-            serving_active_cache: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
-                    .build(),
-            ),
+            community_active: Arc::new(crate::community_active::CommunityActiveCache::new(
+                shared_read_wait,
+            )),
             // Readers use an entry only for `RESTRICTION_CACHE_MAX_AGE`; the
             // TTL just reclaims memory.
             restriction_cache: Arc::new(
@@ -1878,12 +1888,7 @@ impl AppState {
                 100_000,
                 shared_read_wait,
             )),
-            tenant_host_cache: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
-                    .build(),
-            ),
+            tenant_host_cache: Arc::new(crate::host_cache::HostCache::new()),
             tenant_host_reads: Arc::new(crate::shared_reads::SharedReads::new(
                 10_000,
                 shared_read_wait,
@@ -1895,6 +1900,7 @@ impl AppState {
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
             nip_fi_verifier,
+            nip_fi_policy,
             nip_fi_jwks_source,
             // NIP-FI deny map and command verifier are initialized lazily by
             // `build_nip_fi_command_components` in `api::nip_fi`, called from
@@ -1992,22 +1998,17 @@ impl AppState {
         Ok(result)
     }
 
-    /// `is_serving_active` with a 10-second cache, for the ephemeral path only.
-    /// Errors are not cached.
-    pub async fn is_serving_active_cached(
+    /// `is_community_active` served from [`Self::community_active`], for
+    /// socket admission and the ephemeral write fence. Errors are not cached.
+    pub async fn is_community_active_cached(
         &self,
         community_id: CommunityId,
     ) -> Result<bool, buzz_db::DbError> {
-        if let Some(cached) = self.serving_active_cache.get(&community_id) {
-            metrics::counter!("buzz_serving_active_cache_hits_total").increment(1);
-            return Ok(cached);
-        }
-        metrics::counter!("buzz_serving_active_cache_misses_total").increment(1);
-        let result = buzz_deletion::store(&self.db)
-            .is_serving_active(community_id)
-            .await?;
-        self.serving_active_cache.insert(community_id, result);
-        Ok(result)
+        self.community_active
+            .get(community_id, || {
+                self.db.is_community_active_read_at(community_id)
+            })
+            .await
     }
 
     /// `moderation_restriction_state` served from [`Self::restriction_cache`]
@@ -2197,6 +2198,10 @@ impl AppState {
         invalidation: CacheInvalidation,
     ) {
         match invalidation {
+            CacheInvalidation::CommunityHost { host } => {
+                self.tenant_host_cache.invalidate(&host);
+                self.community_active.invalidate(community_id);
+            }
             CacheInvalidation::Membership { channel_id, pubkey } => {
                 self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
@@ -2210,6 +2215,19 @@ impl AppState {
                 self.invalidate_channel_deleted_local(community_id);
             }
         }
+    }
+
+    /// Drop the host's policy/routing snapshot locally and best-effort on peers.
+    /// Lease expiry, not notification delivery, protects acceptance consistency.
+    pub fn invalidate_community_host(&self, tenant: &TenantContext) {
+        self.tenant_host_cache.invalidate(tenant.host());
+        self.community_active.invalidate(tenant.community());
+        self.spawn_cache_invalidation(
+            tenant,
+            CacheInvalidation::CommunityHost {
+                host: tenant.host().to_owned(),
+            },
+        );
     }
 
     /// Close everything `pubkey` has open in `community` on this pod: root
@@ -2491,6 +2509,9 @@ impl AppState {
         community_id: CommunityId,
         archived_at: Option<DateTime<Utc>>,
     ) -> Result<Option<usize>, buzz_db::DbError> {
+        self.tenant_host_cache.invalidate_community(community_id);
+        // Before the sweep, so a socket registered after it reads afresh.
+        self.community_active.invalidate(community_id);
         match archived_at {
             Some(archived_at) => {
                 self.db
@@ -2766,10 +2787,8 @@ impl AuditShutdownHandle {
 
 /// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
 ///
-/// Returns `(None, None)` when the mode is `Off` or `DenyProtected` (the
-/// verifier is never consulted there; admission always returns 503). In
-/// `Enforce` mode, constructs a `ProductionJwksSource` (shared via `Arc`)
-/// and a `FederatedAssertionVerifier` over a clone of that `Arc`.
+/// Only evaluating modes construct these components. Off and repair mode
+/// need no verifier or outbound JWKS traffic. The JWKS source is shared via `Arc`.
 /// The source starts empty; HTTP admission returns `authorization_unavailable`
 /// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 type NipFiComponents = (
@@ -2872,6 +2891,37 @@ pub(crate) mod tests {
     use crate::connection::{AuthState, ConnectionState};
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn fi_components_exist_only_in_evaluating_modes() {
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.jwks_configs = vec![buzz_auth::IssuerJwksConfig {
+            issuer: "https://issuer.example".to_owned(),
+            contract: buzz_auth::JwksSourceContract::new(
+                "https://issuer.example/.well-known/jwks.json".to_owned(),
+                300,
+                3600,
+            )
+            .expect("valid test contract"),
+        }];
+        for source in [
+            crate::nip_fi_config::CommunitySource::Env,
+            crate::nip_fi_config::CommunitySource::Database,
+        ] {
+            config.nip_fi.source = source;
+            for mode in [
+                buzz_auth::NipFiMode::Off,
+                buzz_auth::NipFiMode::Shadow,
+                buzz_auth::NipFiMode::Enforce,
+                buzz_auth::NipFiMode::DenyProtected,
+            ] {
+                config.nip_fi.mode = mode;
+                let (verifier, jwks) = build_nip_fi_components(&config);
+                assert_eq!(verifier.is_some(), mode.evaluates(), "{source:?} {mode:?}");
+                assert_eq!(jwks.is_some(), mode.evaluates(), "{source:?} {mode:?}");
+            }
+        }
+    }
 
     /// Helper: create a ConnectionManager with one registered connection.
     /// Returns (manager, conn_id, receiver, ctrl_receiver, cancel,
@@ -3434,7 +3484,9 @@ pub(crate) mod tests {
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
-        build_test_state(config, pool).await
+        let mut state = (*build_test_state(config, pool).await).clone();
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
+        Arc::new(state)
     }
 
     /// The same test state with an unreachable database target. This lets
@@ -3446,12 +3498,15 @@ pub(crate) mod tests {
     pub(crate) async fn test_state_with_unreachable_database_url(
         database_url: &str,
     ) -> Arc<AppState> {
-        test_state_with_database_url_and_pool_options(
+        let mut state = (*test_state_with_database_url_and_pool_options(
             database_url,
             sqlx::postgres::PgPoolOptions::new()
                 .acquire_timeout(std::time::Duration::from_millis(100)),
         )
-        .await
+        .await)
+            .clone();
+        state.nip_fi_policy = Arc::new(crate::nip_fi_policy::OptionalPolicy);
+        Arc::new(state)
     }
 
     /// Test state whose config and writer pool both target `database_url`,
@@ -3764,7 +3819,7 @@ pub(crate) mod tests {
         /// cache's max age, share one read, and its entry still lands fresh:
         /// waiters wait out the leader's pool wait, and the entry is stamped
         /// at connection checkout, not when the miss began.
-        /// Mutations: stamp any of the three entries before the pool wait,
+        /// Mutations: stamp any of the four entries before the pool wait,
         /// or let waiters give up after the cache's max age → RED.
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres"]
@@ -3792,6 +3847,7 @@ pub(crate) mod tests {
             let wait = RESTRICTION_CACHE_MAX_AGE
                 .max(TENANT_HOST_CACHE_MAX_AGE)
                 .max(OPEN_CHANNELS_MAX_AGE)
+                .max(crate::community_active::COMMUNITY_ACTIVE_MAX_AGE)
                 .max(SHARED_READ_STATEMENT_WAIT)
                 + std::time::Duration::from_millis(500);
             let misses = 8;
@@ -3848,6 +3904,78 @@ pub(crate) mod tests {
                 .get(&community)
                 .expect("open-set entry");
             assert!(open.read_at.elapsed() < OPEN_CHANNELS_MAX_AGE);
+
+            let active = behind_held_connection(&pool, wait, misses, || {
+                let reader = Arc::clone(&state);
+                async move { reader.is_community_active_cached(community).await }
+            })
+            .await;
+            assert!(active
+                .into_iter()
+                .all(|active| active.expect("community active read")));
+            assert_eq!(
+                counted(&snapshotter, "buzz_community_active_cache_misses_total"),
+                1
+            );
+            let (_, read_at) = state
+                .community_active
+                .entry(community)
+                .expect("community active entry");
+            assert!(read_at.elapsed() < crate::community_active::COMMUNITY_ACTIVE_MAX_AGE);
+        }
+
+        /// A cached "active" never outlives an archive: an archive this pod
+        /// applies refuses the next check at once, and one it never hears
+        /// about refuses it once the entry is past its max age.
+        /// Mutations: drop the invalidation from `apply_community_disconnect`
+        /// (the first refusal admits), or serve entries past
+        /// `COMMUNITY_ACTIVE_MAX_AGE` (the second admits) → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn archived_community_is_refused_after_invalidation_or_max_age() {
+            let state = test_state().await;
+            let archive = |community: CommunityId| {
+                let pool = state.db.pool().clone();
+                async move {
+                    sqlx::query_scalar::<_, DateTime<Utc>>(
+                        "UPDATE communities SET archived_at = now() WHERE id = $1 RETURNING archived_at",
+                    )
+                    .bind(community.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("archive")
+                }
+            };
+            let community = |label: &str| {
+                let db = state.db.clone();
+                let host = format!("{label}-{}.local", Uuid::new_v4());
+                async move { db.ensure_configured_community(&host).await.unwrap().id }
+            };
+
+            let applied = community("archive-applied").await;
+            assert!(state.is_community_active_cached(applied).await.unwrap());
+            let archived_at = archive(applied).await;
+            assert!(
+                state.is_community_active_cached(applied).await.unwrap(),
+                "within its max age the cached answer stands"
+            );
+            state
+                .apply_community_disconnect(applied, Some(archived_at))
+                .await
+                .expect("disconnect");
+            assert!(
+                !state.is_community_active_cached(applied).await.unwrap(),
+                "an applied archive must refuse the next socket"
+            );
+
+            let missed = community("archive-missed").await;
+            assert!(state.is_community_active_cached(missed).await.unwrap());
+            archive(missed).await;
+            tokio::time::sleep(crate::community_active::COMMUNITY_ACTIVE_MAX_AGE).await;
+            assert!(
+                !state.is_community_active_cached(missed).await.unwrap(),
+                "an unheard archive must refuse once the entry expires"
+            );
         }
 
         /// Open-set reads park on a lock on `channels`, where the test counts

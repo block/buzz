@@ -557,7 +557,10 @@ actor NativeEmojiRemoteImageLoader {
   }
 
   private static func download(_ request: URLRequest) async throws -> UIImage {
-    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+    let (bytes, response) = try await URLSession.shared.bytes(
+      for: request,
+      delegate: NativeEmojiRedirectPolicy.shared
+    )
     guard
       let httpResponse = response as? HTTPURLResponse,
       (200..<300).contains(httpResponse.statusCode)
@@ -617,6 +620,26 @@ actor NativeEmojiRemoteImageLoader {
       by: cgImage.height
     )
     return overflow ? Int.max : cost
+  }
+}
+
+/// Mirrors the Dart hosted HTTP client, which disables redirects for requests
+/// carrying the relay assertion: a redirect must not forward that bearer token
+/// to another host. The 3xx then fails the load like any non-2xx response.
+final class NativeEmojiRedirectPolicy: NSObject, URLSessionTaskDelegate {
+  static let shared = NativeEmojiRedirectPolicy()
+  static let relayAssertionHeader = "Nostr-Federated-Identity"
+
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    let carriesAssertion =
+      task.originalRequest?.value(forHTTPHeaderField: Self.relayAssertionHeader) != nil
+    completionHandler(carriesAssertion ? nil : request)
   }
 }
 

@@ -60,6 +60,12 @@ class HostedJourneyFixture {
   HostedFlow get flow => activeFlow!;
   late ProviderContainer container;
   String? bound;
+
+  /// Binding these pubkeys answers [bindStatus]; [challengeStatus] fails the
+  /// challenge first.
+  final rejectedBindings = <String>{};
+  int bindStatus = 409;
+  int? challengeStatus;
   int starterFailures = 0;
   final policyResponses = <http.Response>[];
   int browserStarts = 0;
@@ -223,6 +229,7 @@ class HostedJourneyFixture {
         'failed_backup_ids': <String>[],
       };
     } else if (path.endsWith('/challenge')) {
+      if (challengeStatus != null) return http.Response('{}', challengeStatus!);
       result = {
         'challenge_id': '12345678-1234-1234-1234-123456789abc',
         'nonce': 'a' * 43,
@@ -234,6 +241,9 @@ class HostedJourneyFixture {
       final event =
           jsonDecode(jsonDecode(request.body)['signed_payload'] as String)
               as Map;
+      if (rejectedBindings.contains(event['pubkey'])) {
+        return http.Response('{}', bindStatus);
+      }
       bound = event['pubkey'] as String;
       result = {
         'identity': {'pubkey_hex': bound},
@@ -581,7 +591,7 @@ class HostedJourneyFixture {
         .open(
           Uri(
             scheme: 'buzz',
-            host: invite ? 'join' : 'add',
+            host: invite ? 'join' : 'add-community',
             queryParameters: {
               'relay': 'wss://$name.communities.buzz.xyz',
               if (invite) 'code': 'invite-$name',

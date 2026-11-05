@@ -28,7 +28,6 @@ enum PoolOperation {
     ReaderSubscriptionHistory,
     WriterEventWrite,
     WriterMaintenance,
-    ReaderMaintenance,
 }
 
 /// Writer-pool operations. Reader-only combinations cannot be constructed.
@@ -77,17 +76,14 @@ pub(crate) enum ReaderOperation {
     Bootstrap,
     Authorization,
     SubscriptionHistory,
-    /// Leader-only background reads such as fleet usage telemetry.
-    Maintenance,
 }
 
 impl ReaderOperation {
     #[cfg(test)]
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 3] = [
         Self::Bootstrap,
         Self::Authorization,
         Self::SubscriptionHistory,
-        Self::Maintenance,
     ];
 
     const fn pair(self) -> PoolOperation {
@@ -95,26 +91,12 @@ impl ReaderOperation {
             Self::Bootstrap => PoolOperation::ReaderBootstrap,
             Self::Authorization => PoolOperation::ReaderAuthorization,
             Self::SubscriptionHistory => PoolOperation::ReaderSubscriptionHistory,
-            Self::Maintenance => PoolOperation::ReaderMaintenance,
         }
-    }
-
-    /// Whether a dropped checkout must close the connection under SQLx's
-    /// bounded `close_on_drop` instead of returning it to the pool.
-    ///
-    /// Maintenance reads run under relay-side deadlines that drop them
-    /// mid-query when a reader goes dark, and the reader pool is shared with
-    /// serving reads. The pool's release check is bounded, but SQLx's own
-    /// release ping after it is not, so a returned connection whose reader
-    /// goes silent in that window still strands its slot. Close-on-drop
-    /// bounds the whole release. Serving reads keep pooled reuse.
-    pub(crate) const fn bounded_release(self) -> bool {
-        matches!(self, Self::Maintenance)
     }
 }
 
 impl PoolOperation {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::WriterBootstrap,
         Self::ReaderBootstrap,
         Self::WriterReadiness,
@@ -126,15 +108,13 @@ impl PoolOperation {
         Self::ReaderSubscriptionHistory,
         Self::WriterEventWrite,
         Self::WriterMaintenance,
-        Self::ReaderMaintenance,
     ];
 
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
-            Self::ReaderBootstrap
-            | Self::ReaderAuthorization
-            | Self::ReaderSubscriptionHistory
-            | Self::ReaderMaintenance => DbPoolRole::Reader.as_str(),
+            Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
+                DbPoolRole::Reader.as_str()
+            }
             _ => DbPoolRole::Writer.as_str(),
         }
     }
@@ -150,7 +130,7 @@ impl PoolOperation {
                 "subscription_history"
             }
             Self::WriterEventWrite => "event_write",
-            Self::WriterMaintenance | Self::ReaderMaintenance => "maintenance",
+            Self::WriterMaintenance => "maintenance",
         }
     }
 
@@ -159,7 +139,7 @@ impl PoolOperation {
     }
 }
 
-pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
+pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
     (DbPoolRole::Writer.as_str(), "bootstrap"),
     (DbPoolRole::Reader.as_str(), "bootstrap"),
     (DbPoolRole::Writer.as_str(), "readiness"),
@@ -171,10 +151,9 @@ pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
     (DbPoolRole::Reader.as_str(), "subscription_history"),
     (DbPoolRole::Writer.as_str(), "event_write"),
     (DbPoolRole::Writer.as_str(), "maintenance"),
-    (DbPoolRole::Reader.as_str(), "maintenance"),
 ];
 
-/// Twelve valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+/// Eleven valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
 pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,17 +292,21 @@ fn record_pool_acquire(
 ) {
     // Preserve the original observed population for existing dashboards.
     // Newly instrumented raw-pool seams must not create a deployment-time
-    // discontinuity in these compatibility families.
+    // discontinuity in these compatibility families. They carry `operation`
+    // so a breakdown by it attributes every sample instead of reporting it
+    // as unlabelled; summing over `operation` gives the original series.
     if emit_legacy && outcome != Outcome::Cancelled {
         metrics::histogram!(
             "buzz_db_pool_acquire_wait_seconds",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .record(elapsed.as_secs_f64());
         metrics::counter!(
             "buzz_db_pool_acquisitions_total",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .increment(1);
@@ -657,10 +640,9 @@ mod tests {
                 PoolOperation::ReaderBootstrap,
                 PoolOperation::ReaderAuthorization,
                 PoolOperation::ReaderSubscriptionHistory,
-                PoolOperation::ReaderMaintenance,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 216);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 198);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
@@ -786,15 +768,24 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
 
+        for name in [
+            "buzz_db_pool_acquire_wait_seconds",
+            "buzz_db_pool_acquisitions_total",
+        ] {
+            let labels = [
+                ("operation", "subscription_history"),
+                ("outcome", "timeout"),
+                ("pool_role", "reader"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>();
+            assert!(
+                keys.contains(&(name.to_owned(), labels)),
+                "legacy family {name} must carry the operation label; got {keys:?}"
+            );
+        }
         for expected in [
-            (
-                "buzz_db_pool_acquire_wait_seconds",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
-            (
-                "buzz_db_pool_acquisitions_total",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
             (
                 "buzz_db_advisory_lock_wait_seconds",
                 [("lock_type", "replacement"), ("outcome", "success")],
@@ -841,15 +832,8 @@ mod tests {
             "buzz_db_pool_acquisitions_total",
         ] {
             assert!(
-                !keys.contains(&(
-                    name.to_owned(),
-                    [
-                        ("outcome".to_owned(), "success".to_owned()),
-                        ("pool_role".to_owned(), "writer".to_owned()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )),
+                !keys.iter().any(|(key, labels)| key == name
+                    && labels.get("pool_role").map(String::as_str) == Some("writer")),
                 "newly instrumented seams must not expand legacy metric population"
             );
         }
@@ -1566,7 +1550,6 @@ mod tests {
         let _ = writer_db
             .with_inactive_community_fence(test_scope, |_| ())
             .await;
-        let _ = writer_db.usage_community_count().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
         let deletion_store = writer_db.deletion_store();
         let _ = deletion_store.reap_expired_serving_write_leases(1).await;
@@ -1575,7 +1558,6 @@ mod tests {
         let _ = routed_db
             .query_events_routed("pool_operation_matrix_reader", &query)
             .await;
-        let _ = routed_db.usage_fleet_stock_snapshot().await;
         routed_db.refresh_pool_waiter_metrics();
 
         let snapshot = snapshotter.snapshot().into_vec();

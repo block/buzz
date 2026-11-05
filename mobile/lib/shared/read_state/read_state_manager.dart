@@ -17,8 +17,50 @@ import '../theme/community_theme_preference.dart';
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
+  final String Function(Uint8List conversationKey, String ciphertext) _decrypt;
+  final int _maxRetainedLength;
 
-  const ReadStateCrypto._(this.conversationKey);
+  /// Plaintext by ciphertext, least recently used first. NIP-44 payloads
+  /// carry a random nonce and a MAC, so under this one conversation key the
+  /// same ciphertext always decrypts to the same plaintext. Every publish
+  /// re-reads up to [readStateFetchLimit] of our own blobs, every resume
+  /// replays them on the live subscription, and the relay echoes each
+  /// publish back, so most decrypts here repeat a ciphertext this instance
+  /// already decrypted or produced. Decrypting is pure-Dart ChaCha20 and HMAC
+  /// on the UI isolate, so repeats are served from this memo.
+  final Map<String, String> _plaintextByCiphertext = {};
+  int _retainedLength = 0;
+
+  /// Upper bound on the code units the memo retains, counting each ciphertext
+  /// key and its plaintext, so it cannot grow without limit however large the
+  /// blobs get (about 8 MB of one-byte strings at the default). Each slot's
+  /// current blob costs up to about 95,000 (a 40 KiB plaintext and its
+  /// base64 ciphertext), so this holds about 80 slots. The replay walks every
+  /// slot in turn, so a bound below the live slots' total evicts each entry
+  /// before its next use and nothing hits; an account with 27 slots measured
+  /// about 2.6M.
+  static const defaultMaxRetainedLength = 8000000;
+
+  ReadStateCrypto._(
+    this.conversationKey, {
+    String Function(Uint8List conversationKey, String ciphertext) decrypt =
+        nip44Decrypt,
+    int maxRetainedLength = defaultMaxRetainedLength,
+  }) : _decrypt = decrypt,
+       _maxRetainedLength = maxRetainedLength;
+
+  /// Builds a crypto around a known key with a counting or bounded memo.
+  @visibleForTesting
+  ReadStateCrypto.forTesting(
+    Uint8List conversationKey, {
+    String Function(Uint8List conversationKey, String ciphertext) decrypt =
+        nip44Decrypt,
+    int maxRetainedLength = defaultMaxRetainedLength,
+  }) : this._(
+         conversationKey,
+         decrypt: decrypt,
+         maxRetainedLength: maxRetainedLength,
+       );
 
   static ReadStateCrypto? tryCreate({
     required String nsec,
@@ -36,10 +78,45 @@ class ReadStateCrypto {
     }
   }
 
-  String encrypt(String plaintext) => nip44Encrypt(conversationKey, plaintext);
+  String encrypt(String plaintext) {
+    final ciphertext = nip44Encrypt(conversationKey, plaintext);
+    // The relay echoes this blob back, and the next publish fetches it.
+    _remember(ciphertext, plaintext);
+    return ciphertext;
+  }
 
-  String decrypt(String ciphertext) =>
-      nip44Decrypt(conversationKey, ciphertext);
+  /// Throws on a ciphertext that does not decrypt, every time: failures are
+  /// never memoized.
+  String decrypt(String ciphertext) {
+    final known = _plaintextByCiphertext.remove(ciphertext);
+    if (known != null) {
+      // Most recently used goes last, so superseded blobs are evicted first.
+      _plaintextByCiphertext[ciphertext] = known;
+      return known;
+    }
+    final plaintext = _decrypt(conversationKey, ciphertext);
+    _remember(ciphertext, plaintext);
+    return plaintext;
+  }
+
+  void _remember(String ciphertext, String plaintext) {
+    final cost = ciphertext.length + plaintext.length;
+    if (cost > _maxRetainedLength) return;
+    final replaced = _plaintextByCiphertext.remove(ciphertext);
+    if (replaced != null) {
+      _retainedLength -= ciphertext.length + replaced.length;
+    }
+    _plaintextByCiphertext[ciphertext] = plaintext;
+    _retainedLength += cost;
+    while (_retainedLength > _maxRetainedLength) {
+      final oldest = _plaintextByCiphertext.keys.first;
+      final dropped = _plaintextByCiphertext.remove(oldest)!;
+      _retainedLength -= oldest.length + dropped.length;
+    }
+  }
+
+  @visibleForTesting
+  int get retainedLength => _retainedLength;
 }
 
 enum _ApplyRemoteContextResult { unchanged, advanced }
@@ -70,6 +147,9 @@ class ReadStateManager {
   Future<void> _saved = Future.value();
   bool _saveScheduled = false;
   Object? syncError;
+  // Whether the latest snapshot read succeeded. A publish that skips its own
+  // snapshot clears [syncError] only on this evidence.
+  bool _lastSnapshotSucceeded = false;
   final int Function() _now;
   // Override keys already in this device's own slot, carried unchanged.
   // See [isOverrideContext].
@@ -299,11 +379,13 @@ class ReadStateManager {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
+      _lastSnapshotSucceeded = true;
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
       return true;
     } catch (error) {
+      _lastSnapshotSucceeded = false;
       syncError = error;
       debugPrint('[ReadStateManager] snapshot failed: $error');
       return false;
@@ -469,6 +551,39 @@ class ReadStateManager {
     }
   }
 
+  /// Whether a publish would send anything: a pending event to retry, or a
+  /// slot whose packed contexts differ from what was last published. Mirrors
+  /// the packing in [_publishOnce] without changing any state.
+  bool _hasUnpublishedState() {
+    if (_pending.isNotEmpty) return true;
+    final primary = <String, int>{..._carriedOverrides};
+    for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
+      if (_effectiveState[key] case final value?) primary[key] = value;
+    }
+    final horizon = _now() - readStateHorizonSeconds;
+    final List<Map<String, int>> placement;
+    try {
+      placement = packReadStateContexts(
+        {
+          for (final entry in _localContexts.entries)
+            if (entry.value >= horizon) entry.key: entry.value,
+        },
+        clientId: _clientId,
+        previous: _placement,
+        primary: primary,
+      );
+    } on StateError {
+      // Let the real publish surface the capacity error.
+      return true;
+    }
+    if (placement.length > _slots.length) return true;
+    for (var index = 0; index < placement.length; index++) {
+      final published = _published[_slots[index]] ?? const <String, int>{};
+      if (!mapEquals(published, placement[index])) return true;
+    }
+    return false;
+  }
+
   Future<void> _publishOnce(
     SignedEventRelay signedEventRelay, {
     required bool allowDisposed,
@@ -476,10 +591,20 @@ class ReadStateManager {
     try {
       if (!_servesThisCommunity || !_ownsJournal) return;
       await _persistLocalState();
+      // The snapshot below is the whole read state (megabytes on a busy
+      // account), so skip it when there is nothing to send. Each resume
+      // schedules a publish after its re-sync whether or not anything changed.
+      if (!_hasUnpublishedState()) {
+        // Nothing pending and every slot published, so after a good snapshot
+        // this device is in sync, as a full publish would have concluded.
+        if (_lastSnapshotSucceeded) syncError = null;
+        return;
+      }
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
         final events = await _relaySession.fetchReadStateSnapshot();
+        _lastSnapshotSucceeded = true;
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {

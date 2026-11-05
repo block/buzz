@@ -64,30 +64,52 @@ extension _ChannelNotices on ChannelMessagesNotifier {
             !isChannelCursorOlder(floor, cursor)) {
           break;
         }
-        final events = await session.queryRelay([
+        final page = await session.queryRelay([
           NostrFilters.channelNotices(
             channelId,
+            since: floor?.createdAt,
             until: cursor?.createdAt,
             beforeId: cursor?.eventId,
           ),
         ]);
         if (!_isCurrentInit(initVersion)) return;
-        if (events.any(
+        if (page.any(
           (event) =>
               event.kind != EventKind.systemMessage ||
               event.channelId != channelId,
         )) {
           throw Exception('System notices are outside their channel.');
         }
+        // Short bounded ranges can leave a partial page's worth of room.
+        // Count unique additions, keep the newest, and exclude overflow
+        // before fetching auxiliary events. Cached notices and their aux
+        // already come from _windowEvents when an older page reveals them.
+        final fresh =
+            {
+              for (final event in page)
+                if (!_notices.containsKey(event.id)) event.id: event,
+            }.values.toList()..sort(
+              (a, b) => compareChannelTimelineEventsChronologically(b, a),
+            );
+        final events = fresh.take(_maxNotices - _notices.length).toList();
         // Pages carry their rows' reactions; notices read apart need their
         // own. Read them before the notices count as read, so a failure
         // reads the whole page again.
         final aux = await _readNoticeAux(session, events);
         if (!_isCurrentInit(initVersion)) return;
-        if (events.length < NostrFilters.channelNoticePageSize) {
-          _noticesReachedStart = true;
+        if (page.length < NostrFilters.channelNoticePageSize) {
+          if (floor == null) {
+            _noticesReachedStart = true;
+          } else {
+            // Only this range is exhausted. Resume below its message floor
+            // when older pages arrive, even if it was empty. Same-second
+            // notices below the floor are retained and may be read again;
+            // merging by id keeps them unique. Use the captured floor: a
+            // page may have extended the window while this read was in flight.
+            _noticeCursor = floor;
+          }
         } else {
-          _noticeCursor = _nextCursor(events, cursor, 'System notices');
+          _noticeCursor = _nextCursor(page, cursor, 'System notices');
         }
         for (final event in events) {
           _notices[event.id] = event;
