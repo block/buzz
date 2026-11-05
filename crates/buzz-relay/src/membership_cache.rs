@@ -145,6 +145,9 @@ impl MembershipCache {
         metrics::counter!("buzz_membership_cache_misses_total").increment(1);
         let read = read.await?;
         let memberships = if read.value.len() > MAX_MEMBERSHIPS {
+            // Do not retain the query buffer while a point check waits after
+            // we release the full-set load permit below.
+            drop(read.value);
             Memberships::PointChecks
         } else {
             let mut ids = read.value;
