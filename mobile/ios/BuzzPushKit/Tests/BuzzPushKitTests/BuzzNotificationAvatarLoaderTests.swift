@@ -117,6 +117,58 @@ struct BuzzNotificationAvatarLoaderTests {
     }
     #expect(state.downloads == 0)
   }
+
+  @Test("An organization relay avatar is fetched with the issued assertion")
+  func relayAvatarCarriesAssertion() async throws {
+    let key = String(repeating: "0", count: 63) + "1"
+    let account = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    let scope = try #require(
+      BuzzNotificationCacheScope(
+        community: PushLeaseCommunity(
+          id: "community", name: "Test", relayUrl: "wss://relay.org.example", pubkey: account,
+          policies: [], notificationSessionID: "session")))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AssertionIssuanceStub.self]
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration),
+      loadSession: {
+        BuzzOrganizationSession(
+          origin: "https://identity.org.example", credential: "session-credential",
+          relayHosts: ["relay.org.example"])
+      })
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let loader = BuzzNotificationAvatarLoader(
+      directory: directory, privateKey: { _ in key }, isCurrent: { _ in true },
+      assertionIssuer: issuer)
+    let requests = AvatarRequests()
+    loader.startDownload = { request, _, _, completion in
+      requests.record(request)
+      completion(.failure(URLError(.cancelled)))
+    }
+
+    _ = await withCheckedContinuation { continuation in
+      loader.load(
+        source: "https://relay.org.example/media/\(String(repeating: "a", count: 64)).png",
+        scope: scope
+      ) { continuation.resume(returning: $0) }
+    }
+
+    let request = try #require(requests.first)
+    #expect(
+      request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
+        == "Bearer header.payload.signature")
+    #expect(request.value(forHTTPHeaderField: "Authorization") != nil)
+  }
+}
+
+private final class AvatarRequests: @unchecked Sendable {
+  private let lock = NSLock()
+  private var requests: [URLRequest] = []
+
+  var first: URLRequest? { lock.withLock { requests.first } }
+  func record(_ request: URLRequest) { lock.withLock { requests.append(request) } }
 }
 
 private final class AvatarScopeState: @unchecked Sendable {
