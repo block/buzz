@@ -353,7 +353,7 @@ class AccountIdentityStore implements BackupIdentity {
       derivePublicKeyHex(_validSecretHex(_nsecHex(nsec)));
 
   /// Validated signing keys for an nsec held outside this store.
-  static nostr.Keys keysForNsec(String nsec) => _keys(nsec);
+  static nostr.Keys keysForNsec(String nsec) => keysForHex(_nsecHex(nsec));
 
   /// Rejects invalid secp256k1 scalars before constructing a signing key.
   ///
