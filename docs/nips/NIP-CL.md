@@ -8,7 +8,8 @@ Channel Identity and Discovery
 
 This NIP adds identity facts to the relay-signed NIP-29 channel-state events
 (kinds 39000–39002). With these facts, a client can find channels with
-ordinary NIP-01 filters. It needs no new filter key and no relay-specific API.
+ordinary NIP-01 filters. The optional compact membership modes below use
+explicit filter extensions on the existing `POST /query` bridge.
 
 ## Motivation
 
@@ -291,6 +292,19 @@ A relay without this NIP drops label tags on create and refuses
 a system channel on a relay whose NIP-11 document does not contain `"nip-cl"`.
 Lookups by label on such a relay find nothing, which is safe.
 
+## Compact membership modes
+
+These independent, optional query modes reserve distinct response kinds:
+
+| Mode / NIP-11 capability | Kind | Subject | Scope |
+| --- | --- | --- | --- |
+| `membership_snapshot` v1 | 39008 | NIP-98 signer only | Own active memberships, including private channels and DMs as specified below. |
+| `membership_public` v1 | 39009 | Any public key | Active memberships in listed, open forum/stream/workflow channels only. |
+
+Kind 39009 is reserved by this specification for public membership lookups;
+its runtime registration and implementation are separate work. Supporting
+39008 does not imply support for 39009, or conversely.
+
 ## Compact viewer membership snapshot (version 1)
 
 This optional capability replaces full-roster discovery for clients that
@@ -530,6 +544,218 @@ query shape, type opt-ins and signatures intact. Roll out the image to the
 Rollback turns the flag off; clients recheck support and explicitly select
 legacy authority as above. Client opt-in and production-shaped throttled
 validation follow separately.
+
+## Compact public membership lookup (version 1)
+
+This independent mode answers “which public channels is this person in?”
+without loading their peers' roster entries. It does not relax the self-mode
+rule that kind 39008's `#p` MUST equal the NIP-98 signer. In this section,
+**requester** means the authenticated signer and **subject** means the public
+key whose memberships are requested. “Public” means listed and open within
+the host-resolved community, not accessible across community boundaries.
+
+### Capability and request
+
+An enabled relay advertises this separate descriptor in its host-bound
+NIP-11 information document:
+
+```json
+{
+  "membership_public": {
+    "version": 1,
+    "community_id": "<community UUID>",
+    "pubkey": "<relay signing public key>",
+    "kind": 39009,
+    "max_channels": 4096,
+    "max_response_bytes": 2097152
+  }
+}
+```
+
+`BUZZ_MEMBERSHIP_PUBLIC_ENABLED` defaults to false, independently of
+`BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED`. Disabled relays omit this descriptor and
+return HTTP 404 with `{"error":"membership_public unsupported"}` for this
+mode. An unresolved host never advertises it. Clients MUST obtain and pin
+this descriptor using the TLS-origin and relay-key rules of self mode.
+
+Send exactly one filter to `POST /query`:
+
+```json
+[{
+  "kinds": [39009],
+  "#p": ["<subject public key>"],
+  "#t": ["forum", "stream", "workflow"],
+  "membership_public": 1
+}]
+```
+
+`#p` MUST contain exactly one lowercase 64-character hex public key. The
+nonempty `#t` array MUST be sorted, unique, and contain only `forum`,
+`stream`, or `workflow`; a subset is allowed. Unknown types (including `dm`
+and `system`), versions, extra keys or constraints, multiple filters, mixed
+kinds, or mixing `membership_public` with `membership_snapshot` return 400.
+A relay MUST NOT silently narrow the requested set.
+
+A valid fresh NIP-98 event MUST bind the exact body, canonical host-derived
+query URL and POST method, even when unsigned development reads are enabled.
+The normal bridge admission, community membership/ban policy and replay
+guard apply to the requester. Any requester admitted by those rules MAY
+query any subject, including themselves or their owner. The requester is
+always the signer, never `token_owner` or the NIP-OA owner. No relationship
+between requester and subject expands the public scope or grants private
+access. A subject need not have a profile or current community membership;
+selection uses their active channel memberships in this community only.
+
+Every attempt MUST consume the existing shared HTTP API-call quota keyed by
+community and requester (the bridge's `ApiCalls` bucket and configured
+`human_api_calls_per_min` limit), before selection. Changing subjects MUST NOT
+reset that quota. Exhaustion returns 429 using the bridge's existing
+`rate-limited: quota exceeded; retry in <seconds>s` error convention; shared
+admission unavailability returns 503 and fails closed. Clients MUST respect
+that retry delay, back off and jitter further attempts; no new per-subject
+quota or auth nonce scheme is introduced.
+
+### Signed response and verification
+
+Success is an object with its own version marker and response kind:
+
+```json
+{
+  "membership_public": 1,
+  "event": {
+    "kind": 39009,
+    "pubkey": "<relay signing public key>",
+    "tags": [["d", "<NIP-98 event ID>"], ["p", "<subject>"]],
+    "content": "<JSON object below>",
+    "id": "<event ID>",
+    "created_at": 1793899000,
+    "sig": "<signature>"
+  }
+}
+```
+
+The signed content is:
+
+```json
+{
+  "version": 1,
+  "scope": "public",
+  "community_id": "<host-resolved community UUID>",
+  "host": "<canonical resolved request host>",
+  "requester": "<NIP-98 signer public key>",
+  "subject": "<requested public key>",
+  "request_id": "<NIP-98 event ID>",
+  "types": ["forum", "stream", "workflow"],
+  "complete": true,
+  "snapshot_id": "<SHA-256 content identity>",
+  "channels": [{
+    "id": "<channel UUID>",
+    "role": "member",
+    "channel_type": "stream",
+    "visibility": "open",
+    "archived": false
+  }]
+}
+```
+
+Kind 39009 is relay-only, query-time data: it MUST NOT be persisted,
+replaced, broadcast, returned by ordinary REQ, COUNT or `/query`, or accepted
+through client EVENT. Its `d` tag is a request coordinate, not a durable list.
+
+The client MUST verify the envelope marker/version, full Nostr ID and
+signature, kind 39009 and pinned relay key, exactly one `d` and one `p` tag
+with the values shown, and every signed binding: schema version,
+`scope:"public"`, community UUID, canonical host (the normalized host of the
+NIP-98 `u` URL for this request), requester equal to the current signer,
+subject equal to the requested `#p`, outstanding request ID and exact type
+array. The request MUST belong to the current requester/community/session
+and the currently selected subject; consume it at most once. Canceled,
+superseded, timed-out or previous-session results MUST NOT replace current
+discovery data. Neither timestamps nor hashes order responses.
+
+Arrays (including `[]`), malformed envelopes, missing/false completeness,
+invalid signatures, binding mismatches, unknown fields needed to interpret
+the result, duplicate channel IDs, invalid roles/types, non-boolean archive
+state or visibility other than `open` MUST fail validation. Failure is never
+a complete empty list. A valid signed empty list means only that no matching
+public memberships existed at that cut. A saved response is display data;
+its signature and identity do not prove present visibility or authorization.
+
+### Selection, completeness and bounds
+
+The relay MUST read the primary database in one SQL statement's MVCC
+snapshot. Select the subject's active `channel_members` rows joined to
+nondeleted channels in the same community, restricted to requested types,
+`visibility=open` and not unlisted, ordered by channel UUID. This is the
+listed-open discovery predicate, with no shared-private-channel exception.
+All entry fields MUST come from that same statement. Do not load, parse or
+serialize full rosters, peers' public keys or profiles.
+
+There is one entry per matching membership. Preserve the subject's role
+(`owner`, `admin`, `member`, `bot` or `guest`); include archived channels with
+`archived:true`. Exclude removed memberships, deleted channels, private or
+unlisted channels, DMs and system channels, even when the requester is a
+member too. Channel names and other metadata remain in kind 39000 under
+existing read rules.
+
+`complete:true` means all of the subject's memberships satisfying this
+public predicate and requested type set at that instant. It never means
+the subject's full membership set. A channel absent on refresh may have
+become private, unlisted, deleted or changed type, or its membership may
+have ended; absence MUST NOT establish loss of membership.
+
+The snapshot identity is SHA-256 of the UTF-8 compact JSON array
+`["nip-cl-public-membership-v1", community_id, subject, types, channels]`,
+with UUIDs/pubkeys in lowercase and channel object keys in the order shown.
+Clients MUST recompute it from the verified signed fields. Requester and
+request ID bind the signed response but are excluded from content identity;
+identical public sets may have identical identities across requesters.
+The identity is neither a revision nor a live cursor.
+
+The same bounds as self mode apply: at most 4096 matching channels and
+2097152 encoded response bytes, probing one extra matching row. Either
+overflow returns 413 for the whole request, with no success envelope or
+partial list. Database/signing failure returns an error, never complete
+empty state. There are no pages, tokens, server snapshot caches or resume
+semantics in v1. A retry requires fresh NIP-98 auth.
+
+### Discovery authority and rollout
+
+A validated result MAY replace a cached public discovery list keyed by
+community, subject and exact requested types. It MUST NOT populate or alter
+the requester's own membership/role authority, canonical kind-39002 roster
+caches, send permissions or the self-mode 44100/44101 snapshot-to-live
+handoff, even when requester equals subject. Roles describe the subject;
+they are not grants to the requester. The self-mode handoff does not apply.
+Ordinary read/write authorization remains independently enforced, and
+saved public data MUST NOT authorize a read after a visibility change.
+
+Clients MUST require `membership_public` before selecting this mode. Absence
+or the exact disabled 404 means this lookup is unsupported; an ordinary
+array from an older relay is never a valid public result. Auth failures,
+invalid signatures, malformed responses and transient errors MUST NOT be
+accepted as an empty result or silently retried through self mode.
+Deploy support to the entire fleet with the public flag off, then enable
+it separately. Public and self capability rollout and rollback are
+independent. Turning off public lookup stops its use without changing the
+self-membership authority/session generation or deleting saved display data.
+
+### Normative examples and rejection cases
+
+In these examples A signs fresh body-bound NIP-98 auth and B is the subject:
+
+| Request / response | Required outcome |
+| --- | --- |
+| A requests B's `forum,stream,workflow` memberships; B belongs to listed-open stream X, archived listed-open forum Y, private Z shared with A, an unlisted stream, a DM and a system channel. | Return X and Y only, preserving B's roles and marking Y archived. |
+| A is B's agent and its admission auth tag names B as owner. | The same public-only X/Y result; no owner's private memberships. |
+| A requests A with `membership_public:1`. | The same public predicate; never private/DM/system memberships or self authority. |
+| A requests B with `membership_snapshot:1`, kind 39008. | 400; self mode still requires subject equal to signer. |
+| Public request contains `#t:["dm","stream"]`, `#t:["system"]`, duplicate/unsorted types, two subjects, both mode keys, or an added `limit`. | 400; never silently drop forbidden constraints or types. |
+| A receives a validly signed answer for requester C, subject C, another host/community, another type subset or another request ID. | Reject the binding mismatch. A's outstanding request is unchanged. |
+| A receives kind 39008 or the self envelope for its public request, or kind 39009 for its self request. | Reject the cross-mode response, including when A equals B. |
+| X becomes private or unlisted before a later lookup's cut. | Omit X from the new public list even if A still shares X; replacing the public cache is allowed, revoking membership from the omission is forbidden. |
+| B has no matching public memberships, or has never had a community profile. | Return a valid signed complete empty list if selection is empty; do not disclose excluded memberships. |
+| Selection or encoding overflows, selection/signing fails, or requester quota is exhausted. | Return the specified whole-request error; never a partial or complete-empty success. |
 
 ## Trust
 
