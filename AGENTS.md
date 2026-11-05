@@ -78,6 +78,8 @@ This repository is public and contains the relay, NIP specifications, legacy des
 
 Distributor-specific values belong in the relevant release configuration: build-time settings for clients and deployment configuration for the relay. If a setting is missing, add a generic one; never hardcode a Block-only value or special-case a host or organization.
 
+The rule covers functionality, not only identifiers. Every feature here must be generic: useful to any operator or distributor, with no knowledge of one company's internal services, workflows or identity setup. Functionality that only serves Block lives in Block's private repositories (release builds, deployment configuration, private plugins) and reaches this code only through generic settings or documented extension points that never name, detect or special-case a specific organization, plugin or service. Review judges a change's purpose and approach, not just its strings.
+
 Tests, fixtures, docs, and examples use example values (`example.org`, `example-org`, fictional names).
 
 Reviewers treat a violation as a blocking finding.
