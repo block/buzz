@@ -4353,6 +4353,8 @@ mod tests {
     }
 
     mod postgres_tests {
+        use super::*;
+
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w3_b2_req_barrier_expiry_mid_flight_blocks_subscription_registration() {
