@@ -536,10 +536,9 @@ async fn messaging_an_agent_alone_ignores_its_add_policy() {
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &agent]));
 }
 
-/// A DM's members change only through kind:41011: a plain add, a removal and
-/// a leave are refused, so its identity never names someone who is not in it
-/// and the people can always reopen it.
-/// Mutation: drop either DM guard → the add or the leave lands → RED.
+/// People join a DM only through kind:41011, so a plain add, and removing
+/// someone other than yourself or your own agent, are refused.
+/// Mutation: drop either DM guard → the add or the removal lands → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn generic_membership_kinds_cannot_change_a_dm() {
@@ -565,20 +564,77 @@ async fn generic_membership_kinds_cannot_change_a_dm() {
         submit(
             &state,
             &tenant,
-            &b,
+            &a,
             9001,
-            vec![h.clone(), vec!["p".into(), hex(&b)]],
+            vec![h, vec!["p".into(), hex(&b)]],
         )
         .await
         .map(|r| (r.accepted, r.message)),
         "kind:41011",
     );
+
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+    assert_eq!(open(&state, &tenant, &b, &[&a]).await.expect("reopen"), dm);
+}
+
+/// Anyone can leave a DM. The DM then stops being that group's DM, so the
+/// person who left can message the group again, in a new DM.
+/// Mutation: refuse kind:9022 on DMs → the leave is refused → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_person_can_leave_a_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-leave").await;
+    let (a, b, c) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let dm = open(&state, &tenant, &a, &[&b, &c]).await.expect("open");
+
+    let left = submit(
+        &state,
+        &tenant,
+        &c,
+        9022,
+        vec![vec!["h".into(), dm.to_string()]],
+    )
+    .await
+    .expect("leave");
+    assert!(left.accepted, "{}", left.message);
+
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+    let again = open(&state, &tenant, &c, &[&a, &b])
+        .await
+        .expect("message the group again");
+    assert_ne!(again, dm);
+}
+
+/// An owner can remove their own agent from a DM, as deleting an agent does;
+/// the DM stays its people's DM. Someone else's agent cannot be removed.
+/// Mutation: refuse every kind:9001 for another member on DMs → the owner's
+/// removal is refused → RED; allow any → B removes A's agent → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_owner_can_remove_their_agent_from_a_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-remove-agent").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&b, &agent])
+        .await
+        .expect("open");
+    let remove = vec![
+        vec!["h".to_string(), dm.to_string()],
+        vec!["p".into(), hex(&agent)],
+    ];
+
     rejected(
-        submit(&state, &tenant, &b, 9022, vec![h])
+        submit(&state, &tenant, &b, 9001, remove.clone())
             .await
             .map(|r| (r.accepted, r.message)),
         "kind:41011",
     );
+    let removed = submit(&state, &tenant, &a, 9001, remove)
+        .await
+        .expect("remove");
+    assert!(removed.accepted, "{}", removed.message);
 
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
     assert_eq!(open(&state, &tenant, &b, &[&a]).await.expect("reopen"), dm);
