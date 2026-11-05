@@ -1601,8 +1601,8 @@ pub struct AppState {
     /// NIP-FI federated-identity assertion verifier, shared across all HTTP
     /// ingress and WebSocket upgrade checks.
     ///
-    /// `None` for unconfigured OSS deployments. Database-sourced deployments
-    /// construct it even in Off, for stored requirements. When present, the verifier
+    /// `None` when FI evaluation is disabled, including database-sourced Off
+    /// deployments. When present, the verifier
     /// is the single offline authority for assertion validation on every
     /// protected HTTP surface and WebSocket upgrade. The backing `ProductionJwksSource` is also
     /// shared and performs bounded periodic JWKS refresh internally.
@@ -2778,9 +2778,8 @@ impl AuditShutdownHandle {
 
 /// Construct the NIP-FI assertion verifier + JWKS source from `config.nip_fi`.
 ///
-/// Database-sourced deployments construct the verifier in Off too, because
-/// a required community still evaluates assertions. Unconfigured OSS Off and
-/// repair mode need no verifier. The JWKS source is shared via `Arc`.
+/// Only evaluating modes construct these components. Off and repair mode
+/// need no verifier or outbound JWKS traffic. The JWKS source is shared via `Arc`.
 /// The source starts empty; HTTP admission returns `authorization_unavailable`
 /// (503) until the startup warm in `main.rs` succeeds. [FI-TRACE-DEPENDENCY-FAIL-CLOSED]
 type NipFiComponents = (
@@ -2791,10 +2790,7 @@ type NipFiComponents = (
 fn build_nip_fi_components(config: &crate::config::Config) -> NipFiComponents {
     use buzz_auth::{FederatedAssertionVerifier, HttpJwksFetcher, ProductionJwksSource};
 
-    if config.nip_fi.mode.denies_unconditionally()
-        || (!config.nip_fi.mode.evaluates()
-            && config.nip_fi.source != crate::nip_fi_config::CommunitySource::Database)
-    {
+    if !config.nip_fi.mode.evaluates() {
         // Off: no enforcement. DenyProtected: verifier never consulted (always 503).
         return (None, None);
     }
@@ -2886,6 +2882,37 @@ pub(crate) mod tests {
     use crate::connection::{AuthState, ConnectionState};
     use std::collections::HashMap;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn fi_components_exist_only_in_evaluating_modes() {
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.jwks_configs = vec![buzz_auth::IssuerJwksConfig {
+            issuer: "https://issuer.example".to_owned(),
+            contract: buzz_auth::JwksSourceContract::new(
+                "https://issuer.example/.well-known/jwks.json".to_owned(),
+                300,
+                3600,
+            )
+            .expect("valid test contract"),
+        }];
+        for source in [
+            crate::nip_fi_config::CommunitySource::Env,
+            crate::nip_fi_config::CommunitySource::Database,
+        ] {
+            config.nip_fi.source = source;
+            for mode in [
+                buzz_auth::NipFiMode::Off,
+                buzz_auth::NipFiMode::Shadow,
+                buzz_auth::NipFiMode::Enforce,
+                buzz_auth::NipFiMode::DenyProtected,
+            ] {
+                config.nip_fi.mode = mode;
+                let (verifier, jwks) = build_nip_fi_components(&config);
+                assert_eq!(verifier.is_some(), mode.evaluates(), "{source:?} {mode:?}");
+                assert_eq!(jwks.is_some(), mode.evaluates(), "{source:?} {mode:?}");
+            }
+        }
+    }
 
     /// Helper: create a ConnectionManager with one registered connection.
     /// Returns (manager, conn_id, receiver, ctrl_receiver, cancel,

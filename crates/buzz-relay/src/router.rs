@@ -72,8 +72,8 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// Off and Shadow preserve optional-community admission after the policy read.
-// A stored requirement enforces FI independently of the global mode.
+// Off skips FI policy reads and enforcement. Shadow preserves optional-community
+// admission and enforces stored requirements. Enforce requires FI everywhere.
 //
 // ## What this guard checks (and does NOT check)
 //
@@ -155,6 +155,14 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/internal/git/policy",
 ];
 
+fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
+    slot.method(AuthMethod::NipFi);
+    slot.finish(AuthResult::Denied(
+        crate::access::AuthReason::AuthorizationUnavailable,
+    ));
+    http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+}
+
 /// Middleware: full offline assertion guard for NIP-FI protected paths.
 ///
 /// Fires before any handler.  In Enforce mode, if the request path is not
@@ -175,15 +183,6 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
 /// Only a cryptographically verified assertion reaches the handler; the
 /// handler then performs the key pairing and deny-map checks via
 /// `admit_nip_fi_http_on_state`.
-///
-fn nip_fi_unavailable(slot: &crate::access::AccessSlot) -> axum::response::Response {
-    slot.method(AuthMethod::NipFi);
-    slot.finish(AuthResult::Denied(
-        crate::access::AuthReason::AuthorizationUnavailable,
-    ));
-    http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
-}
-
 async fn nip_fi_assertion_guard(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,

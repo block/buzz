@@ -96,8 +96,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // missing credentials → 401 + WWW-Authenticate challenge;
         // malformed credentials (bad base64, bad UTF-8) → 401 without challenge;
         // regardless of whether the Host resolves to a known community.  No
-        // tenant-binding work for syntactically bad requests. The policy read
-        // still comes first so a required row cannot take the legacy path.
+        // tenant-binding work for syntactically bad requests. In evaluating modes,
+        // policy resolution first prevents a required row taking the legacy path.
         //
         // Enforce: the header syntax is validated
         // inside the NIP-FI admission closure below, where proof failures are
