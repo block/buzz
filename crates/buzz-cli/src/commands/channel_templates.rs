@@ -94,6 +94,27 @@ fn load_templates(path: &Path) -> Result<Vec<ChannelTemplateRecord>, CliError> {
         .map_err(|e| CliError::Other(format!("failed to parse {}: {e}", path.display())))
 }
 
+/// Read-only listing of the store `channels create --template` resolves from,
+/// through the same path resolution and parser.
+pub fn list_templates(override_path: Option<&str>) -> Result<serde_json::Value, CliError> {
+    let path = resolve_templates_path(override_path)?;
+    let templates: Vec<_> = load_templates(&path)?
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "channel_type": t.channel_type,
+                "visibility": t.visibility,
+                "has_canvas_template": t.canvas_template.is_some_and(|c| !c.is_empty()),
+                "persona_ids": t.agents.personas.into_iter().map(|p| p.persona_id).collect::<Vec<_>>(),
+                "team_ids": t.agents.teams.into_iter().map(|t| t.team_id).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({"path": path, "templates": templates}))
+}
+
 /// Load the templates store and find the template matching `name`
 /// (case-insensitive, exact match). Errors list available names if not found.
 pub fn find_template(path: &Path, name: &str) -> Result<ChannelTemplateRecord, CliError> {
@@ -191,5 +212,51 @@ mod tests {
         assert_eq!(t.agents.personas[0].persona_id, "builtin:fizz");
         assert_eq!(t.agents.teams.len(), 1);
         assert_eq!(t.agents.teams[0].team_id, "team-1");
+    }
+
+    #[test]
+    fn list_templates_shows_what_create_can_resolve_and_never_writes() {
+        let f = write_store(
+            r##"[
+                {"id":"t1","name":"Buzz Team","description":"d","channel_type":"forum","visibility":"private",
+                 "canvas_template":"# {channel.name}",
+                 "agents":{"personas":[{"personaId":"builtin:fizz"}],"teams":[{"teamId":"team-1"}]}},
+                {"id":"t2","name":"Bare"}
+            ]"##,
+        );
+        let before = std::fs::read(f.path()).unwrap();
+        let path = f.path().to_str().unwrap();
+        let listed = list_templates(Some(path)).unwrap();
+        assert_eq!(std::fs::read(f.path()).unwrap(), before);
+        assert_eq!(listed["path"], path);
+        let templates = listed["templates"].as_array().unwrap();
+        assert_eq!(
+            templates[0],
+            serde_json::json!({
+                "name": "Buzz Team", "description": "d", "channel_type": "forum",
+                "visibility": "private", "has_canvas_template": true,
+                "persona_ids": ["builtin:fizz"], "team_ids": ["team-1"],
+            })
+        );
+        assert_eq!(templates[1]["channel_type"], "stream");
+        assert_eq!(templates[1]["visibility"], "open");
+        assert_eq!(templates[1]["has_canvas_template"], false);
+        for t in templates {
+            find_template(f.path(), t["name"].as_str().unwrap()).expect("create resolves it");
+        }
+    }
+
+    #[test]
+    fn list_templates_missing_or_corrupt_store_is_an_error_not_an_empty_list() {
+        let missing = list_templates(Some("/nonexistent/channel-templates.json")).unwrap_err();
+        assert!(matches!(missing, CliError::NotFound(_)));
+        let f = write_store("{not json");
+        let corrupt = list_templates(f.path().to_str()).unwrap_err();
+        assert!(matches!(corrupt, CliError::Other(_)));
+        let empty = write_store("[]");
+        assert_eq!(
+            list_templates(empty.path().to_str()).unwrap()["templates"],
+            serde_json::json!([])
+        );
     }
 }
