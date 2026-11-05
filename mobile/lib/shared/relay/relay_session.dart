@@ -439,7 +439,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     bool connected() => _isActiveConnection(generation) && _socketConnected;
-    if (!connected()) throw StateError('Relay session is not connected');
+    if (!connected()) throw RelayNotConnectedError();
     if ((mayPublish != null && !await mayPublish()) || !connected()) {
       throw StateError('Event no longer wanted');
     }
