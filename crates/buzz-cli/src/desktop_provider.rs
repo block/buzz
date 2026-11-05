@@ -31,13 +31,13 @@ const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
 /// `lsof` can take seconds on a busy Mac.
 const SAME_USER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Every result is built from a request's params, and the desktop reads at
-/// most 2 MiB of request body, so no signed event (or other result) is
-/// larger. Escaping a result's JSON as a string at most doubles it (`"` and
-/// `\` each become two bytes; event JSON has no raw control characters, and a
-/// NIP-44 plaintext is at most 64 KiB). The 64 KiB on top covers the added
-/// `id`, `pubkey` and `sig`, the envelope and the headers.
+/// most 2 MiB of request body, so no result is larger than that in bytes.
+/// Escaping a result as a JSON string grows it at most sixfold: a decrypted
+/// NIP-44 plaintext (extended lengths have no 64 KiB ceiling) may be all
+/// control characters, each becoming `\u00XX`. The 64 KiB on top covers a
+/// signed event's added `id`, `pubkey` and `sig`, the envelope and the headers.
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 2 * MAX_REQUEST_BYTES + 64 * 1024;
+const MAX_RESPONSE_BYTES: usize = 6 * MAX_REQUEST_BYTES + 64 * 1024;
 
 /// `rate_limited` refuses before acting, so the same envelope is re-sent:
 /// up to this many times, each after `retry_after` capped at the wait below.
@@ -1316,8 +1316,11 @@ pub(crate) mod tests {
             "content": "\"".repeat(64 * 1024), "sig": "",
         })
         .to_string();
-        for event in [event, note] {
-            let body = serde_json::json!({ "id": "1", "result": event })
+        // A decrypt whose base64 payload fills the request: its plaintext,
+        // three quarters of that, all control characters (`\u0001`, six bytes).
+        let plaintext = "\u{1}".repeat(MAX_REQUEST_BYTES / 4 * 3 - 64 * 1024);
+        for result in [event, note, plaintext] {
+            let body = serde_json::json!({ "id": "1", "result": result })
                 .to_string()
                 .into_bytes();
             let (status, parsed) = exchanged(body.clone()).await.unwrap();
