@@ -17,6 +17,7 @@ class AgentCard extends StatelessWidget {
     this.location,
     this.footer,
     this.subtitle,
+    this.subtitleIcon,
     this.isBestie = false,
     super.key,
   });
@@ -26,6 +27,9 @@ class AgentCard extends StatelessWidget {
   /// Whether this is the current community's selected Bestie.
   final bool isBestie;
   final String? subtitle;
+
+  /// Decorative mark shown before [subtitle].
+  final Widget? subtitleIcon;
   final String? imageUrl;
 
   /// Only supplied when the host is known; directory membership is not proof.
@@ -160,13 +164,32 @@ class AgentCard extends StatelessWidget {
                             footer ??
                             Center(
                               child: ExcludeSemantics(
-                                child: Text(
-                                  subtitle ?? '',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  textAlign: TextAlign.center,
-                                  style: context.textTheme.bodySmall?.copyWith(
+                                child: IconTheme.merge(
+                                  data: IconThemeData(
                                     color: context.colors.onSurfaceVariant,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (subtitleIcon != null) ...[
+                                        subtitleIcon!,
+                                        const SizedBox(width: Grid.half),
+                                      ],
+                                      Flexible(
+                                        child: Text(
+                                          subtitle ?? '',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          textAlign: TextAlign.center,
+                                          style: context.textTheme.bodySmall
+                                              ?.copyWith(
+                                                color: context
+                                                    .colors
+                                                    .onSurfaceVariant,
+                                              ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),

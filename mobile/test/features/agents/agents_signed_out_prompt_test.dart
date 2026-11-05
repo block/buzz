@@ -50,13 +50,13 @@ void main() {
       const prompt = 'Sign in to Builderlab to manage remote agents';
       expect(find.text(prompt), findsOneWidget);
       expect(find.byKey(ValueKey(existingDesktopKeys.public)), findsOneWidget);
-      expect(find.text('Manage on desktop'), findsNothing);
+      expect(find.text('On another device'), findsNothing);
 
       // The Management section cannot claim the agent runs on the desktop.
       await tester.tap(find.byKey(ValueKey(existingDesktopKeys.public)));
       await tester.pumpAndSettle();
       expect(find.byType(UserProfileSheet), findsOneWidget);
-      expect(find.textContaining('Keep Buzz open'), findsNothing);
+      expect(find.textContaining('It works while Buzz is open'), findsNothing);
       expect(find.textContaining('Sign in to Builderlab to see'), findsOne);
       await tester.tapAt(const Offset(5, 5));
       await tester.pumpAndSettle();
@@ -69,7 +69,7 @@ void main() {
       h.registry.signedIn = true;
       await tester.pumpAndSettle();
       expect(find.text(prompt), findsNothing);
-      expect(find.text('Manage on desktop'), findsOneWidget);
+      expect(find.text('On another device'), findsOneWidget);
     },
     skip: !HostedEnvironment.enabled,
   );

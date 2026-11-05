@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/remote_agents.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -34,6 +35,13 @@ class InlineAgentTyping extends ConsumerWidget {
     final visibleKeys = keys.take(keys.length > 4 ? 3 : 4).toList();
     final profiles = ref.watch(userCacheProvider);
     final bots = ref.watch(agentMentionPubkeysProvider(channelId));
+    // Only the owner's registry confirms where an agent runs.
+    final remote =
+        ref
+            .watch(availableRemoteAgentsProvider)
+            .value
+            ?.contains(visibleKeys.first) ??
+        false;
     final labels = watchChannelIdentityLabels(
       ref,
       channelId,
@@ -100,7 +108,7 @@ class InlineAgentTyping extends ConsumerWidget {
                       ),
                     ),
                     const SizedBox(height: Grid.xxs),
-                    const AgentTypingBubble(),
+                    AgentTypingBubble(remote: remote),
                   ],
                 ),
               ),

@@ -5,6 +5,7 @@ import 'package:buzz/features/agents/agent_card_grid.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/widgets/progressive_animated_avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -129,6 +130,8 @@ void main() {
                         itemBuilder: (_, index) => AgentCard(
                           name: 'Research assistant $index',
                           location: 'Remote',
+                          subtitle: 'Remote agent',
+                          subtitleIcon: const Icon(BuzzIcons.cloud, size: 14),
                           onOpen: () => opened = '$index',
                         ),
                       ),
@@ -152,7 +155,10 @@ void main() {
         tester.getTopLeft(find.byType(AgentCard).at(1)).dy,
         greaterThan(tester.getTopLeft(find.byType(AgentCard).at(0)).dy),
       );
-      final first = find.bySemanticsLabel(RegExp('Open Research assistant 0'));
+      expect(find.byIcon(BuzzIcons.cloud), findsWidgets);
+      final first = find.bySemanticsLabel(
+        RegExp('Open Research assistant 0, Remote agent'),
+      );
       expect(
         tester
             .getSemantics(first)

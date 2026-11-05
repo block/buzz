@@ -1,5 +1,6 @@
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/features/channels/agent_typing_bubble.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/inline_agent_typing.dart';
@@ -36,6 +37,7 @@ Widget surface({
   bool reduced = false,
   bool typing = true,
   bool bot = true,
+  bool remote = false,
   List<TypingEntry>? entries,
   double textScale = 1,
 }) => ProviderScope(
@@ -44,6 +46,9 @@ Widget surface({
       'chat',
     ).overrideWithValue(bot ? {agent} : <String>{}),
     userCacheProvider.overrideWith(preview ? DemoProfiles.new : Profiles.new),
+    availableRemoteAgentsProvider.overrideWith(
+      (ref) async => remote ? {agent} : <String>{},
+    ),
     channelIdentityNamesProvider('chat').overrideWithValue(
       const IdentityNameSources(profiles: {agent: profile}).scope([agent]),
     ),
@@ -367,6 +372,30 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
     expect(find.byType(ShaderMask), findsNothing);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
+  testWidgets('remote work leads with a cloud that pulses unless reduced', (
+    tester,
+  ) async {
+    final cloud = find.byKey(const ValueKey('remote-work-cloud'));
+    double opacity() => tester.widget<FadeTransition>(cloud).opacity.value;
+
+    await tester.pumpWidget(surface());
+    await tester.pump();
+    expect(cloud, findsNothing);
+
+    // A fresh scope, since overrides are fixed for a scope's lifetime.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(surface(remote: true));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(cloud, findsOneWidget);
+    expect(opacity(), closeTo(0.35, 0.01));
+
+    await tester.pumpWidget(surface(remote: true, reduced: true));
+    await tester.pumpAndSettle();
+    expect(opacity(), 1);
     expect(tester.binding.hasScheduledFrame, isFalse);
   });
 }
