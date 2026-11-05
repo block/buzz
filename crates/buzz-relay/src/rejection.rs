@@ -145,10 +145,13 @@ async fn send_admission_result(
             crate::handlers::close::refuse(sub_id, &reason, conn, state).await;
         }
         _ => {
-            conn.send(request_rejection_message(
+            let queued = conn.send(request_rejection_message(
                 rejection_target_for(msg),
                 &reason,
             ));
+            if let ClientMessage::Event(event) = msg {
+                crate::access::WriteLog::refused(conn, event, logged, queued);
+            }
         }
     }
     Err(logged)

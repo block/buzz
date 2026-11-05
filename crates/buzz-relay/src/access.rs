@@ -190,8 +190,8 @@ impl<T: PartialEq> Listed<T> {
 const REFUSAL_LINES: u64 = 16;
 
 /// Per-connection bound on the access lines a client can trigger without
-/// being served: reads refused or denied, EVENTs rejected, and AUTH frames after the login was
-/// decided. The first [`REFUSAL_LINES`] of each are logged; the rest are
+/// being served: reads refused or denied, EVENTs rejected, and AUTH frames
+/// after the login was decided. Each kind has its own counter. The first [`REFUSAL_LINES`] of each are logged; the rest are
 /// counted and reported on the close line. Served reads are never capped.
 #[derive(Debug, Default)]
 pub(crate) struct RefusalBudget {
@@ -510,17 +510,20 @@ fn ok_reason(message: &str) -> &'static str {
 
 /// One access line per WebSocket EVENT, written when its handler ends and
 /// recording the OK the relay answered: `accepted`, `rejected` or `error`
-/// (WARN) with the OK prefix as `reason`, or `aborted` if no OK was sent.
+/// (WARN) with the OK prefix as `reason`, or `aborted` if the handler ended
+/// before deciding one. `outcome` is the relay's decision; an OK that could not
+/// be queued (outbound channel full or closed) adds `ok_queued=false`.
 /// Only the event's `kind` and id are logged, never its content or tags.
-/// Rejections share the read refusal budget's per-connection cap.
+/// Rejected lines are capped per connection by [`RefusalBudget`], on their own
+/// counter, separate from refused reads'.
 pub(crate) struct WriteLog {
     conn_id: Uuid,
     community: CommunityId,
     pubkey: Option<String>,
     kind: u32,
     event_id: String,
-    /// The OK sent, as (accepted, reason); `None` until one is.
-    answer: Option<(bool, &'static str)>,
+    /// The OK decided, as (accepted, reason, queued); `None` until one is.
+    answer: Option<(bool, &'static str, bool)>,
     budget: Arc<RefusalBudget>,
 }
 
@@ -541,13 +544,15 @@ impl WriteLog {
         }
     }
 
-    /// Log an EVENT refused before its handler ran, under a fixed `reason`.
+    /// Log an EVENT refused before its handler ran, under a fixed `reason`;
+    /// `queued` is whether its OK was queued.
     pub(crate) fn refused(
         conn: &crate::connection::ConnectionState,
         event: &nostr::Event,
         reason: &'static str,
+        queued: bool,
     ) {
-        Self::new(conn, event).answer = Some((false, reason));
+        Self::new(conn, event).answer = Some((false, reason, queued));
     }
 
     /// Send the EVENT's OK and record it for the line.
@@ -558,10 +563,11 @@ impl WriteLog {
         accepted: bool,
         message: &str,
     ) {
-        self.answer = Some((accepted, if accepted { "" } else { ok_reason(message) }));
-        conn.send(crate::protocol::RelayMessage::ok(
+        let queued = conn.send(crate::protocol::RelayMessage::ok(
             event_id, accepted, message,
         ));
+        let reason = if accepted { "" } else { ok_reason(message) };
+        self.answer = Some((accepted, reason, queued));
     }
 }
 
@@ -569,10 +575,12 @@ impl Drop for WriteLog {
     fn drop(&mut self) {
         let (outcome, reason) = match self.answer {
             None => ("aborted", None),
-            Some((true, _)) => ("accepted", None),
-            Some((false, "error")) => ("error", Some("error")),
-            Some((false, reason)) => ("rejected", Some(reason)),
+            Some((true, ..)) => ("accepted", None),
+            Some((false, "error", _)) => ("error", Some("error")),
+            Some((false, reason, _)) => ("rejected", Some(reason)),
         };
+        // Present only when an OK was decided but could not be queued.
+        let ok_queued = matches!(self.answer, Some((.., false))).then_some(false);
         if outcome == "rejected" && !self.budget.write() {
             return;
         }
@@ -591,6 +599,7 @@ impl Drop for WriteLog {
             event_id = self.event_id.as_str(),
             outcome,
             reason,
+            ok_queued,
             "access"
         );
     }
@@ -1928,7 +1937,7 @@ pub(crate) mod tests {
             WriteLog::new(&conn, &event).ok(&conn, &id, false, "duplicate: already have it");
             WriteLog::new(&conn, &event).ok(&conn, &id, false, "error: internal error");
             drop(WriteLog::new(&conn, &event));
-            WriteLog::refused(&conn, &event, "messages");
+            WriteLog::refused(&conn, &event, "messages", true);
         });
         assert!(!out.raw().contains("secret"), "{}", out.raw());
         let got: Vec<String> = out
@@ -1938,6 +1947,7 @@ pub(crate) mod tests {
                 assert_eq!(l["event"], "write", "{l}");
                 assert_eq!(l["kind"], 9, "{l}");
                 assert_eq!(l["event_id"], id.as_str(), "{l}");
+                assert!(l.get("ok_queued").is_none(), "{l}");
                 format!("{}/{}/{}", l["outcome"], l["reason"], l["level"])
             })
             .collect();
@@ -1956,22 +1966,67 @@ pub(crate) mod tests {
     /// Rejected writes past the refusal budget are only counted; accepted
     /// writes are never capped.
     #[test]
-    fn rejected_writes_share_the_refusal_budget() {
-        let (conn, _rx) =
+    fn rejected_writes_have_a_refusal_budget() {
+        let (conn, mut rx) =
             crate::connection::tests::test_conn_with_auth(crate::connection::AuthState::Failed);
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "")
             .sign_with_keys(&nostr::Keys::generate())
             .unwrap();
         let (_, out) = capture(|| {
             for _ in 0..REFUSAL_LINES + 3 {
-                WriteLog::refused(&conn, &event, "messages");
+                WriteLog::refused(&conn, &event, "messages", true);
                 WriteLog::new(&conn, &event).ok(&conn, "x", true, "");
+                // Drain, so every OK is queued and only the cap is under test.
+                rx.try_recv().expect("OK queued");
             }
         });
-        let count = |o: &str| out.lines().iter().filter(|l| l["outcome"] == o).count();
+        let lines = out.lines();
+        assert!(
+            lines.iter().all(|l| l.get("ok_queued").is_none()),
+            "{lines:?}"
+        );
+        let count = |o: &str| lines.iter().filter(|l| l["outcome"] == o).count();
         assert_eq!(count("rejected"), REFUSAL_LINES as usize);
         assert_eq!(count("accepted"), REFUSAL_LINES as usize + 3);
         assert_eq!(RefusalBudget::close(&conn.refusal_budget.writes), 3);
+    }
+
+    /// An OK the outbound channel could not take (full or closed) keeps the
+    /// relay's decision as `outcome` and adds `ok_queued=false`.
+    #[test]
+    fn write_lines_mark_an_ok_that_could_not_be_queued() {
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let id = event.id.to_hex();
+
+        // Full: the test channel holds 4 frames and nothing drains it.
+        let (full, _rx) =
+            crate::connection::tests::test_conn_with_auth(crate::connection::AuthState::Failed);
+        while full.send(String::new()) {}
+        // Closed: the receiver is gone.
+        let (closed, rx) =
+            crate::connection::tests::test_conn_with_auth(crate::connection::AuthState::Failed);
+        drop(rx);
+
+        let (_, out) = capture(|| {
+            WriteLog::new(&full, &event).ok(&full, &id, true, "");
+            WriteLog::new(&closed, &event).ok(&closed, &id, false, "invalid: bad");
+            WriteLog::refused(&closed, &event, "rate-limited", false);
+        });
+        let got: Vec<String> = out
+            .lines()
+            .iter()
+            .map(|l| format!("{}/{}/{}", l["outcome"], l["reason"], l["ok_queued"]))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                r#""accepted"/null/false"#,
+                r#""rejected"/"invalid"/false"#,
+                r#""rejected"/"rate-limited"/false"#,
+            ]
+        );
     }
 
     /// Every read is measured under its type, outcome and reason, including
