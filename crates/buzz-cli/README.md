@@ -63,6 +63,21 @@ buzz gifs share --slug <slug>                 # report selection to provider Rec
 # buzz messages send scans outgoing content for :shortcode: patterns and
 # automatically attaches NIP-30 ["emoji", shortcode, url] tags from the
 # workspace palette — identical to the desktop composer behavior.
+# Names resolve with one batched lookup of catalog entries (kind:30180), then
+# the legacy palette only for names still unresolved. If a lookup fails, the
+# message is still sent, without emoji tags, and a warning goes to stderr.
+
+# Catalog emoji (one event per emoji)
+buzz emoji search party                 # prefix search, min 2 chars; [{shortcode,url,author,event_id,created_at}]
+buzz emoji search party --limit 50      # default 20, max 50
+buzz emoji resolve wave party_parrot    # exact lookup; {"found": [...], "missing": [...]}
+# If two authors publish the same shortcode, the newest event is returned and
+# the other authors are listed in `other_authors`.
+# `buzz emoji list` shows your own set and the legacy union only; use
+# `emoji search` to find catalog emoji.
+# Do NOT run `buzz emoji import` with a large list (for example a Slack
+# export). It builds one very large event that the relay rejects, and stdin
+# input is cut at 10 MB.
 
 # Users & Presence
 buzz users get                          # your own profile
