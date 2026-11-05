@@ -191,16 +191,18 @@ class SearchNotifier extends Notifier<SearchState> {
     _directoryLoad = null;
     _directoryAttempted = false;
     // Channel rows are ranked once per query, so live channel events never
-    // reorder rows under a finger. They are ranked again only when the set
-    // of channels changes (the first load, a directory install, a join or a
-    // leave); the directory status for this community also drives the
-    // spinner.
+    // reorder rows under a finger: they only update the shown rows' content.
+    // Rows are ranked again when the set of channels changes (the first
+    // load, a directory install); the directory status for this community
+    // also drives the spinner.
     ref.listen(channelsProvider, (previous, next) {
       final channels = next.asData?.value;
       if (channels == null) return;
       final before = previous?.asData?.value;
       if (before == null || !_sameChannels(before, channels)) {
         _refreshChannels();
+      } else {
+        _updateShownChannels(channels);
       }
     });
     ref.listen(
@@ -392,11 +394,26 @@ class SearchNotifier extends Notifier<SearchState> {
     state = state.copyWith(userResults: users, isLoading: _isLoading);
   }
 
-  /// Publishes the channel rows and spinner for the current query.
   static bool _sameChannels(List<Channel> a, List<Channel> b) =>
       a.length == b.length &&
       a.map((c) => c.id).toSet().containsAll(b.map((c) => c.id));
 
+  /// Shows each shown channel's latest content (membership, member count,
+  /// name) in the rows' existing order.
+  void _updateShownChannels(List<Channel> channels) {
+    final shown = state.channelResults;
+    if (shown.isEmpty) return;
+    final byId = {for (final channel in channels) channel.id: channel};
+    final updated = [for (final row in shown) byId[row.id] ?? row];
+    for (var i = 0; i < shown.length; i++) {
+      if (!identical(updated[i], shown[i])) {
+        state = state.copyWith(channelResults: updated);
+        return;
+      }
+    }
+  }
+
+  /// Publishes the channel rows and spinner for the current query.
   void _refreshChannels() {
     if (state.query.isEmpty) return;
     state = state.copyWith(

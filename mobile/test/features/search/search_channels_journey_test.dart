@@ -174,7 +174,7 @@ void main() {
     );
     expect(shown, findsOneWidget);
 
-    // Joining a channel changes the set, so it is ranked in: joined ties
+    // A new channel changes the set, so it is ranked in: joined ties
     // keep the list's order.
     channels.state = AsyncData([
       ...channels.state.requireValue,
@@ -219,6 +219,26 @@ void main() {
     await tester.pump();
     final open = find.byKey(const ValueKey('search-channel-row-team-open-id'));
     expect(open, findsOneWidget);
+    expect(
+      find.descendant(of: open, matching: find.text('Open')),
+      findsOneWidget,
+    );
+
+    // Joining a shown open channel updates its row in place: the badge goes,
+    // and no row moves.
+    final openTop = tester.getTopLeft(open).dy;
+    channels.state = AsyncData([
+      for (final channel in channels.state.requireValue)
+        channel.name == 'team-open'
+            ? channel.copyWith(isMember: true)
+            : channel,
+    ]);
+    await tester.pump();
+    expect(
+      find.descendant(of: open, matching: find.text('Open')),
+      findsNothing,
+    );
+    expect(tester.getTopLeft(open).dy, openTop);
 
     // The next query ranks the current list.
     await tester.enterText(find.byType(TextField), 'team ');
