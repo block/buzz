@@ -89,6 +89,8 @@ void main() {
   group('organization relay assertions', () {
     late List<http.Request> requests;
     late Object? boundIdentity;
+    // Answers the next identity lookups before falling back to [boundIdentity].
+    late List<Object?> nextIdentities;
     late int assertionLifetime;
     late String Function(String relayUrl) tokenFor;
 
@@ -107,7 +109,11 @@ void main() {
             200,
           ),
           '/api/goose/v1/buzz/nostr-identities/current' => http.Response(
-            jsonEncode({'identity': boundIdentity}),
+            jsonEncode({
+              'identity': nextIdentities.isEmpty
+                  ? boundIdentity
+                  : nextIdentities.removeAt(0),
+            }),
             200,
           ),
           '/api/goose/v1/buzz/identity/assertions' => http.Response(
@@ -154,6 +160,7 @@ void main() {
     setUp(() {
       requests = [];
       boundIdentity = null;
+      nextIdentities = [];
       assertionLifetime = 120;
       tokenFor = (_) => 'org-token';
     });
@@ -237,6 +244,7 @@ void main() {
         final backup = _RecordingKeyBackup(organizationAccount);
         final auth = relayAuth(organizationAccount, backup: backup);
         await auth.headers(relay);
+        boundIdentity = {'pubkey_hex': keys.public};
         // A background task such as a push revocation for a removed community
         // never backs up the key the user is discarding.
         await auth.headers(other, background: true);
@@ -267,7 +275,7 @@ void main() {
         // The active relay's reconnect, arriving while that background
         // issuance is still in flight, gets its own assertion rather than
         // the other community's failure.
-        boundIdentity = null;
+        boundIdentity = {'pubkey_hex': keys.public};
         tokenFor = (relayUrl) => Uri.parse(relayUrl).host == otherRelayHost
             ? ''
             : 'token-for-${Uri.parse(relayUrl).host}';
@@ -279,6 +287,76 @@ void main() {
           'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
         });
         await revocation;
+      },
+    );
+
+    test(
+      'background issuance never binds a key, shares the cache or fails a foreground caller',
+      () async {
+        await saveSession();
+        var issued = 0;
+        tokenFor = (_) => 'token-${++issued}';
+        final organizationAccount = organizationClient();
+        final backup = _RecordingKeyBackup(organizationAccount);
+        final auth = relayAuth(organizationAccount, backup: backup);
+        int assertions() =>
+            requests.where((r) => r.url.path.endsWith('/assertions')).length;
+
+        // An unbound account is never bound by cleanup with a key the user
+        // may have discarded; the durable revocation retries later.
+        await expectLater(
+          auth.headers(relay, background: true),
+          throwsA(AccountFailure.denied),
+        );
+        expect(assertions(), 0);
+        expect(auth.failure, isNull);
+
+        // Each background attempt gets its own assertion, so a retry never
+        // resends one the relay refused, and nothing enters the shared cache.
+        boundIdentity = {'pubkey_hex': keys.public};
+        expect(await auth.headers(relay, background: true), {
+          'Nostr-Federated-Identity': 'Bearer token-1',
+        });
+        expect(await auth.headers(relay, background: true), {
+          'Nostr-Federated-Identity': 'Bearer token-2',
+        });
+        expect(auth.cachedHeaders(relay), isNull);
+        expect(backup.backedUp, isEmpty);
+
+        // Foreground use issues its own assertion and backs the key up.
+        expect(await auth.headers(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-3',
+        });
+        expect(backup.backedUp, [keys.public]);
+        // Nor does cleanup reuse the session's cached assertion, which the
+        // relay may already refuse.
+        expect(await auth.headers(relay, background: true), {
+          'Nostr-Federated-Identity': 'Bearer token-4',
+        });
+
+        // After a recorded foreground failure, a background denial for the
+        // same relay and key is not handed to a foreground caller waiting on
+        // it: that caller issues for itself.
+        auth.rejected(relay, 'Bearer token-3');
+        tokenFor = (_) => '';
+        await expectLater(
+          auth.headers(relay),
+          throwsA(AccountFailure.invalidResponse),
+        );
+        expect(auth.failure, AccountFailure.invalidResponse);
+        tokenFor = (_) => 'token-${++issued}';
+        nextIdentities = [
+          {'pubkey_hex': 'f' * 64},
+        ];
+        final revocation = expectLater(
+          auth.headers(relay, background: true),
+          throwsA(AccountFailure.denied),
+        );
+        expect(await auth.headers(relay), {
+          'Nostr-Federated-Identity': 'Bearer token-5',
+        });
+        await revocation;
+        expect(auth.failure, isNull);
       },
     );
 

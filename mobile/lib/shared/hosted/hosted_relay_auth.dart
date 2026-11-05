@@ -91,12 +91,12 @@ class HostedRelayAuth extends ChangeNotifier {
         ({String token, DateTime expiry, BuilderlabAccount account})
       >{};
   // Per account client, so a stalled issuer never delays an unrelated one.
-  // Waiters share account restoration, but only an issuance for their own
-  // relay and key can fail on their behalf.
+  // Waiters share account restoration, but only a recorded issuance for their
+  // own relay and key can fail on their behalf.
   final _pending =
       <
         BuilderlabAccountClient,
-        ({Future<void> operation, String relay, String pubkey})
+        ({Future<void> operation, String relay, String pubkey, bool background})
       >{};
   bool _disposed = false;
   // Orders issuance and refusals, so a stale result never replaces a newer
@@ -170,8 +170,10 @@ class HostedRelayAuth extends ChangeNotifier {
 
   /// The assertion for [config]'s relay and key. A [background] caller (such
   /// as a push revocation for a removed community) never records its failure
-  /// or success, so it cannot hide or clear the active session's recovery,
-  /// and never backs up the key.
+  /// or success, so it cannot hide or clear the active session's recovery.
+  /// It never backs up the key or binds it to an unbound account, and its
+  /// assertion bypasses the shared cache: each attempt gets a fresh one, and
+  /// foreground use never inherits an assertion whose key was not backed up.
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
@@ -200,7 +202,9 @@ class HostedRelayAuth extends ChangeNotifier {
     final pubkey = pubkeyFromNsec(config.nsec);
     if (pubkey == null) throw AccountFailure.denied;
     while (!_disposed) {
-      final cached = _cached[(relay: relay, pubkey: pubkey)];
+      final cached = background
+          ? null
+          : _cached[(relay: relay, pubkey: pubkey)];
       if (cached != null &&
           identical(cached.account, client.account) &&
           cached.expiry.isAfter(_now())) {
@@ -209,10 +213,12 @@ class HostedRelayAuth extends ChangeNotifier {
       final pending = _pending[client];
       if (pending != null) {
         // Different communities share account restoration, never assertions.
+        // A background failure is never recorded, so it is never inherited.
         try {
           await pending.operation;
         } on AccountFailure {
-          if (pending.relay == relay &&
+          if (!pending.background &&
+              pending.relay == relay &&
               pending.pubkey == pubkey &&
               failedRelay == config.baseUrl &&
               failedPubkey == pubkey) {
@@ -222,9 +228,17 @@ class HostedRelayAuth extends ChangeNotifier {
         continue;
       }
       final operation = _issue(config, client, relay, pubkey, background);
-      _pending[client] = (operation: operation, relay: relay, pubkey: pubkey);
+      _pending[client] = (
+        operation: operation,
+        relay: relay,
+        pubkey: pubkey,
+        background: background,
+      );
       try {
-        await operation;
+        final token = await operation;
+        if (token != null) {
+          return {'Nostr-Federated-Identity': 'Bearer $token'};
+        }
       } finally {
         if (identical(_pending[client]?.operation, operation)) {
           _pending.remove(client);
@@ -234,7 +248,8 @@ class HostedRelayAuth extends ChangeNotifier {
     throw AccountFailure.unavailable;
   }
 
-  Future<void> _issue(
+  /// The issued token, or null when the account session changed meanwhile.
+  Future<String?> _issue(
     RelayConfig config,
     BuilderlabAccountClient account,
     String relay,
@@ -251,7 +266,11 @@ class HostedRelayAuth extends ChangeNotifier {
       if (!identical(session, account.account)) throw AccountFailure.denied;
       final identity = current['identity'];
       if (current['error'] != null) throw AccountFailure.invalidResponse;
-      if (identity == null && identical(account, organization)) {
+      if (identity == null && background) {
+        // Issuance can create a binding, and a background caller's key may be
+        // one the user discarded. Only foreground use chooses the identity.
+        throw AccountFailure.denied;
+      } else if (identity == null && identical(account, organization)) {
         // The organization's issuer binds the proven key on first issuance;
         // that binding is how a member's existing key joins the organization.
       } else if (identity == null) {
@@ -300,8 +319,11 @@ class HostedRelayAuth extends ChangeNotifier {
       );
       if (_disposed) throw AccountFailure.unavailable;
       if (!identical(session, account.account)) {
-        return;
+        return null;
       }
+      // A background caller may be removing this community: it must not clear
+      // recovery, back up a discarded key or seed the shared cache.
+      if (background) return token;
       _cached.removeWhere((_, entry) => !entry.expiry.isAfter(_now()));
       _cached[(relay: relay, pubkey: pubkey)] = (
         token: token,
@@ -311,12 +333,11 @@ class HostedRelayAuth extends ChangeNotifier {
         account: session,
       );
       // Issuance alone cannot prove admission after a relay refusal.
-      if (!background && failure != AccountFailure.denied) connected(config);
-      // A background caller may be removing this community, so its key must
-      // not be backed up after the user discarded it.
-      if (!background && identical(account, organization)) {
+      if (failure != AccountFailure.denied) connected(config);
+      if (identical(account, organization)) {
         unawaited(organizationBackup?.afterAssertion(config.nsec!, pubkey));
       }
+      return token;
     } on AccountFailure catch (error) {
       // Issuers run in parallel, so a failure that started before another
       // relay's unresolved failure was recorded must not replace it.
