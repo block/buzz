@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../../shared/agents/remote_agents.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/profile/user_cache_provider.dart';
@@ -35,6 +36,12 @@ class AgentActivitySheet extends HookConsumerWidget {
 
     // Resolve bot name.
     final botName = watchChannelIdentityLabel(ref, channelId, agentPubkey);
+    // Only the owner's registry confirms where an agent runs.
+    final remote = ref.watch(
+      availableRemoteAgentsProvider.select(
+        (agents) => agents.value?.contains(agentPubkey.toLowerCase()) ?? false,
+      ),
+    );
 
     // Auto-scroll to bottom on new items.
     final sheetControllerRef = useRef<ScrollController?>(null);
@@ -90,12 +97,31 @@ class AgentActivitySheet extends HookConsumerWidget {
                       ),
                       const SizedBox(width: Grid.xxs),
                       Expanded(
-                        child: Text(
-                          botName,
-                          style: context.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                botName,
+                                style: context.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            // A long name truncates before the location does.
+                            if (remote)
+                              Tooltip(
+                                message: 'Runs remotely on Builderlab',
+                                child: Text(
+                                  ' \u00b7 Remote',
+                                  semanticsLabel: 'Remote',
+                                  maxLines: 1,
+                                  style: context.textTheme.bodySmall?.copyWith(
+                                    color: context.colors.onSurfaceVariant,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                       _ConnectionBadge(connection: connection),

@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/agents/remote_agents.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -41,6 +42,9 @@ class MembersSheet extends HookConsumerWidget {
     final bots = allMembers.where((member) => member.isBot).toList();
     final userCache = ref.watch(userCacheProvider);
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
+    // Only the owner's registry confirms where an agent runs.
+    final remoteAgents =
+        ref.watch(availableRemoteAgentsProvider).value ?? const <String>{};
     final statusCache = ref.watch(userStatusCacheProvider);
     final bottomClearance = Grid.md + MediaQuery.viewPaddingOf(context).bottom;
 
@@ -141,6 +145,7 @@ class MembersSheet extends HookConsumerWidget {
                       isWorking: typingBotPubkeys.contains(
                         bot.pubkey.toLowerCase(),
                       ),
+                      remote: remoteAgents.contains(bot.pubkey.toLowerCase()),
                       onViewActivity: () => openActivity(bot),
                       onActivityTap:
                           typingBotPubkeys.contains(bot.pubkey.toLowerCase())
@@ -199,6 +204,9 @@ class _MemberTile extends ConsumerWidget {
   final bool isSelf;
   final String channelId;
   final bool isWorking;
+
+  /// Whether the owner's registry confirms this agent runs on Builderlab.
+  final bool remote;
   final VoidCallback? onActivityTap;
   final VoidCallback? onViewActivity;
   final UserStatus? userStatus;
@@ -211,6 +219,7 @@ class _MemberTile extends ConsumerWidget {
     required this.isSelf,
     required this.channelId,
     this.isWorking = false,
+    this.remote = false,
     this.onActivityTap,
     this.onViewActivity,
     this.userStatus,
@@ -250,11 +259,18 @@ class _MemberTile extends ConsumerWidget {
                   semanticLabel: 'Agent working',
                 ),
                 const SizedBox(width: Grid.half),
-                Text(
-                  'Working\u2026',
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.appColors.success,
-                    fontWeight: FontWeight.w600,
+                Flexible(
+                  child: Text(
+                    // Desktop's activity fallback for a confirmed remote agent.
+                    remote
+                        ? 'Running remotely on Builderlab\u2026'
+                        : 'Working\u2026',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.appColors.success,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ],

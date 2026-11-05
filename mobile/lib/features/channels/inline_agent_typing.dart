@@ -53,9 +53,13 @@ class InlineAgentTyping extends ConsumerWidget {
     final title = keys.length == 1
         ? name
         : '$name and ${keys.length - 1} ${keys.length == 2 ? 'other' : 'others'}';
+    // Like desktop's typing byline: only a lone confirmed remote agent.
+    final remoteByline = remote && keys.length == 1;
     return Semantics(
       liveRegion: true,
-      label: '$title ${keys.length == 1 ? 'is' : 'are'} typing',
+      label: remoteByline
+          ? '$title, remote, is typing'
+          : '$title ${keys.length == 1 ? 'is' : 'are'} typing',
       child: ExcludeSemantics(
         child: Padding(
           padding: const EdgeInsets.only(top: Grid.xs, bottom: Grid.xxs),
@@ -96,15 +100,32 @@ class InlineAgentTyping extends ConsumerWidget {
                   children: [
                     Padding(
                       padding: const EdgeInsets.only(left: Grid.xs),
-                      child: Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: messageUsernameTextStyle.copyWith(
-                          color: context.colors.onSurface,
-                          fontSize: 13.1,
-                          height: 17 / 13.1,
-                        ),
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: messageUsernameTextStyle.copyWith(
+                                color: context.colors.onSurface,
+                                fontSize: 13.1,
+                                height: 17 / 13.1,
+                              ),
+                            ),
+                          ),
+                          // A long name truncates before the location does.
+                          if (remoteByline)
+                            Text(
+                              ' \u00b7 Remote',
+                              maxLines: 1,
+                              style: messageMetadataTextStyle.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                                fontSize: 11,
+                                height: 17 / 11,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: Grid.xxs),

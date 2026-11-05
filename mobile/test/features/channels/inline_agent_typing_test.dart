@@ -378,12 +378,15 @@ void main() {
   testWidgets('remote work leads with a cloud that pulses unless reduced', (
     tester,
   ) async {
+    final semantics = tester.ensureSemantics();
     final cloud = find.byKey(const ValueKey('remote-work-cloud'));
     double opacity() => tester.widget<FadeTransition>(cloud).opacity.value;
 
     await tester.pumpWidget(surface());
     await tester.pump();
     expect(cloud, findsNothing);
+    expect(find.text(' \u00b7 Remote'), findsNothing);
+    expect(find.bySemanticsLabel('Test agent is typing'), findsOneWidget);
 
     // A fresh scope, since overrides are fixed for a scope's lifetime.
     await tester.pumpWidget(const SizedBox());
@@ -392,10 +395,17 @@ void main() {
     await tester.pump(const Duration(milliseconds: 700));
     expect(cloud, findsOneWidget);
     expect(opacity(), closeTo(0.35, 0.01));
+    // Desktop's typing byline, announced once with the typing state.
+    expect(find.text(' \u00b7 Remote'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Test agent, remote, is typing'),
+      findsOneWidget,
+    );
 
     await tester.pumpWidget(surface(remote: true, reduced: true));
     await tester.pumpAndSettle();
     expect(opacity(), 1);
     expect(tester.binding.hasScheduledFrame, isFalse);
+    semantics.dispose();
   });
 }
