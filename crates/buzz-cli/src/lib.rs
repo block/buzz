@@ -1094,8 +1094,18 @@ pub enum UsersCmd {
         #[arg(long)]
         emoji: Option<String>,
         /// Remove your status entirely
-        #[arg(long, conflicts_with_all = ["text", "emoji"])]
+        #[arg(long, conflicts_with_all = ["text", "emoji", "expires"])]
         clear: bool,
+        /// Clear the status automatically: a future unix timestamp or a
+        /// duration such as 30m, 2h, 1d, 1w
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    /// Read user statuses (NIP-38 kind:30315); expired or cleared statuses are omitted
+    Status {
+        /// Pubkey (hex or npub) or exact display name (repeatable, max 100; default: you)
+        #[arg(long = "pubkey")]
+        pubkeys: Vec<String>,
     },
 }
 
@@ -2681,7 +2691,8 @@ mod tests {
                 "presence",
                 "set-presence",
                 "set-profile",
-                "set-status"
+                "set-status",
+                "status"
             ]
         );
         assert_eq!(
@@ -2785,7 +2796,7 @@ mod tests {
             ("repos", 6),
             ("social", 7),
             ("upload", 1),
-            ("users", 5),
+            ("users", 6),
             ("workflows", 8),
         ];
 
