@@ -10,7 +10,9 @@ typedef _RejectedBinding = ({String subject, String pubkey, int generation});
 extension HostedFlowIdentityRecovery on HostedFlow {
   bool get canChooseDifferentIdentity {
     final rejected = _rejectedBinding;
-    return stage == HostedFlowStage.blocked &&
+    // A paired transfer pins its key, so there is no other identity to choose.
+    return _pairedPubkey == null &&
+        stage == HostedFlowStage.blocked &&
         problem == HostedFlowProblem.requestRejected &&
         rejected != null &&
         rejected.generation == _generation &&

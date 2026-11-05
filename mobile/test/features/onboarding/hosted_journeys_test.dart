@@ -1393,6 +1393,27 @@ void main() {
     expect(await f.store.read(), isNull);
   });
 
+  journey('a rejected paired key offers no other identity', (tester, f) async {
+    if (!HostedEnvironment.requiresAuth('paired.communities.buzz.xyz')) return;
+    await f.initialize(localIdentity: false, cloudChoice: true);
+    await f.mount(tester);
+    f.rejectedBindings.add(f.keys.public);
+    await f.flow.stagePairedCommunity(
+      Community.create(
+        name: 'Paired',
+        relayUrl: 'https://paired.communities.buzz.xyz',
+        pubkey: f.keys.public,
+        nsec: f.keys.nsec,
+      ),
+      isCurrent: () => true,
+    );
+    await f.flow.retry();
+    await f.settle(tester);
+    expect(f.flow.problem, HostedFlowProblem.requestRejected);
+    expect(f.flow.canChooseDifferentIdentity, isFalse);
+    expect(find.text('Choose a different identity'), findsNothing);
+  });
+
   for (final status in [503, 403]) {
     journey('ambiguous binding failure ($status) offers no release', (
       tester,
