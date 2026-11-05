@@ -56,7 +56,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
-deadpool-redis = { workspace = true }
 redis = { workspace = true }
 # Redis TLS (rediss://, e.g. ElastiCache) uses rustls, which needs a process
 # CryptoProvider installed at startup. Both aws-lc-rs and ring are compiled in

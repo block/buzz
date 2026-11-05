@@ -520,6 +520,7 @@ impl LockedMemberSnapshot {
         crate::store::event_follow_up::after_admitted_insert(
             &mut self.tx,
             event.id.as_bytes().as_slice(),
+            created_at,
             kind,
             Some(channel_id),
         )

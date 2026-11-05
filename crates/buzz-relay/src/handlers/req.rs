@@ -956,14 +956,20 @@ async fn handle_search_req(
             let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
             let page_empty = search_result.hits.is_empty();
 
-            let hit_ids: Vec<[u8; 32]> =
-                search_result.hits.into_iter().map(|h| h.event_id).collect();
+            let hit_keys: Vec<_> = search_result
+                .hits
+                .iter()
+                .map(|h| (h.event_id, h.created_at))
+                .collect();
 
-            if !hit_ids.is_empty() {
-                let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
+            if !hit_keys.is_empty() {
                 let events = match state
                     .db
-                    .get_events_by_ids_routed("req_search_hydrate", tenant.community(), &id_refs)
+                    .get_events_by_ids_at_routed(
+                        "req_search_hydrate",
+                        tenant.community(),
+                        &hit_keys,
+                    )
                     .await
                 {
                     Ok(evs) => evs,
@@ -1032,7 +1038,7 @@ async fn handle_search_req(
                         .map(|ev| (ev.event.id.to_bytes(), ev))
                         .collect();
 
-                for id_array in &hit_ids {
+                for (id_array, _) in &hit_keys {
                     if emitted >= limit {
                         break;
                     }

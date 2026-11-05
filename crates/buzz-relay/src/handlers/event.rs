@@ -2672,10 +2672,8 @@ mod tests {
         async fn redis_url_if_available() -> Option<String> {
             let redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-            let pool = deadpool_redis::Config::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
-            let mut conn = pool.get().await.ok()?;
+            let pool = buzz_pubsub::redis_connection(&redis_url).ok()?;
+            let mut conn = pool.clone();
             redis::cmd("PING")
                 .query_async::<String>(&mut conn)
                 .await
@@ -3026,9 +3024,7 @@ mod tests {
             config.redis_url = redis_url.to_string();
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3074,11 +3070,9 @@ mod tests {
             config.redis_url = "redis://127.0.0.1:6379".to_string();
             let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
             // Require a real Redis so dispatch's publish_event doesn't error-log.
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             redis::cmd("PING")
-                .query_async::<String>(&mut redis_pool.get().await.ok()?)
+                .query_async::<String>(&mut redis_pool.clone())
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
