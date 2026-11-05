@@ -1,10 +1,13 @@
 import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:http/testing.dart';
 import 'package:buzz/shared/widgets/media_loading_placeholder.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
+
 import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
@@ -18,6 +21,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
+import 'package:video_player/video_player.dart' show VideoPlayer;
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart' as audio;
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -47,15 +51,9 @@ Widget _testable(
   bool disableAnimations = false,
   bool dark = false,
   ThemeData? theme,
-  VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
-    overrides: [
-      videoPreviewFrameLoaderProvider.overrideWithValue(
-        videoPreviewFrameLoader ?? (_) async => null,
-      ),
-      ...overrides,
-    ],
+    overrides: overrides,
     child: MaterialApp(
       theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
@@ -1311,41 +1309,6 @@ void main() {
         expect(find.byType(MediaLoadingPlaceholder), findsNothing);
         expect(tester.getSize(preview), before);
         expect(tester.takeException(), isNull);
-      });
-
-      testWidgets('keeps video loading and decoded frame the same size', (
-        tester,
-      ) async {
-        final frame = Completer<LoadedVideoPreviewFrame?>();
-        const url = 'https://example.com/loading-video.mp4';
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($url)',
-              channelNames: {'general': 'general-id'},
-              tags: [
-                ['imeta', 'url $url', 'm video/mp4', 'dim 1920x1080'],
-              ],
-            ),
-            disableAnimations: true,
-            videoPreviewFrameLoader: (_) => frame.future,
-          ),
-        );
-        final preview = find.byKey(
-          const ValueKey('message-media-video-preview:$url'),
-        );
-        final before = tester.getSize(preview);
-        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
-        frame.complete(
-          LoadedVideoPreviewFrame(
-            child: const ColoredBox(color: Colors.black),
-            aspectRatio: 16 / 9,
-            dispose: () async {},
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
-        expect(tester.getSize(preview), before);
       });
 
       testWidgets('uses the shared Buzz loader while a voice note loads', (
@@ -2620,11 +2583,10 @@ Photos
         expect(find.byIcon(BuzzIcons.play), findsOneWidget);
       });
 
-      testWidgets('derives a first frame for a posterless video event', (
+      testWidgets('shows a static placeholder for a posterless video event', (
         tester,
       ) async {
         const videoUrl = 'https://example.com/media/legacy-video.mp4';
-        var disposed = false;
 
         await tester.pumpWidget(
           _testable(
@@ -2634,36 +2596,17 @@ Photos
                 ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
               ],
             ),
-            videoPreviewFrameLoader: (url) async {
-              expect(url, videoUrl);
-              return LoadedVideoPreviewFrame(
-                aspectRatio: 9 / 16,
-                child: const ColoredBox(
-                  key: ValueKey('derived-video-frame'),
-                  color: Colors.blue,
-                ),
-                dispose: () async => disposed = true,
-              );
-            },
           ),
         );
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(
-            const ValueKey('message-media-video-first-frame:$videoUrl'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('derived-video-frame')),
-          findsOneWidget,
-        );
-        expect(find.text('Video attachment'), findsNothing);
-
-        await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
-        expect(disposed, isTrue);
+
+        expect(
+          find.byKey(const ValueKey('message-media-video-preview:$videoUrl')),
+          findsOneWidget,
+        );
+        expect(find.text('Video attachment'), findsOneWidget);
+        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
+        expect(find.byType(VideoPlayer), findsNothing);
       });
 
       testWidgets(
