@@ -2330,6 +2330,44 @@ void main() {
     },
   );
 
+  test('reply counts stay on screen while a reconnect catches up', () async {
+    final reconnectPage = Completer<List<NostrEvent>>();
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: threadIdRoot, createdAt: 10),
+          _summary(rootId: threadIdRoot, replyCount: 6, createdAt: 10),
+          _bounds(),
+        ],
+        reconnectPage.future,
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(notifier.threadSummaries[threadIdRoot]?.replyCount, 6);
+
+    session.setConnected(false);
+    await _pumpEventQueue();
+    session.setConnected(true);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isTrue);
+    expect(notifier.threadSummaries[threadIdRoot]?.replyCount, 6);
+
+    // The replacement window decides, including dropping a summary.
+    reconnectPage.complete([
+      _event(id: threadIdRoot, createdAt: 10),
+      _bounds(),
+    ]);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isFalse);
+    expect(notifier.threadSummaries[threadIdRoot], isNull);
+  });
+
   test('a loaded timeline catches up after reconnecting', () async {
     final reconnectPage = Completer<List<NostrEvent>>();
     final session = _RecordingRelaySessionNotifier(
