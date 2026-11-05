@@ -23,9 +23,7 @@ pub async fn cmd_add_reaction(
         buzz_sdk::build_reaction(target_eid, emoji)
             .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
     };
-    // NIP-25 `p` tag names the target's author so they can find reactions to
-    // their messages with a `#p` filter. buzz-acp status reactions keep using
-    // the bare SDK builder so they stay out of those results.
+    // NIP-25: lets the target's author find reactions with a `#p` filter.
     let target_author = fetch_target_author(client, event_id).await?;
     let builder = builder.tag(Tag::public_key(target_author));
 
@@ -174,8 +172,6 @@ mod tests {
 
     type Submitted = Arc<Mutex<Option<serde_json::Value>>>;
 
-    /// Fake relay: `/query` answers with `query_body`; `/events` records the
-    /// submitted event.
     async fn fake_relay(query_body: String) -> (String, Submitted) {
         let submitted: Submitted = Arc::new(Mutex::new(None));
         let state = (query_body, submitted.clone());

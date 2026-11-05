@@ -50,7 +50,7 @@ buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
 
 # Reactions
-buzz reactions add --event <event-id> --emoji "👍"   # tags the message author (NIP-25 `p`)
+buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
 # GIFs (requires relay to advertise buzz-gif / KLIPY)
