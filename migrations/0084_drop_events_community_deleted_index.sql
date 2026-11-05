@@ -1,8 +1,11 @@
--- Contract: drop idx_events_community_deleted. No relay query reads by
--- (community_id, deleted_at), so the index serves nothing. Every write to an
--- `events` row still maintains it, and every read that plans against `events`
--- locks it on each partition. Deployed relays are unaffected: none names the
--- index, and PostgreSQL replans any cached plan that used it.
+-- Contract: drop idx_events_community_deleted. No relay query filters or
+-- sorts `events` on deleted_at beyond `deleted_at IS NULL`. The planner picks
+-- this index only for community-wide scans, the community deletion row count
+-- and purge, because it is the smallest index led by community_id; every other
+-- `events` index is also led by community_id and serves them. Every write to
+-- an `events` row still maintains it, and every read that plans against
+-- `events` locks it on each partition. Deployed relays are unaffected: none
+-- names the index, and PostgreSQL replans any cached plan that used it.
 --
 -- `events` is partitioned, and PostgreSQL cannot drop a partitioned index
 -- CONCURRENTLY. DROP INDEX takes ACCESS EXCLUSIVE on `events` and on every
