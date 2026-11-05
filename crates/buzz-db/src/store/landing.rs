@@ -83,6 +83,11 @@ pub fn welcome_message_error(text: &str) -> Option<&'static str> {
 pub enum LandingAdoption {
     /// A channel was already designated.
     Existing(Uuid),
+    /// A channel was already designated but is no longer eligible: archived,
+    /// private, deleted or given a TTL past the relay's protections (a
+    /// direct write, or a relay from before them). It stays designated; an
+    /// owner or admin moves it with kind:9002 `landing`.
+    ExistingIneligible(Uuid),
     /// An eligible channel named `general` became the landing channel.
     Reused(Uuid),
     /// The relay created `general`, owned by `steward`, as the landing
@@ -96,8 +101,8 @@ pub enum LandingAdoption {
     /// No eligible `general` exists and the community has no owner or admin
     /// to own a new one. The designation stays empty.
     SkippedNoSteward,
-    /// No eligible `general` exists and the name is held by a channel that
-    /// cannot be the landing channel (archived, or a forum).
+    /// No eligible `general` exists and the name is held by a listed channel
+    /// that cannot be the landing channel (archived, a forum, or with a TTL).
     SkippedNameTaken,
 }
 
@@ -105,7 +110,7 @@ impl LandingAdoption {
     /// The landing channel after the call, if any.
     pub fn channel_id(&self) -> Option<Uuid> {
         match *self {
-            Self::Existing(id) | Self::Reused(id) => Some(id),
+            Self::Existing(id) | Self::ExistingIneligible(id) | Self::Reused(id) => Some(id),
             Self::Created { channel_id, .. } => Some(channel_id),
             Self::SkippedNoSteward | Self::SkippedNameTaken => None,
         }
@@ -116,6 +121,7 @@ impl LandingAdoption {
     pub fn outcome(&self) -> Option<&'static str> {
         match self {
             Self::Existing(_) => None,
+            Self::ExistingIneligible(_) => Some("existing_ineligible"),
             Self::Reused(_) => Some("reused"),
             Self::Created { .. } => Some("created"),
             Self::SkippedNoSteward => Some("skipped_no_steward"),
@@ -201,18 +207,26 @@ async fn ensure_landing_channel(
     pool: &PgPool,
     community_id: CommunityId,
 ) -> Result<LandingAdoption> {
-    let current = {
+    let current: Option<(Uuid, bool)> = {
         let mut connection = crate::observability::acquire_writer(
             pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        read_landing(&mut connection, community_id)
-            .await?
-            .channel_id
+        // The designation and, in the same read, whether it is still eligible.
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT c.landing_channel_id, EXISTS (SELECT 1 FROM channels \
+             WHERE community_id = c.id AND id = c.landing_channel_id AND {ELIGIBLE_SQL}) \
+             FROM communities c WHERE c.id = $1 AND c.landing_channel_id IS NOT NULL"
+        )))
+        .bind(community_id.as_uuid())
+        .fetch_optional(&mut *connection)
+        .await?
     };
-    if let Some(channel_id) = current {
-        return Ok(LandingAdoption::Existing(channel_id));
+    match current {
+        Some((channel_id, true)) => return Ok(LandingAdoption::Existing(channel_id)),
+        Some((channel_id, false)) => return Ok(LandingAdoption::ExistingIneligible(channel_id)),
+        None => {}
     }
     if let Some(adopted) = adopt_general(pool, community_id).await? {
         return Ok(adopted);
@@ -418,10 +432,13 @@ impl Db {
     /// an unlisted one. With none, a listed, open `general` is created, owned
     /// by the community's earliest owner, else earliest admin
     /// ([`LandingAdoption::SkippedNoSteward`] when there is neither). If the
-    /// name is held by a channel that cannot be adopted (an archived
-    /// `general`, or a forum), nothing is created
-    /// ([`LandingAdoption::SkippedNameTaken`]). A private `general` is never
-    /// adopted and does not hold the name.
+    /// name is held by a listed channel that cannot be adopted (an archived
+    /// `general`, a forum, or one with a TTL), nothing is created
+    /// ([`LandingAdoption::SkippedNameTaken`]). A private or unlisted
+    /// `general` does not hold the name, and a private one is never adopted.
+    ///
+    /// A designated channel that is no longer eligible is reported
+    /// ([`LandingAdoption::ExistingIneligible`]) and left designated.
     ///
     /// A NULL designation is the retry record: every call that finds one
     /// tries again.

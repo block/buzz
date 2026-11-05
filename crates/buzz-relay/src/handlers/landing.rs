@@ -96,6 +96,9 @@ pub(crate) async fn ensure_landing_channel(
     }
     match adoption {
         LandingAdoption::Existing(_) => {}
+        LandingAdoption::ExistingIneligible(channel_id) => {
+            warn!(channel = %channel_id, "the landing channel is no longer eligible (archived, private, deleted or with a ttl); move the designation with a kind:9002 landing tag");
+        }
         LandingAdoption::Reused(channel_id) => {
             info!(channel = %channel_id, "adopted general as the landing channel");
             state.invalidate_all_accessible_channels(tenant);
@@ -203,8 +206,10 @@ pub(crate) async fn join_landing_on_roster_admission(
 /// 2. A person with no entry evidence
 ///    ([`buzz_db::Db::has_entered_community`]) is joined to it. In roster
 ///    mode the evidence counts from their roster row's `created_at`, so a
-///    re-admission after kind:9031 is a first entry again; without a roster
-///    any history counts.
+///    re-admission after kind:9031 is a first entry again unless a shared
+///    membership from before is still active (kind:9031 removes nobody
+///    from channels, and an active membership always counts); without a
+///    roster any history counts.
 /// 3. In roster mode, the admission then finishes the durable
 ///    default-channel work its roster write left pending, if any
 ///    ([`side_effects::auto_join_default_channels`]): the recovery for a
