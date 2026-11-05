@@ -30,6 +30,99 @@ class _MarkdownEditingController extends TextEditingController {
   List<TextRange> _chipRanges = const [];
   final List<TextRange> _pendingChipRanges = [];
 
+  /// Start of the link [buildTextSpan] last drew as raw text for the caret.
+  int? _revealedLinkStart;
+
+  /// Where the composer's Buzz links sit in [text] (URL only, without
+  /// trailing punctuation), computed once per text.
+  String? _linkRangesText;
+  List<TextRange> _linkRanges = const [];
+
+  static final _linkPattern = RegExp(
+    r'''buzz://(?:message\?|channel/|(?:repo|pr|issue)\?)[^\s<>"']+''',
+    caseSensitive: false,
+  );
+  static final _linkTrailingPunctuation = RegExp(r'[.,!?:;)\]}*]+$');
+
+  /// Snaps a selection that would land inside a chip out to the chip's
+  /// edges, so a chip is always wholly inside or outside the selection. A
+  /// caret inside a chip moves to its nearer edge; at a link's end the link
+  /// then shows as raw text.
+  @override
+  set value(TextEditingValue newValue) {
+    super.value = _snapSelectionToChips(newValue);
+  }
+
+  TextEditingValue _snapSelectionToChips(TextEditingValue next) {
+    final selection = next.selection;
+    if (_chipRanges.isEmpty ||
+        next.text != _chipRangesText ||
+        !selection.isValid ||
+        (next.composing.isValid && !next.composing.isCollapsed)) {
+      return next;
+    }
+    var start = selection.start;
+    var end = selection.end;
+    for (final chip in _chipRanges) {
+      if (selection.isCollapsed) {
+        if (chip.start < start && start < chip.end) {
+          // Keep moving the way the caret came from, so arrow keys step
+          // over a chip; a tap goes to the nearer edge.
+          final from = value.selection.isCollapsed
+              ? value.selection.baseOffset
+              : -1;
+          final towardEnd = from == chip.start
+              ? true
+              : from == chip.end
+              ? false
+              : start - chip.start > chip.end - start;
+          start = end = towardEnd ? chip.end : chip.start;
+        }
+        continue;
+      }
+      if (chip.start < start && start < chip.end) start = chip.start;
+      if (chip.start < end && end < chip.end) end = chip.end;
+    }
+    if (start == selection.start && end == selection.end) return next;
+    final snapped = selection.isCollapsed
+        ? TextSelection.collapsed(offset: start)
+        : selection.baseOffset <= selection.extentOffset
+        ? TextSelection(baseOffset: start, extentOffset: end)
+        : TextSelection(baseOffset: end, extentOffset: start);
+    return next.copyWith(selection: snapped);
+  }
+
+  List<TextRange> _linkRangesIn(String source) {
+    if (_linkRangesText == source) return _linkRanges;
+    _linkRangesText = source;
+    return _linkRanges = List.unmodifiable([
+      for (final match in _linkPattern.allMatches(source))
+        TextRange(
+          start: match.start,
+          end:
+              match.end -
+              (_linkTrailingPunctuation
+                      .firstMatch(match.group(0)!)
+                      ?.group(0)
+                      ?.length ??
+                  0),
+        ),
+    ]);
+  }
+
+  /// The link shown as raw text because the selection sits in it: a caret
+  /// at its end (or a selection inside it, entered from there). A caret at
+  /// its start leaves it a chip.
+  TextRange? _revealedLinkFor(String source, TextSelection selection) {
+    if (!selection.isValid) return null;
+    for (final link in _linkRangesIn(source)) {
+      if (selection.start > link.start && selection.end <= link.end) {
+        return link;
+      }
+    }
+    return null;
+  }
+
   void setChannelNames(Map<String, String> names) {
     if (mapEquals(_channelNames, names)) return;
     _channelNames = Map.unmodifiable(names);
@@ -81,8 +174,10 @@ class _MarkdownEditingController extends TextEditingController {
         ? value.composing
         : TextRange.empty;
     final colors = context.colors;
+    final revealedLinkStart = _revealedLinkFor(text, selection)?.start;
     if (_cachedTextSpan case final cached?
         when _cachedText == text &&
+            _revealedLinkStart == revealedLinkStart &&
             _cachedComposingRange == composingRange &&
             _cachedBaseStyle == baseStyle &&
             _cachedOnSurface == colors.onSurface &&
@@ -90,6 +185,7 @@ class _MarkdownEditingController extends TextEditingController {
       return cached;
     }
     _pendingChipRanges.clear();
+    _revealedLinkStart = revealedLinkStart;
     final span = TextSpan(
       style: baseStyle,
       children: _buildMarkdownSpans(
@@ -109,6 +205,47 @@ class _MarkdownEditingController extends TextEditingController {
     _chipRangesText = text;
     _chipRanges = List.unmodifiable(_pendingChipRanges);
     return span;
+  }
+
+  /// Applies the composer's chip editing rules to a user edit.
+  TextEditingValue formatUserEdit(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) => _spaceAfterPastedLink(oldValue, expandChipDeletion(oldValue, newValue));
+
+  /// Adds a space after a link pasted on its own, so it becomes a chip
+  /// straight away. Pasted text with anything besides one link is unchanged.
+  TextEditingValue _spaceAfterPastedLink(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final oldSelection = oldValue.selection;
+    if (!oldSelection.isValid ||
+        (newValue.composing.isValid && !newValue.composing.isCollapsed)) {
+      return newValue;
+    }
+    final oldText = oldValue.text;
+    final newText = newValue.text;
+    final start = oldSelection.start;
+    final end = oldSelection.end;
+    final insertedEnd = newText.length - (oldText.length - end);
+    if (insertedEnd - start < 2 ||
+        !newText.startsWith(oldText.substring(0, start)) ||
+        !newText.endsWith(oldText.substring(end))) {
+      return newValue;
+    }
+    final inserted = newText.substring(start, insertedEnd);
+    final match = _linkPattern.matchAsPrefix(inserted);
+    if (match == null ||
+        match.end != inserted.length ||
+        _linkTrailingPunctuation.hasMatch(inserted) ||
+        (insertedEnd < newText.length && newText[insertedEnd].trim().isEmpty)) {
+      return newValue;
+    }
+    return TextEditingValue(
+      text: newText.replaceRange(insertedEnd, insertedEnd, ' '),
+      selection: TextSelection.collapsed(offset: insertedEnd + 1),
+    );
   }
 
   /// Widens a backspace or forward delete that removes part of a chip's
@@ -139,12 +276,19 @@ class _MarkdownEditingController extends TextEditingController {
       newSelection.baseOffset,
     );
     if (deleted == null) return newValue;
+    // A link the caret has revealed edits as raw text, even before the next
+    // frame drops its chip.
+    final revealed = _revealedLinkFor(oldValue.text, oldSelection);
     var expandedStart = deleted.start;
     var expandedEnd = deleted.end;
     for (final chip in _chipRanges) {
-      if (chip.start < deleted.end && deleted.start < chip.end) {
-        expandedStart = math.min(expandedStart, chip.start);
-        expandedEnd = math.max(expandedEnd, chip.end);
+      if (chip == revealed) continue;
+      // Only a deletion inside one chip widens. A run reaching past the chip
+      // is not a key press (Undo can restore a shorter link this way), and
+      // leaves the rest as visible text.
+      if (chip.start <= deleted.start && deleted.end <= chip.end) {
+        expandedStart = chip.start;
+        expandedEnd = chip.end;
       }
     }
     if (expandedStart == deleted.start && expandedEnd == deleted.end) {
@@ -426,11 +570,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextStyle style,
     int sourceOffset,
   ) {
-    final expression = RegExp(
-      r'''buzz://(?:message\?|channel/|(?:repo|pr|issue)\?)[^\s<>"']+''',
-      caseSensitive: false,
-    );
-    final matches = expression.allMatches(source).toList();
+    final matches = _linkPattern.allMatches(source).toList();
     if (matches.isEmpty) return null;
 
     final spans = <InlineSpan>[];
@@ -448,9 +588,15 @@ class _MarkdownEditingController extends TextEditingController {
         );
       }
       final raw = match.group(0)!;
-      final url = raw.replaceFirst(RegExp(r'[.,!?:;)\]}*]+$'), '');
+      final url = raw.replaceFirst(_linkTrailingPunctuation, '');
       final trailing = raw.substring(url.length);
-      final presentation = _composerLinkPresentation(url);
+      final linkStart = sourceOffset + match.start;
+      // A link shows as raw text while the caret sits at its end, so it can
+      // be edited. The match runs to whitespace or the end of the text, so
+      // everywhere else a boundary follows it and it is a chip.
+      final presentation = linkStart == _revealedLinkStart
+          ? null
+          : _composerLinkPresentation(url);
       if (presentation == null) {
         spans.add(TextSpan(text: raw, style: style));
       } else {
@@ -716,16 +862,16 @@ class _ComposerAgentMentionChip extends StatelessWidget {
   }
 }
 
-/// Routes user edits through [_MarkdownEditingController.expandChipDeletion]
-/// so backspace and forward delete remove a composer chip as one unit.
-class _ComposerChipDeletionFormatter extends TextInputFormatter {
+/// Routes user edits through [_MarkdownEditingController.formatUserEdit] so
+/// composer chips follow their editing rules.
+class _ComposerChipEditingFormatter extends TextInputFormatter {
   final _MarkdownEditingController controller;
 
-  _ComposerChipDeletionFormatter(this.controller);
+  _ComposerChipEditingFormatter(this.controller);
 
   @override
   TextEditingValue formatEditUpdate(
     TextEditingValue oldValue,
     TextEditingValue newValue,
-  ) => controller.expandChipDeletion(oldValue, newValue);
+  ) => controller.formatUserEdit(oldValue, newValue);
 }

@@ -334,7 +334,7 @@ class _ComposeBarLayout extends HookWidget {
       controller: controller,
       focusNode: focusNode,
       readOnly: readOnly,
-      inputFormatters: [_ComposerChipDeletionFormatter(controller)],
+      inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,
