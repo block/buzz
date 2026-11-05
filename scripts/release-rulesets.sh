@@ -22,6 +22,11 @@ require_canonical_repository() {
       fail_release_ruleset "origin must point to canonical block/buzz, not '$origin_url'" || return 1
       ;;
   esac
+  # Tags are pushed with `git push origin`, which honors remote.origin.pushurl
+  # and url.*.pushInsteadOf. Require the effective push destination to be the
+  # same canonical repository that origin fetches from.
+  [[ "$(git remote get-url --push origin)" == "$(git remote get-url origin)" ]] || \
+    fail_release_ruleset "origin pushes somewhere other than it fetches from; remove remote.origin.pushurl or pushInsteadOf so candidate tags reach canonical block/buzz" || return 1
 }
 
 require_mobile_release_tag_ruleset() {

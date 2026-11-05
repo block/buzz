@@ -295,6 +295,25 @@ git -C "$fork_operator" config user.email test@example.com
 if (cd "$fork_operator" && "$script" candidate 2.0.0 >/dev/null 2>&1); then
   fail "noncanonical origin was accepted"
 fi
+# A canonical fetch URL with a fork push destination (pushurl or
+# pushInsteadOf) is rejected before any tag is created locally or anywhere.
+fork_remote="$tmp/fork.git"
+git clone -q --bare "$remote" "$fork_remote"
+fork_tags_before="$(git --git-dir="$fork_remote" for-each-ref refs/tags)"
+git -C "$operator" config remote.origin.pushurl "file://$fork_remote"
+if run_release "$operator" candidate 2.0.1 > "$tmp/pushurl-output" 2>&1; then
+  fail "candidate succeeded with origin pushing to a fork"
+fi
+git -C "$operator" config --unset remote.origin.pushurl
+grep -Fq 'origin pushes somewhere other than it fetches from' "$tmp/pushurl-output"
+git -C "$operator" config "url.file://$fork_remote.pushInsteadOf" "$canonical_origin"
+if run_release "$operator" candidate 2.0.1 >/dev/null 2>&1; then
+  fail "candidate succeeded with pushInsteadOf pointing at a fork"
+fi
+git -C "$operator" config --unset "url.file://$fork_remote.pushInsteadOf"
+assert_no_candidate_tag 2.0.1
+[[ "$(git --git-dir="$fork_remote" for-each-ref refs/tags)" == "$fork_tags_before" ]]
+
 tags_before="$(git --git-dir="$remote" for-each-ref refs/tags)"
 if GH_VERSION=2.86.0 run_release "$operator" candidate 2.0.0 >/dev/null 2>&1; then
   fail "gh older than 2.87.0 was accepted"
