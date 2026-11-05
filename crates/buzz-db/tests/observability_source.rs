@@ -1667,7 +1667,7 @@ pub(crate) async fn hooked_writer(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
         .await
         .expect("follow up");
 }
@@ -1732,7 +1732,7 @@ pub(crate) async fn writer_with_commented_out_hook(tx: &mut AdmittedTx) {
         .execute(tx.conn())
         .await
         .expect("write");
-    // crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    // crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
 }
 pub(crate) async fn writer_with_block_commented_hook(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1754,7 +1754,7 @@ pub(crate) async fn writer_with_nested_block_commented_hook(tx: &mut AdmittedTx)
         .execute(tx.conn())
         .await
         .expect("write");
-    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel) */
+    /* /* inner */ crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel) */
 }
 pub(crate) async fn writer_with_hook_after_escaped_quote(tx: &mut AdmittedTx) {
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1782,7 +1782,7 @@ pub(crate) async fn writer_after_block_commented_cfg_test(tx: &mut AdmittedTx) {
 pub(crate) async fn writer_after_raw_string_example(tx: &mut AdmittedTx) {
     let _example = r#"
 fn example() {
-    crate::store::event_follow_up::after_admitted_insert(tx, id, kind, channel)
+    crate::store::event_follow_up::after_admitted_insert(tx, id, created_at, kind, channel)
 }
 "#;
     sqlx::query("INSERT INTO events (community_id, id) VALUES ($1, $2)")
@@ -1898,6 +1898,59 @@ fn every_production_event_insert_runs_the_follow_up_hook() {
         hooked_writers >= 7,
         "expected at least seven hooked event writers, found {hooked_writers}"
     );
+}
+
+// Explicit inventory complements the generic insert scanner: every direct
+// production hook must forward the same created_at local bound by its INSERT.
+#[test]
+fn event_insert_hook_inventory_carries_the_insert_timestamp() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut actual = Vec::new();
+    for file in [
+        "event.rs",
+        "replaceable.rs",
+        "channel_members.rs",
+        "relay_members.rs",
+        "push.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(file)).expect("read writer");
+        let production = strip_cfg_test_items(&source);
+        for function in function_slices(&production) {
+            let code = mask_comments_and_literals(function);
+            let Some((_, arguments)) = code.split_once("event_follow_up::after_admitted_insert(")
+            else {
+                continue;
+            };
+            let compact: String = arguments.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                compact.starts_with("tx,id_bytes.as_slice(),created_at,")
+                    || compact.starts_with("tx,incoming_id,created_at,")
+                    || compact.starts_with("&muttx,event.id.as_bytes().as_slice(),created_at,")
+                    || compact
+                        .starts_with("&mutself.tx,event.id.as_bytes().as_slice(),created_at,")
+                    || compact.starts_with("tx,event.id.as_bytes().as_slice(),created_at,"),
+                "{file}: {} must pass the INSERT's signed created_at",
+                function_header(function)
+            );
+            assert!(
+                code.contains(".bind(created_at)"),
+                "{file}: timestamp must match INSERT bind"
+            );
+            actual.push(format!("{file}: {}", function_header(function)));
+        }
+    }
+    actual.sort();
+    let mut expected = [
+        "event.rs: async fn insert_event_on(",
+        "event.rs: pub(crate) async fn insert_event_with_thread_metadata_tx(",
+        "replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
+        "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock(",
+        "channel_members.rs: pub async fn replace_member_event(",
+        "relay_members.rs: pub(crate) async fn write_nip43_membership_snapshot(",
+        "push.rs: pub async fn accept_lease_event(",
+    ];
+    expected.sort();
+    assert_eq!(actual, expected);
 }
 
 // Fixed channel-less kinds cannot be channel rosters, and the replica-floor
