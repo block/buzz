@@ -30,7 +30,11 @@ pub(crate) const HELD_TIMEOUT: Duration = Duration::from_secs(150);
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
 /// `lsof` can take seconds on a busy Mac.
 const SAME_USER_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+/// The largest event the desktop signs, a 512 KiB relay frame (a Canvas),
+/// doubled for escaping its JSON as a string (`"` and `\` each become two
+/// bytes), plus 64 KiB for the envelope and headers.
+const MAX_EVENT_BYTES: usize = 512 * 1024;
+const MAX_RESPONSE_BYTES: usize = 2 * MAX_EVENT_BYTES + 64 * 1024;
 
 /// `rate_limited` refuses before acting, so the same envelope is re-sent:
 /// up to this many times, each after `retry_after` capped at the wait below.
@@ -1264,6 +1268,50 @@ pub(crate) mod tests {
     fn held_methods_get_the_long_timeout() {
         assert!(held("sign_event") && held("nip44_decrypt") && held("pair"));
         assert!(!held("describe") && !held("federated_identity"));
+    }
+
+    /// Serves `body` as one raw HTTP response and returns what `exchange` makes of it.
+    async fn exchanged(body: Vec<u8>) -> Result<(u16, Vec<u8>), ProviderError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+        });
+        let endpoint = Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap();
+        let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let reply = exchange(stream, &endpoint, Some("t"), VERSION, b"{}").await;
+        server.abort();
+        reply
+    }
+
+    #[tokio::test]
+    async fn the_largest_signed_event_fits_and_more_is_refused() {
+        // An event at the desktop's limit whose content is all quotes, so
+        // every content byte doubles again when the event is the result string.
+        let shell =
+            r#"{"id":"","pubkey":"","created_at":0,"kind":40100,"tags":[],"content":"","sig":""}"#;
+        let content = "\"".repeat((MAX_EVENT_BYTES - shell.len()) / 2);
+        let event = serde_json::json!({
+            "id": "", "pubkey": "", "created_at": 0, "kind": 40100, "tags": [],
+            "content": content, "sig": "",
+        })
+        .to_string();
+        assert!(event.len() <= MAX_EVENT_BYTES && event.len() > MAX_EVENT_BYTES - 16);
+        let body = serde_json::json!({ "id": "1", "result": event })
+            .to_string()
+            .into_bytes();
+        let (status, parsed) = exchanged(body.clone()).await.unwrap();
+        assert_eq!((status, parsed), (200, body));
+        let runaway = vec![b'x'; MAX_RESPONSE_BYTES];
+        assert!(matches!(
+            exchanged(runaway).await,
+            Err(ProviderError::Transport(message)) if message == "response too large"
+        ));
     }
 
     #[test]
