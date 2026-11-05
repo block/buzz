@@ -303,7 +303,8 @@ These independent, optional query modes reserve distinct response kinds:
 
 Kind 39009 is reserved by this specification for public membership lookups;
 its runtime registration and implementation are separate work. Supporting
-39008 does not imply support for 39009, or conversely.
+39008 does not imply support for 39009, or conversely. Each mode key MUST
+appear only with its own kind; a mismatched mode key and kind returns 400.
 
 ## Compact viewer membership snapshot (version 1)
 
@@ -701,8 +702,7 @@ existing read rules.
 `complete:true` means all of the subject's memberships satisfying this
 public predicate and requested type set at that instant. It never means
 the subject's full membership set. A channel absent on refresh may have
-become private, unlisted, deleted or changed type, or its membership may
-have ended; absence MUST NOT establish loss of membership.
+become private, unlisted or deleted, or its membership may have ended; absence MUST NOT establish loss of membership.
 
 The snapshot identity is SHA-256 of the UTF-8 compact JSON array
 `["nip-cl-public-membership-v1", community_id, subject, types, channels]`,
@@ -732,7 +732,12 @@ saved public data MUST NOT authorize a read after a visibility change.
 
 Clients MUST require `membership_public` before selecting this mode. Absence
 or the exact disabled 404 means this lookup is unsupported; an ordinary
-array from an older relay is never a valid public result. Auth failures,
+array from an older relay is never a valid public result. If a pod returns
+an ordinary array or the exact disabled 404 after another pod advertised
+support, mark public lookup unsupported for that generation, recheck its
+host-bound descriptor and back off capability probes. Keep any saved public
+list explicitly stale; this does not switch the self authority model.
+Auth failures,
 invalid signatures, malformed responses and transient errors MUST NOT be
 accepted as an empty result or silently retried through self mode.
 Deploy support to the entire fleet with the public flag off, then enable
