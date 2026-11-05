@@ -1372,7 +1372,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
     }
 
     if let Err(reason) = enforce_ws_admission(&msg, &conn, &state).await {
-        crate::access::ReadLog::refused(&msg, &conn, reason);
+        match &msg {
+            ClientMessage::Event(event) => crate::access::WriteLog::refused(&conn, event, reason),
+            _ => crate::access::ReadLog::refused(&msg, &conn, reason),
+        }
         return;
     }
 
@@ -1389,6 +1392,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
+                    crate::access::WriteLog::refused(&conn, &event, "rate-limited");
                     // Correlate to the event id: a bare NOTICE here strands the
                     // client's pending publish exactly as an over-quota one did.
                     conn.send(request_rejection_message(
