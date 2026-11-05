@@ -85,6 +85,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// URLs with a background refresh of stale disk bytes under way.
   static final Set<String> _refreshing = {};
 
+  /// Downloaded bytes not yet saved to disk, by URL: they are saved once one
+  /// load decodes them, so a corrupt body is never persisted.
+  static final Map<String, ({MediaDiskCache cache, bool immutable})> _unsaved =
+      {};
+
   /// Injectable clock for cooldown tests.
   @visibleForTesting
   static DateTime Function() debugNow = DateTime.now;
@@ -160,8 +165,13 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       if (wasAbandoned) throw StateError('Image load abandoned');
       onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return await decode(buffer);
+      final codec = await decode(buffer);
+      if (_unsaved.remove(url) case final save?) {
+        unawaited(save.cache.write(url, bytes, immutable: save.immutable));
+      }
+      return codec;
     } catch (_) {
+      _unsaved.remove(url);
       // An abandoned load has no listener left to report to, and an error
       // would surface as an unhandled image error. The consumer already
       // evicted it; leave the codec unresolved.
@@ -175,8 +185,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     }
   }
 
-  /// [url]'s bytes from [diskCache] when saved there, else downloaded and
-  /// saved. Stale saved bytes are shown while a background download
+  /// [url]'s bytes from [diskCache] when saved there, else downloaded (and
+  /// saved once they decode). Stale saved bytes are shown while a background download
   /// replaces them.
   Future<Uint8List> _loadBytes(Future<void> abort) async {
     final cache = diskCache;
@@ -187,7 +197,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       return hit.bytes;
     }
     final bytes = await _fetchBytes(abort);
-    unawaited(cache.write(url, bytes, immutable: _isContentAddressed));
+    _unsaved[url] = (cache: cache, immutable: _isContentAddressed);
     return bytes;
   }
 
@@ -196,6 +206,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     try {
       // Never aborted: nobody is waiting on it.
       final bytes = await _fetchBytes(Completer<void>().future);
+      // Nothing displays these bytes yet, so check they decode before they
+      // replace the saved copy.
+      final codec = await ui.instantiateImageCodec(bytes);
+      codec.dispose();
       await cache.write(url, bytes, immutable: _isContentAddressed);
     } on Object catch (error) {
       // The stale bytes stay; the next load after the cooldown retries.

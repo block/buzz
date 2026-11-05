@@ -27,6 +27,9 @@ const _thumbnailUrl = '$_relayBase/media/$_hash.thumb.jpg';
 const _hugeUrl =
     '$_relayBase/media/'
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png';
+const _corruptUrl =
+    '$_relayBase/media/'
+    'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.png';
 const _externalUrl = 'https://images.example.org/avatar.png';
 
 void main() {
@@ -57,6 +60,9 @@ void main() {
           ..._pngBytes,
           ...Uint8List(MediaDiskCache.maxFileBytes),
         ], 200);
+      }
+      if (request.url.toString() == _corruptUrl) {
+        return http.Response('truncated', 200);
       }
       return http.Response.bytes(_pngBytes, 200);
     });
@@ -93,12 +99,14 @@ void main() {
       for (final url in urls) {
         expect(await show(cache, url), isNull, reason: url);
       }
+      expect(await show(cache, _corruptUrl), isNotNull);
       await _settle();
     });
-    expect(fetched, urls);
+    expect(fetched, [...urls, _corruptUrl]);
 
     // Offline relaunch: the original and its thumbnail are separate entries,
-    // both shown from disk. The oversized image was never saved.
+    // both shown from disk. The oversized image and the body that failed to
+    // decode were never saved.
     fetched.clear();
     online = false;
     await launch((cache) async {
@@ -106,8 +114,9 @@ void main() {
         expect(await show(cache, url), isNull, reason: url);
       }
       expect(await show(cache, _hugeUrl), isNotNull);
+      expect(await show(cache, _corruptUrl), isNotNull);
     });
-    expect(fetched, [_hugeUrl]);
+    expect(fetched, [_hugeUrl, _corruptUrl]);
 
     // A week on, the external image shows from disk at once and refreshes
     // in the background. Relay media never goes stale.
@@ -131,45 +140,55 @@ void main() {
     );
   });
 
-  test('evicts least recently used files past the byte budget', () async {
-    final directory = await Directory(p.join(root.path, 'media')).create();
-    final index = MediaCacheIndex(
-      File(p.join(directory.path, 'index.json')),
-      directory,
-      10,
-    );
-    await index.open();
-    final start = DateTime.utc(2026, 11, 5);
-    // (name, size, last used minutes after start)
-    const files = [('old', 4, 0), ('newest', 4, 3), ('middle', 4, 2)];
-    for (final (name, size, _) in files) {
-      await File(p.join(directory.path, name)).writeAsBytes(Uint8List(size));
-      await index.updateOrInsert(
-        CacheObject(
-          name,
-          relativePath: name,
-          validTill: start.add(const Duration(days: 1)),
-        ),
+  test(
+    'evicts least recently used files past the byte or file budget',
+    () async {
+      final directory = await Directory(p.join(root.path, 'media')).create();
+      final index = MediaCacheIndex(
+        File(p.join(directory.path, 'index.json')),
+        directory,
+        10,
       );
-    }
-    // updateOrInsert stamps touched as now; restore the scripted order.
-    for (final (name, _, minutes) in files) {
-      final object = (await index.get(name))!;
-      await index.update(
-        CacheObject.fromMap({
-          ...object.toMap(setTouchedToNow: false),
-          CacheObject.columnTouched: start
-              .add(Duration(minutes: minutes))
-              .millisecondsSinceEpoch,
-        }),
-        setTouchedToNow: false,
-      );
-    }
+      await index.open();
+      final start = DateTime.utc(2026, 11, 5);
+      // (name, size, last used minutes after start)
+      const files = [('old', 4, 0), ('newest', 4, 3), ('middle', 4, 2)];
+      for (final (name, size, _) in files) {
+        await File(p.join(directory.path, name)).writeAsBytes(Uint8List(size));
+        await index.updateOrInsert(
+          CacheObject(
+            name,
+            relativePath: name,
+            validTill: start.add(const Duration(days: 1)),
+          ),
+        );
+      }
+      // updateOrInsert stamps touched as now; restore the scripted order.
+      for (final (name, _, minutes) in files) {
+        final object = (await index.get(name))!;
+        await index.update(
+          CacheObject.fromMap({
+            ...object.toMap(setTouchedToNow: false),
+            CacheObject.columnTouched: start
+                .add(Duration(minutes: minutes))
+                .millisecondsSinceEpoch,
+          }),
+          setTouchedToNow: false,
+        );
+      }
 
-    final over = await index.getObjectsOverCapacity(0);
-    expect(over.map((object) => object.key), ['old']);
-    await index.close();
-  });
+      // (file capacity, evicted): 12 bytes are over the 10-byte budget.
+      const cases = [
+        (100, ['old']),
+        (1, ['middle', 'old']),
+      ];
+      for (final (capacity, evicted) in cases) {
+        final over = await index.getObjectsOverCapacity(capacity);
+        expect(over.map((object) => object.key), evicted, reason: '$capacity');
+      }
+      await index.close();
+    },
+  );
 }
 
 /// Lets fire-and-forget disk writes and refreshes finish.

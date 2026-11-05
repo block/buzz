@@ -43,6 +43,7 @@ class MediaDiskCache {
           directory.path,
           // Age never evicts: the byte budget below does.
           stalePeriod: _neverStale,
+          maxNrOfCacheObjects: maxFiles,
           repo: MediaCacheIndex(index, directory, maxBytes),
           fileSystem: _DirectoryFileSystem(directory),
         ),
@@ -53,6 +54,10 @@ class MediaDiskCache {
 
   /// Most bytes one community's cache keeps on disk.
   static const maxBytes = 250 * 1024 * 1024;
+
+  /// Most files one community's cache keeps, so many tiny files (emoji,
+  /// avatars) cannot cost far more disk and index work than their bytes.
+  static const maxFiles = 10000;
 
   /// Larger images still show, from memory, but are never written to disk,
   /// so one image cannot evict the rest of the cache.
@@ -154,14 +159,18 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   final Directory _directory;
   final int _maxBytes;
 
+  /// Least recently used files past [capacity] files or past the byte
+  /// budget, whichever keeps fewer.
   @override
   Future<List<CacheObject>> getObjectsOverCapacity(int capacity) async {
     final newestFirst = await getAllObjects()
       ..sort((a, b) => b.touched!.compareTo(a.touched!));
     var total = 0;
+    var count = 0;
     return [
       for (final object in newestFirst)
-        if ((total += object.length ?? 0) > _maxBytes) object,
+        if ((total += object.length ?? 0) > _maxBytes || ++count > capacity)
+          object,
     ];
   }
 
