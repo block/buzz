@@ -208,16 +208,16 @@ mod tests {
     async fn pinned_producer_responses_use_the_native_reader() {
         for (body, required) in [
             (
-                include_str!("../../tests/fixtures/nip_fi/buzz_511_d3ae4935b_required.json"),
+                include_str!("../../tests/fixtures/nip_fi/buzz_main_6b8a72e835_required.json"),
                 true,
             ),
             (
-                include_str!("../../tests/fixtures/nip_fi/buzz_511_d3ae4935b_optional.json"),
+                include_str!("../../tests/fixtures/nip_fi/buzz_main_6b8a72e835_optional.json"),
                 false,
             ),
             (
                 include_str!(
-                    "../../tests/fixtures/nip_fi/buzz_511_d3ae4935b_optional_capable.json"
+                    "../../tests/fixtures/nip_fi/buzz_main_6b8a72e835_optional_capable.json"
                 ),
                 false,
             ),
