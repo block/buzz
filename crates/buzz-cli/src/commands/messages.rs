@@ -225,7 +225,7 @@ async fn resolve_content_mentions(
     Ok((member_pubkeys, resolved))
 }
 
-fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
+pub(crate) fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
     let mut normalized = Vec::new();
     for value in values {
         let pubkey = PublicKey::parse(value.trim())
