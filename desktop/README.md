@@ -41,4 +41,3 @@ an up-to-date Buzz client. This default applies to every supported desktop
 platform and required community, including unconfigured public release builds.
 If the browser cannot open, the card shows the public URL for manual navigation.
 Discovery never supplies a trusted download or sign-in origin.
-
