@@ -104,20 +104,21 @@ fresh signed owner proof and a stored owner link; the bridge harness verifies
 that the ban denial uses the NIP-98 signed creation time, with a clear-owner
 control that reaches the queue.
 
-This scanner is a source-level guard, not a Rust router interpreter. It reads
-direct `.route(...)` calls inside production functions named `router` or ending
-in `_router`; a `.route(...)` elsewhere is a scanner error. It resolves a
-`.nest(...)` prefix only when the relay's `build_router` passes a literal
-or a resolved string constant and a direct call to another recognized router
-function. It does not expand macros or interpret dynamic paths, prefixes or
-arbitrary router composition. Service-style calls and unsupported nesting or
-merging are errors, rather than silently omitted registrations. The existing root merge aliases and
-Git settings merge are explicit, single-use exceptions; their builders' direct
-routes remain inventoried. It also does not derive auth or
-restriction policy from handler code, or prove that the named regression
-function contains the expected assertions or is selected by CI. If production
-routes use an unrecognized registration shape, extend the scanner and bind
-that shape to the inventory before treating the table as complete.
+This scanner is a source-level guard, not a Rust router interpreter. It
+reads direct `.route(...)` calls inside production functions named `router`
+or ending in `_router`; a `.route(...)` elsewhere is a scanner error. It
+resolves a `.nest(...)` prefix only when the relay's `build_router` passes a
+literal or a resolved string constant and a direct call to another
+recognized router function. It does not expand macros or interpret dynamic
+paths, prefixes or arbitrary router composition. Service-style calls and
+unsupported nesting or merging are errors, rather than silently omitted
+registrations. The existing root merge aliases and Git settings merge are
+explicit, single-use exceptions; their builders' direct routes remain
+inventoried. It also does not derive auth or restriction policy from handler
+code, or prove that the named regression function contains the expected
+assertions or is selected by CI. If production routes use an unrecognized
+registration shape, extend the scanner and bind that shape to the inventory
+before treating the table as complete.
 
 The method column records explicitly declared methods. Axum's `get(...)` helper
 also serves `HEAD` through the GET handler unless an explicit `.head(...)`
