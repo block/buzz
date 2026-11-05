@@ -390,8 +390,9 @@ async fn proof_timeout_mid_begin_leaves_no_reader_transaction_open() {
 /// not strand the reader pool. Each stalled warm connection costs one routed
 /// read a proof timeout; once the release check gives up on those sockets,
 /// their slots are freed and routed reads reach the reader again through
-/// new connections, instead of falling back to the writer until the kernel
-/// gives up on the old sockets.
+/// new connections, instead of falling back to the writer (or, for history
+/// reads on the saturated pool, being rejected) until the kernel gives up on
+/// the old sockets.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Postgres"]
 async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
@@ -463,9 +464,13 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
             .sum::<u64>()
     };
     loop {
-        db.count_events_routed("stalled_reader_probe", &query)
-            .await
-            .expect("routed read answers");
+        // While both slots sit in the release check the reader pool is
+        // saturated, so a history read is rejected as retryable rather than
+        // moved to the writer; the caller retries, as a client would.
+        match db.count_events_routed("stalled_reader_probe", &query).await {
+            Ok(_) | Err(crate::error::DbError::Sqlx(sqlx::Error::PoolTimedOut)) => {}
+            Err(e) => panic!("routed read answers or is rejected as retryable: {e:?}"),
+        }
         for (key, n) in drain_counters(&snapshotter) {
             *totals.entry(key).or_default() += n;
         }
