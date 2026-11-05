@@ -24,6 +24,8 @@ pub mod dm;
 pub mod entity_deletion;
 /// Event storage and retrieval.
 pub mod event;
+/// Atomic event deletion and retention-free purging.
+mod event_deletion;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
 /// Per-community NIP-FI issuer bindings.
