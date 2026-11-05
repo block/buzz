@@ -160,7 +160,11 @@ fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
                 })
                 .filter_map(|t| t.content())
                 .any(|event_val| event_val == filter_val.as_str())
-        });
+        }) || (tag_key_str == "p"
+            && ev
+                .derived_recipients
+                .iter()
+                .any(|recipient| tag_values.contains(recipient)));
         // Fallback for #h (channel) filters: some events (reactions kind:7,
         // deletions kind:5) derive their channel from the target event and
         // don't carry an h-tag themselves. Use StoredEvent.channel_id as a
@@ -456,6 +460,69 @@ mod tests {
             !filters_match(std::slice::from_ref(&h_filter), &stored_with_h),
             "explicit h-tag must be authoritative — channel_id fallback must not override it"
         );
+    }
+
+    #[test]
+    fn p_filter_matches_derived_recipients_and_literal_tags() {
+        let recipient = Keys::generate().public_key().to_hex();
+        let other = Keys::generate().public_key().to_hex();
+        let channel_id = uuid::Uuid::new_v4();
+        let by_p = |pubkey: &str| -> Filter {
+            serde_json::from_value(serde_json::json!({"kinds": [7], "#p": [pubkey]})).unwrap()
+        };
+        let by_h: Filter = serde_json::from_value(
+            serde_json::json!({"kinds": [7], "#h": [channel_id.to_string()]}),
+        )
+        .unwrap();
+        let reaction = |tags: Vec<Tag>, derived: Vec<String>| {
+            let event = EventBuilder::new(Kind::Reaction, "+")
+                .tags(tags)
+                .sign_with_keys(&Keys::generate())
+                .expect("sign");
+            StoredEvent::with_received_at(event, Utc::now(), Some(channel_id), true)
+                .with_derived_recipients(derived)
+        };
+        let target = Tag::event(nostr::EventId::all_zeros());
+        let p_tag = |pubkey: &str| Tag::parse(["p", pubkey]).unwrap();
+        // (literal tags, derived recipients, filter, matches)
+        let cases: [(Vec<Tag>, Vec<String>, Filter, bool); 7] = [
+            (
+                vec![target.clone()],
+                vec![recipient.clone()],
+                by_p(&recipient),
+                true,
+            ),
+            (vec![target.clone()], vec![], by_p(&recipient), false),
+            (
+                vec![target.clone()],
+                vec![other.clone()],
+                by_p(&recipient),
+                false,
+            ),
+            (
+                vec![target.clone(), p_tag(&recipient)],
+                vec![],
+                by_p(&recipient),
+                true,
+            ),
+            (
+                vec![target.clone(), p_tag(&other)],
+                vec![recipient.clone()],
+                by_p(&recipient),
+                true,
+            ),
+            (
+                vec![target.clone()],
+                vec![recipient.clone()],
+                by_h.clone(),
+                true,
+            ),
+            (vec![target.clone()], vec![], by_h, true),
+        ];
+        for (index, (tags, derived, filter, matches)) in cases.into_iter().enumerate() {
+            let stored = reaction(tags, derived);
+            assert_eq!(filters_match(&[filter], &stored), matches, "case {index}");
+        }
     }
 
     #[test]
