@@ -1,3 +1,5 @@
+import '../../shared/widgets/confirmation_dialog.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import 'access_error_message.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -44,13 +46,17 @@ class MemberAccessControls extends HookConsumerWidget {
         const {'admin', 'member', 'guest', 'bot'}.contains(role);
 
     final owners =
-        !editable &&
-            base != null &&
-            base.role(actor) != null &&
-            !base.data.labels.contains('buzz.solo')
-        ? ref.watch(agentOwnersProvider).asData?.value ??
-              const <String, String>{}
-        : const <String, String>{};
+        ref.watch(agentOwnersProvider).asData?.value ??
+        const <String, String>{};
+    final isAgent =
+        role == 'bot' ||
+        owners.containsKey(target) ||
+        (ref
+                .watch(agentDirectoryProvider)
+                .asData
+                ?.value
+                .any((agent) => agent.pubkey == target) ??
+            false);
     final ownRemoval =
         base != null &&
         !base.data.isArchived &&
@@ -75,24 +81,31 @@ class MemberAccessControls extends HookConsumerWidget {
         final message = nextRole == null
             ? 'Remove $label from this channel?'
             : 'Set $label to ${memberAccessLabel(nextRole).toLowerCase()}?';
-        final confirmed = await showDialog<bool>(
-          context: context,
-          builder: (dialogContext) => AlertDialog(
-            title: Text(nextRole == null ? 'Remove member?' : 'Change access?'),
-            content: Text(message),
-            actions: [
-              TextButton(
-                autofocus: true,
-                onPressed: () => Navigator.pop(dialogContext, false),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(dialogContext, true),
-                child: Text(nextRole == null ? 'Remove' : 'Change access'),
-              ),
-            ],
-          ),
-        );
+        final confirmed = nextRole == null
+            ? await showDestructiveConfirmation(
+                context: context,
+                title: 'Remove member?',
+                message: message,
+                confirmLabel: 'Remove',
+              )
+            : await showBuzzDialog<bool>(
+                context: context,
+                builder: (dialogContext) => AlertDialog(
+                  title: const Text('Change access?'),
+                  content: Text(message),
+                  actions: [
+                    TextButton(
+                      autofocus: true,
+                      onPressed: () => Navigator.pop(dialogContext, false),
+                      child: const Text('Cancel'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(dialogContext, true),
+                      child: const Text('Change access'),
+                    ),
+                  ],
+                ),
+              );
         if (!context.mounted || confirmed != true) return;
       }
       busy.value = true;
@@ -136,7 +149,11 @@ class MemberAccessControls extends HookConsumerWidget {
               ),
             if (editable &&
                 base?.data.labels.contains('buzz.solo') != true) ...[
-              for (final nextRole in ['admin', 'member', 'guest'])
+              for (final nextRole in [
+                if (!isAgent) 'admin',
+                isAgent ? 'bot' : 'member',
+                'guest',
+              ])
                 ListTile(
                   title: Text(memberAccessLabel(nextRole)),
                   selected:
@@ -196,7 +213,7 @@ class MemberAccessControls extends HookConsumerWidget {
 /// Confirms abandoning local recovery without promising to cancel publication.
 Future<bool?> confirmDiscardAccessSave(
   BuildContext context,
-) => showDialog<bool>(
+) => showBuzzDialog<bool>(
   context: context,
   builder: (dialogContext) => AlertDialog(
     title: const Text('Discard this save check?'),

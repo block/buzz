@@ -362,6 +362,26 @@ class ChannelAccessController
         !const {'admin', 'member', 'guest', 'bot'}.contains(role)) {
       throw ArgumentError.value(role, 'role');
     }
+    if (role != null) {
+      final scope = _scope;
+      final profiles = await _session.fetchHistory(
+        NostrFilters.profilesBatch([target]),
+      );
+      _check(scope);
+      final isAgent =
+          base.role(target) == 'bot' ||
+          profiles.any(
+            (profile) =>
+                profile.pubkey == target.toLowerCase() &&
+                verifiedProfileOaOwnerPubkey(profile) != null,
+          );
+      if (isAgent) {
+        if (role == 'admin') {
+          throw StateError('Agents cannot become channel admins.');
+        }
+        if (role == 'member') role = 'bot';
+      }
+    }
     return _commit(
       id,
       base,

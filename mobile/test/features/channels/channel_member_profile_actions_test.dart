@@ -251,9 +251,7 @@ void main() {
       await _pump(tester, targetRole: role);
       expect(
         find.text('Make channel admin'),
-        role == 'member' || role == 'guest' || role == 'bot'
-            ? findsOneWidget
-            : findsNothing,
+        role == 'member' || role == 'guest' ? findsOneWidget : findsNothing,
       );
       expect(
         find.text('Participating'),
