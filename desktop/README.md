@@ -1,5 +1,11 @@
 # Buzz
 
+> [!IMPORTANT]
+> **This is the deprecated Buzz 0.X desktop app.** Buzz 1.0 lives in
+> [block/buzz-app](https://github.com/block/buzz-app). Build new desktop
+> features there. Change this directory only to fix a 0.X bug, or to keep it
+> compiling after a shared crate change.
+
 Desktop chat shell with:
 
 - Tauri + React + TypeScript + Vite
