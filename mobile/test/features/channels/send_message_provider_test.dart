@@ -73,6 +73,66 @@ void main() {
     expect(removedIds, [localMessages.single.id]);
   });
 
+  test(
+    'keeps a failed message for retry, then resends the same signed event',
+    () async {
+      final session = _ScriptedPublishRelaySession();
+      final pending = <String, NostrEvent>{};
+      final failedIds = <String>[];
+      final completedIds = <String>[];
+      final removedIds = <String>[];
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) async => const [],
+        readUserCache: () => const {},
+        addLocalMessage: (_, event) => pending[event.id] = event,
+        completeLocalMessage: (_, eventId) {
+          pending.remove(eventId);
+          completedIds.add(eventId);
+        },
+        removeLocalMessage: (_, eventId) {
+          pending.remove(eventId);
+          removedIds.add(eventId);
+        },
+        readPendingLocalMessage: (_, eventId) => pending[eventId],
+        failLocalMessage: (_, eventId) => failedIds.add(eventId),
+        publishSigned: session.publish,
+      );
+
+      // Offline: the bubble stays, marked failed, and the draft is not
+      // handed back to the composer as an error.
+      session.outcomes.add(StateError('Relay session is not connected'));
+      await send(channelId: _channelId, content: 'hello');
+      final id = session.published.single.id;
+      expect(failedIds, [id]);
+      expect(pending.keys, [id]);
+      expect(removedIds, isEmpty);
+
+      // A second failure keeps it failed.
+      session.outcomes.add(TimeoutException('no ack'));
+      await send.retry(channelId: _channelId, eventId: id);
+      expect(failedIds, [id, id]);
+
+      // Retry republishes the exact signed bytes.
+      session.outcomes.add(null);
+      await send.retry(channelId: _channelId, eventId: id);
+      expect(session.published.map((event) => event.id), [id, id, id]);
+      expect(completedIds, [id]);
+      expect(pending, isEmpty);
+
+      // Delete discards a failed message instead.
+      session.outcomes.add(StateError('Relay session is not connected'));
+      await send(channelId: _channelId, content: 'second');
+      final second = session.published.last.id;
+      send.discard(channelId: _channelId, eventId: second);
+      expect(removedIds, [second]);
+      expect(pending, isEmpty);
+    },
+  );
+
   test('final signed event addresses the current DM agent member', () async {
     final session = _PendingPublishRelaySession();
     final signingKey = nostr.Keys.generate().nsec;
@@ -282,4 +342,25 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   void accept() => _result.complete(event);
 
   void reject() => _result.completeError(Exception('relay rejected event'));
+}
+
+class _ScriptedPublishRelaySession extends RelaySessionNotifier {
+  final published = <NostrEvent>[];
+
+  /// Each publish consumes one outcome: null accepts, an error rejects.
+  final outcomes = <Object?>[];
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    published.add(event);
+    final outcome = outcomes.removeAt(0);
+    if (outcome != null) throw outcome;
+    return event;
+  }
 }

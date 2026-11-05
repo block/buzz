@@ -19525,6 +19525,15 @@ class _RecordingOrdinarySender implements SendMessage {
     channels.add(channel);
     parents.add(parentEventId);
   }
+
+  @override
+  Future<void> retry({
+    required String channelId,
+    required String eventId,
+  }) async {}
+
+  @override
+  void discard({required String channelId, required String eventId}) {}
 }
 
 class _SoloMetadataRelaySession extends RelaySessionNotifier {

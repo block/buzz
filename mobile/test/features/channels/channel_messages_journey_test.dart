@@ -1,6 +1,7 @@
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
+import 'package:buzz/features/channels/local_send_status_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:fake_async/fake_async.dart';
@@ -113,16 +114,27 @@ void main() {
         settle();
         expect(timeline().where((text) => text == 'hello'), hasLength(1));
 
-        // A rejected send leaves no row and is not stored by the relay.
+        // A rejected send is not stored by the relay, but its row stays,
+        // marked failed, as the record the user can retry or delete.
         relay.rejectNext('blocked: not allowed');
         Object? failure;
         container
             .read(sendMessageProvider)(channelId: _channel, content: 'nope')
             .catchError((Object error) => failure = error);
         settle();
-        expect(failure, isNotNull);
-        expect(pending(), isEmpty);
-        expect(timeline(), isNot(contains('nope')));
+        expect(failure, isNull);
+        final rejected = relay.published.last;
+        expect(pending(), {rejected.id});
+        expect(
+          container.read(
+            localSendStatusForProvider((
+              channelId: _channel,
+              eventId: rejected.id,
+            )),
+          ),
+          LocalSendStatus.failed,
+        );
+        expect(timeline(), contains('nope'));
         expect(relay.stored.map((e) => e.content), isNot(contains('nope')));
 
         // After a network drop the session reconnects, recovers what it missed
@@ -136,6 +148,16 @@ void main() {
         settle();
         expect(timeline(), contains('after reconnect'));
         expect(timeline().where((text) => text == 'hello'), hasLength(1));
+        expect(timeline(), contains('nope'), reason: 'failed row survives');
+        expect(pending(), {rejected.id}, reason: 'and is still unconfirmed');
+
+        // Deleting the failed message leaves no row.
+        container
+            .read(sendMessageProvider)
+            .discard(channelId: _channel, eventId: rejected.id);
+        settle();
+        expect(pending(), isEmpty);
+        expect(timeline(), isNot(contains('nope')));
 
         // A chat left for a while stops following live, typing included;
         // returning shows the cached rows at once and catches up on what

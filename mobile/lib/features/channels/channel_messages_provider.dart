@@ -191,7 +191,18 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
 
     _reachedOldest = false;
-    _windowStore = const ChannelWindowStore.empty();
+    // Unacknowledged sends, including failed ones awaiting retry, have no row
+    // in any page yet. Carry them over so a reconnect cannot drop them.
+    _windowStore = ChannelWindowStore(
+      pages: const [],
+      liveOverlay: [
+        for (final event
+            in ref.read(pendingLocalMessagesProvider(channelId)).values)
+          if (event.threadReference.parentId == null) event,
+      ],
+      liveAux: const [],
+      liveThreadSummaries: const {},
+    );
     _notices.clear();
     _noticeAux.clear();
     _noticeCursor = null;
@@ -252,7 +263,28 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
       if (!_usingChannelWindow) _legacyHistoryCursor = history.firstOrNull;
-      _confirmLocalMessages(history.map((event) => event.id));
+      // The window's carried-over overlay holds unacknowledged local sends;
+      // only page rows the relay returned prove those were stored.
+      final relayRowIds = _usingChannelWindow
+          ? {
+              for (final page in _windowStore.pages)
+                for (final row in page.rows) row.event.id,
+            }
+          : null;
+      final pendingIds = ref
+          .read(pendingLocalMessagesProvider(channelId))
+          .keys
+          .toSet();
+      _confirmLocalMessages(
+        history
+            .map((event) => event.id)
+            .where(
+              (id) =>
+                  relayRowIds == null ||
+                  !pendingIds.contains(id) ||
+                  relayRowIds.contains(id),
+            ),
+      );
 
       final existing = state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
