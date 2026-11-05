@@ -201,13 +201,13 @@ fn decode_ready_record(key: &str, raw: &str) -> Option<ReadyRecord> {
 /// Redis-backed mesh bootstrap registry.
 #[derive(Clone)]
 pub struct ReadyRegistry {
-    pool: deadpool_redis::Pool,
+    redis: redis::aio::ConnectionManager,
     refresh: Duration,
 }
 
 impl ReadyRegistry {
-    pub fn new(pool: deadpool_redis::Pool, refresh: Duration) -> Self {
-        Self { pool, refresh }
+    pub fn new(redis: redis::aio::ConnectionManager, refresh: Duration) -> Self {
+        Self { redis, refresh }
     }
 
     pub fn refresh_interval(&self) -> Duration {
@@ -224,7 +224,7 @@ impl ReadyRegistry {
     /// rule stays explicit at the relay boundary.
     pub async fn publish_ready(&self, record: &ReadyRecord) -> Result<(), MeshError> {
         record.verify_attestation()?;
-        let mut conn = self.conn().await?;
+        let mut conn = self.redis.clone();
         let payload = serde_json::to_string(record)
             .map_err(|e| MeshError::Transport(format!("ready registry encode: {e}")))?;
         let ttl_secs = self.expiry().as_secs().max(1);
@@ -262,7 +262,7 @@ impl ReadyRegistry {
 
     /// Remove this runtime on clean shutdown. A crash is handled by TTL expiry.
     pub async fn clear_ready(&self, runtime_id: RuntimeId) -> Result<(), MeshError> {
-        let mut conn = self.conn().await?;
+        let mut conn = self.redis.clone();
         let key = ready_key(runtime_id);
         redis::pipe()
             .atomic()
@@ -283,7 +283,7 @@ impl ReadyRegistry {
     /// Malformed/stale/unauthenticated values are skipped with a warn: a bad
     /// registry entry must not prevent bootstrap from healthy peers.
     pub async fn ready_records(&self) -> Result<Vec<ReadyRecord>, MeshError> {
-        let mut conn = self.conn().await?;
+        let mut conn = self.redis.clone();
         let keys: Vec<String> = redis::cmd("ZRANGE")
             .arg(READY_INDEX_KEY)
             .arg(0)
@@ -312,7 +312,7 @@ impl ReadyRegistry {
     /// passes. Mixed-version compatibility only: delete it (and those call
     /// sites) once every deployed relay writes the index.
     pub async fn legacy_scan_ready(&self) -> Result<Vec<ReadyRecord>, MeshError> {
-        let mut conn = self.conn().await?;
+        let mut conn = self.redis.clone();
         let mut cursor = 0u64;
         let mut out = Vec::new();
 
@@ -349,13 +349,6 @@ impl ReadyRegistry {
             record,
             published: false,
         }
-    }
-
-    async fn conn(&self) -> Result<deadpool_redis::Connection, MeshError> {
-        self.pool
-            .get()
-            .await
-            .map_err(|e| MeshError::Transport(format!("redis pool: {e}")))
     }
 }
 
@@ -410,6 +403,14 @@ mod tests {
         nostr::Keys::generate()
     }
 
+    fn lazy_redis(url: &str) -> redis::aio::ConnectionManager {
+        redis::aio::ConnectionManager::new_lazy_with_config(
+            redis::Client::open(url).expect("redis url"),
+            redis::aio::ConnectionManagerConfig::new(),
+        )
+        .expect("redis connection")
+    }
+
     fn ready_record(byte: u8) -> ReadyRecord {
         ReadyRecord::new(rid(byte), &relay_keys(), vec![], 1, vec![])
     }
@@ -427,12 +428,12 @@ mod tests {
         assert_eq!(expiry_for(Duration::from_secs(15)), Duration::from_secs(45));
     }
 
-    #[test]
-    fn heartbeat_starts_unpublished() {
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
-        let registry = ReadyRegistry::new(pool, Duration::from_secs(15));
+    #[tokio::test]
+    async fn heartbeat_starts_unpublished() {
+        let registry = ReadyRegistry::new(
+            lazy_redis("redis://127.0.0.1:6379"),
+            Duration::from_secs(15),
+        );
         let heartbeat = registry.heartbeat(ready_record(1));
         assert!(!heartbeat.published());
         assert_eq!(heartbeat.record().runtime_id, rid(1));
@@ -475,12 +476,10 @@ mod tests {
     mod external_infra_redis {
         use super::*;
 
-        fn pool() -> deadpool_redis::Pool {
+        fn pool() -> redis::aio::ConnectionManager {
             let url = std::env::var("BUZZ_TEST_REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-            deadpool_redis::Config::from_url(url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool")
+            lazy_redis(&url)
         }
 
         fn fresh_record() -> ReadyRecord {
@@ -492,8 +491,8 @@ mod tests {
             records.iter().map(|r| r.runtime_id).collect()
         }
 
-        async fn index_score(pool: &deadpool_redis::Pool, member: &str) -> Option<f64> {
-            let mut conn = pool.get().await.expect("conn");
+        async fn index_score(pool: &redis::aio::ConnectionManager, member: &str) -> Option<f64> {
+            let mut conn = pool.clone();
             redis::cmd("ZSCORE")
                 .arg(READY_INDEX_KEY)
                 .arg(member)
@@ -534,7 +533,7 @@ mod tests {
             let legacy = fresh_record();
             {
                 // What a relay that predates the index writes.
-                let mut conn = pool.get().await.unwrap();
+                let mut conn = pool.clone();
                 redis::cmd("SET")
                     .arg(legacy.key())
                     .arg(serde_json::to_string(&legacy).unwrap())
@@ -560,7 +559,7 @@ mod tests {
             // index entry's score is in the past.
             let gone = ready_key(fresh_record().runtime_id);
             {
-                let mut conn = pool.get().await.unwrap();
+                let mut conn = pool.clone();
                 redis::cmd("ZADD")
                     .arg(READY_INDEX_KEY)
                     .arg(unix_now_secs() - 1)
@@ -578,7 +577,7 @@ mod tests {
             let score = index_score(&pool, &fresh.key()).await.expect("indexed");
             assert!(score > unix_now_secs() as f64);
 
-            let mut conn = pool.get().await.unwrap();
+            let mut conn = pool.clone();
             let ttl: i64 = redis::cmd("TTL")
                 .arg(READY_INDEX_KEY)
                 .query_async(&mut conn)
@@ -598,7 +597,7 @@ mod tests {
             let record = fresh_record();
             registry.publish_ready(&record).await.unwrap();
             {
-                let mut conn = pool.get().await.unwrap();
+                let mut conn = pool.clone();
                 redis::cmd("DEL")
                     .arg(record.key())
                     .query_async::<()>(&mut conn)

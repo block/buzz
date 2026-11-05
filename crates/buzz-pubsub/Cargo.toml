@@ -11,7 +11,6 @@ description = "Redis pub/sub fan-out, presence, and typing indicators for Buzz"
 buzz-core = { workspace = true }
 buzz-auth = { workspace = true }
 redis = { workspace = true }
-deadpool-redis = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

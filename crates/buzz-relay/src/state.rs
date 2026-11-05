@@ -28,7 +28,6 @@ use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use chrono::{DateTime, Utc};
-use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
@@ -603,24 +602,28 @@ const REDIS_BOOTSTRAP_DRIVER_TIMEOUT: std::time::Duration =
 /// Proves once, during startup, that the Redis command path this pod will serve
 /// from can actually be reached.
 ///
-/// `deadpool_redis` pools dial lazily and `PubSubManager::new` only allocates
-/// channels, so without this nothing in boot ever opened a command connection:
-/// a relay came up against a dead Redis, bound its health listener, and — since
-/// readiness reports local lifecycle only — advertised ready forever. Binding
-/// that listener is a one-way latch, so the check has to happen before it, and
-/// it is deliberately a *startup* gate: once serving, a Redis blip is a
-/// dependency failure and must never change readiness.
-pub async fn verify_redis_command_path(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+/// The shared command connection dials lazily and `PubSubManager::new` only
+/// allocates channels, so without this nothing in boot ever opened a command
+/// connection: a relay came up against a dead Redis, bound its health
+/// listener, and — since readiness reports local lifecycle only — advertised
+/// ready forever. Binding that listener is a one-way latch, so the check has to
+/// happen before it, and it is deliberately a *startup* gate: once serving, a
+/// Redis blip is a dependency failure and must never change readiness.
+///
+/// The PING runs on a one-shot connection to the same URL so its longer driver
+/// timeouts never apply to serving traffic; the outer timeout bounds connect,
+/// handshake, and PING together.
+pub async fn verify_redis_command_path(redis_url: &str) -> anyhow::Result<()> {
     let ping = async {
-        let connection = pool
-            .get()
+        let client = redis::Client::open(redis_url)
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
+        let config = redis::AsyncConnectionConfig::new()
+            .set_connection_timeout(Some(REDIS_BOOTSTRAP_DRIVER_TIMEOUT))
+            .set_response_timeout(Some(REDIS_BOOTSTRAP_DRIVER_TIMEOUT));
+        let mut connection = client
+            .get_multiplexed_async_connection_with_config(&config)
             .await
             .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
-        // This one-shot connection is removed from the pool so extending its
-        // driver timeout cannot leak into normal serving traffic. The relay's
-        // outer timeout below must bound both lazy checkout and PING.
-        let mut connection = deadpool_redis::Connection::take(connection);
-        connection.set_response_timeout(REDIS_BOOTSTRAP_DRIVER_TIMEOUT);
         redis::cmd("PING")
             .query_async::<String>(&mut connection)
             .await
@@ -1394,7 +1397,7 @@ pub struct AppState {
     /// Database connection pool.
     pub db: Db,
     /// Redis pool for readiness health checks.
-    pub redis_pool: deadpool_redis::Pool,
+    pub redis_pool: buzz_pubsub::RedisConnection,
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
@@ -1681,7 +1684,7 @@ impl AppState {
     pub fn new(
         config: Config,
         db: Db,
-        redis_pool: deadpool_redis::Pool,
+        redis_pool: buzz_pubsub::RedisConnection,
         audit: impl Into<Option<AuditService>>,
         pubsub: Arc<PubSubManager>,
         auth: AuthService,
@@ -3544,9 +3547,7 @@ pub(crate) mod tests {
 
     async fn build_test_state(config: crate::config::Config, pool: sqlx::PgPool) -> Arc<AppState> {
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await

@@ -15,7 +15,6 @@ buzz-db = { workspace = true }
 buzz-media = { workspace = true }
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-deadpool-redis = { workspace = true }
 hex = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }

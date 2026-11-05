@@ -3441,11 +3441,9 @@ pub(crate) mod postgres_tests {
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
 
-    fn redis_pool() -> deadpool_redis::Pool {
+    fn redis_pool() -> buzz_pubsub::RedisConnection {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("create redis pool")
+        buzz_pubsub::redis_connection(&url).expect("create redis pool")
     }
 
     fn fresh_tenant(host: &str) -> TenantContext {
@@ -3540,9 +3538,8 @@ pub(crate) mod postgres_tests {
         use buzz_core::kind::KIND_PRESENCE_SNAPSHOT;
 
         // Pool at a closed port: get_presence_bulk's connection attempt fails.
-        let dead_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("pool builds lazily");
+        let dead_pool =
+            buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("pool builds lazily");
         let pubsub = buzz_pubsub::PubSubManager::new("redis://127.0.0.1:1", dead_pool)
             .await
             .expect("PubSubManager::new performs no IO");
@@ -4968,9 +4965,7 @@ pub(crate) mod postgres_tests {
 
         let pool = sqlx::PgPool::connect(database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5766,9 +5761,7 @@ pub(crate) mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5879,9 +5872,7 @@ pub(crate) mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5927,9 +5918,7 @@ pub(crate) mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -6542,9 +6531,7 @@ pub(crate) mod postgres_tests {
         assert_one_auth_line(&lines, "denied", Some("quota_exceeded"));
 
         let mut unavailable = (*base).clone();
-        let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let dead = buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("redis pool");
         unavailable.admission_rate_limiter =
             Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(dead));
         let (status, lines) =
@@ -9040,9 +9027,7 @@ pub(crate) mod postgres_tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -9281,9 +9266,7 @@ pub(crate) mod postgres_tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -9422,9 +9405,7 @@ pub(crate) mod postgres_tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -10023,9 +10004,7 @@ pub(crate) mod postgres_tests {
             db.fence().force_open_for_tests(chrono::Utc::now());
             db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
 
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -10251,9 +10230,7 @@ pub(crate) mod postgres_tests {
         let mut db = buzz_db::Db::from_pools(writer.clone(), replica.clone());
         db.fence().force_open_for_tests(chrono::Utc::now());
         db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await

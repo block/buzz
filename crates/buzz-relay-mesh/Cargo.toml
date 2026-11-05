@@ -14,7 +14,6 @@ serde_json   = { workspace = true }
 postcard     = { workspace = true }
 iroh         = { workspace = true }
 redis        = { workspace = true }
-deadpool-redis = { workspace = true }
 thiserror    = { workspace = true }
 tracing      = { workspace = true }
 uuid         = { workspace = true }

@@ -340,7 +340,7 @@ impl LoopMode {
 struct Services {
     store: DeletionStore,
     media: Arc<MediaStorage>,
-    redis: deadpool_redis::Pool,
+    redis: redis::aio::ConnectionManager,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -612,14 +612,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     };
     let media = Arc::new(MediaStorage::new(&media_config)?);
     let redis_url = required_env("REDIS_URL")?;
-    let mut redis_config = deadpool_redis::Config::from_url(&redis_url);
-    redis_config.pool = Some(deadpool_redis::PoolConfig::new(env_parse(
-        "BUZZ_REDIS_POOL_SIZE",
-        16,
-    )));
-    let redis = redis_config
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("create deletion Redis pool")?;
+    let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
     Ok(Services {
         store,
         media,
@@ -1689,24 +1682,24 @@ async fn verify_storage_absence(services: &Services, request: &DeletionRequest) 
 }
 
 async fn publish_disconnect_community(
-    pool: &deadpool_redis::Pool,
+    pool: &redis::aio::ConnectionManager,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let channel = format!("buzz:{community}:conn-control");
     let _: u64 = redis::cmd("PUBLISH")
         .arg(channel)
         .arg(r#"{"op":"DisconnectCommunity"}"#)
-        .query_async(&mut *connection)
+        .query_async(&mut connection)
         .await?;
     Ok(())
 }
 
 async fn purge_redis_namespace(
-    pool: &deadpool_redis::Pool,
+    pool: &redis::aio::ConnectionManager,
     community: buzz_core::CommunityId,
 ) -> Result<u64> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     let mut cursor = 0u64;
     let mut deleted = 0u64;
@@ -1717,12 +1710,12 @@ async fn purge_redis_namespace(
             .arg(&pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut *connection)
+            .query_async(&mut connection)
             .await?;
         if !keys.is_empty() {
             let count: u64 = redis::cmd("UNLINK")
                 .arg(&keys)
-                .query_async(&mut *connection)
+                .query_async(&mut connection)
                 .await?;
             deleted = deleted.saturating_add(count);
         }
@@ -1734,13 +1727,22 @@ async fn purge_redis_namespace(
     Ok(deleted)
 }
 
+/// One shared auto-reconnecting multiplexed connection for the worker's
+/// Redis commands; built lazily, so nothing dials until the first command.
+fn redis_connection(redis_url: &str) -> Result<redis::aio::ConnectionManager> {
+    Ok(redis::aio::ConnectionManager::new_lazy_with_config(
+        redis::Client::open(redis_url)?,
+        redis::aio::ConnectionManagerConfig::new(),
+    )?)
+}
+
 fn scan_proves_absence(pages: &[(u64, Vec<String>)]) -> bool {
     pages.last().is_some_and(|(cursor, _)| *cursor == 0)
         && pages.iter().all(|(_, keys)| keys.is_empty())
 }
 
 async fn scan_redis_namespace(
-    connection: &mut deadpool_redis::Connection,
+    connection: &mut redis::aio::ConnectionManager,
     pattern: &str,
 ) -> Result<Vec<(u64, Vec<String>)>> {
     let mut cursor = 0u64;
@@ -1752,7 +1754,7 @@ async fn scan_redis_namespace(
             .arg(pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut **connection)
+            .query_async(connection)
             .await?;
         cursor = page.0;
         pages.push(page);
@@ -1763,10 +1765,10 @@ async fn scan_redis_namespace(
 }
 
 async fn verify_redis_absence(
-    pool: &deadpool_redis::Pool,
+    pool: &redis::aio::ConnectionManager,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     // SCAN is weakly consistent. Two complete empty passes ensure a cursor
     // rollover or concurrent expiry cannot make one sparse pass look absent.
@@ -1957,9 +1959,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, claim)
     }
@@ -2028,9 +2029,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, *request, inventory)
     }

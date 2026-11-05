@@ -979,7 +979,6 @@ dependencies = [
  "buzz-search",
  "buzz-workflow",
  "clap",
- "deadpool-redis",
  "hex",
  "nostr 0.44.7",
  "rustls",
@@ -1214,7 +1213,6 @@ dependencies = [
  "buzz-media",
  "chrono",
  "clap",
- "deadpool-redis",
  "hex",
  "nostr 0.44.7",
  "redis",
@@ -1372,7 +1370,6 @@ dependencies = [
  "buzz-auth",
  "buzz-core",
  "chrono",
- "deadpool-redis",
  "futures-util",
  "nostr 0.44.7",
  "redis",
@@ -1449,7 +1446,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
- "deadpool-redis",
  "flate2",
  "futures",
  "futures-util",
@@ -1503,7 +1499,6 @@ name = "buzz-relay-mesh"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "deadpool-redis",
  "futures-util",
  "hex",
  "hmac 0.13.0",
@@ -2606,36 +2601,6 @@ checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "deadpool"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "883466cb8db62725aee5f4a6011e8a5d42912b42632df32aad57fc91127c6e04"
-dependencies = [
- "deadpool-runtime",
- "num_cpus",
- "tokio",
-]
-
-[[package]]
-name = "deadpool-redis"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bafa30c49dafe086d10116074e422ad7fc1c3cf554697e744a3ab112599ebd09"
-dependencies = [
- "deadpool",
- "redis",
-]
-
-[[package]]
-name = "deadpool-runtime"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2657f61fb1dd8bf37a8d51093cc7cee4e77125b22f7753f49b289f831bec2bae"
-dependencies = [
- "tokio",
 ]
 
 [[package]]
@@ -6707,16 +6672,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "num_cpus"
-version = "1.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
-dependencies = [
- "hermit-abi",
- "libc",
 ]
 
 [[package]]

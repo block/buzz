@@ -24,9 +24,7 @@ async fn state_with_limits(messages: u64, agent_messages: u64, ws: u64) -> AppSt
         ..RateLimitConfig::default()
     };
     state.auth = Arc::new(AuthService::new(auth));
-    state.redis_pool = deadpool_redis::Config::from_url(url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .unwrap();
+    state.redis_pool = buzz_pubsub::redis_connection(&url).unwrap();
     state.admission_rate_limiter = Arc::new(RedisRateLimiter::new(state.redis_pool.clone()));
     state
 }
@@ -57,10 +55,10 @@ fn pubkey(conn: &ConnectionState) -> nostr::PublicKey {
 
 async fn counter(state: &AppState, conn: &ConnectionState, bucket: LimitType) -> Option<u64> {
     let key = buzz_auth::rate_limit::rate_limit_key(&conn.tenant, &pubkey(conn), &bucket);
-    let mut redis = state.redis_pool.get().await.unwrap();
+    let mut redis = state.redis_pool.clone();
     redis::cmd("GET")
         .arg(key)
-        .query_async(&mut *redis)
+        .query_async(&mut redis)
         .await
         .unwrap()
 }

@@ -2068,9 +2068,7 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -2155,9 +2153,7 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -4484,9 +4480,7 @@ mod tests {
             db.ensure_configured_community("relay.example")
                 .await
                 .expect("seed relay.example community for host-bound media tests");
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
