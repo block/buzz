@@ -109,8 +109,11 @@ Every push to `main` continues to publish the rolling relay `:main` and
    checked-out commit and never moves an existing candidate. To select a
    historical commit, add `--commit FULL_SHA`. The script requires that commit
    to be in the selected source branch's history. Later branch advances do not
-   change or invalidate the tag. If the push is rejected, the script deletes
-   the local tag and fails; check that you are a bypass actor of the ruleset.
+   change or invalidate the tag. If the push is rejected and origin has no
+   such tag, the script deletes the local tag and fails; check that you are a
+   bypass actor of the ruleset. If the candidate may already be on GitHub, the
+   script keeps the local tag and says so: use the published tag rather than
+   rerunning.
 2. **Build the exact tag.** Enter the candidate tag as `mobile_ref` in the
    private Buzz mobile Buildkite pipeline. OSS CI deliberately cannot trigger
    that private pipeline. The tag supplies both source commit and release
@@ -140,8 +143,10 @@ The branch must match the marketing version's major and minor components:
 `mobile-v0.25` accepts 0.25.x, but rejects 0.26.x and 1.25.x. Without the option,
 the source remains `main`. The script validates the source;
 a missing branch or a commit outside its history fails rather than falling back
-to `main`. `--commit FULL_SHA` also works with a stable source branch, whose
-review and check protections remain required.
+to `main`. `--commit FULL_SHA` also works with a stable source branch. Its
+review and check protections bind everyone except the mobile release managers,
+who bypass them: a release manager can push an unreviewed commit to a stable
+branch and tag it as a candidate.
 The private pipeline still builds only the resulting immutable candidate tag.
 
 For the October 2026 stabilization period, all distributed mobile builds,
@@ -308,9 +313,11 @@ host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
 - The Default `main` ruleset configured for squash-only merging, strict required
   checks, stale-review dismissal, and the **Desktop Release Candidate** check
 - Release tag ruleset [`14378754`](https://github.com/block/buzz/rules/14378754)
-  active for `desktop-v*`, with creation, update, deletion, and
+  active for all tags (`~ALL`), with creation, update, deletion, and
   non-fast-forward protections and `buzz-release-bot` as its sole always-bypass
-  actor. It must not cover `mobile-v*`.
+  actor. It must exclude `refs/tags/mobile-*`: rulesets stack, so otherwise it
+  rejects release managers' mobile tag pushes. `scripts/mobile-release.sh`
+  checks that exclusion before tagging.
 - The `buzz-release-bot` App credentials configured for GitHub Actions (desktop,
   relay, and chart lanes only; mobile does not use them)
 - The following **GitHub Actions variables and secrets** configured for the
@@ -342,7 +349,9 @@ Stable sources additionally require active branch ruleset
 at least one approval, stale-approval dismissal, last-push approval, resolved
 review threads, and strict required `Mobile` and `DCO Check` checks. The mobile
 release managers are also its bypass actors, so they can publish from a stable
-branch; the ruleset still forces review and checks on everyone else. The script
+branch; the ruleset still forces review and checks on everyone else. Because of
+that bypass, a release manager can push an unreviewed commit to a stable branch
+and publish it as a candidate; nothing else enforces review for them. The script
 verifies the public policy on every publication but does not check bypass.
 
 ---
