@@ -8,10 +8,14 @@
 -- names the index, and PostgreSQL replans any cached plan that used it.
 --
 -- `events` is partitioned, and PostgreSQL cannot drop a partitioned index
--- CONCURRENTLY. DROP INDEX takes ACCESS EXCLUSIVE on `events` and on every
--- partition for a few milliseconds. The lock budget below makes it fail
--- rather than queue behind a long read while writers queue behind it; a
--- failed startup migration fails the boot, and the next boot retries it.
+-- CONCURRENTLY. DROP INDEX takes ACCESS EXCLUSIVE on `events`, then on each
+-- partition while still holding the parent's lock; uncontended, that takes a
+-- few milliseconds. lock_timeout bounds each lock wait at 1s, so the drop
+-- fails rather than queue behind a long read while writers queue behind it.
+-- A wait on a partition still holds `events`, so a run of contended
+-- partitions can stall `events` traffic longer: statement_timeout bounds
+-- the whole statement at 5s. A failed startup migration fails the boot, and
+-- the next boot retries it.
 -- A deployment that applies migrations out of band runs this file the same
 -- way, retrying until the lock is granted. IF EXISTS makes a retry, or an
 -- index an operator already dropped, a no-op that takes no lock on `events`.
