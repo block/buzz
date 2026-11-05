@@ -1970,7 +1970,8 @@ impl AppState {
 
     /// Check the user's complete active-membership snapshot, cached for at
     /// most 10 seconds from its query's connection checkout. Concurrent
-    /// channel checks share a single load; discovery visibility is irrelevant.
+    /// channel checks share a bounded load; oversized users and busy loaders
+    /// use authoritative point checks. Discovery visibility is irrelevant.
     pub async fn is_member_cached(
         &self,
         community_id: CommunityId,
@@ -1981,8 +1982,16 @@ impl AppState {
             .contains(
                 (community_id, pubkey.to_vec()),
                 channel_id,
-                self.db
-                    .get_active_membership_ids_read_at(community_id, pubkey),
+                self.db.get_active_membership_ids_read_at(
+                    community_id,
+                    pubkey,
+                    (crate::membership_cache::MAX_MEMBERSHIPS + 1) as u32,
+                ),
+                async {
+                    // Keep the fallback query out of every caller's future
+                    // layout, and allocate it only when a point check is needed.
+                    Box::pin(self.db.is_member(community_id, channel_id, pubkey)).await
+                },
             )
             .await
     }

@@ -1202,13 +1202,15 @@ pub async fn is_member(
     Ok(cnt > 0)
 }
 
-/// All channel IDs for which [`is_member`] is true, with the read's connection
+/// Up to `limit` channel IDs for which [`is_member`] is true, with the read's connection
 /// checkout time. Unlike discovery's [`get_member_channel_ids`], this includes
 /// every channel type and does not grant open-channel access to non-members.
+/// A result of `limit` rows may be incomplete; callers must not cache it as a full set.
 pub async fn get_active_membership_ids_read_at(
     pool: &PgPool,
     community_id: CommunityId,
     pubkey: &[u8],
+    limit: u32,
 ) -> Result<ReadAt<Vec<Uuid>>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
@@ -1219,10 +1221,11 @@ pub async fn get_active_membership_ids_read_at(
     let value = sqlx::query_scalar(
         "SELECT cm.channel_id FROM channel_members cm \
          JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
-         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL",
+         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL LIMIT $3",
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
+    .bind(i64::from(limit))
     .fetch_all(&mut *connection)
     .await?;
     Ok(ReadAt { value, read_at })
@@ -2425,14 +2428,16 @@ impl Db {
         get_accessible_channel_ids(&self.pool, community_id, pubkey).await
     }
 
-    /// All active memberships, across every channel type, for authorization.
+    /// Bounded active memberships across every channel type for authorization.
+    /// `limit` rows may be incomplete; request cap + 1 to detect oversized users.
     #[datastore_span(name = "get_active_membership_ids", system = "postgresql")]
     pub async fn get_active_membership_ids_read_at(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
+        limit: u32,
     ) -> Result<ReadAt<Vec<Uuid>>> {
-        get_active_membership_ids_read_at(&self.pool, community_id, pubkey).await
+        get_active_membership_ids_read_at(&self.pool, community_id, pubkey, limit).await
     }
 
     /// Channel IDs where a pubkey is an active member. See [`get_member_channel_ids`].
@@ -2653,7 +2658,7 @@ mod postgres_tests {
         channels.push(Uuid::new_v4()); // Missing channel.
         for community in [a, b] {
             for pubkey in [&user, &other_user] {
-                let snapshot = get_active_membership_ids_read_at(&pool, community, pubkey)
+                let snapshot = get_active_membership_ids_read_at(&pool, community, pubkey, 100)
                     .await
                     .unwrap();
                 for channel in &channels {
@@ -2692,7 +2697,7 @@ mod postgres_tests {
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
         let user = random_pubkey();
         let held = pool.acquire().await.unwrap();
-        let read = get_active_membership_ids_read_at(&pool, community, &user);
+        let read = get_active_membership_ids_read_at(&pool, community, &user, 100);
         tokio::pin!(read);
         assert!(futures_util::poll!(&mut read).is_pending());
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
