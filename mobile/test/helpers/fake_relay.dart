@@ -324,7 +324,20 @@ class FakeRelay {
       scheduleMicrotask(() => socket._reply(['OK', event.id, false, message]));
       return;
     }
-    stored.add(event);
+    final duplicate = stored.any((storedEvent) => storedEvent.id == event.id);
+    final now = (_now?.call() ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    if (!duplicate && (event.createdAt - now).abs() > 900) {
+      scheduleMicrotask(
+        () => socket._reply([
+          'OK',
+          event.id,
+          false,
+          'invalid: event timestamp too far from server time',
+        ]),
+      );
+      return;
+    }
+    if (!duplicate) stored.add(event);
     final okHold = _okHold?.future;
     final echoHold = _echoHold?.future;
     Future<void> ok() async {

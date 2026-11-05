@@ -112,12 +112,12 @@ class SoloShareSheet extends HookConsumerWidget {
               if (verifiedProfileOaOwnerPubkey(event) != null) event.pubkey,
           };
           if (!context.mounted) return;
-          final confirmed = await showDialog<bool>(
+          final confirmed = await showBuzzDialog<bool>(
             context: context,
             builder: (dialogContext) => AlertDialog(
               title: Text('Share in #${destination.name}?'),
               content: Text(
-                '${recipients.length} people or agents will receive access to this chat. One link will be posted in the channel. Future joins and departures will not change access to this chat.',
+                '${recipients.length} people or agents can read and post in this chat, including to your agents. One link will be posted in the channel. Future joins and departures will not change access to this chat.',
               ),
               actions: [
                 TextButton(
@@ -179,6 +179,50 @@ class SoloShareSheet extends HookConsumerWidget {
         );
         if (context.mounted) Navigator.pop(context);
       } catch (reason) {
+        if (context.mounted) {
+          pending.value = MeChatShare.pending(sync, channel.id);
+          error.value = accessErrorMessage(reason);
+        }
+      } finally {
+        if (context.mounted) busy.value = false;
+      }
+    }
+
+    Future<void> cancelShare() async {
+      final reviewed = pending.value;
+      if (busy.value || reviewed == null) return;
+      busy.value = true;
+      try {
+        final confirmed = await showBuzzDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Cancel this share?'),
+            content: const Text(
+              'Access already granted and a possibly-posted link may remain. This only forgets the pending share; nothing will be resent or revoked.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Keep share'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Cancel share'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true ||
+            !context.mounted ||
+            !identical(pending.value, reviewed)) {
+          return;
+        }
+        await reviewed.discard(sync);
+        if (context.mounted) {
+          pending.value = null;
+          error.value = null;
+        }
+      } catch (reason) {
         if (context.mounted) error.value = accessErrorMessage(reason);
       } finally {
         if (context.mounted) busy.value = false;
@@ -200,11 +244,15 @@ class SoloShareSheet extends HookConsumerWidget {
             children: [
               if (pending.value case final intent?) ...[
                 Text(
-                  'Finish sharing in #${intent.destinationName}. Confirmed access stays in place; Retry uses the same link message.',
+                  'Finish sharing in #${intent.destinationName}. Granted access stays in place. Uncertain retries reuse the link; a rejected link is refreshed before the next retry.',
                 ),
                 FilledButton(
                   onPressed: busy.value ? null : () => share(),
                   child: const Text('Retry share'),
+                ),
+                TextButton(
+                  onPressed: busy.value ? null : cancelShare,
+                  child: const Text('Cancel share'),
                 ),
               ] else ...[
                 TextField(

@@ -3,11 +3,12 @@ import 'dart:convert';
 import '../crypto/event_signing.dart';
 import '../crypto/nip44.dart';
 import '../relay/nostr_models.dart';
+import '../relay/relay_session_types.dart';
 import 'me_journal.dart';
 import 'me_sync.dart';
 
-/// A reviewed fixed audience and one signed link message. Retries reuse both,
-/// so a changed destination roster cannot silently widen a partially sent share.
+/// A reviewed fixed audience. Uncertain retries reuse the signed link; only a
+/// definitive rejection permits a freshly signed replacement.
 class MeChatShare {
   final String source;
   final String destination;
@@ -116,6 +117,55 @@ class MeChatShare {
     }
   }
 
+  /// Forget only this reviewed share, without revoking access or deleting links.
+  Future<void> discard(MeSync sync) async {
+    _check(sync);
+    final prefs = sync.prefs;
+    if (prefs == null) throw StateError('Local sharing is unavailable.');
+    await clearMeJournal(
+      prefs,
+      _scope,
+      _record,
+      checkScope: () => _check(sync),
+    );
+  }
+
+  Future<void> _replaceRejectedMessage(MeSync sync) async {
+    final prefs = sync.prefs!;
+    await prefs.reload();
+    _check(sync);
+    if (prefs.getString(_scope) != _record) {
+      throw StateError('The pending share changed. Open sharing again.');
+    }
+    final fresh = NostrEvent.fromJson(
+      signNostrEvent(
+        kind: message.kind,
+        content: message.content,
+        tags: message.tags,
+        secretKey: sync.privateHex,
+      ).toMap(),
+    );
+    final record = nip44Encrypt(
+      sync.key,
+      jsonEncode({
+        'source': source,
+        'destination': destination,
+        'destinationName': destinationName,
+        'audience': audience,
+        'message': fresh.toJson(),
+      }),
+    );
+    try {
+      if (!await prefs.setString(_scope, record)) {
+        throw StateError('Could not save the replacement link. Try again.');
+      }
+    } catch (_) {
+      await prefs.reload();
+      rethrow;
+    }
+    _check(sync);
+  }
+
   /// Persist before the first grant, then retain this exact message through a
   /// lost OK response. Relay deduplication makes an explicit retry idempotent.
   Future<void> complete(
@@ -136,11 +186,26 @@ class MeChatShare {
       throw StateError('Could not save sharing on this phone. Try again.');
     }
     _check(sync);
+    void checkPending() {
+      _check(sync);
+      if (prefs.getString(_scope) != _record) {
+        throw StateError('The pending share changed. Open sharing again.');
+      }
+    }
+
     for (final recipient in audience.entries) {
       await ensureRecipient(recipient.key, recipient.value);
-      _check(sync);
+      checkPending();
     }
-    await send(message);
+    checkPending();
+    try {
+      await send(message);
+    } on RelayEventRejected {
+      // A negative OK proves this attempt was not stored. Persist first, then
+      // let the user explicitly retry; never replace an uncertain outcome.
+      await _replaceRejectedMessage(sync);
+      rethrow;
+    }
     _check(sync);
     await clearMeJournal(
       prefs,
