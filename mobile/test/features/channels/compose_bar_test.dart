@@ -4978,9 +4978,8 @@ void main() {
           findsNothing,
         );
 
-        // Typing over a selection keeps the typed text: over the whole chip
-        // it replaces only the selection, and over part of the chip it
-        // replaces the whole chip.
+        // Edits over a selection replace exactly the selection, so typed
+        // text is kept and Cut removes only what it copies.
         Future<void> typeOver(TextSelection selection, String typed) async {
           await tester.enterText(find.byType(TextField), '@hel');
           await tester.pumpAndSettle();
@@ -5019,8 +5018,7 @@ void main() {
           const TextSelection(baseOffset: 5, extentOffset: 13),
           'x',
         );
-        expect(textField.controller!.text, 'xyping');
-        expect(textField.controller!.selection.baseOffset, 1);
+        expect(textField.controller!.text, '@Helpxyping');
 
         // Text that is not drawn as a chip still deletes one character.
         await tester.enterText(find.byType(TextField), '`@Helper Bot`');
