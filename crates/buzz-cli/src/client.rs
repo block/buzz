@@ -3663,6 +3663,35 @@ mod desktop_throttle_tests {
         assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
+    /// A signature slower than a proof's lifetime is signed again even when
+    /// the evidence did not change.
+    #[tokio::test]
+    async fn a_slow_signature_with_unchanged_evidence_is_signed_again() {
+        let (relay, seen) = logging_relay().await;
+        let exp = crate::cached_assertion::unix_now() + 3600;
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let (c, _) = desktop(
+            &relay,
+            &nostr::Keys::generate(),
+            move || dp::assertion(exp - crate::cached_assertion::unix_now()),
+            move |_| {
+                if n.fetch_add(1, Ordering::SeqCst) == 0 {
+                    crate::cached_assertion::test_clock::advance(65);
+                }
+                None
+            },
+        )
+        .await;
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            signs.load(Ordering::SeqCst),
+            2,
+            "the stale proof is signed again"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
     /// Evidence that keeps expiring while the proof is signed ends retryable
     /// after three rounds, sending nothing.
     #[tokio::test]

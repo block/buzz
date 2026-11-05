@@ -522,8 +522,10 @@ pub enum Skip {
     Revoked,
     /// The provider does not apply (relay not bound, no common version).
     NotApplicable,
-    /// The endpoint could not be reached or confirmed: nothing was decided.
+    /// The endpoint could not be reached: nothing was decided.
     Unreachable,
+    /// The same-user check timed out before anything was sent.
+    Unconfirmed,
 }
 
 /// A relay URL as the local provider binds it: `http`/`https` read as
@@ -566,9 +568,8 @@ impl Provider {
             Ok(raw) => raw,
             Err(ProviderError::Revoked) => return Ok(Err(Skip::Revoked)),
             Err(ProviderError::NoCommonVersion) => return Ok(Err(Skip::NotApplicable)),
-            Err(ProviderError::Transport(_) | ProviderError::Unconfirmed) => {
-                return Ok(Err(Skip::Unreachable))
-            }
+            Err(ProviderError::Transport(_)) => return Ok(Err(Skip::Unreachable)),
+            Err(ProviderError::Unconfirmed) => return Ok(Err(Skip::Unconfirmed)),
             Err(e) => return Err(e.into_cli("describe")),
         };
         let describe: Describe = serde_json::from_str(&raw)
@@ -1075,6 +1076,7 @@ async fn inherited_link(
         Err(Skip::Unreachable) => Err(CliError::Auth(
             "the Buzz desktop that launched this agent is not reachable".into(),
         )),
+        Err(Skip::Unconfirmed) => Err(ProviderError::Unconfirmed.into_cli("describe")),
     }
 }
 
@@ -1110,7 +1112,7 @@ async fn paired_link(
                 );
             }
             // A stale or unconfirmed advertisement decides nothing: skip it.
-            Ok(Err(Skip::NotApplicable | Skip::Unreachable)) => {}
+            Ok(Err(Skip::NotApplicable | Skip::Unreachable | Skip::Unconfirmed)) => {}
             // The desktop answered (denied, unavailable, ...): that is final.
             Err(e) => {
                 found = Err(e);
