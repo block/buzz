@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/features/channels/bestie_welcome.dart';
 import 'package:buzz/features/channels/bestie_welcome_storage.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -261,6 +262,7 @@ Widget _buildTestable({
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
   Set<String> inventoryAgents = const {},
+  Set<String> remoteAgents = const {},
   Future<Set<String>> Function()? loadChannelBotPubkeys,
   bool watchChannelMembershipUpdates = false,
   Future<List<AgentDirectoryEntry>> Function()? loadAgentDirectory,
@@ -426,6 +428,7 @@ Widget _buildTestable({
       ),
       if (knownAgentPubkeys != null)
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
+      availableRemoteAgentsProvider.overrideWith((ref) async => remoteAgents),
       meAgentInventoryReadProvider.overrideWithValue(
         () async => {...inventoryAgents},
       ),

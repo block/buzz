@@ -10,6 +10,13 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Optional secondary username, hidden when blank or equal to [displayName].
   final String? username;
 
+  /// Optional short caption after the author, shown as "· [detail]" before
+  /// the timestamp (for example "Remote" for a remote agent).
+  final String? detail;
+
+  /// Optional explanation of [detail], shown when it is long-pressed.
+  final String? detailTooltip;
+
   /// Timestamp label shown after the author metadata.
   final String timestamp;
 
@@ -63,6 +70,8 @@ class MessageAuthorMeta extends StatelessWidget {
     required this.nameColor,
     required this.metadataColor,
     this.username,
+    this.detail,
+    this.detailTooltip,
     this.alignment = MainAxisAlignment.start,
     this.reversed = false,
     this.showTimestamp = true,
@@ -122,6 +131,10 @@ class MessageAuthorMeta extends StatelessWidget {
               ),
             ),
           ],
+          if (showIdentity && detail != null) ...[
+            const SizedBox(width: Grid.half),
+            _detail(detail!, resolvedMetadataStyle),
+          ],
           if (showTimestamp) ...[
             if (showIdentity) SizedBox(width: timestampGap),
             ConstrainedBox(
@@ -146,5 +159,16 @@ class MessageAuthorMeta extends StatelessWidget {
         );
       },
     );
+  }
+
+  Widget _detail(String detail, TextStyle style) {
+    final text = Text(
+      '· $detail',
+      semanticsLabel: detail,
+      maxLines: 1,
+      style: style,
+    );
+    final tooltip = detailTooltip;
+    return tooltip == null ? text : Tooltip(message: tooltip, child: text);
   }
 }
