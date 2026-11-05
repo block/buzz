@@ -28,6 +28,9 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// Runs `/commands` typed as the first token. Off unless a composer opts in.
+  final bool enableSlashCommands;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -41,6 +44,7 @@ class ComposeBar extends HookConsumerWidget {
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
+    this.enableSlashCommands = false,
     required this.onSend,
   });
   @override
@@ -488,6 +492,16 @@ class ComposeBar extends HookConsumerWidget {
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
 
+    final slash = _useSlashCommands(
+      ref: ref,
+      composer: this,
+      channel: composeChannel,
+      channels: channels,
+      customEmoji: customEmoji,
+      controller: controller,
+      focusNode: focusNode,
+    );
+
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
       final start = channelStartIdx.value.clamp(0, controller.text.length);
@@ -512,18 +526,8 @@ class ComposeBar extends HookConsumerWidget {
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
 
     // Insert a selected emoji at the cursor without replacing the draft.
-    void insertEmoji(String emoji) {
-      final text = controller.text;
-      final selection = controller.selection;
-      final cursor = selection.isValid
-          ? selection.baseOffset.clamp(0, text.length)
-          : text.length;
-      controller.value = TextEditingValue(
-        text: text.replaceRange(cursor, cursor, emoji),
-        selection: TextSelection.collapsed(offset: cursor + emoji.length),
-      );
-      focusNode.requestFocus();
-    }
+    void insertEmoji(String emoji) =>
+        _insertAtCursor(controller, focusNode, emoji);
 
     void clearComposer() {
       draftRevision.value += 1;
@@ -565,6 +569,10 @@ class ComposeBar extends HookConsumerWidget {
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
+      final command = slash.recognize(text);
+      if (command != null && hasAttachments) {
+        return _rejectSlashCommandAttachments(messenger);
+      }
 
       // Extract pubkeys for mentions present in the final text.
       List<MentionCandidate> selectedMentions;
@@ -611,6 +619,25 @@ class ComposeBar extends HookConsumerWidget {
           SnackBar(content: Text(error.message)),
           kind: ToastKind.error,
         );
+        return;
+      }
+      if (command != null) {
+        isSending.value = true;
+        try {
+          final done = await slash.run(
+            invocation: command,
+            mentions: selectedMentions,
+            send: sendWithOrigin,
+            messenger: messenger,
+          );
+          if (done &&
+              context.mounted &&
+              draftRevision.value == submittedDraftRevision) {
+            clearComposer();
+          }
+        } finally {
+          if (context.mounted) isSending.value = false;
+        }
         return;
       }
       final outgoing = _OutgoingMentions(selectedMentions);
@@ -907,36 +934,13 @@ class ComposeBar extends HookConsumerWidget {
     }
 
     // Wrap (or insert) markdown formatting around the current selection.
-    void applyFormat(String prefix, [String? suffix]) {
-      suffix ??= prefix;
-      final text = controller.text;
-      final sel = controller.selection;
-      if (!sel.isValid) return;
-
-      isModifyingText.value = true;
-      try {
-        if (sel.isCollapsed) {
-          final offset = sel.baseOffset;
-          final updated =
-              '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-          controller.text = updated;
-          controller.selection = TextSelection.collapsed(
-            offset: offset + prefix.length,
-          );
-        } else {
-          final selected = text.substring(sel.start, sel.end);
-          final updated =
-              '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-          controller.text = updated;
-          controller.selection = TextSelection.collapsed(
-            offset: sel.start + prefix.length + selected.length + suffix.length,
-          );
-        }
-      } finally {
-        isModifyingText.value = false;
-      }
-      focusNode.requestFocus();
-    }
+    void applyFormat(String prefix, [String? suffix]) => _applyFormat(
+      controller,
+      focusNode,
+      isModifyingText,
+      prefix,
+      suffix ?? prefix,
+    );
 
     void chooseAttachment(
       Future<void> Function() choose, {
@@ -1056,6 +1060,8 @@ class ComposeBar extends HookConsumerWidget {
         final query = mentionQuery.value;
         if (query != null) ref.invalidate(mentionUserSearchProvider(query));
       },
+      slashSuggestions: slash.suggestions,
+      onSlashSelect: slash.select,
       userCache: userCache,
       currentPubkey: currentPubkey,
       isDmChannel: isDmChannel,

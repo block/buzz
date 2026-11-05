@@ -1036,6 +1036,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                       ComposeBar(
                         channelId: channelId,
                         focusNode: composerFocusNode,
+                        enableSlashCommands: true,
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
                         hintText: 'Reply in thread\u2026',
