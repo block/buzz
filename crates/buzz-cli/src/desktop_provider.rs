@@ -16,7 +16,6 @@ use nostr::signer::{SignerBackend, SignerError};
 use nostr::{Event, JsonUtil, PublicKey, Tag, UnsignedEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 
 use crate::error::CliError;
 
@@ -43,9 +42,6 @@ const RETRY_AFTER_UNIT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(1)
 };
-
-/// Re-ask for an assertion this long before its `exp`.
-const REFRESH_MARGIN_SECS: u64 = 30;
 
 /// A provider failure, by the contract's error code.
 #[derive(Debug)]
@@ -478,11 +474,6 @@ struct Describe {
     methods: Vec<String>,
 }
 
-struct CachedAssertion {
-    assertion: Option<String>,
-    refresh_at: u64,
-}
-
 /// A connected provider acting as one identity.
 pub struct Provider {
     endpoint: Endpoint,
@@ -492,7 +483,7 @@ pub struct Provider {
     same_user: bool,
     public_key: PublicKey,
     methods: Vec<String>,
-    cached: Mutex<Option<CachedAssertion>>,
+    cached: crate::cached_assertion::CachedAssertion,
 }
 
 impl std::fmt::Debug for Provider {
@@ -572,7 +563,7 @@ impl Provider {
             same_user,
             public_key,
             methods: describe.methods,
-            cached: Mutex::new(None),
+            cached: Default::default(),
         })))
     }
 
@@ -644,43 +635,25 @@ impl Provider {
     /// The NIP-FI assertion for the relay it was opened for, cached until
     /// shortly before its `exp`. `None` when the desktop has none for it.
     pub async fn federated_identity(&self) -> Result<Option<String>, CliError> {
-        let relay_url = self.relay.as_str();
-        let mut cached = self.cached.lock().await;
-        if let Some(entry) = cached.as_ref() {
-            if unix_now() < entry.refresh_at {
-                return Ok(entry.assertion.clone());
-            }
-        }
-        let params = [relay_url.to_owned()];
-        let assertion = match call(
-            &self.endpoint,
-            Some(&self.token),
-            self.same_user,
-            "federated_identity",
-            &params,
-        )
-        .await
-        {
-            Ok(a) if a.is_empty() => None,
-            Ok(a) => Some(a),
-            Err(ProviderError::UnknownMethod) => None,
-            Err(e) => return Err(e.into_cli("federated_identity")),
-        };
-        let refresh_at = match assertion.as_deref() {
-            Some(a) => {
-                let exp = jwt_exp(a).ok_or_else(|| {
-                    CliError::Auth("Buzz desktop returned an unreadable assertion".into())
-                })?;
-                exp.saturating_sub(REFRESH_MARGIN_SECS)
-            }
-            // Ask again on the next command; within one, there is none.
-            None => u64::MAX,
-        };
-        *cached = Some(CachedAssertion {
-            assertion: assertion.clone(),
-            refresh_at,
-        });
-        Ok(assertion)
+        let params = [self.relay.clone()];
+        self.cached
+            .get(async {
+                match call(
+                    &self.endpoint,
+                    Some(&self.token),
+                    self.same_user,
+                    "federated_identity",
+                    &params,
+                )
+                .await
+                {
+                    Ok(a) if a.is_empty() => Ok(None),
+                    Ok(a) => Ok(Some(a)),
+                    Err(ProviderError::UnknownMethod) => Ok(None),
+                    Err(e) => Err(e.into_cli("federated_identity")),
+                }
+            })
+            .await
     }
 
     /// NIP-44 decrypt `payload` from `peer`. `Ok(None)` when the desktop
@@ -722,28 +695,6 @@ impl Provider {
         }
         Ok(tag)
     }
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// The `exp` claim of a compact JWS, without verifying it (the relay does).
-fn jwt_exp(jws: &str) -> Option<u64> {
-    use base64::Engine;
-    let mut parts = jws.split('.');
-    let (_, payload, _, None) = (parts.next()?, parts.next()?, parts.next()?, parts.next()) else {
-        return None;
-    };
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()?
-        .get("exp")?
-        .as_u64()
 }
 
 fn signer_error(e: CliError) -> SignerError {
@@ -1246,6 +1197,7 @@ fn unpair_with(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::cached_assertion::unix_now;
 
     tokio::task_local! {
         /// Pretend the caller runs as this user ID.
@@ -1305,16 +1257,6 @@ pub(crate) mod tests {
         let out = "p100\nu501\nn127.0.0.1:50000->127.0.0.1:4100\np200\nu502\nn127.0.0.1:4100->127.0.0.1:50000\n";
         assert_eq!(lsof_uid(out, 4100, 50000), Some(502));
         assert_eq!(lsof_uid(out, 4100, 50001), None);
-    }
-
-    #[test]
-    fn jwt_exp_reads_the_payload_claim() {
-        use base64::Engine;
-        let payload =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":1790000300}"#);
-        assert_eq!(jwt_exp(&format!("e30.{payload}.c2ln")), Some(1_790_000_300));
-        assert_eq!(jwt_exp("e30.e30"), None);
-        assert_eq!(jwt_exp("e30.e30.c2ln.x"), None);
     }
 
     #[test]
@@ -1414,6 +1356,45 @@ pub(crate) mod tests {
         assert_eq!(seen[0].0.as_deref(), Some("Bearer tok"));
         assert_eq!(seen[0].1, "1");
         assert_eq!(seen[0].2["method"], "describe");
+    }
+
+    #[tokio::test]
+    async fn short_and_long_assertions_refresh_at_the_earlier_point() {
+        use base64::Engine;
+        for (lifetime, refresh) in [(20, 10), (300, 150)] {
+            let (endpoint, seen) = provider(move |_, request| match request["method"].as_str() {
+                Some("federated_identity") => {
+                    let b64 = |v: serde_json::Value| {
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+                    };
+                    let jws = format!(
+                        "{}.{}.c2ln",
+                        b64(serde_json::json!({"alg": "ES256"})),
+                        b64(serde_json::json!({"exp": unix_now() + lifetime}))
+                    );
+                    serde_json::json!({ "result": jws })
+                }
+                _ => describe(&[RELAY]),
+            })
+            .await;
+            let Ok(Ok(provider)) = Provider::open(endpoint, "tok".into(), false, RELAY).await
+            else {
+                panic!("the provider should open");
+            };
+            let mints = || {
+                let seen = seen.lock().unwrap();
+                seen.iter()
+                    .filter(|s| s.2["method"] == "federated_identity")
+                    .count()
+            };
+            provider.federated_identity().await.unwrap();
+            crate::cached_assertion::test_clock::advance(refresh - 1);
+            provider.federated_identity().await.unwrap();
+            assert_eq!(mints(), 1, "lifetime {lifetime}");
+            crate::cached_assertion::test_clock::advance(1);
+            provider.federated_identity().await.unwrap();
+            assert_eq!(mints(), 2, "lifetime {lifetime}");
+        }
     }
 
     #[tokio::test]

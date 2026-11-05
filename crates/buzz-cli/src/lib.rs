@@ -1,4 +1,5 @@
 pub mod agent_management;
+mod cached_assertion;
 mod client;
 mod commands;
 mod credentials;

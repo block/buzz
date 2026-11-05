@@ -17,12 +17,16 @@
 
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+use sha2::{Digest, Sha256};
 
-use crate::credentials::{
-    Credentials, FEDERATED_IDENTITY_ADAPTER_ENV, FEDERATED_IDENTITY_TOKEN_ENV,
-};
+use crate::cached_assertion::{unix_now, CachedAssertion};
 use crate::error::CliError;
+
+/// Environment variable carrying a NIP-FA adapter session token.
+pub const FEDERATED_IDENTITY_TOKEN_ENV: &str = "BUZZ_FEDERATED_IDENTITY_TOKEN";
+/// Environment variable carrying the NIP-FA adapter base URL.
+pub const FEDERATED_IDENTITY_ADAPTER_ENV: &str = "BUZZ_FEDERATED_IDENTITY_ADAPTER";
 
 /// NIP-FA assertion endpoint, relative to the adapter base.
 const ASSERTIONS_PATH: &str = "/v1/identity/assertions";
@@ -37,10 +41,6 @@ const MINT_BACKOFF: [Duration; MINT_ATTEMPTS - 1] =
 /// The longest adapter `Retry-After` the CLI waits out before a retry.
 const MINT_RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
 
-/// Re-mint this long before expiry, or at half-life for lifetimes up to
-/// twice this, so a short-lived assertion is not re-minted on every request.
-const REFRESH_MARGIN_SECS: u64 = 30;
-
 /// A NIP-FA adapter session that mints NIP-FI assertions.
 pub struct AdapterSession {
     endpoint: url::Url,
@@ -48,12 +48,7 @@ pub struct AdapterSession {
     relay_url: String,
     token: String,
     http: reqwest::Client,
-    cached: Mutex<Option<CachedAssertion>>,
-}
-
-struct CachedAssertion {
-    assertion: String,
-    refresh_at: u64,
+    cached: CachedAssertion,
 }
 
 impl std::fmt::Debug for AdapterSession {
@@ -119,38 +114,6 @@ fn parse_retry_after(value: &str, now: u64) -> Option<Duration> {
         .ok()?
         .as_secs();
     Some(Duration::from_secs(at.saturating_sub(now)))
-}
-
-fn unix_now() -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    #[cfg(test)]
-    let now = now + test_clock::SKEW.with(std::cell::Cell::get);
-    now
-}
-
-/// A clock tests move forward instead of sleeping. Per thread, so it moves
-/// only for the test (and its current-thread runtime) that advances it.
-#[cfg(test)]
-pub(crate) mod test_clock {
-    thread_local! {
-        pub(super) static SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    }
-    pub(crate) fn advance(secs: u64) {
-        SKEW.with(|skew| skew.set(skew.get() + secs));
-    }
-}
-
-fn refresh_at(now: u64, expires_at: u64) -> u64 {
-    let lifetime = expires_at.saturating_sub(now);
-    let margin = if lifetime > 2 * REFRESH_MARGIN_SECS {
-        REFRESH_MARGIN_SECS
-    } else {
-        lifetime / 2
-    };
-    expires_at - margin
 }
 
 /// Read at most `MAX_RESPONSE_BYTES` of the body; `None` when it is larger.
@@ -247,37 +210,23 @@ impl AdapterSession {
             relay_url,
             token: token.to_owned(),
             http,
-            cached: Mutex::new(None),
+            cached: CachedAssertion::default(),
         })
     }
 
-    /// The assertion for its relay, minted on first use and re-minted
-    /// shortly before it expires. Concurrent callers share one mint.
-    pub async fn assertion(&self, credentials: &Credentials) -> Result<String, CliError> {
-        let relay_url = self.relay_url.as_str();
-        let mut cached = self.cached.lock().await;
-        if let Some(entry) = cached.as_ref() {
-            if unix_now() < entry.refresh_at {
-                return Ok(entry.assertion.clone());
-            }
-        }
-        let (assertion, expires_at) = self.mint(relay_url, credentials).await?;
-        *cached = Some(CachedAssertion {
-            assertion: assertion.clone(),
-            refresh_at: refresh_at(unix_now(), expires_at),
-        });
-        Ok(assertion)
+    /// The assertion for its relay, minted with `keys` on first use and
+    /// re-minted at its refresh point. Concurrent callers share one mint.
+    pub async fn assertion(&self, keys: &Keys) -> Result<Option<String>, CliError> {
+        self.cached
+            .get(async { self.mint(&self.relay_url, keys).await.map(Some) })
+            .await
     }
 
     /// Mint with bounded retries; a refusal or a definitive error returns at once.
-    async fn mint(
-        &self,
-        relay_url: &str,
-        credentials: &Credentials,
-    ) -> Result<(String, u64), CliError> {
+    async fn mint(&self, relay_url: &str, keys: &Keys) -> Result<String, CliError> {
         let mut attempt = 0;
         loop {
-            match self.mint_once(relay_url, credentials).await? {
+            match self.mint_once(relay_url, keys).await? {
                 Ok(issued) => return Ok(issued),
                 Err(transient) if attempt + 1 == MINT_ATTEMPTS => {
                     return Err(CliError::Adapter(format!(
@@ -302,9 +251,9 @@ impl AdapterSession {
     async fn mint_once(
         &self,
         relay_url: &str,
-        credentials: &Credentials,
-    ) -> Result<Result<(String, u64), Transient>, CliError> {
-        let pubkey = credentials.public_key().to_hex();
+        keys: &Keys,
+    ) -> Result<Result<String, Transient>, CliError> {
+        let pubkey = keys.public_key().to_hex();
         let body = serde_json::to_vec(&serde_json::json!({
             "relay_url": relay_url,
             "nostr_pubkey": pubkey,
@@ -312,9 +261,11 @@ impl AdapterSession {
         .map_err(|e| CliError::Other(format!("assertion request serialization failed: {e}")))?;
 
         // A fresh proof per attempt: NIP-FA proofs are single-use.
-        let proof = credentials
-            .nip98("POST", self.endpoint.as_str(), Some(&body))
-            .await?;
+        let proof = nip98_event("POST", self.endpoint.as_str(), Some(&body))?
+            .sign_with_keys(keys)
+            .map_err(|e| CliError::Other(format!("NIP-98 signing failed: {e}")))?;
+        use base64::Engine;
+        let proof = base64::engine::general_purpose::STANDARD.encode(proof.as_json());
         let mut proof = reqwest::header::HeaderValue::try_from(format!("Nostr {proof}"))
             .map_err(|_| CliError::Other("NIP-98 proof is not a valid header value".into()))?;
         proof.set_sensitive(true);
@@ -386,7 +337,7 @@ impl std::fmt::Display for Transient {
 }
 
 /// Validate a 200 response (NIP-FA: a rejected 200 is a refusal).
-fn accept(body: Option<&[u8]>, pubkey: &str) -> Result<(String, u64), CliError> {
+fn accept(body: Option<&[u8]>, pubkey: &str) -> Result<String, CliError> {
     let response: AssertionResponse = body
         .and_then(|b| serde_json::from_slice(b).ok())
         .ok_or_else(|| refused("unreadable assertion response"))?;
@@ -396,39 +347,36 @@ fn accept(body: Option<&[u8]>, pubkey: &str) -> Result<(String, u64), CliError> 
     if response.expires_at <= unix_now() {
         return Err(refused("assertion already expired"));
     }
-    match jws_exp(&response.assertion) {
+    match crate::cached_assertion::jws_exp(&response.assertion) {
         None => return Err(refused("assertion is not a compact JWS")),
         Some(exp) if exp != response.expires_at => {
             return Err(refused("assertion exp does not match expires_at"));
         }
         Some(_) => {}
     }
-    Ok((response.assertion, response.expires_at))
+    Ok(response.assertion)
 }
 
-/// The `exp` claim of a structurally valid compact JWS: three non-empty
-/// unpadded base64url segments, a JSON-object header naming `alg`, and a
-/// JSON-object payload with an integer `exp`. The relay verifies the
-/// signature; the CLI only refuses output it could not present or refresh.
-fn jws_exp(token: &str) -> Option<u64> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    let mut segments = token.split('.');
-    let (Some(header), Some(payload), Some(signature), None) = (
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-    ) else {
-        return None;
+/// The NIP-98 HTTP auth event (kind:27235) for `method` + `url`: `u`,
+/// `method`, a nonce (so rapid identical requests don't trip replay guards)
+/// and, with a body, its `payload` hash. Mints and relay requests sign it.
+pub(crate) fn nip98_event(
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+) -> Result<EventBuilder, CliError> {
+    let tag = |parts: &[&str]| {
+        Tag::parse(parts.iter().copied()).map_err(|e| CliError::Other(format!("tag error: {e}")))
     };
-    let json = |segment: &str| -> Option<serde_json::Map<String, serde_json::Value>> {
-        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segment).ok()?).ok()
-    };
-    if signature.is_empty() || URL_SAFE_NO_PAD.decode(signature).is_err() {
-        return None;
+    let mut tags = vec![
+        tag(&["u", url])?,
+        tag(&["method", method])?,
+        tag(&["nonce", &uuid::Uuid::new_v4().to_string()])?,
+    ];
+    if let Some(body) = body {
+        tags.push(tag(&["payload", &hex::encode(Sha256::digest(body))])?);
     }
-    json(header)?.get("alg")?.as_str()?;
-    json(payload)?.get("exp")?.as_u64()
+    Ok(EventBuilder::new(Kind::HttpAuth, "").tags(tags))
 }
 
 #[cfg(test)]
@@ -491,15 +439,6 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         assert_eq!(parse_retry_after("soon", now), None);
-    }
-
-    #[test]
-    fn refresh_keeps_a_margin_without_reminting_short_lifetimes_every_call() {
-        assert_eq!(refresh_at(1_000, 1_300), 1_270);
-        assert_eq!(refresh_at(1_000, 1_061), 1_031);
-        assert_eq!(refresh_at(1_000, 1_060), 1_030);
-        assert_eq!(refresh_at(1_000, 1_020), 1_010);
-        assert_eq!(refresh_at(1_000, 1_001), 1_001);
     }
 
     #[test]
@@ -611,11 +550,14 @@ mod tests {
         let (base, seen) =
             adapter(|req| issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + 300)).await;
         let keys = Keys::generate();
-        let credentials = Credentials::from_keys(keys.clone());
+        let credentials = keys.clone();
         let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
 
         let first = session.assertion(&credentials).await.unwrap();
-        assert!(jws_exp(&first).is_some(), "{first}");
+        assert!(first
+            .as_deref()
+            .and_then(crate::cached_assertion::jws_exp)
+            .is_some());
         for _ in 0..2 {
             let assertion = session.assertion(&credentials).await.unwrap();
             assert_eq!(assertion, first);
@@ -667,12 +609,33 @@ mod tests {
         // A 2 s lifetime refreshes at half-life, so the second call re-mints.
         let (base, seen) =
             adapter(|req| issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + 2)).await;
-        let credentials = Credentials::from_keys(Keys::generate());
+        let credentials = Keys::generate();
         let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
         session.assertion(&credentials).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2_100)).await;
         session.assertion(&credentials).await.unwrap();
         assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn short_and_long_assertions_refresh_at_the_earlier_point() {
+        // 20 s refreshes at half-life (10 s); 300 s at half-life (150 s),
+        // earlier than 30 s before expiry.
+        for (lifetime, refresh) in [(20, 10), (300, 150)] {
+            let (base, seen) = adapter(move |req| {
+                issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + lifetime)
+            })
+            .await;
+            let keys = Keys::generate();
+            let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+            session.assertion(&keys).await.unwrap();
+            crate::cached_assertion::test_clock::advance(refresh - 1);
+            session.assertion(&keys).await.unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 1, "lifetime {lifetime}");
+            crate::cached_assertion::test_clock::advance(1);
+            session.assertion(&keys).await.unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 2, "lifetime {lifetime}");
+        }
     }
 
     /// NIP-FA §Denials: every status/code the adapter can answer, plus the
@@ -829,7 +792,7 @@ mod tests {
         for (name, respond, retry_status, expected) in cases {
             let (base, seen) =
                 adapter(move |req| respond(req["nostr_pubkey"].as_str().unwrap_or_default())).await;
-            let credentials = Credentials::from_keys(Keys::generate());
+            let credentials = Keys::generate();
             let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
             let err = session.assertion(&credentials).await.unwrap_err();
             let message = err.to_string();
@@ -882,10 +845,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
-        let err = session
-            .assertion(&Credentials::from_keys(Keys::generate()))
-            .await
-            .unwrap_err();
+        let err = session.assertion(&Keys::generate()).await.unwrap_err();
         assert!(
             matches!(&err, CliError::Auth(m) if m.contains("HTTP 307")),
             "{err:?}"
@@ -899,10 +859,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
         let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
-        let err = session
-            .assertion(&Credentials::from_keys(Keys::generate()))
-            .await
-            .unwrap_err();
+        let err = session.assertion(&Keys::generate()).await.unwrap_err();
         assert!(
             matches!(&err, CliError::Adapter(m) if m.contains("3 attempts")),
             "{err:?}"
@@ -915,7 +872,7 @@ mod tests {
     /// retryable. A cut-off 200 is a transport failure and is retried.
     #[tokio::test]
     async fn a_truncated_body_keeps_the_status_meaning() {
-        let credentials = Credentials::from_keys(Keys::generate());
+        let credentials = Keys::generate();
         let (base, seen) = raw_adapter(test_support::TRUNCATED_403).await;
         let err = AdapterSession::new(&base, TOKEN, RELAY)
             .unwrap()

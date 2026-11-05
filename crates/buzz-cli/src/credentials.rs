@@ -15,18 +15,13 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use nostr::{
-    Event, EventBuilder, JsonUtil, Keys, Kind, NostrSigner, PublicKey, Tag, UnsignedEvent,
-};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, NostrSigner, PublicKey, Tag, UnsignedEvent};
 use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
-use crate::federated_identity::AdapterSession;
-
-/// Environment variable carrying a NIP-FA adapter session token.
-pub const FEDERATED_IDENTITY_TOKEN_ENV: &str = "BUZZ_FEDERATED_IDENTITY_TOKEN";
-/// Environment variable carrying the NIP-FA adapter base URL.
-pub const FEDERATED_IDENTITY_ADAPTER_ENV: &str = "BUZZ_FEDERATED_IDENTITY_ADAPTER";
+pub use crate::federated_identity::{
+    AdapterSession, FEDERATED_IDENTITY_ADAPTER_ENV, FEDERATED_IDENTITY_TOKEN_ENV,
+};
 
 /// Raw credential settings, from flags and the environment.
 #[derive(Default)]
@@ -428,7 +423,12 @@ impl Credentials {
             return provider.federated_identity().await;
         }
         match &self.evidence {
-            Some(source) => source.assertion(self).await.map(Some),
+            Some(source) => {
+                let keys = self.local_keys.as_ref().ok_or_else(|| {
+                    CliError::Auth("a headless evidence source needs a local key".into())
+                })?;
+                source.assertion(keys).await
+            }
             None => Ok(None),
         }
     }
@@ -511,20 +511,8 @@ impl Credentials {
         url: &str,
         body: Option<&[u8]>,
     ) -> Result<String, CliError> {
-        let tag = |parts: &[&str]| {
-            Tag::parse(parts.iter().copied())
-                .map_err(|e| CliError::Other(format!("tag error: {e}")))
-        };
-        let mut tags = vec![
-            tag(&["u", url])?,
-            tag(&["method", method])?,
-            tag(&["nonce", &uuid::Uuid::new_v4().to_string()])?,
-        ];
-        if let Some(body) = body {
-            tags.push(tag(&["payload", &hex::encode(Sha256::digest(body))])?);
-        }
         let event = self
-            .sign(EventBuilder::new(Kind::HttpAuth, "").tags(tags))
+            .sign(crate::federated_identity::nip98_event(method, url, body)?)
             .await?;
         Ok(B64.encode(event.as_json().as_bytes()))
     }

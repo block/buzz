@@ -3242,7 +3242,7 @@ mod federated_identity_route_tests {
                         sends.fetch_add(1, Ordering::SeqCst);
                         // The relay may have stored it; the proxy lost the answer
                         // after the assertion reached its refresh boundary.
-                        crate::federated_identity::test_clock::advance(300);
+                        crate::cached_assertion::test_clock::advance(300);
                         StatusCode::BAD_GATEWAY.into_response()
                     }
                 }
