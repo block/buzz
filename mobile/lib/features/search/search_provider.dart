@@ -180,10 +180,6 @@ class SearchNotifier extends Notifier<SearchState> {
   // even one with the same text, cannot settle the current spinner.
   int _generation = 0;
 
-  // The directory status turned loaded and its channels are not installed
-  // yet: rank the next list.
-  bool _directoryInstalling = false;
-
   @override
   SearchState build() {
     // Watch relayConfig so search state resets on a community or identity
@@ -195,22 +191,22 @@ class SearchNotifier extends Notifier<SearchState> {
     _directoryLoad = null;
     _directoryAttempted = false;
     // Channel rows are ranked once per query, so live channel events never
-    // reorder rows under a finger. They are ranked again only when the list
-    // first loads and when a directory load installs open channels, which
-    // lands just after its status turns loaded; the directory status for
-    // this community also drives the spinner.
-    _directoryInstalling = false;
+    // reorder rows under a finger. They are ranked again only when the set
+    // of channels changes (the first load, a directory install, a join or a
+    // leave); the directory status for this community also drives the
+    // spinner.
     ref.listen(channelsProvider, (previous, next) {
-      if (next.asData == null) return;
-      if (previous?.asData == null || _directoryInstalling) {
-        _directoryInstalling = false;
+      final channels = next.asData?.value;
+      if (channels == null) return;
+      final before = previous?.asData?.value;
+      if (before == null || !_sameChannels(before, channels)) {
         _refreshChannels();
       }
     });
-    ref.listen(channelDirectoryLoadStatusProvider, (_, next) {
-      _directoryInstalling = next.status == ChannelDirectoryLoadStatus.loaded;
-      _refreshChannels();
-    });
+    ref.listen(
+      channelDirectoryLoadStatusProvider,
+      (_, _) => _refreshChannels(),
+    );
     // Offline, a directory load fails at once. Load it again on reconnect, so
     // the failure clears without another query.
     ref.listen(relaySessionProvider, (previous, next) {
@@ -397,6 +393,10 @@ class SearchNotifier extends Notifier<SearchState> {
   }
 
   /// Publishes the channel rows and spinner for the current query.
+  static bool _sameChannels(List<Channel> a, List<Channel> b) =>
+      a.length == b.length &&
+      a.map((c) => c.id).toSet().containsAll(b.map((c) => c.id));
+
   void _refreshChannels() {
     if (state.query.isEmpty) return;
     state = state.copyWith(

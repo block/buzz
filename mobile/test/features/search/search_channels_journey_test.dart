@@ -169,20 +169,37 @@ void main() {
     final shown = find.byKey(
       const ValueKey('search-channel-row-team-4things-id'),
     );
-    final arrived = find.byKey(const ValueKey('search-channel-row-team-id'));
+    final joined = find.byKey(
+      const ValueKey('search-channel-row-team-chat-id'),
+    );
     expect(shown, findsOneWidget);
 
-    // A live event adds a better match. Rows stay put under the finger.
+    // Joining a channel changes the set, so it is ranked in: joined ties
+    // keep the list's order.
     channels.state = AsyncData([
       ...channels.state.requireValue,
-      _channel('team', isMember: true),
+      _channel('team-chat', isMember: true),
     ]);
     await tester.pump();
-    expect(arrived, findsNothing);
-    expect(shown, findsOneWidget);
+    expect(joined, findsOneWidget);
+    expect(tester.getTopLeft(shown).dy, lessThan(tester.getTopLeft(joined).dy));
 
-    // Another caller's directory load: its status turns loaded, then it
-    // installs the open channels, which this search shows.
+    // Activity moves the joined channel to the top of the list. Rows stay put
+    // under the finger.
+    void bump(String name) {
+      final list = channels.state.requireValue;
+      channels.state = AsyncData([
+        ...list.where((c) => c.name == name),
+        ...list.where((c) => c.name != name),
+      ]);
+    }
+
+    bump('team-chat');
+    await tester.pump();
+    expect(tester.getTopLeft(shown).dy, lessThan(tester.getTopLeft(joined).dy));
+
+    // Another caller's directory load: its status turns loaded, a live event
+    // lands, then it installs the open channels, which this search shows.
     final container = ProviderScope.containerOf(
       tester.element(find.byType(SearchPage)),
     );
@@ -192,6 +209,9 @@ void main() {
       container.read(myPubkeyProvider),
     );
     status.markLoaded(scope);
+    await tester.pump();
+    bump('general');
+    await tester.pump();
     channels.state = AsyncData([
       ...channels.state.requireValue,
       _channel('team-open', isMember: false),
@@ -199,16 +219,11 @@ void main() {
     await tester.pump();
     final open = find.byKey(const ValueKey('search-channel-row-team-open-id'));
     expect(open, findsOneWidget);
-    expect(arrived, findsOneWidget);
 
     // The next query ranks the current list.
     await tester.enterText(find.byType(TextField), 'team ');
     await tester.pump(const Duration(milliseconds: 300));
-    expect(arrived, findsOneWidget);
-    expect(
-      tester.getTopLeft(arrived).dy,
-      lessThan(tester.getTopLeft(shown).dy),
-    );
+    expect(tester.getTopLeft(joined).dy, lessThan(tester.getTopLeft(shown).dy));
   });
 
   testWidgets('a failed directory offers a retry instead of no results', (
