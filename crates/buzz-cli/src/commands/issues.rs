@@ -59,7 +59,7 @@ struct AssignmentEvent {
     tags: Vec<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AssignmentQueryEvent {
     id: String,
     kind: u16,
@@ -220,6 +220,146 @@ struct IssueAssignmentContext {
     prior: Option<String>,
 }
 
+const TASK_TRANSITION_LABEL: &str = "task-transition";
+const GRAPH_LABEL: &str = "graph";
+
+struct TaskTransitionContext {
+    head: Option<String>,
+    state: Option<String>,
+}
+
+fn query_tag_values<'a>(event: &'a AssignmentQueryEvent, name: &str) -> Vec<&'a str> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            (tag.first().map(String::as_str) == Some(name))
+                .then(|| tag.get(1).map(String::as_str))
+                .flatten()
+                .filter(|value| !value.is_empty())
+        })
+        .collect()
+}
+
+fn issue_dependencies(event: &AssignmentQueryEvent) -> Vec<String> {
+    query_tag_values(event, "depends-on")
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn dependency_graph_has_cycle(
+    issue: &str,
+    issues: &HashMap<String, &AssignmentQueryEvent>,
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    if visited.contains(issue) {
+        return false;
+    }
+    if !visiting.insert(issue.to_string()) {
+        return true;
+    }
+    if let Some(event) = issues.get(issue) {
+        for dependency in issue_dependencies(event) {
+            if dependency_graph_has_cycle(&dependency, issues, visiting, visited) {
+                return true;
+            }
+        }
+    }
+    visiting.remove(issue);
+    visited.insert(issue.to_string());
+    false
+}
+
+fn dependency_is_resolved(
+    dependency: &AssignmentQueryEvent,
+    repo_owner: &str,
+    status_events: &[&AssignmentQueryEvent],
+) -> bool {
+    status_events
+        .iter()
+        .filter(|event| {
+            (event.pubkey.eq_ignore_ascii_case(&dependency.pubkey)
+                || event.pubkey.eq_ignore_ascii_case(repo_owner))
+                && query_tag_values(event, "e")
+                    .iter()
+                    .any(|root| root.eq_ignore_ascii_case(&dependency.id))
+        })
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .is_some_and(|event| event.kind == 1631)
+}
+
+fn reduce_task_transitions(
+    issue: &AssignmentQueryEvent,
+    repo_owner: &str,
+    assignees: &HashSet<String>,
+    events: &[&AssignmentQueryEvent],
+) -> TaskTransitionContext {
+    let mut events = events
+        .iter()
+        .filter(|event| {
+            event.kind == 1
+                && query_tag_values(event, "e")
+                    .iter()
+                    .any(|root| root.eq_ignore_ascii_case(&issue.id))
+                && query_tag_values(event, "t").contains(&TASK_TRANSITION_LABEL)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let mut head: Option<String> = None;
+    let mut state: Option<String> = None;
+    for event in events {
+        let signer = event.pubkey.to_ascii_lowercase();
+        if !event.pubkey.eq_ignore_ascii_case(&issue.pubkey)
+            && !event.pubkey.eq_ignore_ascii_case(repo_owner)
+            && !assignees.contains(&signer)
+        {
+            continue;
+        }
+        let from = query_tag_values(event, "from");
+        let to = query_tag_values(event, "to");
+        let prior = query_tag_values(event, "prior");
+        if from.len() != 1 || to.len() != 1 || prior.len() > 1 {
+            continue;
+        }
+        let causal = match head.as_deref() {
+            None => prior.is_empty(),
+            Some(current) => prior
+                .first()
+                .is_some_and(|value| value.eq_ignore_ascii_case(current)),
+        };
+        if !causal || state.as_deref().is_some_and(|current| current != from[0]) {
+            continue;
+        }
+        head = Some(event.id.to_ascii_lowercase());
+        state = Some(to[0].to_string());
+    }
+    TaskTransitionContext { head, state }
+}
+
+fn next_task_transition_created_at(now: u64, events: &[&AssignmentQueryEvent]) -> u64 {
+    let latest = events
+        .iter()
+        .filter(|event| {
+            event.kind == 1 && query_tag_values(event, "t").contains(&TASK_TRANSITION_LABEL)
+        })
+        .map(|event| event.created_at)
+        .max()
+        .unwrap_or(0);
+    now.max(latest.saturating_add(1))
+}
+
 impl IssueAssignmentOperation {
     fn content(self, label: &str) -> String {
         match self {
@@ -229,6 +369,7 @@ impl IssueAssignmentOperation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -237,6 +378,7 @@ pub async fn cmd_create_issue(
     content: &str,
     labels: &[String],
     to: &[String],
+    dependencies: &[String],
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
@@ -245,6 +387,7 @@ pub async fn cmd_create_issue(
     let meta = GitIssueMeta {
         labels: labels.to_vec(),
         recipients: to.to_vec(),
+        dependencies: dependencies.to_vec(),
     };
 
     let repo = GitRepoCoord {
@@ -477,6 +620,153 @@ async fn issue_assignment_context(
     Ok(IssueAssignmentContext { created_at, prior })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_transition_issue(
+    client: &BuzzClient,
+    issue: &str,
+    repo_owner: &str,
+    repo_id: &str,
+    from: &str,
+    to: &str,
+    content: &str,
+    gate: Option<&str>,
+) -> Result<(), CliError> {
+    validate_hex64(issue)?;
+    validate_hex64(repo_owner)?;
+    validate_repo_id(repo_id)?;
+    let body = read_or_stdin(content)?;
+    let repo = GitRepoCoord {
+        owner: repo_owner.to_string(),
+        id: repo_id.to_string(),
+    };
+    let repo_address = format!("30617:{repo_owner}:{repo_id}");
+    let root_filter = serde_json::json!({
+        "kinds": [1621],
+        "#a": [repo_address.clone()],
+        "limit": 1000
+    });
+    let operation_filter = serde_json::json!({
+        "kinds": [1],
+        "#e": [issue],
+        "#t": [ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL, TASK_TRANSITION_LABEL],
+        "limit": 500
+    });
+    let response = client.query_multi(&[root_filter, operation_filter]).await?;
+    let mut events = serde_json::from_str::<Vec<AssignmentQueryEvent>>(&response)
+        .map_err(|error| CliError::Other(format!("parse task transition context: {error}")))?;
+    let root = events
+        .iter()
+        .find(|event| event.kind == 1621 && event.id.eq_ignore_ascii_case(issue))
+        .cloned()
+        .ok_or_else(|| CliError::Other("issue root was not returned by the relay".into()))?;
+    if !query_tag_values(&root, "t")
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(GRAPH_LABEL))
+    {
+        return Err(CliError::Usage(
+            "task transitions require the issue to have a graph label".into(),
+        ));
+    }
+
+    let dependency_ids = issue_dependencies(&root);
+    if !dependency_ids.is_empty() {
+        let status_filter = serde_json::json!({
+            "kinds": [1630, 1631, 1632, 1633],
+            "#e": dependency_ids,
+            "limit": 1000
+        });
+        let status_response = client.query(&status_filter).await?;
+        let mut status_events = serde_json::from_str::<Vec<AssignmentQueryEvent>>(&status_response)
+            .map_err(|error| {
+                CliError::Other(format!("parse dependency status context: {error}"))
+            })?;
+        events.append(&mut status_events);
+    }
+
+    let issues = events
+        .iter()
+        .filter(|event| event.kind == 1621)
+        .map(|event| (event.id.to_ascii_lowercase(), event))
+        .collect::<HashMap<_, _>>();
+    if dependency_graph_has_cycle(
+        &issue.to_ascii_lowercase(),
+        &issues,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+    ) {
+        return Err(CliError::Usage(
+            "task dependency graph contains a cycle".into(),
+        ));
+    }
+    let statuses = events
+        .iter()
+        .filter(|event| (1630..=1633).contains(&event.kind))
+        .collect::<Vec<_>>();
+    for dependency_id in issue_dependencies(&root) {
+        let dependency = issues.get(&dependency_id).ok_or_else(|| {
+            CliError::Usage(format!(
+                "dependency {dependency_id} is missing from the requested repository"
+            ))
+        })?;
+        if !dependency_is_resolved(dependency, repo_owner, &statuses) {
+            return Err(CliError::Usage(format!(
+                "dependency {dependency_id} is not resolved"
+            )));
+        }
+    }
+
+    let comments = events
+        .iter()
+        .filter(|event| event.kind == 1)
+        .map(AssignmentEvent::from)
+        .collect::<Vec<_>>();
+    let assignment_state = reduce_assignment_operations(issue, &root.pubkey, repo_owner, &comments);
+    let signer = client.keys().public_key().to_hex();
+    if !signer.eq_ignore_ascii_case(&root.pubkey)
+        && !signer.eq_ignore_ascii_case(repo_owner)
+        && !assignment_state
+            .assignees
+            .contains(&signer.to_ascii_lowercase())
+    {
+        return Err(CliError::Usage(
+            "only the issue author, repo owner, or a current assignee may transition this task"
+                .into(),
+        ));
+    }
+    let operations = events
+        .iter()
+        .filter(|event| event.kind == 1)
+        .collect::<Vec<_>>();
+    let context =
+        reduce_task_transitions(&root, repo_owner, &assignment_state.assignees, &operations);
+    if context.state.as_deref().is_some_and(|state| state != from) {
+        return Err(CliError::Usage(format!(
+            "transition from {from} does not match current task state {}",
+            context.state.unwrap_or_default()
+        )));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| CliError::Other(format!("read system clock: {error}")))?
+        .as_secs();
+    let created_at = next_task_transition_created_at(now, &operations);
+    let builder = buzz_sdk::build_git_issue_transition(
+        &repo,
+        issue,
+        from,
+        to,
+        &body,
+        context.head.as_deref(),
+        gate,
+    )
+    .map_err(sdk_err)?
+    .custom_created_at(Timestamp::from_secs(created_at));
+    let event = client.sign_event(with_git_provenance(builder)?)?;
+    let resp = client.submit_event(event).await?;
+    println!("{resp}");
+    Ok(())
+}
+
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
     let filter = serde_json::json!({
@@ -599,6 +889,7 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             title,
             content,
             label,
+            depends_on,
             to,
         } => {
             let (repo_owner, repo_id) = resolve_issue_repo_target(
@@ -608,7 +899,17 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
                 channel.as_deref(),
             )
             .await?;
-            cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await
+            cmd_create_issue(
+                client,
+                &repo_owner,
+                &repo_id,
+                &title,
+                &content,
+                &label,
+                &to,
+                &depends_on,
+            )
+            .await
         }
         IssuesCmd::Get { event } => cmd_get_issue(client, &event).await,
         IssuesCmd::List {
@@ -683,14 +984,38 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             )
             .await
         }
+        IssuesCmd::Transition {
+            issue,
+            repo_owner,
+            repo_id,
+            from,
+            to,
+            content,
+            gate,
+        } => {
+            cmd_transition_issue(
+                client,
+                &issue,
+                &repo_owner,
+                &repo_id,
+                &from,
+                &to,
+                &content,
+                gate.as_deref(),
+            )
+            .await
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
     use super::{
-        assignment_note_label, reduce_assignment_operations, AssignmentEvent, AssignmentQueryEvent,
-        ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
+        assignment_note_label, dependency_graph_has_cycle, dependency_is_resolved,
+        next_task_transition_created_at, reduce_assignment_operations, reduce_task_transitions,
+        AssignmentEvent, AssignmentQueryEvent, ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
     };
 
     const ISSUE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -726,6 +1051,42 @@ mod tests {
             created_at,
             tags,
         }
+    }
+
+    fn query_event(
+        id: &str,
+        kind: u16,
+        pubkey: &str,
+        created_at: u64,
+        tags: Vec<Vec<String>>,
+    ) -> AssignmentQueryEvent {
+        AssignmentQueryEvent {
+            id: id.into(),
+            kind,
+            pubkey: pubkey.into(),
+            created_at,
+            tags,
+        }
+    }
+
+    fn transition_event(
+        id: &str,
+        pubkey: &str,
+        created_at: u64,
+        from: &str,
+        to: &str,
+        prior: Option<&str>,
+    ) -> AssignmentQueryEvent {
+        let mut tags = vec![
+            vec!["e".into(), ISSUE.into(), "".into(), "root".into()],
+            vec!["t".into(), "task-transition".into()],
+            vec!["from".into(), from.into()],
+            vec!["to".into(), to.into()],
+        ];
+        if let Some(prior) = prior {
+            tags.push(vec!["prior".into(), prior.into()]);
+        }
+        query_event(id, 1, pubkey, created_at, tags)
     }
 
     #[test]
@@ -841,5 +1202,129 @@ mod tests {
 
         assert!(!state.assignees.contains(VOLUNTEER));
         assert_eq!(state.heads.get(VOLUNTEER), Some(&owner_unassign));
+    }
+
+    #[test]
+    fn task_transitions_require_authority_and_current_prior() {
+        let root = query_event(
+            ISSUE,
+            1621,
+            AUTHOR,
+            1,
+            vec![vec!["t".into(), "graph".into()]],
+        );
+        let first = "a".repeat(64);
+        let second = "2".repeat(64);
+        let stale = "3".repeat(64);
+        let unauthorized = "4".repeat(64);
+        let events = [
+            transition_event(&first, AUTHOR, 10, "requirements", "implementation", None),
+            transition_event(
+                &unauthorized,
+                &"9".repeat(64),
+                20,
+                "implementation",
+                "done",
+                Some(&first),
+            ),
+            transition_event(
+                &second,
+                VOLUNTEER,
+                30,
+                "implementation",
+                "quality-gate",
+                Some(&first.to_ascii_uppercase()),
+            ),
+            transition_event(&stale, OWNER, 40, "quality-gate", "done", Some(&first)),
+        ];
+        let references = events.iter().collect::<Vec<_>>();
+        let context = reduce_task_transitions(
+            &root,
+            OWNER,
+            &HashSet::from([VOLUNTEER.to_string()]),
+            &references,
+        );
+        assert_eq!(context.head, Some(second));
+        assert_eq!(context.state.as_deref(), Some("quality-gate"));
+    }
+
+    #[test]
+    fn dependency_graph_detects_cycles() {
+        let dependency = "d".repeat(64);
+        let root = query_event(
+            ISSUE,
+            1621,
+            AUTHOR,
+            1,
+            vec![vec!["depends-on".into(), dependency.clone()]],
+        );
+        let other = query_event(
+            &dependency,
+            1621,
+            AUTHOR,
+            2,
+            vec![vec!["depends-on".into(), ISSUE.into()]],
+        );
+        let issues = HashMap::from([(ISSUE.to_string(), &root), (dependency, &other)]);
+        assert!(dependency_graph_has_cycle(
+            ISSUE,
+            &issues,
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+        ));
+    }
+
+    #[test]
+    fn dependency_requires_latest_trusted_resolved_status() {
+        let dependency_id = "d".repeat(64);
+        let dependency = query_event(&dependency_id, 1621, AUTHOR, 1, vec![]);
+        let resolved = query_event(
+            &"1".repeat(64),
+            1631,
+            AUTHOR,
+            10,
+            vec![vec![
+                "e".into(),
+                dependency_id.clone(),
+                "".into(),
+                "root".into(),
+            ]],
+        );
+        let reopened = query_event(
+            &"2".repeat(64),
+            1630,
+            OWNER,
+            20,
+            vec![vec!["e".into(), dependency_id, "".into(), "root".into()]],
+        );
+        assert!(dependency_is_resolved(&dependency, OWNER, &[&resolved]));
+        assert!(!dependency_is_resolved(
+            &dependency,
+            OWNER,
+            &[&resolved, &reopened],
+        ));
+    }
+
+    #[test]
+    fn next_transition_follows_future_head_from_another_signer() {
+        let future = transition_event(
+            &"1".repeat(64),
+            AUTHOR,
+            10_000,
+            "implementation",
+            "quality-gate",
+            None,
+        );
+        let unrelated = query_event(
+            &"2".repeat(64),
+            1,
+            VOLUNTEER,
+            20_000,
+            vec![vec!["t".into(), "assignment".into()]],
+        );
+        assert_eq!(
+            next_task_transition_created_at(100, &[&future, &unrelated]),
+            10_001
+        );
     }
 }
