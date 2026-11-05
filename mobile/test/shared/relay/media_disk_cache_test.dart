@@ -73,7 +73,11 @@ void main() {
       }
       return http.Response.bytes(_pngBytes, 200);
     });
-    final directory = MediaDiskCache.directoryFor(root, 'community-1');
+    final directory = MediaDiskCache.directoryFor(
+      root,
+      'community-1',
+      'signer-1',
+    );
     var now = DateTime.now();
 
     Future<void> launch(

@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../community/community_provider.dart';
+import 'relay_provider.dart' show pubkeyFromNsec;
 
 /// Image bytes saved on disk, and whether they are due a background refresh.
 typedef MediaDiskCacheHit = ({Uint8List bytes, bool isStale});
@@ -19,9 +20,9 @@ typedef MediaDiskCacheHit = ({Uint8List bytes, bool isStale});
 /// avatars, attachments and anything else [MediaImageProvider] loads.
 ///
 /// Built on `flutter_cache_manager`. It keeps the bytes each URL served, so a
-/// relay thumbnail and its original are separate entries. Each community has
-/// its own directory under the caches root (see [mediaCacheRootProvider]),
-/// deleted with the community. Least recently used files are evicted once
+/// relay thumbnail and its original are separate entries. Each community and
+/// account has its own directory under the caches root (see
+/// [mediaCacheRootProvider]), deleted with the community or account. Least recently used files are evicted once
 /// the directory holds more than [maxBytes].
 ///
 /// Relay media URLs are content hashes and never go stale. Other URLs can
@@ -70,6 +71,7 @@ class MediaDiskCache {
 
   final CacheManager _manager;
   final DateTime Function() _now;
+  var _closed = false;
 
   /// The directory holding everything one community persists under [root].
   static Directory communityDirectory(Directory root, String communityId) =>
@@ -77,9 +79,16 @@ class MediaDiskCache {
         p.join(root.path, 'communities', Uri.encodeComponent(communityId)),
       );
 
-  /// Where [communityId]'s image cache lives under [root].
-  static Directory directoryFor(Directory root, String communityId) =>
-      Directory(p.join(communityDirectory(root, communityId).path, 'media'));
+  /// Where [communityId]'s image cache for the account [signer] lives under
+  /// [root]. Each account has its own, so one account's images never serve
+  /// another's.
+  static Directory directoryFor(
+    Directory root,
+    String communityId,
+    String signer,
+  ) => Directory(
+    p.join(communityDirectory(root, communityId).path, 'media', signer),
+  );
 
   /// Deletes every community directory under [root] whose id is not in
   /// [retainedIds]: a removed community's data, including writes that landed
@@ -130,7 +139,9 @@ class MediaDiskCache {
     Uint8List bytes, {
     required bool immutable,
   }) async {
-    if (bytes.isEmpty || bytes.length > maxFileBytes) return;
+    // A download that finishes after its account or community was retired
+    // must not repopulate the cache.
+    if (_closed || bytes.isEmpty || bytes.length > maxFileBytes) return;
     try {
       await _manager.putFile(
         url,
@@ -142,7 +153,11 @@ class MediaDiskCache {
     }
   }
 
-  Future<void> dispose() => _manager.dispose();
+  /// Stops writes, then flushes the index.
+  Future<void> dispose() {
+    _closed = true;
+    return _manager.dispose();
+  }
 
   static void _logFailure(Object error) =>
       debugPrint('[MediaDiskCache] write failed: $error');
@@ -220,15 +235,20 @@ Future<Directory?> resolveMediaCacheRoot() async {
 final mediaCacheRootProvider = FutureProvider<Directory?>((ref) async => null);
 
 /// The active community's image cache, or null when there is no caches root
-/// or no community. Switching community disposes the previous one.
+/// or no community. Switching community or account disposes the previous one.
 final mediaDiskCacheProvider = Provider<MediaDiskCache?>((ref) {
   final root = ref.watch(mediaCacheRootProvider).value;
-  final communityId = ref.watch(
-    activeCommunityProvider.select((community) => community.value?.id),
+  final (communityId, signer) = ref.watch(
+    activeCommunityProvider.select((value) {
+      final community = value.value;
+      if (community == null) return (null, null);
+      final signer = pubkeyFromNsec(community.nsec?.trim()) ?? community.pubkey;
+      return (community.id, signer);
+    }),
   );
-  if (root == null || communityId == null) return null;
+  if (root == null || communityId == null || signer == null) return null;
   final cache = MediaDiskCache.open(
-    MediaDiskCache.directoryFor(root, communityId),
+    MediaDiskCache.directoryFor(root, communityId, signer.toLowerCase()),
   );
   ref.onDispose(() => unawaited(cache.dispose()));
   return cache;

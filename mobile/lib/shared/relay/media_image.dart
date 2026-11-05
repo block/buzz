@@ -82,8 +82,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   static final Map<String, DateTime> _cooldownUntil = {};
   static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
 
-  /// URLs with a background refresh of stale disk bytes under way.
-  static final Set<String> _refreshing = {};
+  /// Background refreshes of stale disk bytes under way, per cache and URL.
+  static final Set<(MediaDiskCache, String)> _refreshing = {};
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -204,7 +204,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   }
 
   Future<void> _refresh(MediaDiskCache cache) async {
-    if (!_refreshing.add(url)) return;
+    final refresh = (cache, url);
+    if (!_refreshing.add(refresh)) return;
     try {
       // Never aborted: nobody is waiting on it.
       final bytes = await _fetchBytes(Completer<void>().future);
@@ -221,7 +222,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // The stale bytes stay; the next load after the cooldown retries.
       debugPrint('[MediaImageProvider] refresh of $url failed: $error');
     } finally {
-      _refreshing.remove(url);
+      _refreshing.remove(refresh);
     }
   }
 

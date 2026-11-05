@@ -291,14 +291,16 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         pubkey: community.pubkey,
         nsec: community.nsec,
       );
-      if (_channelSnapshotPubkey(existing)?.toLowerCase() !=
-          _channelSnapshotPubkey(updated)?.toLowerCase()) {
-        await _removeChannelListSnapshot(existing);
-      }
+      final identityChanged =
+          _channelSnapshotPubkey(existing)?.toLowerCase() !=
+          _channelSnapshotPubkey(updated)?.toLowerCase();
+      if (identityChanged) await _removeChannelListSnapshot(existing);
       await storage.save(updated);
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
+      // The new account has its own image cache; drop the previous one's.
+      if (identityChanged) await _removeMediaCache(existing);
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
@@ -400,6 +402,26 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         if (_channelSnapshotPubkey(community) case final pubkey?)
           ChannelListSnapshotStorage.key(pubkey, community.relayUrl),
     });
+  }
+
+  /// Deletes [community]'s image cache for its current account. A failure is
+  /// logged; the cache only costs disk until the community is removed.
+  Future<void> _removeMediaCache(Community community) async {
+    final signer = _channelSnapshotPubkey(community)?.toLowerCase();
+    if (signer == null) return;
+    try {
+      final root = await ref.read(mediaCacheRootProvider.future);
+      if (root == null) return;
+      final directory = MediaDiskCache.directoryFor(root, community.id, signer);
+      if (await directory.exists()) await directory.delete(recursive: true);
+    } catch (error, stackTrace) {
+      developer.log(
+        'Media cache deletion failed',
+        name: 'buzz.community',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   /// Deletes the image caches of communities no longer in [communities].
