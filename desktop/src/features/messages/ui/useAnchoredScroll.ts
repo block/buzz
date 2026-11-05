@@ -91,6 +91,9 @@ type UseAnchoredScrollResult = {
   /** True from that arming until the first append lands, whether or not the
    *  append moves the tail and fires the one-shot. */
   isOwnSendPending: () => boolean;
+  /** Disarm that one-shot and the pending send without moving the view, for
+   *  a send that failed. */
+  cancelScrollToBottomOnNextUpdate: () => void;
   /** Imperative: scroll a specific message into view; optionally pulse it.
    *  Returns true if the row was found and scrolled, false otherwise. */
   scrollToMessage: (
@@ -459,6 +462,12 @@ export function useAnchoredScroll({
     () => ownSendPendingRef.current,
     [],
   );
+  // A send that fails may never add a row here, so nothing else would clear
+  // these.
+  const cancelScrollToBottomOnNextUpdate = React.useCallback(() => {
+    forceBottomOnNextAppendRef.current = false;
+    ownSendPendingRef.current = false;
+  }, []);
 
   const settleAtBottomAfterLayout = React.useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1078,6 +1087,7 @@ export function useAnchoredScroll({
     settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
     isOwnSendPending,
+    cancelScrollToBottomOnNextUpdate,
     scrollToMessage: scrollToMessageImperative,
     onVirtualizerAtBottomStateChange,
   };

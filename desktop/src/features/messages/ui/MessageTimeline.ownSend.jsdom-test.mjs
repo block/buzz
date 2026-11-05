@@ -263,3 +263,66 @@ test("a reader who scrolls up after a send that lands above the tail keeps their
   );
   assert.equal(scroller.scrollTop, readingOffset);
 });
+
+// A failed send can leave no row here, as when its optimistic row never
+// resolved a channel. Its cancel drops the pin and the hold, and freezes the
+// tail the hold left open if the reader is off the floor, so the next arrival
+// waits behind the pill instead of firing the pin under the reader.
+for (const order of [
+  ["send", "fail", "gap"],
+  ["send", "gap", "fail"],
+  ["gap", "send", "fail"],
+]) {
+  test(`a send that fails without a row leaves the reader in place (${order.join(", ")})`, async () => {
+    const { render, scroller, timeline } = await mountAtFloor();
+
+    for (const step of order) {
+      if (step === "send") {
+        act(() => timeline.current.scrollToBottomOnNextUpdate());
+      } else if (step === "fail") {
+        act(() => timeline.current.cancelScrollToBottomOnNextUpdate());
+      } else {
+        readerScrollsTo(scroller, scroller.scrollTop - 200);
+      }
+    }
+    const readingOffset = scroller.scrollTop;
+    flushFrames();
+    await render([...history, message(22, "from the other person")]);
+    flushFrames();
+
+    assert.equal(
+      container.querySelector('[data-testid="message-scroll-to-latest"]')
+        ?.textContent,
+      "1 new message",
+    );
+    assert.equal(scroller.scrollTop, readingOffset);
+  });
+}
+
+// A send to this channel lands its optimistic row at once, which is an append
+// that fires the pin and ends the hold. When the publish then fails, the row
+// is reverted and the cancel finds nothing pending.
+test("a reader who scrolls up before a same-channel send fails keeps their place", async () => {
+  const { render, scroller, timeline } = await mountAtFloor();
+
+  act(() => timeline.current.scrollToBottomOnNextUpdate());
+  await render([...history, sent]);
+  flushFrames();
+  assert.equal(scroller.scrollTop, scroller.scrollHeight - VIEWPORT);
+
+  readerScrollsTo(scroller, scroller.scrollTop - 200);
+  const readingOffset = scroller.scrollTop;
+  flushFrames();
+  act(() => timeline.current.cancelScrollToBottomOnNextUpdate());
+  await render(history);
+  flushFrames();
+  await render([...history, message(22, "from the other person")]);
+  flushFrames();
+
+  assert.equal(
+    container.querySelector('[data-testid="message-scroll-to-latest"]')
+      ?.textContent,
+    "1 new message",
+  );
+  assert.equal(scroller.scrollTop, readingOffset);
+});

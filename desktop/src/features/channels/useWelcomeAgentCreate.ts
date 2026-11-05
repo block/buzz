@@ -26,10 +26,15 @@ export function useWelcomeAgentCreate({
   );
   const [isOpen, setIsOpen] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const beforeSendRef = React.useRef<(() => void) | null>(null);
+  // Runs right before the chat-first send and returns how to undo it if the
+  // send fails.
+  const beforeSendRef = React.useRef<(() => () => void) | null>(null);
 
   const openAddAgent = React.useCallback(
-    (openRegularPicker: () => void, options?: { beforeSend?: () => void }) => {
+    (
+      openRegularPicker: () => void,
+      options?: { beforeSend?: () => () => void },
+    ) => {
       setError(null);
       if (isWelcomeExperienceChannel(activeChannel)) {
         beforeSendRef.current = options?.beforeSend ?? null;
@@ -59,8 +64,9 @@ export function useWelcomeAgentCreate({
       return;
     }
     setError(null);
+    let undoBeforeSend: (() => void) | undefined;
     try {
-      beforeSendRef.current?.();
+      undoBeforeSend = beforeSendRef.current?.();
       await sendMessageMutation.mutateAsync({
         channelId: activeChannel.id,
         content: `@${welcomeGuideAgent.name}, help me create a new agent.`,
@@ -68,6 +74,7 @@ export function useWelcomeAgentCreate({
       });
       setIsOpen(false);
     } catch (cause) {
+      undoBeforeSend?.();
       setError(
         cause instanceof Error
           ? cause.message

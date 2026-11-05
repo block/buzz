@@ -35,6 +35,8 @@ import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
+  /** Undo `scrollToBottomOnNextUpdate` for a send that failed. */
+  cancelScrollToBottomOnNextUpdate: () => void;
   settleAtBottom: () => boolean;
 };
 
@@ -359,6 +361,7 @@ const MessageTimelineBase = React.forwardRef<
     scrollToBottom,
     scrollToBottomOnNextUpdate,
     isOwnSendPending,
+    cancelScrollToBottomOnNextUpdate,
     scrollToMessage,
     onVirtualizerAtBottomStateChange,
   } = useAnchoredScroll({
@@ -379,6 +382,7 @@ const MessageTimelineBase = React.forwardRef<
   });
 
   const hasConfirmedVirtualizerBottomRef = React.useRef(false);
+  const virtualizerAtBottomRef = React.useRef(true);
   const bottomConfirmationChannelRef = React.useRef(channelId);
   if (bottomConfirmationChannelRef.current !== channelId) {
     bottomConfirmationChannelRef.current = channelId;
@@ -412,6 +416,7 @@ const MessageTimelineBase = React.forwardRef<
       // scroll-to-end is still converging. Do not turn that mount transient
       // into a semantic dataset freeze: wait until this channel has reached a
       // confirmed bottom once, then track genuine bottom -> history movement.
+      virtualizerAtBottomRef.current = atBottom;
       if (atBottom) {
         hasConfirmedVirtualizerBottomRef.current = true;
         onVirtualizerAtBottomStateChange(true);
@@ -496,18 +501,38 @@ const MessageTimelineBase = React.forwardRef<
     setIsSemanticallyAtBottom(true);
     scrollToBottomOnNextUpdate();
   }, [scrollToBottomOnNextUpdate]);
+  const cancelOwnMessage = React.useCallback(() => {
+    // While the send was pending, its hold skipped any freeze, including one
+    // queued before the send. If the reader is off the floor now, freeze as
+    // that report would have, so later arrivals wait behind the pill.
+    const skippedFreeze =
+      isOwnSendPending() &&
+      hasConfirmedVirtualizerBottomRef.current &&
+      !virtualizerAtBottomRef.current;
+    cancelScrollToBottomOnNextUpdate();
+    if (skippedFreeze) {
+      suppressNextSemanticBottomRef.current = true;
+      queueSemanticBottom(false);
+    }
+  }, [cancelScrollToBottomOnNextUpdate, isOwnSendPending, queueSemanticBottom]);
 
   React.useImperativeHandle(
     ref,
     () => ({
       scrollToBottomOnNextUpdate: prepareForOwnMessage,
+      cancelScrollToBottomOnNextUpdate: cancelOwnMessage,
       settleAtBottom: () => {
         if (!timelineVirtualizerApi) return false;
         scrollToBottom("auto");
         return true;
       },
     }),
-    [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
+    [
+      cancelOwnMessage,
+      prepareForOwnMessage,
+      scrollToBottom,
+      timelineVirtualizerApi,
+    ],
   );
 
   const jumpToMessage = React.useCallback(

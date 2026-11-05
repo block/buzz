@@ -1085,3 +1085,58 @@ test("reader input at the floor resumes following live messages", async () => {
   assert.deepEqual(held.settles, ["settle"]);
   await act(async () => held.root.unmount());
 });
+
+// A failed send may add no row, so its cancel must drop the one-shot and the
+// pending send. The next tail is then someone else's arrival and must not pull
+// a reader who left the floor, while a later send still pins.
+test("a cancelled own send leaves the next tail with the reader", async () => {
+  globalThis.ResizeObserver = class {
+    disconnect() {}
+    observe() {}
+  };
+  const scroller = document.createElement("div");
+  scroller.querySelector = () => null;
+  const settles = [];
+  const fake = {
+    content: { current: null },
+    messages: [{ createdAt: 500, id: "latest" }],
+    scrollToBottom: () => settles.push("jump"),
+    scrollToMessage: () => true,
+    scroller: { current: scroller },
+    settleAtBottom: () => settles.push("settle"),
+  };
+  let state = null;
+  const root = createRoot(document.createElement("div"));
+  const render = () =>
+    act(async () =>
+      root.render(
+        React.createElement(TargetHoldHarness, {
+          fake,
+          onState: (next) => {
+            state = next;
+          },
+        }),
+      ),
+    );
+  await render();
+  await act(async () => state.onVirtualizerAtBottomStateChange(true));
+  settles.length = 0; // the mount's own bottom pin
+
+  state.scrollToBottomOnNextUpdate();
+  assert.equal(state.isOwnSendPending(), true);
+  state.cancelScrollToBottomOnNextUpdate();
+  assert.equal(state.isOwnSendPending(), false);
+
+  await act(async () => state.onVirtualizerAtBottomStateChange(false));
+  fake.messages = [...fake.messages, { createdAt: 600, id: "live" }];
+  await render();
+  assert.deepEqual(settles, [], "the arrival does not move the reader");
+  assert.equal(state.isAtBottom, false);
+
+  state.scrollToBottomOnNextUpdate();
+  fake.messages = [...fake.messages, { createdAt: 700, id: "sent" }];
+  await render();
+  assert.deepEqual(settles, ["jump"], "a later send still pins");
+  assert.equal(state.isOwnSendPending(), false);
+  await act(async () => root.unmount());
+});
