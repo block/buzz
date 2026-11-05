@@ -689,6 +689,7 @@ fn build_query_events_sql(
     // every community row against the id set; the fence keeps it on the GIN
     // tags index.
     let e_tag_fence = q.e_tags.is_some();
+    let per_channel = per_channel_scope(q);
     let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
         // Join against event_mentions for #p-filtered queries (indexed).
         let mut b = QueryBuilder::new(if e_tag_fence {
@@ -710,6 +711,11 @@ fn build_query_events_sql(
         } else {
             ""
         });
+        if let Some(ids) = per_channel {
+            b.push("SELECT e.* FROM (SELECT DISTINCT unnest(")
+                .push_bind(ids.to_vec())
+                .push("::uuid[]) AS ch) c CROSS JOIN LATERAL (");
+        }
         b.push(
             "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
              FROM events WHERE community_id = ",
@@ -734,6 +740,10 @@ fn build_query_events_sql(
     // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
     if e_tag_fence {
         qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
+    } else if per_channel.is_some() {
+        qb.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+            .push_bind(limit_val)
+            .push(") e ORDER BY e.created_at DESC, e.id ASC LIMIT ");
     } else {
         qb.push(format!(
             " ORDER BY {col_prefix}created_at DESC, {col_prefix}id ASC LIMIT "
@@ -763,7 +773,13 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    push_channel_scope(qb, col_prefix, q);
+    // A per-channel read (see `per_channel_scope`) scopes each lateral to one
+    // channel of the set. The thread route never qualifies: it reads one channel.
+    if per_channel_scope(q).is_some() {
+        qb.push(" AND channel_id = c.ch");
+    } else {
+        push_channel_scope(qb, col_prefix, q);
+    }
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -1004,6 +1020,32 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
     qb.push_bind(page_limit(q));
     qb.push(" OFFSET ").push_bind(q.offset.unwrap_or(0));
     qb
+}
+
+/// The channels of a read that takes them one at a time: an explicit `#h` set
+/// (no global events), without a `#p` join, e-tag fence or offset.
+///
+/// `channel_id = ANY($set) ORDER BY created_at DESC LIMIT n` leaves the
+/// planner to guess how many rows the set matches. With the ids as literals
+/// (the custom plans a prepared statement runs first) it overestimates a quiet
+/// set, walks each partition's pkey backward and tests every community row
+/// until the page fills or the partition ends; the inflated cost adds JIT too.
+/// The cold unread repair (every joined channel, no `since`) is that read.
+/// Reading each channel through `idx_events_community_channel_created` up to
+/// `n` rows, then keeping the newest `n` of those, returns the same page,
+/// since every row of the overall top `n` is in its own channel's top `n`.
+/// At most distinct channels × `n` candidates reach the outer sort, whatever
+/// the statistics say; how many index entries each channel scans for them
+/// still depends on the other predicates.
+fn per_channel_scope(q: &EventQuery) -> Option<&[Uuid]> {
+    let ids = q.channel_ids.as_deref().filter(|ids| !ids.is_empty())?;
+    let eligible = !q.channel_ids_include_global
+        && q.channel_id.is_none()
+        && !q.global_only
+        && q.p_tag_hex.is_none()
+        && q.e_tags.is_none()
+        && q.offset.unwrap_or(0) == 0;
+    eligible.then_some(ids)
 }
 
 /// `#p` reads join `event_mentions` by the full event key, including
@@ -3482,6 +3524,7 @@ mod e_tag_filter_shape_tests {
     /// change the SQL text, or each count is its own statement that is planned
     /// again on every call. Holds for the `#p` join and plain reads, for
     /// access scope and explicit `#h`, in both the page SELECT and the COUNT.
+    /// A plain explicit `#h` page unnests the bind and reads each channel.
     #[test]
     fn channel_scope_sql_does_not_depend_on_channel_count() {
         let sql = |p_tag: bool, include_global: bool, n: usize| {
@@ -3502,7 +3545,19 @@ mod e_tag_filter_shape_tests {
             for include_global in [true, false] {
                 let one = sql(p_tag, include_global, 1);
                 assert_eq!(one, sql(p_tag, include_global, 40));
-                for text in [&one.0, &one.1] {
+                let per_channel = !p_tag && !include_global;
+                assert_eq!(
+                    one.0.contains("unnest($") && one.0.contains("channel_id = c.ch"),
+                    per_channel,
+                    "{}",
+                    one.0
+                );
+                let set_reads = if per_channel {
+                    vec![&one.1]
+                } else {
+                    vec![&one.0, &one.1]
+                };
+                for text in set_reads {
                     assert!(text.contains("channel_id = ANY($"), "{text}");
                     assert!(!text.contains("channel_id IN ("), "{text}");
                     assert_eq!(
@@ -3512,6 +3567,35 @@ mod e_tag_filter_shape_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Only a plain explicit `#h` page reads channel by channel: global
+    /// events, a `#p` join, an e-tag fence, an offset or an empty set keep
+    /// their own SQL.
+    #[test]
+    fn per_channel_scope_eligibility() {
+        let base = || EventQuery {
+            channel_ids: Some(vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()]),
+            channel_ids_include_global: false,
+            ..EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()))
+        };
+        assert!(per_channel_scope(&base()).is_some());
+        let mut offset_zero = base();
+        offset_zero.offset = Some(0);
+        assert!(per_channel_scope(&offset_zero).is_some());
+        type Edit = fn(&mut EventQuery);
+        let others: [(&str, Edit); 5] = [
+            ("global", |q| q.channel_ids_include_global = true),
+            ("#p", |q| q.p_tag_hex = Some("ab".repeat(32))),
+            ("#e", |q| q.e_tags = Some(vec!["cd".repeat(32)])),
+            ("offset", |q| q.offset = Some(1)),
+            ("empty", |q| q.channel_ids = Some(Vec::new())),
+        ];
+        for (label, set) in others {
+            let mut q = base();
+            set(&mut q);
+            assert!(per_channel_scope(&q).is_none(), "{label}");
         }
     }
 }
@@ -3717,6 +3801,117 @@ mod postgres_tests {
                 );
             }
         }
+    }
+
+    /// An explicit channel set is read one channel at a time and returns the
+    /// set read's page: newest first across channels with id ties broken
+    /// ascending, one channel holding the whole page, other kinds and other
+    /// channels taking no slot, a repeated id read once, keyset cursors and
+    /// `since`, and older rows the recent pass leaves missing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn per_channel_reads_match_the_set_read() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let mut channels = Vec::new();
+        for _ in 0..4 {
+            channels.push(make_test_channel(&pool, community_uuid, None).await);
+        }
+        let (busy, quiet, empty, outside) = (channels[0], channels[1], channels[2], channels[3]);
+        let db = crate::Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let now = Utc::now().timestamp() as u64;
+        let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
+        let mut matching = Vec::new();
+        let mut insert = |channel: Uuid, kind: u16, at: u64, matches: bool| {
+            let event =
+                EventBuilder::new(Kind::Custom(kind), format!("{kind} at {at} in {channel}"))
+                    .custom_created_at(nostr::Timestamp::from(at))
+                    .sign_with_keys(&author)
+                    .expect("sign");
+            if matches {
+                matching.push((at, event.id));
+            }
+            (channel, event)
+        };
+        let mut events = Vec::new();
+        // The busy channel alone holds the newest five rows.
+        for i in 0..5 {
+            events.push(insert(busy, 9, now - 10 - i, true));
+        }
+        // Newer rows of another kind or another channel take no slot.
+        events.push(insert(busy, 7, now - 1, false));
+        events.push(insert(outside, 9, now - 2, false));
+        // A tie across channels, then older rows on both sides of the floor.
+        events.push(insert(busy, 9, now - 100, true));
+        events.push(insert(quiet, 9, now - 100, true));
+        events.push(insert(quiet, 9, now - 200, true));
+        events.push(insert(busy, 9, floor - 86_400, true));
+        events.push(insert(quiet, 9, floor - 2 * 86_400, true));
+        for (channel, event) in &events {
+            db.insert_event(community, event, Some(*channel))
+                .await
+                .expect("insert");
+        }
+        matching.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+        });
+        let expected: Vec<_> = matching.iter().map(|(_, id)| *id).collect();
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let read = |limit: i64| EventQuery {
+            kinds: Some(vec![9]),
+            channel_ids: Some(vec![busy, quiet, empty, busy]),
+            channel_ids_include_global: false,
+            limit: Some(limit),
+            ..EventQuery::for_community(community)
+        };
+        let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
+
+        for limit in 1..=expected.len() as i64 + 1 {
+            let page = query_events_on(&mut conn, &read(limit), ReadDeadline::PerRead)
+                .await
+                .expect("page");
+            let want = &expected[..expected.len().min(limit as usize)];
+            assert_eq!(ids(page), want, "limit {limit}");
+        }
+        assert!(
+            prepared_like(&mut conn, "%CROSS JOIN LATERAL%channel_id = c.ch%").await >= 1,
+            "the set was read per channel"
+        );
+        assert_eq!(
+            prepared_like(&mut conn, "%channel_id = ANY(%").await,
+            0,
+            "no set read ran"
+        );
+
+        // Keyset pages walk the same order, across the tie and the floor.
+        let first = query_events_on(&mut conn, &read(6), ReadDeadline::PerRead)
+            .await
+            .expect("first page");
+        let last = first.last().expect("full first page").clone();
+        let mut next = read(6);
+        next.until = Some(
+            DateTime::from_timestamp(last.event.created_at.as_secs() as i64, 0).expect("until"),
+        );
+        next.before_id = Some(last.event.id.as_bytes().to_vec());
+        let page = query_events_on(&mut conn, &next, ReadDeadline::PerRead)
+            .await
+            .expect("next page");
+        assert_eq!(ids(first), expected[..6]);
+        assert_eq!(ids(page), expected[6..]);
+
+        let mut since = read(10);
+        since.since = Some(DateTime::from_timestamp((now - 100) as i64, 0).expect("since"));
+        let page = query_events_on(&mut conn, &since, ReadDeadline::PerRead)
+            .await
+            .expect("since page");
+        assert_eq!(ids(page), expected[..7]);
     }
 
     /// A newest-first page read split at the floor returns the rows the
