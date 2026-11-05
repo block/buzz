@@ -4084,6 +4084,22 @@ void main() {
       controller.selection = const TextSelection.collapsed(offset: 3);
       await tester.pump();
       expect(controller.selection, const TextSelection.collapsed(offset: 0));
+      // From the chip's start, a tap still goes to the nearer edge, while an
+      // arrow key steps over the chip.
+      controller.selection = TextSelection.collapsed(
+        offset: urls[0].length - 3,
+      );
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      controller.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pump();
+      controller.selection = const TextSelection.collapsed(offset: 3);
+      await tester.pump();
+      expect(controller.selection.baseOffset, 0);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      await setValue(full, full.length);
       controller.selection = TextSelection(
         baseOffset: urls[0].length - 3,
         extentOffset: urls[0].length + 4,
@@ -4150,6 +4166,18 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pump();
       expect(controller.text, 'buzz://channel/580c');
+
+      // Undo that brings back a whole link restores it as it was, without
+      // the space a paste would add.
+      await tester.enterText(find.byType(TextField), 'see ${urls[1]}');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), 'see ');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'see ${urls[1]}');
     });
 
     testWidgets('preserves underscore d-tags and Markdown delimiters', (

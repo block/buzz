@@ -51,7 +51,19 @@ class _MarkdownEditingController extends TextEditingController {
   @override
   set value(TextEditingValue newValue) {
     super.value = _snapSelectionToChips(newValue);
+    _recentValues
+      ..remove(super.value)
+      ..add(super.value);
+    if (_recentValues.length > _recentValueLimit) {
+      _recentValues.remove(_recentValues.first);
+    }
   }
+
+  /// Values this controller held recently, oldest first. Undo and redo
+  /// restore one of these exactly, which tells them apart from a paste of a
+  /// link.
+  final _recentValues = <TextEditingValue>{};
+  static const _recentValueLimit = 100;
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     final selection = next.selection;
@@ -66,14 +78,15 @@ class _MarkdownEditingController extends TextEditingController {
     for (final chip in _chipRanges) {
       if (selection.isCollapsed) {
         if (chip.start < start && start < chip.end) {
-          // Keep moving the way the caret came from, so arrow keys step
-          // over a chip; a tap goes to the nearer edge.
+          // A one-character step in from an edge is an arrow key, so keep
+          // going and step over the chip; anything else (a tap) goes to the
+          // nearer edge.
           final from = value.selection.isCollapsed
               ? value.selection.baseOffset
               : -1;
-          final towardEnd = from == chip.start
+          final towardEnd = from == chip.start && start == chip.start + 1
               ? true
-              : from == chip.end
+              : from == chip.end && start == chip.end - 1
               ? false
               : start - chip.start > chip.end - start;
           start = end = towardEnd ? chip.end : chip.start;
@@ -214,14 +227,16 @@ class _MarkdownEditingController extends TextEditingController {
   ) => _spaceAfterPastedLink(oldValue, expandChipDeletion(oldValue, newValue));
 
   /// Adds a space after a link pasted on its own, so it becomes a chip
-  /// straight away. Pasted text with anything besides one link is unchanged.
+  /// straight away. Pasted text with anything besides one link, and Undo or
+  /// Redo back to an earlier value, is unchanged.
   TextEditingValue _spaceAfterPastedLink(
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
     final oldSelection = oldValue.selection;
     if (!oldSelection.isValid ||
-        (newValue.composing.isValid && !newValue.composing.isCollapsed)) {
+        (newValue.composing.isValid && !newValue.composing.isCollapsed) ||
+        _recentValues.contains(newValue)) {
       return newValue;
     }
     final oldText = oldValue.text;
