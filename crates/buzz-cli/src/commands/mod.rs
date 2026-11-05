@@ -6,6 +6,7 @@ pub mod emoji;
 pub(crate) mod event_output;
 pub mod feed;
 pub mod gifs;
+pub mod groups;
 pub mod issues;
 pub mod mem;
 pub mod messages;
