@@ -89,6 +89,38 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        let global = state.config.nip_fi.mode;
+        if !global.evaluates() {
+            return Self::from_parts_with_policy(parts, state, global).await;
+        }
+        match crate::nip_fi_policy::resolve(state, &parts.headers).await {
+            Ok(policy) => {
+                crate::nip_fi_policy::with_policy(policy, async {
+                    let mode = crate::nip_fi_policy::mode(state, &parts.headers).await;
+                    Self::from_parts_with_policy(parts, state, mode).await
+                })
+                .await
+            }
+            Err(response) => {
+                // Preserve the early gate's legacy host-miss ordering. A failed
+                // lookup is never turned into a usable optional policy scope.
+                let mode = if response.status() == StatusCode::NOT_FOUND {
+                    global
+                } else {
+                    buzz_auth::NipFiMode::unavailable()
+                };
+                Self::from_parts_with_policy(parts, state, mode).await
+            }
+        }
+    }
+}
+
+impl GitAuth {
+    async fn from_parts_with_policy(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+        mode: buzz_auth::NipFiMode,
+    ) -> Result<Self, Response> {
         let method = parts.method.as_str();
 
         // Off mode: parse and validate the Authorization header BEFORE tenant
@@ -106,7 +138,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // admission (immediately after this block) because the signed `u` tag
         // must be verified against the tenant-bound host, not a process-global
         // domain.
-        let mode = crate::nip_fi_policy::mode(state, &parts.headers).await;
         let slot = AccessSlot::of(parts);
         if !mode.restricts() {
             if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
