@@ -248,6 +248,35 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
 final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
   private let callbackTimeout: TimeInterval = 10
 
+  /// Waits for a bridge callback. On timeout the failure also reports how long
+  /// one fresh user-initiated-queue-then-main-queue hop takes right then (the
+  /// path every bridge reply follows), capped at 2 s. A starved test host reads
+  /// "a fresh queue->main hop did not finish within 2 s" or hundreds of ms; a
+  /// callback that never fired reads "took 0.4 ms". The hop is measured after
+  /// the 10 s window, so a fast hop does not rule out starvation that ended at
+  /// the deadline. The 2026-11-01 CI failures predate this measurement; their
+  /// timings fit starvation, since the RunnerTests host is the full Flutter app
+  /// and its launch saturated the 3-vCPU runner mid-class. A passing wait
+  /// returns as soon as the callback runs and measures nothing.
+  private func waitForCallback(
+    _ expectation: XCTestExpectation, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    guard XCTWaiter().wait(for: [expectation], timeout: callbackTimeout) != .completed else { return }
+    let hop = XCTestExpectation(description: "queue to main hop")
+    let started = Date()
+    DispatchQueue(label: "xyz.block.buzz.test-hop", qos: .userInitiated).async {
+      DispatchQueue.main.async { hop.fulfill() }
+    }
+    let hopResult = XCTWaiter().wait(for: [hop], timeout: 2)
+    let elapsed = String(format: "%.1f ms", Date().timeIntervalSince(started) * 1000)
+    let hopReport = hopResult == .completed ? "took \(elapsed)" : "did not finish within 2 s"
+    XCTFail(
+      "'\(expectation.expectationDescription)' not fulfilled within \(Int(callbackTimeout)) s;"
+        + " a fresh queue->main hop \(hopReport)",
+      file: file, line: line
+    )
+  }
+
   func testAgeSignalRequestDoesNotDependOnNotificationStorage() {
     let delegate = MissingAppGroupDelegate()
     var completed = false
@@ -315,7 +344,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: callbackTimeout)
+    waitForCallback(completed)
     XCTAssertNil(received)
   }
 
@@ -331,6 +360,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     let snapshotURL = directory.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)
     let original = try Data(contentsOf: snapshotURL)
     var deletionCalls = 0
+    var deletionQoS: [qos_class_t] = []
     let bridge = BuzzPushSnapshotBridge(
       appGroupIdentifier: nil,
       endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
@@ -340,6 +370,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
         timeout: 5,
         deleteAllInteractions: { completion in
           deletionCalls += 1
+          deletionQoS.append(qos_class_self())
           completion(deletionCalls == 1 ? NSError(domain: "InjectedCleanupFailure", code: 1) : nil)
         },
         scheduleTimeout: { _, _ in }
@@ -353,7 +384,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       purgeResult = value
       restricted.fulfill()
     })
-    wait(for: [restricted], timeout: callbackTimeout)
+    waitForCallback(restricted)
     XCTAssertEqual((purgeResult as? FlutterError)?.code, "age_restriction_purge_failed")
     XCTAssertTrue(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
@@ -366,10 +397,17 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       restoreResult = value
       restored.fulfill()
     })
-    wait(for: [restored], timeout: callbackTimeout)
+    waitForCallback(restored)
     XCTAssertNil(restoreResult)
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(deletionCalls, 2)
+    // Flutter awaits these replies; a lower QoS left them starved on busy hosts.
+    for qos in deletionQoS {
+      XCTAssertEqual(
+        qos, QOS_CLASS_USER_INITIATED,
+        "deletion ran at QoS class \(qos.rawValue), expected user-initiated (\(QOS_CLASS_USER_INITIATED.rawValue))"
+      )
+    }
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
   }
 
@@ -399,7 +437,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: callbackTimeout)
+    waitForCallback(completed)
     XCTAssertEqual((received as? FlutterError)?.code, "interaction_cleanup_retry_failed")
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
   }

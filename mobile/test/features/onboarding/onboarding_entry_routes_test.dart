@@ -5,6 +5,8 @@ import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/invites/invite_join_provider.dart';
+import 'package:buzz/features/invites/invite_join_sheet.dart';
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/hosted_app_gate.dart';
@@ -243,6 +245,25 @@ void main() {
       find.text('Enter a valid community address or invite link.'),
       findsOneWidget,
     );
+    // A pasted invite-page link keeps its code through to the join sheet.
+    await tester.enterText(
+      find.byKey(const Key('community-link-input')).hitTestable(),
+      'https://primary.example/invite/fixture',
+    );
+    await tester.tap(find.text('Continue').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.byType(InviteJoinSheet), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(InviteJoinSheet),
+        matching: find.text('primary.example'),
+      ),
+      findsOneWidget,
+    );
+    expect(container.read(inviteJoinProvider).invite?.code, 'fixture');
+    await tester.tap(find.text('Cancel').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.byType(InviteJoinSheet), findsNothing);
     // Drive the real deep-link dispatcher, sheet, service and auth persistence.
     await tester.enterText(
       find.byKey(const Key('community-link-input')).hitTestable(),

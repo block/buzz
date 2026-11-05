@@ -16,7 +16,6 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/widgets/media_loading_placeholder.dart';
@@ -24,7 +23,6 @@ import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
-import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
