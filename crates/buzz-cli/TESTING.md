@@ -486,6 +486,39 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 Artifacts (NIP-AR, kind:45010)
+
+```bash
+SRC="$CHANNEL_ID"                       # an open channel you can write in
+DEST="$OTHER_CHANNEL_ID"                # a second channel
+
+ID=$(buzz artifacts create --channel "$SRC" --type buzz.task --title "Fix timeout" \
+  --content '{"version":1}' | jq -r .artifact_id)
+buzz artifacts get --channel "$SRC" --id "$ID" | jq '.[0].tags'
+# Expected: ar, d, h, type, title, op=create
+
+buzz artifacts update --channel "$SRC" --id "$ID" --title "Fix the timeout" | jq .
+buzz artifacts list --channel "$SRC" --type buzz.task | jq 'length'   # 1
+
+buzz artifacts move --channel "$SRC" --id "$ID" --to "$DEST"          # exit 1: names the audience, writes nothing
+buzz artifacts move --channel "$SRC" --id "$ID" --to "$DEST" --yes | jq .
+buzz artifacts get --channel "$SRC" --id "$ID"                        # exit 1: not found (moved)
+
+buzz artifacts delete --channel "$DEST" --id "$ID" | jq .
+buzz artifacts list --channel "$DEST" | jq 'length'                   # 0
+buzz artifacts restore --channel "$DEST" --id "$ID" --title "Back" --content '{}' | jq .
+
+# Idempotent create-or-reconcile with a derived id
+buzz artifacts create --channel "$SRC" --type buzz.config --title Theme --ensure theme --content dark | jq .
+buzz artifacts create --channel "$SRC" --type buzz.config --title Theme --ensure theme --content light | jq .
+
+# Lost race: run several writers at once; the losers exit 5
+for i in 1 2 3 4; do (buzz artifacts update --channel "$DEST" --id "$ID" --content "w$i" >/dev/null 2>&1; echo "exit=$?") & done; wait
+```
+
+Error paths: `--type task` (not namespaced) → exit 1; an unknown, deleted or
+unreadable `--id` → exit 1; a non-member writing to a private channel → exit 2.
+
 ---
 
 ## 7. Error Path Testing
@@ -625,3 +658,4 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
 | 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 63 | `artifacts create/list/get/update/move/delete/restore` | ☐ | Tag shape, `--ensure`, move confirmation, concurrent writers → exit 5 |
