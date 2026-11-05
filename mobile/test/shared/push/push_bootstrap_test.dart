@@ -8,6 +8,8 @@ import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
@@ -33,14 +35,22 @@ void main() {
     (tester) async {
       await HttpOverrides.runWithHttpOverrides(() async {
         final user = nostr.Keys('1' * 64);
+        final activeUser = nostr.Keys('3' * 64);
+        final auth = _AssertingRelayAuth();
+        addTearDown(auth.dispose);
         const oldHandle = '22222222-2222-4222-8222-222222222222';
         const newHandle = '44444444-4444-4444-8444-444444444444';
         const native = MethodChannel('buzz/push');
         final messenger = tester.binding.defaultBinaryMessenger;
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-        final healthy = await tester.runAsync(PushRelayFixture.start);
+        final healthy = await tester.runAsync(
+          () => PushRelayFixture.start(requiredIdentity: 'Bearer hosted-token'),
+        );
         final bad = await tester.runAsync(
-          () => PushRelayFixture.start(failMetadata: true),
+          () => PushRelayFixture.start(
+            failMetadata: true,
+            requiredIdentity: 'Bearer hosted-token',
+          ),
         );
         final good = healthy!;
         final failing = bad!;
@@ -68,8 +78,8 @@ void main() {
         final active = Community.create(
           name: 'active-disabled',
           relayUrl: 'https://active.invalid',
-          nsec: user.nsec,
-          pubkey: user.public,
+          nsec: activeUser.nsec,
+          pubkey: activeUser.public,
         ).copyWith(pushNotificationsEnabled: false);
         await storage.save(active);
         Map<String, dynamic> grant(
@@ -113,6 +123,7 @@ void main() {
           ProviderScope(
             overrides: [
               savedPrefsProvider.overrideWithValue(prefs),
+              hostedRelayAuthProvider.overrideWithValue(auth),
               communityStorageProvider.overrideWithValue(storage),
               communitySnapshotWriterProvider.overrideWithValue((_) async {}),
               buzzPushLeaseRevocationStorageProvider.overrideWithValue(
@@ -195,6 +206,13 @@ void main() {
         saved = (await storage.loadAll()).firstWhere((c) => c.id == saved.id);
         expect(saved.pushSubscriptionState.acceptedGeneration, 4);
         expect(good.leases.map((lease) => lease['generation']), [1, 2, 3, 4]);
+        expect(auth.configs, hasLength(4));
+        for (final config in auth.configs) {
+          expect(config.baseUrl, good.httpUrl);
+          expect(config.nsec, user.nsec);
+        }
+        expect(auth.backgrounds, [true, true, true, true]);
+        expect(good.upgradeIdentities, List.filled(4, 'Bearer hosted-token'));
         await tester.pumpWidget(const SizedBox.shrink());
         debugDefaultTargetPlatformOverride = null;
         await tester.runAsync(good.close);
@@ -233,6 +251,8 @@ void main() {
       final journal = BuzzPushLeaseRevocationStorage(
         secure: FakeSecureStorage(),
       );
+      final auth = _AssertingRelayAuth();
+      addTearDown(auth.dispose);
       var grant = 'opaque-before-revoke';
       var calls = 0;
       var nativeReads = 0;
@@ -278,12 +298,16 @@ void main() {
       });
       final overrides = [
         savedPrefsProvider.overrideWithValue(prefs),
+        hostedRelayAuthProvider.overrideWithValue(auth),
         communityStorageProvider.overrideWithValue(storage),
         communitySnapshotWriterProvider.overrideWithValue((_) async {}),
         buzzPushLeaseRevocationOutboxProvider.overrideWith((ref) {
           final outbox = BuzzPushLeaseRevocationOutbox(
             storage: journal,
-            publisher: publishBuzzPushLeaseRevocation,
+            publisher: (record) => publishBuzzPushLeaseRevocation(
+              record,
+              relayAuth: ref.read(hostedRelayAuthProvider),
+            ),
             now: tester.binding.clock.now,
             jitter: () => 0,
           );
@@ -1064,6 +1088,23 @@ BuzzPushEndpointGrant _grant(String origin, String grant) =>
       generation: 2,
       expiresAt: 3600,
     );
+
+class _AssertingRelayAuth extends HostedRelayAuth {
+  _AssertingRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  final configs = <RelayConfig>[];
+  final backgrounds = <bool>[];
+
+  @override
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+  }) async {
+    configs.add(config);
+    backgrounds.add(background);
+    return {'Nostr-Federated-Identity': 'Bearer hosted-token'};
+  }
+}
 
 class _ConnectedSession extends RelaySessionNotifier {
   _ConnectedSession({required this.initialStatus});

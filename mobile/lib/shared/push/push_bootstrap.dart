@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../hosted/hosted_relay_auth.dart';
 import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
@@ -892,15 +893,22 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         subscriptions: desired,
         submit:
             relay?.submit ??
-            ({required kind, required content, required tags, createdAt}) =>
-                submitSignedEventOnce(
-                  wsUrl: config.wsUrl,
-                  nsec: config.nsec!,
-                  kind: kind,
-                  content: content,
-                  tags: tags,
-                  createdAt: createdAt,
-                ),
+            ({
+              required kind,
+              required content,
+              required tags,
+              createdAt,
+            }) async => submitSignedEventOnce(
+              wsUrl: config.wsUrl,
+              headers: await ref
+                  .read(hostedRelayAuthProvider)
+                  .headers(config, background: true),
+              nsec: config.nsec!,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
       ),
       markAccepted: (leaseGeneration) => notifier.markPushLeaseAccepted(
         community.id,
