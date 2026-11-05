@@ -30,6 +30,7 @@ import {
 } from "@/features/messages/lib/threadTreeLayout";
 import {
   KIND_HUDDLE_STARTED,
+  KIND_JOB_RESULT,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
@@ -48,6 +49,10 @@ import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdo
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
+import {
+  getJobResultRequestId,
+  parseJobResultContent,
+} from "@/features/messages/lib/jobResult";
 import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import {
@@ -62,6 +67,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
+const JobResultCard = React.lazy(() =>
+  import("./JobResultCard").then(({ JobResultCard }) => ({
+    default: JobResultCard,
+  })),
+);
 export type ThreadDepthGuideAction = {
   active?: boolean;
   depth: number;
@@ -381,6 +391,63 @@ export const MessageRow = React.memo(
     const getTag = (name: string) =>
       message.tags?.find((tag) => tag[0] === name)?.[1];
 
+    const structuredJobResult =
+      message.kind === KIND_JOB_RESULT
+        ? parseJobResultContent(
+            message.body,
+            getJobResultRequestId(message.tags ?? []),
+          )
+        : null;
+
+    const renderDefaultBody = () => {
+      const waveMessage = parseWaveMessageContent(message.body);
+      if (waveMessage) {
+        return (
+          <WaveMessageAttachment
+            channelId={channelId}
+            fallbackText={waveMessage.fallbackText}
+            huddleMemberPubkeys={huddleMemberPubkeys}
+            huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+            searchQuery={searchQuery}
+          />
+        );
+      }
+
+      return (
+        <VideoReviewCommentMarkdown
+          channelNames={channelNames}
+          className={cn(
+            "max-w-full text-message",
+            emojiOnly &&
+              "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+          )}
+          // Only pass the author pubkey for agent-authored messages so
+          // config-nudge cards can authenticate the sender. Uses the
+          // raw event signer (signerPubkey), not a relay-delegated display
+          // author, because the agent itself must have signed the card.
+          configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+            message,
+            isKnownAgentPubkey,
+          )}
+          content={message.body}
+          messageId={message.id}
+          linkPreviewsSuppressed={linkPreviewsSuppressed}
+          linkPreviewTags={message.tags}
+          leadingInlineContent={agentAddressPrefix}
+          onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
+          customEmoji={customEmoji}
+          imetaByUrl={imetaByUrl}
+          agentMentionPubkeysByName={agentMentionPubkeysByName}
+          mentionNames={mentionNames}
+          mentionPubkeysByName={mentionPubkeysByName}
+          searchQuery={searchQuery}
+          snapshotSharedBy={snapshotSharedBy}
+          videoReviewCommentRootId={videoReviewCommentRootId}
+          videoReviewContext={videoReviewContext}
+        />
+      );
+    };
+
     const renderBody = () => {
       switch (message.kind) {
         case KIND_STREAM_MESSAGE_DIFF:
@@ -414,54 +481,14 @@ export const MessageRow = React.memo(
               message={message}
             />
           );
-        default: {
-          const waveMessage = parseWaveMessageContent(message.body);
-          if (waveMessage) {
-            return (
-              <WaveMessageAttachment
-                channelId={channelId}
-                fallbackText={waveMessage.fallbackText}
-                huddleMemberPubkeys={huddleMemberPubkeys}
-                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-                searchQuery={searchQuery}
-              />
-            );
-          }
-
-          return (
-            <VideoReviewCommentMarkdown
-              channelNames={channelNames}
-              className={cn(
-                "max-w-full text-message",
-                emojiOnly &&
-                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
-              )}
-              // Only pass the author pubkey for agent-authored messages so
-              // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey), not a relay-delegated display
-              // author, because the agent itself must have signed the card.
-              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
-                message,
-                isKnownAgentPubkey,
-              )}
-              content={message.body}
-              messageId={message.id}
-              linkPreviewsSuppressed={linkPreviewsSuppressed}
-              linkPreviewTags={message.tags}
-              leadingInlineContent={agentAddressPrefix}
-              onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
-              customEmoji={customEmoji}
-              imetaByUrl={imetaByUrl}
-              agentMentionPubkeysByName={agentMentionPubkeysByName}
-              mentionNames={mentionNames}
-              mentionPubkeysByName={mentionPubkeysByName}
-              searchQuery={searchQuery}
-              snapshotSharedBy={snapshotSharedBy}
-              videoReviewCommentRootId={videoReviewCommentRootId}
-              videoReviewContext={videoReviewContext}
-            />
+        case KIND_JOB_RESULT:
+          return structuredJobResult ? (
+            <JobResultCard result={structuredJobResult} />
+          ) : (
+            renderDefaultBody()
           );
-        }
+        default:
+          return renderDefaultBody();
       }
     };
 
