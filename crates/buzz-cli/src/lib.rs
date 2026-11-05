@@ -272,7 +272,7 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
-    /// Organize your own sidebar: sections, stars, mutes, and project pins
+    /// Organize your own sidebar: sections, sort modes, stars, mutes, and project pins
     #[command(subcommand)]
     Sidebar(SidebarCmd),
     /// Add, remove, and list emoji reactions
@@ -906,6 +906,9 @@ pub enum SidebarCmd {
     /// each other, and the last publish wins.
     #[command(subcommand)]
     Sections(SidebarSectionsCmd),
+    /// List and set how each sidebar group is sorted (synced with Buzz desktop)
+    #[command(subcommand)]
+    Sort(SidebarSortCmd),
     /// List, star, and unstar your channels (synced with Buzz desktop)
     #[command(subcommand)]
     Stars(SidebarChannelFlagCmd),
@@ -915,6 +918,38 @@ pub enum SidebarCmd {
     /// List, pin, and unpin your sidebar projects (synced with Buzz desktop)
     #[command(subcommand)]
     Projects(SidebarProjectsCmd),
+}
+
+/// How a sidebar group orders its channels.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum SidebarSortMode {
+    /// By name, A to Z
+    Alpha,
+    /// By last message, newest first
+    Recent,
+}
+
+/// `--group` takes `starred`, `channels`, `forums`, `dms`, `section:<id>`, or
+/// the name of a section.
+#[derive(Subcommand)]
+pub enum SidebarSortCmd {
+    /// List the groups that have a sort mode set
+    List,
+    /// Sort a group by name or by recent activity
+    Set {
+        /// Group to sort
+        #[arg(long)]
+        group: String,
+        /// Sort mode
+        #[arg(long, value_enum)]
+        mode: SidebarSortMode,
+    },
+    /// Return a group to the default sort (alpha)
+    Reset {
+        /// Group to reset
+        #[arg(long)]
+        group: String,
+    },
 }
 
 /// Shared by `sidebar stars` and `sidebar mutes`.

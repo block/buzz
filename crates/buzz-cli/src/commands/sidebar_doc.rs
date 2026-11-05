@@ -1,9 +1,11 @@
-//! The synced channel-sections document (kind:30078, d=`channel-sections`).
+//! The synced register-tree documents: channel sections (kind:30078,
+//! d=`channel-sections`) and sort modes (d=`channel-sort`).
 //!
-//! Wire-compatible with desktop `channelSectionsSync.ts`, `sidebarLaneStore.ts`
-//! and `sidebarLwwMap.ts`: a tree of per-field last-writer-wins registers
-//! `[v, dev, value]` under `meta`, plus the projected `sections`/`assignments`
-//! fields that meta-less clients (mobile) read and write.
+//! Wire-compatible with desktop `channelSectionsSync.ts`, `channelSortSync.ts`,
+//! `sidebarLaneStore.ts` and `sidebarLwwMap.ts`: a tree of per-field
+//! last-writer-wins registers `[v, dev, value]` under `meta`, plus the
+//! projected legacy fields that meta-less clients (mobile) read and write.
+//! A [`Codec`] describes one document's shape, legacy import and projection.
 
 use std::collections::BTreeMap;
 
@@ -16,6 +18,8 @@ pub(crate) type Tree = Map<String, Value>;
 pub(crate) const MAX_SECTIONS: usize = 100;
 /// Live-assignment cap shared with desktop.
 pub(crate) const MAX_ASSIGNMENTS: usize = 1_000;
+/// Cap on non-null sort registers shared with desktop.
+pub(crate) const MAX_SORT_GROUPS: usize = 104;
 
 /// Device id desktop stamps on registers imported from meta-less payloads.
 const LEGACY_DEV: &str = "0000000000000000";
@@ -85,15 +89,50 @@ fn is_order(value: &Value) -> bool {
 fn is_bool(value: &Value) -> bool {
     value.is_boolean()
 }
+fn is_sort_mode(value: &Value) -> bool {
+    value.is_null() || matches!(value.as_str(), Some("alpha" | "recent"))
+}
 
 type Leaf = fn(&Value) -> bool;
 
-const SECTION_FIELDS: [(&str, Leaf); 4] = [
-    ("name", is_string),
-    ("icon", is_string_or_null),
-    ("order", is_order),
-    ("live", is_bool),
-];
+/// Shape of a register-tree node, as desktop `Shape`: a leaf register, fixed
+/// fields, or a map whose every entry has one shape.
+pub(crate) enum Shape {
+    Leaf(Leaf),
+    Fields(&'static [(&'static str, Shape)]),
+    Map(&'static Shape),
+}
+
+/// One synced document: its tree shape, how a meta-less payload becomes
+/// registers, and the legacy fields projected from them.
+pub(crate) struct Codec {
+    shape: Shape,
+    from_legacy: fn(&Value, i64) -> Value,
+    project: fn(&Tree) -> Value,
+}
+
+pub(crate) const SECTIONS: Codec = Codec {
+    shape: Shape::Fields(&[
+        (
+            "s",
+            Shape::Map(&Shape::Fields(&[
+                ("name", Shape::Leaf(is_string)),
+                ("icon", Shape::Leaf(is_string_or_null)),
+                ("order", Shape::Leaf(is_order)),
+                ("live", Shape::Leaf(is_bool)),
+            ])),
+        ),
+        ("a", Shape::Map(&Shape::Leaf(is_string_or_null))),
+    ]),
+    from_legacy: sections_from_legacy,
+    project: sections_view,
+};
+
+pub(crate) const SORT: Codec = Codec {
+    shape: Shape::Fields(&[("g", Shape::Map(&Shape::Leaf(is_sort_mode)))]),
+    from_legacy: sort_from_legacy,
+    project: |tree| json!({ "groups": sort_groups(tree) }),
+};
 
 /// Own entries of a JSON object, skipping the `__proto__` key desktop drops.
 fn entries(node: &Value) -> impl Iterator<Item = (&String, &Value)> {
@@ -103,34 +142,34 @@ fn entries(node: &Value) -> impl Iterator<Item = (&String, &Value)> {
         .filter(|(key, _)| key.as_str() != "__proto__")
 }
 
-/// Keeps only well-formed registers; an invalid one is dropped while its
-/// valid siblings survive (desktop `validTree` with the sections shape).
-fn valid_tree(fields: &Value) -> Option<Tree> {
-    fields.as_object()?;
-    let mut tree = Tree::new();
-    if let Some(s) = fields.get("s").filter(|s| s.is_object()) {
-        let mut sections = Map::new();
-        for (id, node) in entries(s) {
-            if !node.is_object() {
-                continue;
-            }
-            let mut out = Map::new();
-            for (field, leaf) in SECTION_FIELDS {
-                if let Some(reg) = node.get(field).and_then(|n| valid_reg(n, leaf)) {
-                    out.insert(field.to_string(), reg);
-                }
-            }
-            sections.insert(id.clone(), Value::Object(out));
+/// Keeps only well-formed nodes of `shape`; an invalid register or record is
+/// dropped while its valid siblings survive (desktop `validTree`).
+fn valid_node(node: &Value, shape: &Shape) -> Option<Value> {
+    if let Shape::Leaf(leaf) = shape {
+        return valid_reg(node, *leaf);
+    }
+    node.as_object()?;
+    let mut out = Map::new();
+    for (key, child) in entries(node) {
+        let sub = match shape {
+            Shape::Map(sub) => Some(*sub),
+            Shape::Fields(fields) => fields
+                .iter()
+                .find_map(|(name, sub)| (*name == key).then_some(sub)),
+            Shape::Leaf(_) => None,
+        };
+        if let Some(valid) = sub.and_then(|sub| valid_node(child, sub)) {
+            out.insert(key.clone(), valid);
         }
-        tree.insert("s".into(), Value::Object(sections));
     }
-    if let Some(a) = fields.get("a").filter(|a| a.is_object()) {
-        let assignments = entries(a)
-            .filter_map(|(id, node)| Some((id.clone(), valid_reg(node, is_string_or_null)?)))
-            .collect();
-        tree.insert("a".into(), Value::Object(assignments));
+    Some(Value::Object(out))
+}
+
+fn valid_tree(fields: &Value, shape: &Shape) -> Option<Tree> {
+    match valid_node(fields, shape)? {
+        Value::Object(tree) => Some(tree),
+        _ => None,
     }
-    Some(tree)
 }
 
 /// JS `Math.round`, as an integer when it is a safe one.
@@ -143,8 +182,9 @@ fn js_round(f: f64) -> Value {
     }
 }
 
-/// Registers for a meta-less (legacy/mobile) payload, every value stamped at `legacy_v`.
-fn from_legacy(json: &Value, legacy_v: i64) -> Value {
+/// Registers for a meta-less (legacy/mobile) sections payload, every value
+/// stamped at `legacy_v`.
+fn sections_from_legacy(json: &Value, legacy_v: i64) -> Value {
     let stamp = |value: Value| json!([legacy_v, LEGACY_DEV, value]);
     let mut s = Map::new();
     for entry in json
@@ -182,19 +222,29 @@ fn from_legacy(json: &Value, legacy_v: i64) -> Value {
     json!({ "s": s, "a": a })
 }
 
+/// Registers for a meta-less sort payload; unknown group keys are kept and
+/// unknown modes dropped, as desktop `parseChannelSortPayload`.
+fn sort_from_legacy(json: &Value, legacy_v: i64) -> Value {
+    let g: Map<String, Value> = entries(json.get("groups").unwrap_or(&Value::Null))
+        .filter(|(_, mode)| matches!(mode.as_str(), Some("alpha" | "recent")))
+        .map(|(key, mode)| (key.clone(), json!([legacy_v, LEGACY_DEV, mode])))
+        .collect();
+    json!({ "g": g })
+}
+
 /// Decodes a `version: 1` payload, importing a meta-less one at `legacy_v`.
 /// Returns `None` when unreadable, including an unknown `meta.v`.
-pub(crate) fn decode(json: &Value, legacy_v: i64) -> Option<Tree> {
+pub(crate) fn decode(codec: &Codec, json: &Value, legacy_v: i64) -> Option<Tree> {
     let is_one = |value: Option<&Value>| value.and_then(safe_int) == Some(1);
     if !is_one(json.get("version")) {
         return None;
     }
     match json.get("meta") {
-        None => valid_tree(&from_legacy(json, legacy_v)),
+        None => valid_tree(&(codec.from_legacy)(json, legacy_v), &codec.shape),
         Some(meta) if is_one(meta.get("v")) => {
             let mut fields = meta.as_object()?.clone();
             fields.remove("v");
-            valid_tree(&Value::Object(fields))
+            valid_tree(&Value::Object(fields), &codec.shape)
         }
         Some(_) => None,
     }
@@ -265,20 +315,35 @@ pub(crate) fn project(tree: &Tree) -> Projection {
     }
 }
 
-/// The plaintext document: projected legacy fields plus the register tree.
-pub(crate) fn encode(tree: &Tree) -> Value {
+fn sections_view(tree: &Tree) -> Value {
     let Projection {
         sections,
         assignments,
     } = project(tree);
+    json!({ "sections": sections, "assignments": assignments })
+}
+
+/// Non-null sort modes by group key; `null` registers are explicit resets.
+pub(crate) fn sort_groups(tree: &Tree) -> BTreeMap<String, String> {
+    tree.get("g")
+        .map(entries)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, reg)| Some((key.clone(), reg.get(2)?.as_str()?.to_string())))
+        .collect()
+}
+
+/// The plaintext document: projected legacy fields plus the register tree.
+pub(crate) fn encode(codec: &Codec, tree: &Tree) -> Value {
+    let mut doc = match (codec.project)(tree) {
+        Value::Object(fields) => fields,
+        _ => Map::new(),
+    };
     let mut meta = tree.clone();
     meta.insert("v".into(), json!(1));
-    json!({
-        "version": 1,
-        "sections": sections,
-        "assignments": assignments,
-        "meta": meta,
-    })
+    doc.insert("version".into(), json!(1));
+    doc.insert("meta".into(), Value::Object(meta));
+    Value::Object(doc)
 }
 
 fn max_version(node: &Value) -> i64 {
@@ -382,11 +447,17 @@ impl<'a> Edit<'a> {
         }
     }
 
-    /// Clears an assignment that exists (as a value or tombstone).
-    pub(crate) fn unassign(&mut self, channel_id: &str) {
-        let exists = self.tree.get("a").and_then(|a| a.get(channel_id)).is_some();
+    /// Tombstones the register at `path` when one exists (as a value or tombstone).
+    pub(crate) fn clear(&mut self, path: &[&str]) {
+        let Some((first, rest)) = path.split_first() else {
+            return;
+        };
+        let exists = rest
+            .iter()
+            .fold(self.tree.get(*first), |node, key| node?.get(key))
+            .is_some();
         if exists {
-            self.set(&["a", channel_id], Value::Null);
+            self.set(path, Value::Null);
         }
     }
 }
@@ -438,7 +509,7 @@ mod tests {
 
     #[test]
     fn decodes_desktop_document_and_projects_live_state() {
-        let tree = decode(&desktop_doc(), 0).expect("readable");
+        let tree = decode(&SECTIONS, &desktop_doc(), 0).expect("readable");
         let view = project(&tree);
         let names: Vec<_> = view
             .sections
@@ -463,11 +534,11 @@ mod tests {
             json!({"meta": {"v": 1}}),
             json!("text"),
         ] {
-            assert!(decode(&payload, 0).is_none(), "{payload}");
+            assert!(decode(&SECTIONS, &payload, 0).is_none(), "{payload}");
         }
         let bad_version = json!({"version": 1.0, "meta": {"v": 1, "s": {"x": {
             "order": [i64::MIN, DEV, 0], "live": [-1, DEV, true], "name": [1, DEV, "X"]}}}});
-        let tree = decode(&bad_version, 0).expect("readable");
+        let tree = decode(&SECTIONS, &bad_version, 0).expect("readable");
         assert_eq!(tree["s"]["x"], json!({"name": [1, DEV, "X"]}));
     }
 
@@ -482,7 +553,7 @@ mod tests {
             ],
             "assignments": {"c1": "x", "c2": "missing"},
         });
-        let tree = decode(&mobile, 42_000).expect("readable");
+        let tree = decode(&SECTIONS, &mobile, 42_000).expect("readable");
         assert_eq!(tree["s"]["x"]["order"], json!([42_000, LEGACY_DEV, 2]));
         assert_eq!(tree["s"]["x"]["icon"], json!([42_000, LEGACY_DEV, null]));
         let view = project(&tree);
@@ -493,18 +564,18 @@ mod tests {
 
     #[test]
     fn encode_round_trips_and_carries_the_projection() {
-        let tree = decode(&desktop_doc(), 0).expect("readable");
-        let doc = encode(&tree);
+        let tree = decode(&SECTIONS, &desktop_doc(), 0).expect("readable");
+        let doc = encode(&SECTIONS, &tree);
         assert_eq!(doc["meta"]["v"], json!(1));
         assert_eq!(doc["sections"][0]["name"], json!("Alpha"));
         assert!(doc["sections"][1].get("icon").is_none());
         assert_eq!(doc["assignments"], json!({"c1": "a"}));
-        assert_eq!(decode(&doc, 0).expect("readable"), tree);
+        assert_eq!(decode(&SECTIONS, &doc, 0).expect("readable"), tree);
     }
 
     #[test]
     fn edits_share_one_stamp_newer_than_every_register() {
-        let mut tree = decode(&desktop_doc(), 0).expect("readable");
+        let mut tree = decode(&SECTIONS, &desktop_doc(), 0).expect("readable");
         let mut edit = Edit::new(&mut tree, &stamp(1));
         edit.create_section("n", "New", None);
         edit.set(&["a", "c9"], json!("n"));
@@ -548,9 +619,48 @@ mod tests {
         edit.create_section("s1", "S", None);
         edit.set(&["a", "c1"], json!("s1"));
         let mut edit = Edit::new(&mut tree, &stamp(2));
-        edit.unassign("c1");
-        edit.unassign("never");
+        edit.clear(&["a", "c1"]);
+        edit.clear(&["a", "never"]);
         assert_eq!(tree["a"]["c1"], json!([2, DEV, null]));
         assert!(tree["a"].get("never").is_none());
+    }
+
+    #[test]
+    fn sort_documents_decode_project_and_round_trip() {
+        let desktop = json!({
+            "version": 1,
+            "groups": {"dms": "recent"},
+            "meta": {"v": 1, "g": {
+                "dms": reg(4, json!("recent")),
+                "forums": reg(5, Value::Null),
+                "starred": reg(6, json!("newest")),
+                "section:x": reg(7, json!("alpha")),
+            }, "future": reg(1, json!("ignored"))},
+        });
+        let tree = decode(&SORT, &desktop, 0).expect("readable");
+        assert_eq!(tree["g"]["forums"], reg(5, Value::Null));
+        assert!(tree["g"].get("starred").is_none());
+        assert!(!tree.contains_key("future"));
+        assert_eq!(
+            sort_groups(&tree),
+            BTreeMap::from([
+                ("dms".to_string(), "recent".to_string()),
+                ("section:x".to_string(), "alpha".to_string()),
+            ])
+        );
+        let doc = encode(&SORT, &tree);
+        assert_eq!(
+            doc["groups"],
+            json!({"dms": "recent", "section:x": "alpha"})
+        );
+        assert_eq!(decode(&SORT, &doc, 0).expect("readable"), tree);
+
+        let mobile = json!({"version": 1, "groups": {"dms": "recent", "x": "bogus", "n": null}});
+        let tree = decode(&SORT, &mobile, 42_000).expect("readable");
+        assert_eq!(tree["g"]["dms"], json!([42_000, LEGACY_DEV, "recent"]));
+        assert!(tree["g"].get("x").is_none() && tree["g"].get("n").is_none());
+        let bare = decode(&SORT, &json!({"version": 1, "groups": []}), 1).expect("readable");
+        assert!(bare["g"].as_object().is_some_and(Map::is_empty));
+        assert!(decode(&SORT, &json!({"version": 1, "meta": {"v": 2}}), 0).is_none());
     }
 }
