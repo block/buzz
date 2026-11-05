@@ -699,9 +699,9 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, visibility, join role, unlisted, or ephemeral TTL
+    /// Update channel name, description, visibility, join role, unlisted, auto-join, or ephemeral TTL
     #[command(
-        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true"
+        after_help = "Examples:\n  buzz channels update --channel <uuid> --name general\n  buzz channels update --channel <uuid> --visibility open\n  buzz channels update --channel <uuid> --visibility private\n  buzz channels update --channel <uuid> --join-role guest\n  buzz channels update --channel <uuid> --visibility open --unlisted true\n  buzz channels update --channel <uuid> --auto-join true"
     )]
     Update {
         /// Channel UUID
@@ -735,6 +735,11 @@ pub enum ChannelsCmd {
         /// does not advertise `buzz-unlisted-channels`.
         #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set)]
         unlisted: Option<bool>,
+        /// Whether the relay joins every new community member into this
+        /// channel (a default channel). Relay owner/admin only; accepted only
+        /// on an open, unarchived stream channel.
+        #[arg(long, value_name = "true|false")]
+        auto_join: Option<bool>,
     },
     /// Set the channel topic
     Topic {

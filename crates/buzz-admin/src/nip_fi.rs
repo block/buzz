@@ -188,6 +188,10 @@ async fn unbind(
     {
         NipFiUnbind::Removed => true,
         NipFiUnbind::NotBound => false,
+        NipFiUnbind::RequiredIssuer => anyhow::bail!(
+            "refusing to remove the last NIP-FI issuer: this community requires NIP-FI; \
+             bind a replacement first, or archive or delete the community to stop it logging in"
+        ),
         NipFiUnbind::LastIssuer => anyhow::bail!(
             "refusing to remove the community's last NIP-FI issuer: backfill would rebind it; \
              bind a replacement first, or archive or delete the community to stop it logging in"

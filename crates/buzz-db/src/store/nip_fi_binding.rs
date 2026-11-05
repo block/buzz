@@ -19,6 +19,8 @@ pub enum NipFiUnbind {
     NotBound,
     /// The issuer is the community's last one and was kept.
     LastIssuer,
+    /// The last issuer is required by durable community policy, even with `allow_last`.
+    RequiredIssuer,
 }
 
 /// A community's stored NIP-FI binding, as returned to the operator route.
@@ -94,10 +96,11 @@ impl Db {
     }
 
     /// Remove one issuer from a community, refusing to remove its last one
-    /// unless `allow_last`.
+    /// unless `allow_last` and the community does not require NIP-FI.
     ///
-    /// The bound rows are locked first, so two concurrent unbinds of a
-    /// community's two issuers cannot both succeed and leave it empty. An
+    /// The community row is locked before issuer rows, serializing with policy
+    /// acceptance and binding edits. Two concurrent unbinds of a community's
+    /// two issuers cannot both succeed and leave it empty. An
     /// empty community looks never-provisioned and the next backfill would
     /// rebind it; archive or delete the community to stop it logging in.
     #[datastore_span(name = "unbind_nip_fi_issuer", system = "postgresql")]
@@ -116,6 +119,12 @@ impl Db {
         self.deletion_store()
             .guard_transaction(&mut tx, community)
             .await?;
+        let requires_nip_fi: Option<bool> = sqlx::query_scalar(
+            "SELECT requires_nip_fi FROM communities WHERE id = $1 FOR NO KEY UPDATE",
+        )
+        .bind(community.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
         let bound: Vec<String> = sqlx::query_scalar(
             "SELECT issuer FROM community_nip_fi_issuers WHERE community_id = $1 FOR UPDATE",
         )
@@ -124,6 +133,8 @@ impl Db {
         .await?;
         let outcome = if !bound.iter().any(|bound| bound == issuer) {
             NipFiUnbind::NotBound
+        } else if bound.len() == 1 && requires_nip_fi == Some(true) {
+            NipFiUnbind::RequiredIssuer
         } else if bound.len() == 1 && !allow_last {
             NipFiUnbind::LastIssuer
         } else {
@@ -234,7 +245,8 @@ impl Db {
     /// than aborting the batch. The community rows are then locked, as
     /// [`Db::bind_nip_fi_issuers`] does, so an operator bind that commits after
     /// the caller listed the community wins and the default is not added
-    /// beside it. Returns the number of new rows.
+    /// beside it. Required communities need explicit operator repair and are
+    /// never rebound by this bulk backfill. Returns the number of new rows.
     #[datastore_span(name = "bind_nip_fi_issuers_to_active", system = "postgresql")]
     pub async fn bind_nip_fi_issuers_to_active(
         &self,
@@ -270,6 +282,7 @@ impl Db {
             WHERE c.id = ANY($1)
               AND c.deletion_state = 'active'
               AND c.deleted_at IS NULL
+              AND NOT c.requires_nip_fi
               AND NOT EXISTS (
                   SELECT 1 FROM community_nip_fi_issuers b WHERE b.community_id = c.id
               )

@@ -73,8 +73,9 @@ class _PersonInviteSection extends HookConsumerWidget {
         candidatePubkey.value = null;
         searchController.clear();
         ref.invalidate(communityMembershipProvider);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invited to the community')),
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
+          const SnackBar(content: Text('Invite sent')),
+          kind: ToastKind.success,
         );
       } catch (error) {
         if (context.mounted) {

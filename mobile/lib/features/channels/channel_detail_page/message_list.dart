@@ -4,6 +4,9 @@ class _MessageList extends HookConsumerWidget {
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TypingEntry> inlineTyping;
+
+  /// Agents typing in each thread, by lowercase root message ID.
+  final Map<String, List<String>> threadWorking;
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
@@ -13,6 +16,7 @@ class _MessageList extends HookConsumerWidget {
   final Set<String> initialForcedUnreadMessageIds;
   final bool hasInitialUnread;
   final String channelId;
+  final String? welcomeAgent;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
   final String? currentPubkey;
@@ -26,6 +30,7 @@ class _MessageList extends HookConsumerWidget {
   const _MessageList({
     required this.entries,
     this.inlineTyping = const [],
+    this.threadWorking = const {},
     required this.stickyDateHeaderState,
     required this.allMessages,
     required this.initialMessageId,
@@ -36,6 +41,7 @@ class _MessageList extends HookConsumerWidget {
     required this.initialForcedUnreadMessageIds,
     required this.hasInitialUnread,
     required this.channelId,
+    this.welcomeAgent,
     required this.notifier,
     required this.isDm,
     required this.currentPubkey,
@@ -51,6 +57,9 @@ class _MessageList extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final handoff = useAgentReplyHandoffs(channelId, inlineTyping, allMessages);
     final displayedTyping = handoff.typing;
+    final workingAgents = {
+      for (final agents in threadWorking.values) ...agents,
+    };
     final appView = View.of(context);
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
@@ -63,6 +72,9 @@ class _MessageList extends HookConsumerWidget {
     final isLoadingOlder = useState(false);
     final navigatingOldest = useRef(false);
     final olderFetchPaused = useRef(false);
+    final viewportFillPages = useRef(0);
+    final boundaryFetchInFlight = useRef(false);
+    final showLoadEarlier = useState(false);
     final oldestNavigationGeneration = useRef(0);
     final isAtLatest = useState(true);
     final settledImeBottomInset = useState(
@@ -120,8 +132,10 @@ class _MessageList extends HookConsumerWidget {
       chronologicalIndex += 1
     ) {
       final message = displayEntries[chronologicalIndex].first.message;
+      // A membership group can span days; it sits under its first change's
+      // day, so the next row compares against that same change.
       final previousMessage = chronologicalIndex > 0
-          ? displayEntries[chronologicalIndex - 1].last.message
+          ? displayEntries[chronologicalIndex - 1].first.message
           : null;
       final startsDay =
           previousMessage == null ||
@@ -173,9 +187,12 @@ class _MessageList extends HookConsumerWidget {
         if (canFetchTarget) {
           unreadBoundaryFetchCount.value += 1;
           var cancelled = false;
+          boundaryFetchInFlight.value = true;
           unawaited(
             Future<void>(() async {
-              final loaded = await notifier.fetchOlder();
+              final loaded = await notifier.fetchOlder().whenComplete(
+                () => boundaryFetchInFlight.value = false,
+              );
               if (cancelled || loaded) return;
               if (notifier.reachedOldest) {
                 unreadBoundaryReachedOldestCount.value += 1;
@@ -219,6 +236,7 @@ class _MessageList extends HookConsumerWidget {
         initialOldestOrdinaryUnreadMessageId,
         initialForcedUnreadMessageIds,
         entries.length,
+        allMessages.length, // A page of hidden notices adds no entry.
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,
       ],
@@ -505,6 +523,7 @@ class _MessageList extends HookConsumerWidget {
 
     useEffect(
       () {
+        var disposed = false;
         void onPositionsChanged() {
           final positions = itemPositionsListener.itemPositions.value;
           if (positions.isEmpty) return;
@@ -529,26 +548,39 @@ class _MessageList extends HookConsumerWidget {
           final oldestVisible = positions
               .map((position) => position.index)
               .reduce((a, b) => a > b ? a : b);
-          if (!hasUserScrolled.value ||
+          final (:fills, :offerLoadEarlier) = _viewportFill(
+            fits: _oldestRowFits(positions, displayEntries.length),
+            scrolled: hasUserScrolled.value,
+            busy: boundaryFetchInFlight.value || isLoadingOlder.value,
+            pages: viewportFillPages.value,
+            reachedOldest: notifier.reachedOldest,
+            paused: olderFetchPaused.value,
+          );
+          if (showLoadEarlier.value != offerLoadEarlier) {
+            showLoadEarlier.value = offerLoadEarlier;
+          }
+          if ((!hasUserScrolled.value && !fills) ||
               oldestVisible < displayEntries.length - 3 ||
               isLoadingOlder.value ||
               navigatingOldest.value ||
-              olderFetchPaused.value) {
+              olderFetchPaused.value ||
+              viewportFillPages.value >= _maxAutoOlderPages) {
             return;
           }
           if (notifier.reachedOldest) return;
-          isLoadingOlder.value = true;
-          notifier
-              .fetchOlder()
-              .then((loaded) {
-                olderFetchPaused.value = !loaded && !notifier.reachedOldest;
-              })
-              .whenComplete(() {
-                if (context.mounted) isLoadingOlder.value = false;
-              });
+          viewportFillPages.value++;
+          _fetchOlderPage(
+            context,
+            notifier,
+            isLoadingOlder,
+            olderFetchPaused,
+            // Re-check: a page of hidden notices adds no entry to re-run this.
+            onDone: () => WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!disposed && context.mounted) onPositionsChanged();
+            }),
+          );
         }
 
-        var disposed = false;
         itemPositionsListener.itemPositions.addListener(onPositionsChanged);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!disposed && context.mounted) onPositionsChanged();
@@ -798,7 +830,17 @@ class _MessageList extends HookConsumerWidget {
       },
     );
 
+    final hiddenHistory = _useHiddenHistoryPaging(
+      context: context,
+      noRows: entries.isEmpty,
+      loaded: allMessages,
+      notifier: notifier,
+      isLoadingOlder: isLoadingOlder,
+      olderFetchPaused: olderFetchPaused,
+    );
+
     if (entries.isEmpty &&
+        welcomeAgent == null &&
         (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
       return Align(
         alignment: Alignment.bottomCenter,
@@ -809,18 +851,51 @@ class _MessageList extends HookConsumerWidget {
             Grid.gutter,
             composerBottomInset,
           ),
-          child: TypingMotionPreview.enabled
-              ? TypingMotionPreview(channelId: channelId)
-              : InlineAgentTyping(
-                  channelId: channelId,
-                  entries: displayedTyping,
-                ),
+          child: _aboveHiddenHistory(
+            hiddenHistory,
+            TypingMotionPreview.enabled
+                ? TypingMotionPreview(channelId: channelId)
+                : InlineAgentTyping(
+                    channelId: channelId,
+                    entries: displayedTyping,
+                    knownAgents: workingAgents,
+                  ),
+          ),
         ),
       );
     }
-    if (entries.isEmpty) return const _EmptyMessages();
+    if (entries.isEmpty) {
+      if (welcomeAgent != null) {
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ) +
+                Grid.md,
+            Grid.gutter,
+            composerBottomInset + Grid.md,
+          ),
+          child: Column(
+            children: [
+              BestieWelcome(agent: welcomeAgent!),
+              ?hiddenHistory,
+              if (displayedTyping.isNotEmpty)
+                InlineAgentTyping(
+                  channelId: channelId,
+                  entries: displayedTyping,
+                  knownAgents: workingAgents,
+                ),
+            ],
+          ),
+        );
+      }
+      return hiddenHistory ?? const _EmptyMessages();
+    }
 
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
+    final rowCache = _useRowCache(this, [channelNamesMap, localSendAnimations]);
 
     return Stack(
       children: [
@@ -855,6 +930,7 @@ class _MessageList extends HookConsumerWidget {
               navigatingOldest.value = false;
               oldestNavigationGeneration.value++;
               olderFetchPaused.value = false;
+              viewportFillPages.value = 0;
               hasUserScrolled.value = true;
               followsLatest.value = false;
               if (showUnreadNavigation) {
@@ -886,9 +962,25 @@ class _MessageList extends HookConsumerWidget {
                 ),
                 bottom: timelineBottomInset,
               ),
-              itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
+              itemCount:
+                  displayEntries.length +
+                  (isLoadingOlder.value || showLoadEarlier.value ? 1 : 0),
               itemBuilder: (context, index) {
                 // Loading indicator at the top (last index in reversed list).
+                if (index >= displayEntries.length && !isLoadingOlder.value) {
+                  return _LoadEarlierButton(
+                    onPressed: () {
+                      showLoadEarlier.value = false;
+                      viewportFillPages.value = 0;
+                      _fetchOlderPage(
+                        context,
+                        notifier,
+                        isLoadingOlder,
+                        olderFetchPaused,
+                      );
+                    },
+                  );
+                }
                 if (index >= displayEntries.length) {
                   return const Padding(
                     padding: EdgeInsets.symmetric(vertical: Grid.xs),
@@ -908,8 +1000,10 @@ class _MessageList extends HookConsumerWidget {
                 final message = entry.message;
 
                 // Day boundary check — applies to all messages including system.
+                // Compare with the change that dates the previous group (see
+                // the day index above).
                 final prevEntry = chronIdx > 0
-                    ? displayEntries[chronIdx - 1].last
+                    ? displayEntries[chronIdx - 1].first
                     : null;
                 final prevMessage = prevEntry?.message;
                 final showDayDivider =
@@ -939,15 +1033,31 @@ class _MessageList extends HookConsumerWidget {
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
                     nextMessage.createdAt - message.createdAt > 300;
-
-                return LocalMessageSendTransition(
+                final animate = isRecentLocalMessageSendAnimation(
+                  localSendAnimations,
+                  message.id,
+                );
+                final isHandoff = isRecentAgentReplyHandoff(
+                  handoff.messageIds,
+                  message.id,
+                );
+                final endsDay =
+                    nextMessage != null &&
+                    !isSameDay(message.createdAt, nextMessage.createdAt);
+                final inputs = _rowInputs(entryGroup, [
+                  prevMessage,
+                  nextMessage,
+                  animate,
+                  isHandoff,
+                  threadWorking[message.id.toLowerCase()],
+                  if (index == 0) ...[displayedTyping, workingAgents],
+                ]);
+                if (rowCache.reuse(message, inputs) case final row?) return row;
+                final row = LocalMessageSendTransition(
                   messageId: message.id,
                   channelId: channelId,
                   key: ValueKey('channel-message-send-${message.id}'),
-                  animate: isRecentLocalMessageSendAnimation(
-                    localSendAnimations,
-                    message.id,
-                  ),
+                  animate: animate,
                   startOffsetFactor: showAuthor
                       ? localMessageSendTransitionAvatarStartOffset
                       : localMessageSendTransitionStartOffset,
@@ -957,6 +1067,16 @@ class _MessageList extends HookConsumerWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (chronIdx == 0 &&
+                            notifier.reachedOldest &&
+                            welcomeAgent != null)
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              top: Grid.md,
+                              bottom: Grid.md,
+                            ),
+                            child: BestieWelcome(agent: welcomeAgent!),
+                          ),
                         if (showDayDivider)
                           DayDivider(
                             label: formatDayHeading(message.createdAt),
@@ -967,12 +1087,7 @@ class _MessageList extends HookConsumerWidget {
                           _SystemMessageRow(
                             message: message,
                             startsDay: showDayDivider,
-                            endsDay:
-                                nextMessage != null &&
-                                !isSameDay(
-                                  message.createdAt,
-                                  nextMessage.createdAt,
-                                ),
+                            endsDay: endsDay,
                             groupedMessages: entryGroup.length > 1
                                 ? entryGroup
                                       .map((entry) => entry.message)
@@ -988,28 +1103,23 @@ class _MessageList extends HookConsumerWidget {
                           _MessageBubble(
                             message: message,
                             startsDay: showDayDivider,
-                            endsDay:
-                                nextMessage != null &&
-                                !isSameDay(
-                                  message.createdAt,
-                                  nextMessage.createdAt,
-                                ),
-                            showAuthor:
-                                showAuthor ||
-                                isRecentAgentReplyHandoff(
-                                  handoff.messageIds,
-                                  message.id,
-                                ),
-                            typingHandoff: isRecentAgentReplyHandoff(
-                              handoff.messageIds,
-                              message.id,
-                            ),
+                            endsDay: endsDay,
+                            showAuthor: showAuthor || isHandoff,
+                            typingHandoff: isHandoff,
                             showAvatar: showAvatar,
                             hasReplies: entry.summary != null,
-                            replyFooter: entry.summary == null
+                            replyFooter:
+                                entry.summary == null &&
+                                    !threadWorking.containsKey(
+                                      message.id.toLowerCase(),
+                                    )
                                 ? null
                                 : _ThreadSummaryRow(
-                                    summary: entry.summary!,
+                                    summary: entry.summary,
+                                    working:
+                                        threadWorking[message.id
+                                            .toLowerCase()] ??
+                                        const [],
                                     message: message,
                                     allMessages: allMessages,
                                     channelId: channelId,
@@ -1036,11 +1146,13 @@ class _MessageList extends HookConsumerWidget {
                             InlineAgentTyping(
                               channelId: channelId,
                               entries: displayedTyping,
+                              knownAgents: workingAgents,
                             ),
                       ],
                     ),
                   ),
                 );
+                return rowCache.keep(message, inputs, row);
               },
             ),
           ),

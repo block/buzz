@@ -4,12 +4,19 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import 'agent_avatar_choices.dart';
+import 'agent_avatar_geometry.dart';
 import 'agent_avatar_picker.dart';
 
 /// Edits an avatar locally; Cancel leaves the creation draft unchanged.
 class AgentAvatarEditorPage extends HookWidget {
-  const AgentAvatarEditorPage({super.key, required this.initialSelection});
+  const AgentAvatarEditorPage({
+    super.key,
+    required this.initialSelection,
+    this.heroTag,
+  });
   final AgentAvatarSelection initialSelection;
+  final Object? heroTag;
 
   @override
   Widget build(BuildContext context) {
@@ -51,22 +58,27 @@ class AgentAvatarEditorPage extends HookWidget {
         ),
         body: SafeArea(
           top: false,
+          minimum: const EdgeInsets.only(bottom: Grid.gutter),
           child: Padding(
             padding: EdgeInsets.fromLTRB(
               Grid.gutter,
               frostedAppBarHeight(context) + Grid.xxs,
               Grid.gutter,
-              Grid.xxs,
+              Grid.sm,
             ),
             child: LayoutBuilder(
               builder: (context, constraints) => SingleChildScrollView(
+                clipBehavior: Clip.none,
                 child: AgentAvatarPicker(
-                  // 48-point mode control, 220-point preview, two 8-point gaps.
-                  controlsHeight: (constraints.maxHeight - 284).clamp(
-                    180,
-                    double.infinity,
-                  ),
+                  // Fill the available height so the tray shares the page gutters.
+                  controlsHeight:
+                      (constraints.maxHeight -
+                              agentAvatarChoicesHeight(context) -
+                              Grid.sm -
+                              agentAvatarPreviewSpace)
+                          .clamp(180, double.infinity),
                   selection: selection.value,
+                  heroTag: heroTag,
                   onChanged: (value) => selection.value = value,
                   disabled: false,
                   onBusyChanged: (value) => busy.value = value,

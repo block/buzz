@@ -1,24 +1,20 @@
 //! Exercise the same database-to-metrics tick called by the relay leader.
 
+use std::collections::HashMap;
+
 use super::*;
 use buzz_media::CommunityStorage;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+use uuid::Uuid;
 
 fn observe_tick(
     db: &Db,
     state: &Mutex<StorageSweepState>,
     mode: StorageMetricsMode,
-    hosts: &HashMap<Uuid, String>,
 ) -> (anyhow::Result<()>, HashMap<String, f64>) {
     let recorder = DebuggingRecorder::new();
     let result = metrics::with_local_recorder(&recorder, || {
-        futures::executor::block_on(run_storage_metrics_tick(
-            db,
-            state,
-            mode,
-            Some(hosts),
-            |_| true,
-        ))
+        futures::executor::block_on(run_storage_metrics_tick(db, state, mode))
     });
     let values = recorder
         .snapshotter()
@@ -47,7 +43,6 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
         .expect("connect isolated database");
     let db = Db::from_pool(pool.clone());
     let community = Uuid::new_v4();
-    let hosts = HashMap::from([(community, "storage.example.test".to_owned())]);
 
     for configured in [None, Some("inline"), Some("external")] {
         sqlx::query("DELETE FROM storage_accounting_snapshots")
@@ -56,7 +51,7 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
             .expect("clear isolated snapshot");
         let state = Mutex::new(StorageSweepState::default());
         let mode = parse_storage_metrics_mode(configured);
-        let (result, values) = observe_tick(&db, &state, mode, &hosts);
+        let (result, values) = observe_tick(&db, &state, mode);
         result.expect("no worker is normal");
         assert!(
             values.is_empty(),
@@ -82,10 +77,13 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
                 )
                 .await
                 .expect("publish through production worker session");
-            let (result, values) = observe_tick(&db, &state, mode, &hosts);
+            let (result, values) = observe_tick(&db, &state, mode);
             result.expect("same running reader picks up worker publication");
-            assert_eq!(values["buzz_community_storage_bytes"], bytes as f64);
             assert_eq!(values["buzz_total_storage_bytes"], bytes as f64);
+            assert!(
+                !values.contains_key("buzz_community_storage_bytes"),
+                "per-community storage is not a relay metric"
+            );
             assert_eq!(values["buzz_storage_snapshot_load_ok"], 1.0);
             assert!(!values
                 .keys()
@@ -101,10 +99,10 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
             )
             .await
             .unwrap();
-        let (result, values) = observe_tick(&db, &state, mode, &hosts);
+        let (result, values) = observe_tick(&db, &state, mode);
         assert!(result.is_err());
         assert_eq!(values["buzz_storage_snapshot_load_ok"], 0.0);
-        assert_eq!(values["buzz_community_storage_bytes"], 250.0);
+        assert_eq!(values["buzz_total_storage_bytes"], 250.0);
 
         // A blocked table read is bounded, preserves the cache, and can recover.
         let mut blocker = pool.begin().await.unwrap();
@@ -113,18 +111,18 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
             .await
             .unwrap();
         let started = std::time::Instant::now();
-        let (result, values) = observe_tick(&db, &state, mode, &hosts);
+        let (result, values) = observe_tick(&db, &state, mode);
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(8));
         assert_eq!(values["buzz_storage_snapshot_load_ok"], 0.0);
-        assert_eq!(values["buzz_community_storage_bytes"], 250.0);
+        assert_eq!(values["buzz_total_storage_bytes"], 250.0);
         blocker.rollback().await.unwrap();
 
         sqlx::query("DELETE FROM storage_accounting_snapshots")
             .execute(&pool)
             .await
             .unwrap();
-        let (result, values) = observe_tick(&db, &state, mode, &hosts);
+        let (result, values) = observe_tick(&db, &state, mode);
         result.expect("removed worker snapshot is inactive");
         assert!(
             values.is_empty(),
@@ -140,16 +138,12 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
             )
             .await
             .unwrap();
-        let (result, values) = observe_tick(&db, &state, mode, &hosts);
+        let (result, values) = observe_tick(&db, &state, mode);
         result.expect("reader reactivates after removal and transient failure");
         assert_eq!(values["buzz_storage_snapshot_load_ok"], 1.0);
         assert_eq!(
             values["buzz_total_storage_bytes"], 0.0,
             "a real empty snapshot may report zero"
-        );
-        assert_eq!(
-            values["buzz_community_storage_bytes"], 0.0,
-            "clear the previous community when publication resumes"
         );
         drop(worker);
     }

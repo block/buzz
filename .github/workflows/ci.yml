@@ -34,6 +34,12 @@ jobs:
         with:
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # The first call of each Hermit tool downloads it. A stalled Node download
+      # hung the selection step until this job's cap cancelled every gate. One
+      # invocation fetches both tools, so its worst case (under 6 minutes)
+      # still leaves the rest of the job inside the 10-minute cap.
+      - name: Fetch Hermit tools
+        run: scripts/ci-hermit-retry.sh sh -c './bin/node --version && ./bin/just --version'
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
@@ -69,6 +75,7 @@ jobs:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
               - 'scripts/ci-apt-retry.sh'
+              - 'scripts/ci-hermit-retry.sh'
               - 'Justfile'
             desktop:
               - '.github/workflows/ci.yml'
@@ -104,6 +111,7 @@ jobs:
               - 'scripts/test-mobile-release-contract.sh'
               - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
+              - 'scripts/ci-hermit-retry.sh'
               - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
@@ -144,7 +152,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/ci-hermit-retry.test.mjs
       - name: File size policy
         run: just file-size-check
 

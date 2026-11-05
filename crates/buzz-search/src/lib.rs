@@ -21,6 +21,8 @@
 //! `community_id = $ctx` as the first predicate. A query bound to community
 //! A cannot return events stored under community B, by construction.
 
+#[doc(hidden)]
+pub mod cancel;
 /// Search error types.
 pub mod error;
 /// Search query execution.
@@ -33,7 +35,19 @@ pub use query::{
     SearchSort, PROFILE_NAMES_PER_PAGE_MAX,
 };
 
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+
+/// Options for the pool behind [`SearchService`]: every new connection's
+/// session `statement_timeout` is lowered to buzz-db's event-read deadline
+/// ([`buzz_db::event::READ_STATEMENT_TIMEOUT`]) unless it is already
+/// tighter. Searches cancel their statement when abandoned (see
+/// [`cancel`]); this bounds the ones a cancel cannot reach.
+pub fn pool_options() -> PgPoolOptions {
+    PgPoolOptions::new().after_connect(|conn, _meta| {
+        Box::pin(buzz_db::event::tighten_session_read_statement_timeout(conn))
+    })
+}
 
 /// Thin handle around a `PgPool` for community-scoped FTS.
 ///
@@ -55,15 +69,16 @@ impl SearchService {
         query::search(&self.pool, query).await
     }
 
-    /// Find current profiles by `name` and `display_name`; see
-    /// [`search_profile_names`].
+    /// Find people by profile name, and by verified profile names signed by
+    /// `verified_by`; see [`search_profile_names`].
     pub async fn search_profile_names(
         &self,
         community: CommunityId,
         q: &str,
+        verified_by: Option<[u8; 32]>,
         page: u32,
         per_page: u32,
     ) -> Result<SearchResult, SearchError> {
-        query::search_profile_names(&self.pool, community, q, page, per_page).await
+        query::search_profile_names(&self.pool, community, q, verified_by, page, per_page).await
     }
 }

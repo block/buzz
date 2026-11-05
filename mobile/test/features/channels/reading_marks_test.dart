@@ -109,6 +109,40 @@ void main() {
     );
   });
 
+  test('hidden membership notices do not block catch-up', () {
+    final bottom = _msg('visible', 100);
+    TimelineMessage notice(String id, SystemEvent event) => TimelineMessage(
+      id: id,
+      pubkey: 'alice',
+      createdAt: 150,
+      content: '',
+      isSystem: true,
+      systemEvent: event,
+    );
+    for (final hidden in [
+      notice(
+        'join',
+        const SystemEvent(
+          type: SystemEventType.memberJoined,
+          actorPubkey: 'alice',
+          targetPubkey: 'alice',
+        ),
+      ),
+      notice(
+        'leave',
+        const SystemEvent(
+          type: SystemEventType.memberLeft,
+          actorPubkey: 'alice',
+        ),
+      ),
+    ]) {
+      expect(
+        _marks(loaded: [bottom, hidden], visible: [bottom], bottom: bottom),
+        {'activity:$_channel': 100},
+      );
+    }
+  });
+
   group('channel timeline', () {
     test('the bottom writes one catch-up mark instead of message marks', () {
       final a = _msg('a', 100);

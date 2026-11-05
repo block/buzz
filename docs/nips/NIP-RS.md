@@ -469,6 +469,71 @@ as a session-wide authority or use it to label live freshness. On reconnect,
 identity changes, or later canonical publication, acquire a new snapshot; merge
 arriving live state as evidence but do not infer a complete load from it.
 
+### Buzz Frontier-Only Retention Profile
+
+Buzz clients use the following frontier-only profile. This section takes
+precedence over the legacy finite-horizon, per-message-writing, frontier
+replication, and unconditional frontier-slot deletion guidance in this document; the manual-unread override register algebra and durability rules
+are unchanged.
+
+- **Semantic retention:** `floor = max(0, now - 2592000)` (30 days, Unix
+  seconds). Every effective frontier includes this floor in its maximum,
+  including missing contexts and unresolved parents. A message at the floor is
+  read; a message one second newer is not read without a covering frontier.
+  Forced-unread overrides still take precedence. Legacy per-message entries
+  remain readable, but clients MUST NOT create or republish `msg:` hints outside
+  an existing primary override group. Sparse device-local UI feedback may be
+  persisted locally, but is not synchronized state and MUST NOT be described as
+  synchronized. Individual-message menu and dwell actions MUST NOT acknowledge
+  their entire channel or thread; direct mentions do not opt into msg writes.
+- **Catch-up frontiers:** `activity:<channel-id>` covers ordinary top-level
+  channel messages, excluding DMs, mentions and broadcasts.
+  `thread-activity:<root-event-id>` covers that thread's replies. Neither is a
+  substitute for the broad channel frontier. A partial/nested thread view MUST
+  NOT advance the entire thread solely because that view reached its bottom.
+- **Own values, not observed maxima:** publish only frontiers advanced locally,
+  or recovered from the installation's owned coordinates/journal. Keep these
+  values separate from the merged view. If a local value is 5, a peer supplies
+  50, and a local read advances to 10, the observed value is 50 but this
+  installation publishes 10. Peer delivery alone does not trigger publication.
+  Legacy journals that did not retain provenance may carry their existing
+  publishable values during migration, but MUST NOT absorb further peer maxima.
+- **No loss to fit:** prune frontier hints below the floor, but never evict a
+  still-required frontier merely to fit a blob or local count limit. Overflow
+  uses additional persisted random 32-hex coordinates under the same client ID.
+  Each plaintext is at most 40 KiB including the compact JSON envelope.
+  Existing snapshot/storage bounds remain real limits: report capacity failure
+  and retain pending local work rather than silently truncating state. Before
+  sending, project each replacement/addition against the complete own-author
+  kind-30078 snapshot (including unrelated application coordinates): no prefix
+  may knowingly exceed 4096 events or the 8 MiB compact event-array bound.
+  Include the encrypted content and signed-event envelope, not plaintext alone.
+  This preflight is not a reservation against concurrent writes by peers.
+- **Stable placement:** initial allocation sorts keys; later updates preserve
+  persisted key-to-slot placement and sort within each slot. Persist slot IDs
+  and assignments before publication. Publish changed coordinates only. Never
+  remove a sole carrier before its replacement is accepted. Unused slots may be
+  reused after their entries are below the floor, with read-before-write conflict
+  detection. Override groups and their frontiers remain on the primary.
+- **Recovery:** save pending signed event bytes durably before sending. An
+  unknown outcome retries those exact bytes. A partially accepted batch is not
+  whole-revision success; successful slots need not be resent, and unsynced
+  slots and local advances survive restart. Successors MUST have timestamps
+  strictly above pending events they supersede, even when the pending packet
+  never reached the relay or the clock moved backwards. Journal writers MUST
+  be scoped to identity/community and fenced across owner replacement; a late
+  acknowledgement from a retired owner cannot overwrite successor local work.
+  A transient journal failure MUST remain retryable without another user edit.
+- **Retrieval:** use the validated full-state snapshot above, with no `since`
+  or tag filter. The floor is evaluated on frontier values, not containing
+  event age. An old blob can carry a newer frontier because message timestamps
+  are author-controlled. Orphan slots are not automatically deleted or ignored.
+  No age policy applies to override tombstone floors.
+
+Legacy clients do not gain the semantic floor automatically. A mixed-version
+installation may continue showing old messages unread; wire max-register
+interoperability alone does not imply identical unread presentation.
+
 ### Merge Rule
 
 After decrypting all fetched blobs, the effective read timestamp for each context is:
