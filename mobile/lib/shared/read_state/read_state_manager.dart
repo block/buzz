@@ -461,7 +461,8 @@ class ReadStateManager {
 
   Future<bool> _startLiveSubscription() async {
     try {
-      final unsub = await _relaySession!.subscribe(
+      var interrupted = false;
+      final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
@@ -473,6 +474,17 @@ class ReadStateManager {
           limit: 0,
         ),
         _handleIncomingEvent,
+        // RelaySession reopens a REQ the relay closed for a transient reason
+        // on the same socket. With limit 0 the reopened REQ replays nothing,
+        // so read the snapshot once it is live again to cover the gap.
+        onStatusChanged: (status) {
+          if (status == RelaySubscriptionStatus.retrying) {
+            interrupted = true;
+          } else if (interrupted) {
+            interrupted = false;
+            unawaited(_catchUpAfterRetry());
+          }
+        },
       );
       if (_disposed) {
         unsub.call();
@@ -485,6 +497,15 @@ class ReadStateManager {
       debugPrint('[ReadStateManager] live subscription FAILED: $e');
       return false;
     }
+  }
+
+  /// Reads the snapshot after the live subscription recovered from a retry,
+  /// after any reconnect pass already running, which reads it anyway.
+  Future<void> _catchUpAfterRetry() async {
+    final pass = _queuedResync ?? _runningResync ?? _initializing;
+    if (pass != null) await pass;
+    if (_disposed || !_servesThisCommunity) return;
+    await _fetchAndMerge();
   }
 
   void _handleIncomingEvent(NostrEvent event) {
@@ -596,10 +617,12 @@ class ReadStateManager {
       // The snapshot below is the whole read state (megabytes on a busy
       // account), so skip it when there is nothing to send. Each resume
       // schedules a publish after its re-sync whether or not anything changed.
-      if (!_hasUnpublishedState()) {
-        // Nothing pending and every slot published, so after a good snapshot
-        // this device is in sync, as a full publish would have concluded.
-        if (_lastSnapshotSucceeded) syncError = null;
+      // After a failed snapshot, run the full publish anyway: its own
+      // snapshot is the retry, which the change notifications can't replace.
+      if (_lastSnapshotSucceeded && !_hasUnpublishedState()) {
+        // Nothing pending and every slot published, so this device is in
+        // sync, as a full publish would have concluded.
+        syncError = null;
         return;
       }
       final checkConnection = _relaySession?.captureConnectionFence();
