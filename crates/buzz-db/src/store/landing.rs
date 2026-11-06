@@ -1270,6 +1270,9 @@ mod postgres_tests {
         }
     }
 
+    /// Relay members to seed, as (role, seconds since they joined).
+    type RelayMembers = Vec<(&'static str, i64)>;
+
     #[derive(Debug, Clone, Copy)]
     enum Expect {
         /// The seed at this index is adopted.
@@ -1297,7 +1300,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn ensure_landing_channel_rules() {
         let owner = || vec![("owner", 10)];
-        let cases: Vec<(&str, Vec<Seed>, Vec<(&str, i64)>, Expect)> = vec![
+        let cases: Vec<(&str, Vec<Seed>, RelayMembers, Expect)> = vec![
             ("listed general", vec![general()], vec![], Expect::Reused(0)),
             (
                 "name is case-insensitive",
@@ -1636,6 +1639,16 @@ mod postgres_tests {
         id
     }
 
+    /// An `entry_evidence_rules` row: its label, the membership to seed (its
+    /// channel's shape, `joined_at` and `removed_at`), and whether that is
+    /// entry evidence in roster mode and in roster-free mode.
+    type EvidenceCase = (
+        &'static str,
+        Option<(Shape, DateTime<Utc>, Option<DateTime<Utc>>)>,
+        bool,
+        bool,
+    );
+
     /// `has_entered_community`: which memberships are entry evidence, with
     /// a roster admission time (roster mode) and without (roster-free).
     ///
@@ -1650,13 +1663,7 @@ mod postgres_tests {
             admitted - Duration::hours(1),
             admitted + Duration::minutes(10),
         );
-        // (label, membership, roster-mode evidence, roster-free evidence)
-        let cases: &[(
-            &str,
-            Option<(Shape, DateTime<Utc>, Option<DateTime<Utc>>)>,
-            bool,
-            bool,
-        )] = &[
+        let cases: &[EvidenceCase] = &[
             ("no memberships", None, false, false),
             (
                 "active, joined before admission",
@@ -1732,6 +1739,16 @@ mod postgres_tests {
         }
     }
 
+    /// A `put_first_member_since_rules` row: its label, the existing row
+    /// (`joined_at`, `removed_at`), the roster admission time, and whether
+    /// the call writes.
+    type PutFirstCase = (
+        &'static str,
+        Option<(DateTime<Utc>, Option<DateTime<Utc>>)>,
+        Option<DateTime<Utc>>,
+        bool,
+    );
+
     /// `put_first_member_since` writes only when no row stands for this
     /// admission: none at all, or one removed before the roster admission.
     /// A leave since admission stands, and so does any earlier leave
@@ -1748,13 +1765,7 @@ mod postgres_tests {
             admitted - Duration::hours(1),
             admitted + Duration::minutes(10),
         );
-        // (label, existing row (joined, removed), admitted_at, writes)
-        let cases: &[(
-            &str,
-            Option<(DateTime<Utc>, Option<DateTime<Utc>>)>,
-            Option<DateTime<Utc>>,
-            bool,
-        )] = &[
+        let cases: &[PutFirstCase] = &[
             ("no row, roster", None, Some(admitted), true),
             ("no row, roster-free", None, None, true),
             ("active row", Some((before, None)), Some(admitted), false),
