@@ -110,6 +110,91 @@ fn assert_taken(result: crate::error::Result<impl std::fmt::Debug>, name: &str) 
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn invisible_names_are_rejected_by_every_store_entry_point() {
+    let f = Fixture::new().await;
+    let existing = f.open("visible").await;
+    for name in ["\u{200b}", "\u{200c}\u{200d}", "\u{feff}"] {
+        assert!(matches!(
+            f.create(name, ChannelType::Stream, ChannelVisibility::Open)
+                .await,
+            Err(DbError::InvalidData(_))
+        ));
+        let id = Uuid::new_v4();
+        assert!(matches!(
+            f.db.create_channel_with_id(
+                f.community,
+                id,
+                name,
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &f.owner.public_key().to_bytes(),
+                None
+            )
+            .await,
+            Err(DbError::InvalidData(_))
+        ));
+        assert!(matches!(
+            f.update(
+                existing,
+                ChannelUpdate {
+                    name: Some(name.into()),
+                    description: Some("must not be written".into()),
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(DbError::InvalidData(_))
+        ));
+        let after = f.db.get_channel(f.community, existing).await.unwrap();
+        assert_eq!(after.name, "visible");
+        assert!(after.description.is_none());
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channels WHERE community_id = $1")
+        .bind(f.community.as_uuid())
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "refused creates store no channel");
+
+    // Existing invalid names remain readable, editable without a name change,
+    // and repairable. Emulate a row written before this validation existed.
+    sqlx::query("UPDATE channels SET name = $1 WHERE community_id = $2 AND id = $3")
+        .bind("\u{200b}")
+        .bind(f.community.as_uuid())
+        .bind(existing)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.db.get_channel(f.community, existing).await.unwrap().name,
+        "\u{200b}"
+    );
+    f.update(
+        existing,
+        ChannelUpdate {
+            description: Some("still editable".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    f.update(
+        existing,
+        ChannelUpdate {
+            name: Some("👩‍💻".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let repaired = f.db.get_channel(f.community, existing).await.unwrap();
+    assert_eq!(repaired.name, "👩‍💻");
+    assert_eq!(repaired.description.as_deref(), Some("still editable"));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn a_listed_name_is_taken_only_for_listed_channels() {
     let f = Fixture::new().await;
     f.open("Square-iOS").await;
