@@ -278,6 +278,32 @@ void main() {
     expect(badge.generalUnreadCount, 1);
   });
 
+  test('forum channel is excluded even if unread', () async {
+    final container = buildContainer(
+      channels: [
+        makeChannel(
+          id: 'ch-forum',
+          channelType: 'forum',
+          lastMessageAtSeconds: t20,
+        ),
+        makeChannel(
+          id: 'ch-forum-mention',
+          channelType: 'forum',
+          lastMessageAtSeconds: t30,
+        ),
+        makeChannel(id: 'ch-stream', lastMessageAtSeconds: t20),
+      ],
+      readContexts: {},
+      highPriorityMap: {'ch-forum-mention': t30},
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final badge = container.read(unreadBadgeProvider);
+    expect(badge.highPriorityCount, 0);
+    expect(badge.generalUnreadCount, 1);
+  });
+
   test('non-member channel is excluded even if unread', () async {
     final container = buildContainer(
       channels: [
