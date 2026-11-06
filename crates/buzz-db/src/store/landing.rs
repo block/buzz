@@ -362,11 +362,13 @@ async fn ensure_landing_channel(
     let Some(steward) = steward(pool, community_id).await? else {
         return Ok(LandingAdoption::SkippedNoSteward);
     };
-    // No eligible `general` exists, so a listed holder of the name is one
-    // that cannot be adopted (archived, a forum, or with a TTL). Read that
-    // first: the common steady state of such a community is then one read,
-    // not a write transaction that `idx_channels_listed_name` rolls back.
-    if general_name_held(pool, community_id).await? {
+    // Read whether a listed channel that cannot be adopted (archived, a
+    // forum, or with a TTL) holds the name first: the common steady state of
+    // such a community is then one read, not a write transaction that
+    // `idx_channels_listed_name` rolls back. An eligible holder is left to
+    // `create_general`: one that a concurrent ensure created and designated
+    // since `adopt_general` read is found by its locked designation re-check.
+    if general_name_held_by_ineligible(pool, community_id).await? {
         return Ok(LandingAdoption::SkippedNameTaken);
     }
     match create_general(pool, community_id, steward).await {
@@ -379,20 +381,22 @@ async fn ensure_landing_channel(
     }
 }
 
-/// Whether a listed channel holds the name `general`: the predicate of
-/// `idx_channels_listed_name`, which `create_general` would trip.
-async fn general_name_held(pool: &PgPool, community_id: CommunityId) -> Result<bool> {
+/// Whether a listed channel that cannot be the landing channel holds the
+/// name `general`: the predicate of `idx_channels_listed_name`, which
+/// `create_general` would trip, without the eligible channels.
+async fn general_name_held_by_ineligible(pool: &PgPool, community_id: CommunityId) -> Result<bool> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let held: bool = sqlx::query_scalar(
+    let held: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS (SELECT 1 FROM channels \
          WHERE community_id = $1 AND lower(name) = $2 \
            AND visibility = 'open' AND NOT unlisted \
-           AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL)",
-    )
+           AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL \
+           AND NOT ({ELIGIBLE_SQL}))"
+    )))
     .bind(community_id.as_uuid())
     .bind(LANDING_CHANNEL_NAME)
     .fetch_one(&mut *connection)
@@ -1285,7 +1289,10 @@ mod postgres_tests {
     /// before an older unlisted" adopts the unlisted one → RED; adopt
     /// without the eligibility predicate → the archived, forum, ttl and
     /// private rows adopt them → RED; order the steward by `created_at`
-    /// alone → "owner before an earlier admin" → RED.
+    /// alone → "owner before an earlier admin" → RED; count an eligible
+    /// holder in the name pre-read → "listed general" reads as held, which
+    /// a concurrent ensure that lost the creation race would report as
+    /// `SkippedNameTaken` → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn ensure_landing_channel_rules() {
@@ -1432,6 +1439,13 @@ mod postgres_tests {
                 stewards.push(relay_member(&db, community, role, seconds_ago).await);
             }
 
+            assert_eq!(
+                general_name_held_by_ineligible(db.pool(), community)
+                    .await
+                    .expect("name read"),
+                matches!(expect, Expect::NameTaken),
+                "{label}: only a channel that cannot be adopted holds the name"
+            );
             let adoption = db
                 .ensure_landing_channel(community)
                 .await
