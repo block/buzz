@@ -193,7 +193,7 @@ async fn relay_quota_upgrade_preserves_populated_v1_authority_and_permissions() 
                 .unwrap();
         before.push((rows, acl));
     }
-    GATEWAY_MIGRATOR.run(&pool).await.unwrap();
+    migrate_gateway_through(&pool, 7).await.unwrap();
     for (table, (rows, acl)) in tables.into_iter().zip(before) {
         let after: serde_json::Value = sqlx::query_scalar(AssertSqlSafe(format!(
             "SELECT jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text) FROM {table} t"
