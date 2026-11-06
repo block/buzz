@@ -617,6 +617,19 @@ mod tests {
         bytes
     }
 
+    /// Thumbnails are also rebuilt from stored originals, which skip upload
+    /// validation, so generation enforces the pixel cap itself.
+    #[test]
+    fn image_thumbnails_reject_over_25_megapixels() {
+        let mut png = Vec::new();
+        image::GrayImage::new(5_001, 5_000)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let result =
+            generate_image_metadata_sync(&test_config(), &"a".repeat(64), &png, "image/png", "png");
+        assert!(matches!(result.err(), Some(MediaError::ImageTooLarge)));
+    }
+
     #[test]
     fn image_thumbnails_are_alpha_webp_and_jpeg() {
         for (format, mime, ext) in [
