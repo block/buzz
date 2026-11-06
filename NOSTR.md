@@ -368,6 +368,11 @@ tokens need the `AdminChannels` scope):
 - The title is 1–120 Unicode scalar values, not blank, on one line: no
   control characters at all (`\n` and `\t` included) and no Unicode line or
   paragraph separator (U+2028, U+2029).
+- Blank means only whitespace and invisible characters, such as a
+  zero-width space (U+200B) or a Braille blank (U+2800). Neither value may
+  contain a bidirectional control character (U+061C, U+200E, U+200F,
+  U+202A–U+202E, U+2066–U+2069). NIP-CL (**Welcome text**) lists the exact
+  sets, which clients mirror.
 - The relay stores both exactly as it receives them and validates nothing
   else about them (see the Markdown note above).
 - The designation cannot be turned off, only moved.
@@ -384,10 +389,12 @@ Refusals (`accepted: false`):
 | `welcome` with no value | `invalid: welcome tag must have a value (text, or empty to restore the default)` |
 | `welcome_title` with no value | `invalid: welcome_title tag must have a value (text, or empty to restore the default)` |
 | More than one `landing`, `welcome` or `welcome_title` tag | `invalid: kind:9002 may include at most one landing, one welcome and one welcome_title tag` |
-| Whitespace-only message | `invalid: welcome message must not be blank` |
+| Blank message (only whitespace and invisible characters) | `invalid: welcome message must not be blank` |
+| Message with a bidirectional control character | `invalid: welcome message must not contain bidirectional control characters` |
 | Message over 4000 characters | `invalid: welcome message is too long (max 4000 characters)` |
 | Message with a control character other than `\n` or `\t` | `invalid: welcome message must not contain control characters other than line breaks and tabs` |
-| Whitespace-only title | `invalid: welcome title must not be blank` |
+| Blank title (only whitespace and invisible characters) | `invalid: welcome title must not be blank` |
+| Title with a bidirectional control character | `invalid: welcome title must not contain bidirectional control characters` |
 | Title over 120 characters | `invalid: welcome title is too long (max 120 characters)` |
 | Title with any control character (`\n` and `\t` included) or U+2028/U+2029 | `invalid: welcome title must be a single line without control characters` |
 | Ineligible target channel | `invalid: landing requires an open, unarchived channel without a ttl` |
