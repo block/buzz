@@ -768,6 +768,116 @@ mod tests {
         assert!(missing.contains(&EventTopicKey::from_context(&dropped_ctx, dropped)));
     }
 
+    /// Fill the command queue with first retains of fresh topics, then retain
+    /// `topic`, without yielding: on this single-threaded runtime the
+    /// subscriber cannot drain the queue in between, so `topic`'s subscribe
+    /// hint is dropped.
+    async fn retain_with_dropped_hint(
+        manager: &PubSubManager,
+        filler: &TenantContext,
+        first_filler: u128,
+        target: &TenantContext,
+        topic: EventTopic,
+    ) {
+        tokio::task::unconstrained(async {
+            let mut id = first_filler;
+            while manager.subscription_tx.capacity() > 0 {
+                manager
+                    .retain_topic(filler, EventTopic::Channel(Uuid::from_u128(id)))
+                    .await;
+                id += 1;
+            }
+            manager.retain_topic(target, topic).await;
+        })
+        .await;
+    }
+
+    /// Publish to `topic` until the live link delivers it.
+    async fn delivered(
+        manager: &PubSubManager,
+        rx: &mut broadcast::Receiver<ChannelEvent>,
+        ctx: &TenantContext,
+        topic: EventTopic,
+    ) -> bool {
+        let event = EventBuilder::new(Kind::TextNote, "reconciled")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                manager
+                    .publish_event(ctx, topic, &event)
+                    .await
+                    .expect("publish");
+                let wait = tokio::time::sleep(Duration::from_millis(100));
+                tokio::pin!(wait);
+                loop {
+                    tokio::select! {
+                        () = &mut wait => break,
+                        received = rx.recv() => match received {
+                            Ok(received) if received.event.id == event.id => return,
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => panic!("closed"),
+                        },
+                    }
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// A subscribe hint lost to a full command queue is recovered by the
+    /// running subscriber on the same Redis link: first for a new topic, then
+    /// for one released, unsubscribed, and retained again. The link never
+    /// reconnects and nothing sends `Confirm` for the topic, so only the
+    /// reconciliation wake-up can subscribe it. Mutation: drop the
+    /// subscriber's `subscription_changed` arm, or the `notify_one` in
+    /// `retain_topic` → the topic is never delivered → RED.
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn live_subscriber_recovers_a_dropped_subscribe_hint() {
+        let manager = Arc::new(
+            PubSubManager::with_config(
+                PubSubConfig::new("redis://127.0.0.1:6379")
+                    .with_unsubscribe_debounce(Duration::from_millis(1)),
+                make_test_pool(),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut rx = manager.subscribe_local();
+        let mut link = manager.link_state();
+        let subscriber = tokio::spawn(Arc::clone(&manager).run_subscriber());
+        link.wait_for(|state| state.up).await.expect("link up");
+        let epoch = link.borrow().epoch;
+
+        let filler = ctx(Uuid::new_v4().as_u128(), "filler.example");
+        let target = ctx(Uuid::new_v4().as_u128(), "target.example");
+        let topic = EventTopic::Channel(Uuid::new_v4());
+
+        retain_with_dropped_hint(&manager, &filler, 0, &target, topic).await;
+        assert!(
+            delivered(&manager, &mut rx, &target, topic).await,
+            "a dropped hint for a new topic must be reconciled"
+        );
+
+        manager.release_topic(&target, topic).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Queued after the debounced unsubscribe: once it answers, the
+        // subscriber has processed that unsubscribe.
+        manager
+            .confirm_topic(&filler, EventTopic::Channel(Uuid::from_u128(0)))
+            .await
+            .expect("confirm");
+        retain_with_dropped_hint(&manager, &filler, 1 << 32, &target, topic).await;
+        assert!(
+            delivered(&manager, &mut rx, &target, topic).await,
+            "a dropped hint after an unsubscribe must be reconciled"
+        );
+        assert_eq!(link.borrow().epoch, epoch, "the link must not reconnect");
+        subscriber.abort();
+    }
+
     #[tokio::test]
     async fn retain_release_refcounts_and_debounces_last_release() {
         let pool = make_test_pool();

@@ -540,8 +540,8 @@ async fn claim(
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
-    let subs = conn.subscriptions.lock().await;
-    if conn.cancel.is_cancelled() || subs.get(sub_id) != Some(&owner) {
+    let mut subs = conn.subscriptions.lock().await;
+    if !super::close::claim_locked(&mut subs, sub_id, owner, conn) {
         return None;
     }
     super::close::retire_holder_locked(sub_id, conn, state).await;
@@ -689,7 +689,7 @@ async fn send_reserved(
         .await
         .map_err(|_| Stop::Close("error: connection closed"))?;
     let subs = conn.subscriptions.lock().await;
-    if subs.get(sub_id) != Some(&owner) {
+    if !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
     let pending = unless_resync.map(|handle| {
@@ -714,7 +714,7 @@ async fn try_send_owned(
     conn: &ConnectionState,
 ) -> Result<(), Stop> {
     let subs = conn.subscriptions.lock().await;
-    if subs.get(sub_id) != Some(&owner) {
+    if !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
     conn.send_tx
@@ -977,8 +977,15 @@ mod tests {
         conn.subscriptions
             .try_lock()
             .unwrap()
-            .insert("s".into(), owner);
+            .insert("s".into(), held(owner));
         (conn, rx)
+    }
+
+    fn held(owner: u64) -> super::super::close::SubOwner {
+        super::super::close::SubOwner {
+            owner,
+            claimed: true,
+        }
     }
 
     /// A live frame goes out only while its request still owns the ID.
@@ -996,7 +1003,7 @@ mod tests {
             Err(Stop::Retired)
         ));
         assert!(rx.try_recv().is_err());
-        conn.subscriptions.lock().await.insert("s".into(), 1);
+        conn.subscriptions.lock().await.insert("s".into(), held(1));
         assert!(try_send_owned("s", 1, "x".into(), &conn).await.is_ok());
         assert!(rx.try_recv().is_ok());
     }
@@ -1017,7 +1024,7 @@ mod tests {
         // Polled once, the frame is now waiting in `reserve`.
         assert!(futures_util::poll!(&mut waiting).is_pending());
         // A replacing REQ takes the ID while the frame waits.
-        conn.subscriptions.lock().await.insert("s".into(), 2);
+        conn.subscriptions.lock().await.insert("s".into(), held(2));
         rx.recv().await.unwrap();
         assert!(matches!(waiting.await, Err(Stop::Retired)));
         let mut rest = 0;

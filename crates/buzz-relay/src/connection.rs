@@ -37,8 +37,8 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const WS_TERMINAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Shared mutable subscription map for a single WebSocket connection: sub ID →
-/// owner token of the request that currently holds it (see `close::next_owner`).
-pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, u64>>>;
+/// the newest admitted request for it (see `close::SubOwner`).
+pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, handlers::close::SubOwner>>>;
 
 /// Pre-built NIP-FI session components created before the `is_community_active`
 /// bootstrap await. Passed from the HTTP-layer wrapper into the active handler so
@@ -1617,8 +1617,9 @@ fn log_aborted_auth(conn: &ConnectionState, claimed: nostr::PublicKey) {
 pub(crate) mod test_seam {
     use super::*;
 
-    pub(crate) type Hold =
-        tokio::sync::oneshot::Sender<tokio::sync::OwnedMutexGuard<HashMap<String, u64>>>;
+    pub(crate) type Hold = tokio::sync::oneshot::Sender<
+        tokio::sync::OwnedMutexGuard<HashMap<String, handlers::close::SubOwner>>,
+    >;
 
     tokio::task_local! {
         /// Hands the test this connection's subscription lock, already held,
@@ -2832,7 +2833,13 @@ pub(crate) mod tests {
         {
             let mut subs = conn.subscriptions.lock().await;
             for index in 0..handlers::req::MAX_SUBSCRIPTIONS {
-                subs.insert(format!("held-{index}"), 0);
+                subs.insert(
+                    format!("held-{index}"),
+                    handlers::close::SubOwner {
+                        owner: 0,
+                        claimed: true,
+                    },
+                );
             }
         }
         while conn
@@ -5646,7 +5653,13 @@ pub(crate) mod terminal_close_delivery_tests {
         });
         drop(effect_rx.await.expect("effect permit"));
         let mut subscriptions = subs_rx.await.expect("subscription lock");
-        subscriptions.insert("s".to_owned(), 1);
+        subscriptions.insert(
+            "s".to_owned(),
+            handlers::close::SubOwner {
+                owner: 1,
+                claimed: true,
+            },
+        );
         let mut socket = connected.await.expect("raw client");
 
         let elapsed = time_to_eof(&mut socket, std::time::Instant::now()).await;
