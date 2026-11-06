@@ -2748,6 +2748,38 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// Relay selection asks only what a command needs: an explicit key never
+    /// asks for a pairing, unpairing asks nothing, pairing asks for no other
+    /// pairing, and an agent's inherited relay comes first. `None` for
+    /// `inherited` means it must not be asked; the paired lookup never is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relay_selection_asks_only_what_a_command_needs() {
+        use clap::Parser;
+        const INHERITED: &str = "wss://inherited.example/";
+        const DEFAULT: &str = "http://localhost:3000";
+        let cases = [
+            ("users get", true, Some(None), DEFAULT),
+            ("auth desktop unpair", false, None, DEFAULT),
+            ("auth desktop pair", false, Some(None), DEFAULT),
+            ("users get", false, Some(Some(INHERITED)), INHERITED),
+        ];
+        for (args, explicit_key, inherited, want) in cases {
+            let argv = std::iter::once("buzz").chain(args.split(' '));
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let inherited = async move {
+                Ok(inherited
+                    .unwrap_or_else(|| panic!("`{args}` asked for an inherited relay"))
+                    .map(str::to_owned))
+            };
+            let paired = async { panic!("`{args}` asked for a paired relay") };
+            let relay = default_relay_with(&cli.command, explicit_key, inherited, paired)
+                .await
+                .unwrap();
+            assert_eq!(relay, want, "`{args}`");
+        }
+    }
+
     #[test]
     fn messages_send_from_thread_conflicts_with_reply_and_broadcast() {
         let base = [

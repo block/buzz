@@ -1133,10 +1133,10 @@ async fn accepted_relay(
         }
     }
     match (accepted.len(), transient) {
-        (1, _) => Ok(accepted.pop()),
-        // Nothing usable, but a check that might pass on retry: report it
-        // rather than fall back to a relay this person is not paired for.
-        (0, Some(e)) => Err(e),
+        // A desktop whose check failed may accept a relay of its own: report
+        // it rather than pick, or fall back to, a relay it might contradict.
+        (0 | 1, Some(e)) => Err(e),
+        (1, None) => Ok(accepted.pop()),
         _ => Ok(None),
     }
 }
@@ -2489,14 +2489,16 @@ pub(crate) mod tests {
             .unwrap_err();
         assert_eq!(crate::error::exit_code(&err), 2, "{err:?}");
 
-        // A usable relay wins over a transient failure elsewhere.
+        // A still-throttled desktop might add a second relay, so one
+        // accepted relay elsewhere does not settle the choice.
         let (throttled, _) = provider(
             |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1}),
         )
         .await;
         let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
         let ads = vec![("a".into(), good), ("b".into(), throttled)];
-        assert!(accepted_relay(&store, ads).await.unwrap().is_some());
+        let err = accepted_relay(&store, ads).await.unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:?}");
     }
 
     /// With no usable relay, a retryable failure is reported over an
