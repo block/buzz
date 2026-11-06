@@ -582,8 +582,8 @@ pub(crate) async fn query_events_on(
         _ => None,
     };
     // Thread-reply reads must be planned with their root: a cached generic
-    // plan sorts every reply of a large thread. Tag matches likewise.
-    let persistent = !has_tag_values(q) && root.is_none();
+    // plan sorts every reply of a large thread. Tag and `#d` matches likewise.
+    let persistent = !plans_with_bound_values(q) && root.is_none();
     let limit = page_limit(q);
     // Recent-first (see `recent_pass`): the newest partitions answer a page
     // that fills there; older rows are read only for what is still missing.
@@ -863,19 +863,7 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         }
     }
 
-    if let Some(ref d) = q.d_tag {
-        qb.push(format!(" AND {col_prefix}d_tag = "))
-            .push_bind(d.clone());
-    } else if let Some(ref ds) = q.d_tags {
-        if !ds.is_empty() {
-            qb.push(format!(" AND {col_prefix}d_tag IN ("));
-            let mut sep = qb.separated(", ");
-            for d in ds {
-                sep.push_bind(d.clone());
-            }
-            qb.push(")");
-        }
-    }
+    push_d_tag_filter(qb, col_prefix, q);
 
     // Shared-gated visibility pushdown: exclude SHARED_GATED_KINDS events that
     // are neither authored by the reader nor explicitly shared.  Applied BEFORE
@@ -1321,12 +1309,34 @@ fn push_exact_tag_match(
         .push(")))");
 }
 
-/// Whether `q` carries a [`EventQuery::tag_values`] match. Such a query runs
-/// as an unnamed statement, so Postgres plans it with the bound values. After
-/// a few runs, a cached generic plan ignores the value and can scan every
-/// group-state row in the community instead of using the `tags` GIN index.
-fn has_tag_values(q: &EventQuery) -> bool {
+/// Whether `q` must run as an unnamed statement, so Postgres plans it with the
+/// bound values. After a few runs on a connection, Postgres can switch a named
+/// statement to a cached generic plan that ignores the values:
+/// - a [`EventQuery::tag_values`] match then scans every group-state row in
+///   the community instead of using the `tags` GIN index;
+/// - a multi-value `#d` ([`EventQuery::d_tags`]) match walks the author's
+///   `created_at` index and filters `d_tag` row by row. Its `LIMIT` is never
+///   reached when it asks for one row per value, so it reads every stored
+///   version of the kind (relay-signed channel metadata, say) instead of
+///   probing `idx_events_parameterized` once per value.
+fn plans_with_bound_values(q: &EventQuery) -> bool {
     q.tag_values.iter().any(|(_, values)| !values.is_empty())
+        || q.d_tags.as_ref().is_some_and(|ds| !ds.is_empty())
+}
+
+/// AND the NIP-33 `d` match: one value, or any of [`EventQuery::d_tags`] as
+/// one array bind, so the number of values does not change the SQL text.
+fn push_d_tag_filter(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    if let Some(ref d) = q.d_tag {
+        qb.push(format!(" AND {col_prefix}d_tag = "))
+            .push_bind(d.clone());
+    } else if let Some(ref ds) = q.d_tags {
+        if !ds.is_empty() {
+            qb.push(format!(" AND {col_prefix}d_tag = ANY("))
+                .push_bind(ds.clone())
+                .push(")");
+        }
+    }
 }
 
 /// AND one [`push_exact_tag_match`] per non-empty [`EventQuery::tag_values`]
@@ -1523,11 +1533,15 @@ pub(crate) async fn count_events_on(
     let mut qb = count_events_sql(q);
     // Same transaction-local deadline as `query_events_on`, so a COUNT cannot
     // stall indefinitely either.
-    let row = fetch_with_read_deadline(conn, qb.build().persistent(!has_tag_values(q)), deadline)
-        .await?
-        .into_iter()
-        .next()
-        .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?;
+    let row = fetch_with_read_deadline(
+        conn,
+        qb.build().persistent(!plans_with_bound_values(q)),
+        deadline,
+    )
+    .await?
+    .into_iter()
+    .next()
+    .ok_or_else(|| DbError::InvalidData("COUNT returned no rows".to_string()))?;
     let cnt: i64 = row.try_get("cnt")?;
 
     Ok(cnt)
@@ -1630,19 +1644,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
             .push_bind(u);
     }
 
-    if let Some(ref d) = q.d_tag {
-        qb.push(format!(" AND {col_prefix}d_tag = "))
-            .push_bind(d.clone());
-    } else if let Some(ref ds) = q.d_tags {
-        if !ds.is_empty() {
-            qb.push(format!(" AND {col_prefix}d_tag IN ("));
-            let mut sep = qb.separated(", ");
-            for d in ds {
-                sep.push_bind(d.clone());
-            }
-            qb.push(")");
-        }
-    }
+    push_d_tag_filter(&mut qb, col_prefix, q);
 
     qb
 }
@@ -3152,6 +3154,33 @@ mod e_tag_filter_shape_tests {
         assert!(!unbounded.contains("m.event_kind"));
     }
 
+    /// A multi-value `#d` read binds its values as one array, so the number of
+    /// values does not change the SQL text, in both the page SELECT and the
+    /// COUNT. One `IN ($n, …)` bind per value made a new statement (and a new
+    /// `pg_stat_statements` entry) for every arity.
+    #[test]
+    fn d_tag_sql_does_not_depend_on_value_count() {
+        let sql = |n: usize| {
+            let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
+            q.kinds = Some(vec![39000]);
+            q.pubkey = Some(vec![7; 32]);
+            q.d_tags = Some((0..n).map(|i| format!("d{i}")).collect());
+            (
+                build_query_events_sql(&q, Range::All, page_limit(&q))
+                    .sql()
+                    .as_str()
+                    .to_owned(),
+                count_events_sql(&q).sql().as_str().to_owned(),
+            )
+        };
+        let two = sql(2);
+        assert_eq!(two, sql(128));
+        for text in [&two.0, &two.1] {
+            assert!(text.contains("d_tag = ANY($"), "{text}");
+            assert!(!text.contains("d_tag IN ("), "{text}");
+        }
+    }
+
     /// The channel scope is one array bind: a viewer's channel count must not
     /// change the SQL text, or each count is its own statement that is planned
     /// again on every call. Holds for the `#p` join and plain reads, for
@@ -3307,14 +3336,29 @@ mod postgres_tests {
             .expect("read prepared statements")
     }
 
-    /// A label or creator match must keep parameter-aware planning. A cached
-    /// generic plan ignores the label value and scans every group-state row in
-    /// the community instead of using the `tags` GIN index.
+    /// Label/creator matches and multi-value `#d` reads must keep
+    /// parameter-aware planning. A cached generic plan ignores the values: a
+    /// label match scans every group-state row in the community instead of
+    /// using the `tags` GIN index, and a `#d` read walks the author's
+    /// `created_at` index and reads every stored version of the kind. The `#d`
+    /// read still returns and counts exactly the requested addresses.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn tag_value_queries_are_not_cached_as_prepared_statements() {
+    async fn value_matched_queries_are_not_cached_as_prepared_statements() {
         let pool = setup_pool().await;
         let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let keys = Keys::generate();
+        let mut addressed = Vec::new();
+        for d in ["a", "b", "c"] {
+            let event = EventBuilder::new(Kind::Custom(30023), "")
+                .tags([Tag::parse(["d", d]).unwrap()])
+                .sign_with_keys(&keys)
+                .unwrap();
+            insert_event(&pool, community, &event, None)
+                .await
+                .expect("insert addressable event");
+            addressed.push((d, event.id));
+        }
         let mut conn = pool.acquire().await.expect("acquire");
         // Clear SQLx's statement cache and Postgres's prepared statements
         // together; a raw `DEALLOCATE ALL` would leave the client cache
@@ -3322,23 +3366,51 @@ mod postgres_tests {
         sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
             .expect("clear prepared statements");
-        let mut q = EventQuery::for_community(community);
-        q.kinds = Some(vec![39000]);
-        q.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
-        for _ in 0..6 {
-            query_events_on(&mut conn, &q, ReadDeadline::PerRead)
-                .await
-                .expect("label query");
-            count_events_on(&mut conn, &q, ReadDeadline::PerRead)
-                .await
-                .expect("label count");
-        }
-        assert_eq!(prepared_like(&mut conn, "%tags @> ANY(%").await, 0);
 
-        // Control: the same query without a tag match stays a cached statement,
-        // so the check above can see one.
-        q.tag_values.clear();
-        query_events_on(&mut conn, &q, ReadDeadline::PerRead)
+        let mut label = EventQuery::for_community(community);
+        label.kinds = Some(vec![39000]);
+        label.tag_values = vec![("t".to_owned(), vec!["for-you".to_owned()])];
+        let mut d_tags = EventQuery::for_community(community);
+        d_tags.kinds = Some(vec![30023]);
+        d_tags.pubkey = Some(keys.public_key().to_bytes().to_vec());
+        d_tags.d_tags = Some(vec!["a".to_owned(), "c".to_owned()]);
+        for (q, statement) in [(&label, "%tags @> ANY(%"), (&d_tags, "%d_tag = ANY(%")] {
+            for _ in 0..6 {
+                query_events_on(&mut conn, q, ReadDeadline::PerRead)
+                    .await
+                    .expect("value-matched query");
+                count_events_on(&mut conn, q, ReadDeadline::PerRead)
+                    .await
+                    .expect("value-matched count");
+            }
+            assert_eq!(prepared_like(&mut conn, statement).await, 0, "{statement}");
+        }
+
+        let mut page: Vec<_> = query_events_on(&mut conn, &d_tags, ReadDeadline::PerRead)
+            .await
+            .expect("d-tag page")
+            .into_iter()
+            .map(|stored| stored.event.id)
+            .collect();
+        page.sort();
+        let mut expected: Vec<_> = addressed
+            .iter()
+            .filter(|(d, _)| *d != "b")
+            .map(|(_, id)| *id)
+            .collect();
+        expected.sort();
+        assert_eq!(page, expected, "exactly the requested addresses");
+        assert_eq!(
+            count_events_on(&mut conn, &d_tags, ReadDeadline::PerRead)
+                .await
+                .expect("d-tag count"),
+            2
+        );
+
+        // Control: the same query without a value match stays a cached
+        // statement, so the checks above can see one.
+        label.tag_values.clear();
+        query_events_on(&mut conn, &label, ReadDeadline::PerRead)
             .await
             .expect("plain query");
         assert!(prepared_like(&mut conn, "%FROM events%").await > 0);
