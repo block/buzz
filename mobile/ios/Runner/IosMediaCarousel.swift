@@ -25,7 +25,14 @@ private final class CarouselShimmer: UIView {
     gradient.locations = [0, 0.34, 0.5, 0.66, 1]
     layer.addSublayer(gradient)
     updateColors()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(reduceMotionChanged),
+      name: UIAccessibility.reduceMotionStatusDidChangeNotification,
+      object: nil
+    )
   }
+  @objc private func reduceMotionChanged() { animate() }
   required init?(coder: NSCoder) { nil }
   override func layoutSubviews() {
     super.layoutSubviews()
