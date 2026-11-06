@@ -228,7 +228,7 @@ pub(super) fn media_reference_query(
     query.push(" AS readable FROM (");
     query.push("SELECT e.id,e.pubkey,e.created_at,e.kind,");
     query.push(if probe == 3 {
-        "jsonb_path_query_array(e.tags, '$[*] ? (@[0] == \"link-preview\")') AS tags,"
+        "jsonb_path_query_array(e.tags, 'strict $[*] ? (@[0] == \"link-preview\")') AS tags,"
     } else {
         "e.tags,"
     });
@@ -389,7 +389,7 @@ pub(super) fn media_reference_query(
             .push_bind(serde_json::json!([["p", hex::encode(pubkey)]]))
             .push(")");
         query.push(" AND (kind <> ALL(").push_bind(shared).push(") OR pubkey=").push_bind(pubkey)
-            .push(" OR jsonb_path_query_array(tags, '$[*] ? (@[0] == \"shared\")') = '[[\"shared\",\"true\"]]'::jsonb)");
+            .push(" OR jsonb_path_query_array(tags, 'strict $[*] ? (@[0] == \"shared\")') = '[[\"shared\",\"true\"]]'::jsonb)");
     }
     if probe == 2 {
         query

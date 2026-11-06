@@ -63,7 +63,8 @@ successful expansion, the usual rollback requirement above still applies.
 
 The earlier PR snapshot split this unmerged expansion across migrations 0084
 and 0085. They were consolidated during review, then renumbered to 0086 after the base added
-its unrelated 0084 default-channel recovery migration. Main’s migration is unchanged.
+its unrelated 0084 default-channel recovery and 0085 community-policy migrations.
+Both base migrations are unchanged.
 A disposable database that already applied an earlier PR snapshot must be
 recreated before testing this revision; do not rewrite its sqlx migration rows
 or checksums. Keep any ongoing old-snapshot trial pinned to its matching binary.
