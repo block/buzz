@@ -138,7 +138,10 @@ where
     pub(crate) fn invalidate_if(&self, predicate: impl Fn(&K) -> bool + Send + Sync + 'static) {
         let mut epoch = self.lock();
         *epoch = epoch.wrapping_add(1);
-        if let Err(error) = self.entries.invalidate_entries_if(move |key, _| predicate(key)) {
+        if let Err(error) = self
+            .entries
+            .invalidate_entries_if(move |key, _| predicate(key))
+        {
             // Invalidation closures are enabled at construction. If that ever
             // regresses, over-invalidate rather than serve stale state.
             tracing::error!(
@@ -190,7 +193,10 @@ mod tests {
             16,
             MAX_AGE,
             Duration::from_secs(5),
-            ("test_fenced_cache_hits_total", "test_fenced_cache_misses_total"),
+            (
+                "test_fenced_cache_hits_total",
+                "test_fenced_cache_misses_total",
+            ),
         ))
     }
 

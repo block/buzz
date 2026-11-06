@@ -1590,7 +1590,10 @@ pub struct AppState {
     /// Socket admission and moderation-command actors read fresh: a grant that
     /// outlives the bound must not rest on a cached verdict.
     pub(crate) restriction_cache: Arc<
-        crate::fenced_cache::FencedCache<(CommunityId, Vec<u8>), buzz_db::moderation::RestrictionState>,
+        crate::fenced_cache::FencedCache<
+            (CommunityId, Vec<u8>),
+            buzz_db::moderation::RestrictionState,
+        >,
     >,
     /// Normalized request host → community, from the row-zero host binding
     /// ([`crate::tenant::bind_community`]). Only mapped hosts are cached, and
@@ -3951,7 +3954,7 @@ pub(crate) mod tests {
             );
             let (_, read_at) = state
                 .community_active
-                .entry(community)
+                .entry(&community)
                 .expect("community active entry");
             assert!(read_at.elapsed() < crate::community_active::COMMUNITY_ACTIVE_MAX_AGE);
         }
@@ -5370,7 +5373,10 @@ pub(crate) mod tests {
         ] {
             seed();
             invalidate();
-            assert!(!cached((community, owner.clone())), "the target's row is dropped");
+            assert!(
+                !cached((community, owner.clone())),
+                "the target's row is dropped"
+            );
             assert!(
                 !cached((community, agent.clone())),
                 "an owned agent's row is dropped with it"
