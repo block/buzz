@@ -207,6 +207,7 @@ pub(super) async fn run(
         post(state, tenant, owner, persona).await.unwrap();
         for keys in [owner, member] {
             let report = EventBuilder::new(Kind::Custom(1984), "media report")
+                .allow_self_tagging()
                 .tags([
                     Tag::parse(["p", &owner.public_key().to_hex()]).unwrap(),
                     Tag::parse(["x", &hash, "spam"]).unwrap(),
