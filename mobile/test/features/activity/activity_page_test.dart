@@ -18,6 +18,7 @@ import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -930,6 +931,21 @@ void main() {
 
       await chooseSender('Anyone');
       expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsOneWidget);
+      int? threadMarker() => ProviderScope.containerOf(
+        tester.element(find.byType(ActivityPage)),
+      ).read(readStateProvider).contexts[threadContextKey(threadIdRoot1)];
+      // The synced marker stops short of the hidden agent reply.
+      expect(threadMarker(), now - 301);
+
+      await chooseSender('Agents');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-g1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(threadMarker(), now - 300);
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
     },
   );
 
