@@ -740,6 +740,12 @@ impl BuzzClient {
             .assertion_sent
             .load(std::sync::atomic::Ordering::Relaxed);
         let desktop = self.credentials.is_desktop();
+        // Only a refused explicit key reads the stored pairings.
+        let hint = if status == 401 && self.credentials.is_explicit_key() {
+            self.key_overrode_pairing()
+        } else {
+            ""
+        };
         if status == 401 && !sent && desktop {
             return CliError::Auth(format!(
                 "relay requires authentication ({message}); if it enforces federated identity \
@@ -752,13 +758,12 @@ impl BuzzClient {
                 "relay requires authentication ({message}); if it enforces federated identity \
                  (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} to your own NIP-FA sign-in session \
                  (a human session for this key, not an agent grant) and \
-                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion{}",
-                self.key_overrode_pairing()
+                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion{hint}"
             ));
         }
         CliError::Relay {
             status,
-            body: message,
+            body: format!("{message}{hint}"),
         }
     }
 
@@ -4282,6 +4287,76 @@ mod ws_deadline_tests {
             named.lock().unwrap().as_deref(),
             Some(format!("ws://{addr}/team/").as_str())
         );
+    }
+
+    /// The note that a key overrode a pairing depends only on a 401, an
+    /// explicit key and a stored pairing for the relay; nothing else reads
+    /// the stored pairings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_refused_explicit_key_notes_an_overridden_pairing() {
+        use crate::desktop_provider::tests::PAIRED_RELAYS;
+        const NOTE: &str = "took precedence over this CLI's Buzz desktop pairing";
+        let relay = "https://team.example/x/";
+        PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec!["wss://team.example/x/".into()], 0));
+        let reads = || PAIRED_RELAYS.with(|p| p.borrow().1);
+        let keys = Keys::generate();
+
+        let plain = BuzzClient::new(relay.into(), Credentials::from_keys(keys.clone())).unwrap();
+        assert!(plain
+            .relay_error(401, "no".into())
+            .to_string()
+            .contains(NOTE));
+        let session =
+            crate::federated_identity::AdapterSession::new("https://adapter.example", "t", relay)
+                .unwrap();
+        let with_evidence = BuzzClient::new(
+            relay.into(),
+            Credentials::from_keys(keys).with_evidence(session),
+        )
+        .unwrap();
+        with_evidence.assertion_sent.store(true, Ordering::Relaxed);
+        assert!(with_evidence
+            .relay_error(401, "no".into())
+            .to_string()
+            .contains(NOTE));
+        assert_eq!(reads(), 2);
+
+        assert!(!plain
+            .relay_error(500, "no".into())
+            .to_string()
+            .contains(NOTE));
+        assert!(!plain
+            .relay_error(403, "no".into())
+            .to_string()
+            .contains(NOTE));
+        assert_eq!(reads(), 2, "only a 401 reads the pairings");
+
+        let (endpoint, _) = crate::desktop_provider::tests::desktop(
+            Keys::generate(),
+            vec!["wss://team.example/x/".into()],
+        )
+        .await;
+        let provider = crate::desktop_provider::Provider::open(
+            endpoint,
+            "t".into(),
+            false,
+            "wss://team.example/x/",
+        )
+        .await
+        .unwrap()
+        .ok()
+        .unwrap();
+        let desktop = BuzzClient::new(
+            relay.into(),
+            Credentials::from_desktop(provider).await.unwrap(),
+        )
+        .unwrap();
+        assert!(!desktop
+            .relay_error(401, "no".into())
+            .to_string()
+            .contains(NOTE));
+        assert_eq!(reads(), 2, "desktop credentials never read them");
     }
 
     #[cfg(unix)]
