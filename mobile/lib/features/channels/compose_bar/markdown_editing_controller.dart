@@ -134,19 +134,62 @@ class _MarkdownEditingController extends TextEditingController {
   List<TextRange> _linkRangesIn(String source) {
     if (_linkRangesText == source) return _linkRanges;
     _linkRangesText = source;
-    return _linkRanges = List.unmodifiable([
-      for (final match in _linkPattern.allMatches(source))
-        TextRange(
-          start: match.start,
-          end:
-              match.end -
-              (_linkTrailingPunctuation
-                      .firstMatch(match.group(0)!)
-                      ?.group(0)
-                      ?.length ??
-                  0),
-        ),
-    ]);
+    return _linkRanges = List.unmodifiable(_renderedLinkRanges(source, 0));
+  }
+
+  /// The links [buildTextSpan] draws in [source], split by Markdown the same
+  /// way, so a closing `_` or `~~` stays outside the link it wraps.
+  List<TextRange> _renderedLinkRanges(String source, int sourceOffset) {
+    final ranges = <TextRange>[];
+    void addLinks(int start, int end) {
+      for (final match in _linkPattern.allMatches(
+        source.substring(start, end),
+      )) {
+        final trailing = _linkTrailingPunctuation
+            .firstMatch(match.group(0)!)
+            ?.group(0);
+        ranges.add(
+          TextRange(
+            start: sourceOffset + start + match.start,
+            end: sourceOffset + start + match.end - (trailing?.length ?? 0),
+          ),
+        );
+      }
+    }
+
+    var offset = 0;
+    while (offset < source.length) {
+      final tail = source.substring(offset);
+      _MarkdownRule? nextRule;
+      RegExpMatch? nextMatch;
+      for (final rule in _rules) {
+        final match = rule.pattern.firstMatch(tail);
+        if (match == null) continue;
+        if (nextMatch == null || match.start < nextMatch.start) {
+          nextRule = rule;
+          nextMatch = match;
+        }
+      }
+      if (nextRule == null || nextMatch == null) {
+        addLinks(offset, source.length);
+        break;
+      }
+      addLinks(offset, offset + nextMatch.start);
+      if (nextRule.parsesNestedFormatting) {
+        final (contentStart, _) = _contentBounds(
+          nextMatch.group(0)!,
+          nextRule.style,
+        );
+        ranges.addAll(
+          _renderedLinkRanges(
+            nextMatch.group(1)!,
+            sourceOffset + offset + nextMatch.start + contentStart,
+          ),
+        );
+      }
+      offset += nextMatch.end;
+    }
+    return ranges;
   }
 
   /// The link shown as raw text because the selection sits in it: a caret

@@ -4264,6 +4264,19 @@ void main() {
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         source,
       );
+
+      // A caret after a closing italic or strikethrough delimiter is past the
+      // link, so the link stays a chip.
+      final plain = 'buzz://repo?owner=$owner&d=buzz';
+      for (final wrapped in ['_${plain}_', '~~$plain~~']) {
+        await tester.enterText(find.byType(TextField), wrapped);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+          findsOneWidget,
+          reason: wrapped,
+        );
+      }
     });
 
     testWidgets('uses the primary color for formatting actions', (
