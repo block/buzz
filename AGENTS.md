@@ -637,7 +637,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 ## Common Gotchas
 
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `buzz-core/src/kind.rs`.
-2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
+2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403, or a `restricted:` CLOSED) unless the filter has `#p=[self]`, `authors=[self]` or explicit `ids`. Always include explicit kind filters.
 3. **`messages search` chooses its own supported kinds** — do not add a `--kinds` option; the current command does not accept one. This differs from raw relay filters, which still need explicit kinds.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.

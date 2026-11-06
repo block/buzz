@@ -1747,12 +1747,12 @@ async fn query_member_events(
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
-    // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
+    // #p or authors naming only the caller — same enforcement as WS REQ handler.
     let authed_pubkey_hex = pubkey.to_hex();
     if !crate::handlers::req::p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
         return Err(api_error(
             StatusCode::FORBIDDEN,
-            "restricted: p-gated kinds require #p tag matching your pubkey",
+            crate::handlers::req::P_GATED_REFUSAL,
         ));
     }
     if !crate::handlers::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
@@ -2429,7 +2429,7 @@ async fn count_member_events(
     if !crate::handlers::req::p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
         return Err(api_error(
             StatusCode::FORBIDDEN,
-            "restricted: p-gated kinds require #p tag matching your pubkey",
+            crate::handlers::req::P_GATED_REFUSAL,
         ));
     }
     if !crate::handlers::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
