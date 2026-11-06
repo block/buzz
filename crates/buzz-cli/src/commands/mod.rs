@@ -27,6 +27,8 @@ pub mod repos;
 pub(crate) mod sent_from_thread;
 pub mod sidebar;
 mod sidebar_doc;
+mod sidebar_flags;
+mod sidebar_sync;
 pub mod social;
 pub mod upload;
 pub mod users;
