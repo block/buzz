@@ -1387,6 +1387,159 @@ pub async fn no_store_upgrade_response(
 
 #[cfg(test)]
 mod postgres_tests {
+
+    fn set_default(state: &mut Arc<AppState>, required: bool) {
+        Arc::make_mut(&mut Arc::get_mut(state).unwrap().config).nip_fi_require_new_communities =
+            required;
+    }
+
+    async fn stored_policy(
+        state: &Arc<AppState>,
+        host: &str,
+    ) -> buzz_db::community_auth::CommunityAuthPolicy {
+        let record = state
+            .db
+            .lookup_community_by_host(host)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .db
+            .community_auth_policy(record.id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn provision(
+        state: &Arc<AppState>,
+        operator: &Keys,
+        owner: &Keys,
+        host: &str,
+        create_only: bool,
+    ) -> axum::response::Response {
+        signed_operator_request(state.clone(), operator, "POST", "/operator/communities", Some(serde_json::json!({
+        "host": host, "initial_owner_pubkey": owner.public_key().to_hex(), "create_only": create_only,
+    }).to_string())).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn new_community_requirement_preserves_retries_and_bootstrap() {
+        let operator = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let mut state =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy.clone()))
+                .await
+                .expect("Postgres test state");
+        assert!(!state.config.nip_fi_require_new_communities);
+        assert!(!state.config.nip_fi_upgrades_enabled);
+        for create_only in [true, false] {
+            let owner = Keys::generate();
+            let legacy = control.replacen("acme.", &format!("legacy-{create_only}."), 1);
+            let required = control.replacen("acme.", &format!("required-{create_only}."), 1);
+            set_default(&mut state, false);
+            assert!(provision(&state, &operator, &owner, &legacy, create_only)
+                .await
+                .status()
+                .is_success());
+            let before = stored_policy(&state, &legacy).await;
+            assert!(!before.requires_nip_fi);
+            assert_eq!(before.policy_generation, 0);
+
+            set_default(&mut state, true);
+            assert!(provision(&state, &operator, &owner, &legacy, create_only)
+                .await
+                .status()
+                .is_success());
+            assert_eq!(stored_policy(&state, &legacy).await, before);
+            assert!(provision(&state, &operator, &owner, &required, create_only)
+                .await
+                .status()
+                .is_success());
+            let born = stored_policy(&state, &required).await;
+            assert!(born.requires_nip_fi);
+            assert_eq!(born.policy_generation, 1);
+            assert_eq!(
+                nip_fi_lookup(state.clone(), &operator, &required).await["issuers"],
+                serde_json::json!([NIP_FI_ISSUER])
+            );
+
+            // Rollback changes future creations only. It cannot clear durable policy.
+            set_default(&mut state, false);
+            assert!(provision(&state, &operator, &owner, &required, create_only)
+                .await
+                .status()
+                .is_success());
+            assert_eq!(stored_policy(&state, &required).await, born);
+
+            // A changed suffix now makes both hosts unbindable. Retrying or
+            // converging existing rows still succeeds without changing bindings.
+            set_default(&mut state, true);
+            Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+                None;
+            for host in [&legacy, &required] {
+                assert!(provision(&state, &operator, &owner, host, create_only)
+                    .await
+                    .status()
+                    .is_success());
+            }
+            assert_eq!(stored_policy(&state, &legacy).await, before);
+            assert_eq!(stored_policy(&state, &required).await, born);
+            Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+                Some(policy.clone());
+        }
+
+        // The flag is on while the reserved deployment host is first bootstrapped.
+        assert!(state.config.nip_fi_require_new_communities);
+        for _ in 0..2 {
+            crate::handlers::community_provisioning::ensure_deployment_community(
+                &state.db,
+                state.config.nip_fi_provision_binding.as_ref(),
+                &reserved,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let stored = stored_policy(&state, &reserved).await;
+            assert!(!stored.requires_nip_fi);
+            assert_eq!(stored.policy_generation, 0);
+            assert_eq!(
+                nip_fi_lookup(state.clone(), &operator, &reserved).await["issuers"],
+                serde_json::json!([])
+            );
+        }
+
+        // Both operator entry paths refuse *new* unbindable hosts. Existing
+        // unbound rows still converge; bootstrap is never an operator fallback.
+        let owner = Keys::generate();
+        for create_only in [true, false] {
+            let outside = format!("outside-{}.example", Uuid::new_v4().simple());
+            assert!(!provision(&state, &operator, &owner, &outside, create_only)
+                .await
+                .status()
+                .is_success());
+            assert!(state
+                .db
+                .lookup_community_by_host(&outside)
+                .await
+                .unwrap()
+                .is_none());
+            if !create_only {
+                state
+                    .db
+                    .ensure_configured_community(&outside)
+                    .await
+                    .unwrap();
+                assert!(provision(&state, &operator, &owner, &outside, false)
+                    .await
+                    .status()
+                    .is_success());
+                assert!(!stored_policy(&state, &outside).await.requires_nip_fi);
+            }
+        }
+    }
+
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},

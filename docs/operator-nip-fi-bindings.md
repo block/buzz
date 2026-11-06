@@ -42,6 +42,36 @@ binds nothing.
 relay's environment: `BUZZ_NIP_FI_PROVISION_BINDING`, `BUZZ_NIP_FI_ISSUERS`,
 `BUZZ_NIP_FI_COMMUNITIES`, and `DATABASE_URL`.
 
+### Require FI for new tenant communities
+
+`BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES` defaults to `false`. Setting it to
+`true` requires `BUZZ_NIP_FI_COMMUNITY_SOURCE=database` and
+`BUZZ_NIP_FI_PROVISION_BINDING`; incomplete configuration refuses startup.
+Both operator provisioning modes create new tenant rows with
+`requires_nip_fi=true` and `policy_generation=1`, in the same transaction as
+their issuer bindings (and the initial owner for `create_only`). A new host
+outside the binding policy, including a reserved host, is refused without
+leaving a community row. Existing rows and idempotent retries retain their
+policy, generation and bindings, even if the creation default changes.
+
+Deployment-host startup bootstrap is excluded: it keeps the existing behavior,
+including an unrequired, unbound reserved control host. Operator creation never
+uses this bootstrap exception. This switch is independent of
+`BUZZ_NIP_FI_UPGRADES_ENABLED`, which gates upgrades of existing communities.
+It does not create upgrade operations or retrofit existing rows.
+
+Stage the database source and issuer configuration first using the rollout
+below. Enable this creation default only when the issuer can sign users into
+new communities. Verify a new community's NIP-11 `requires_nip_fi` and issuer
+binding, and verify an existing community retains its policy. Mode semantics
+are unchanged: `off` bypasses FI relay-wide, `shadow` enforces stored required
+communities while observing others, and `enforce` enforces all communities.
+
+**Disabling this default affects future creations only.** Born-required rows
+remain required; no per-community rollback endpoint exists. `BUZZ_NIP_FI_MODE=off`
+is an explicit relay-wide bypass, not an undo of durable policy. See
+[community auth containment](community-auth-upgrades.md#mistaken-acceptance-and-containment).
+
 ### Database community source
 
 `BUZZ_NIP_FI_COMMUNITY_SOURCE=database` resolves communities from these

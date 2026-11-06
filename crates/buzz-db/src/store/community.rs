@@ -522,9 +522,27 @@ impl Db {
         normalized_host: &str,
         nip_fi_issuers: &[String],
     ) -> Result<EnsuredCommunityRecord> {
+        self.ensure_configured_community_with_nip_fi_policy(normalized_host, nip_fi_issuers, false)
+            .await
+    }
+
+    /// Ensure a community, setting its initial NIP-FI requirement and generation
+    /// atomically with its issuer bindings. Existing rows retain their policy.
+    /// Required creation without issuers is refused inside the transaction.
+    #[datastore_span(
+        name = "ensure_configured_community_with_nip_fi_policy",
+        system = "postgresql"
+    )]
+    pub async fn ensure_configured_community_with_nip_fi_policy(
+        &self,
+        normalized_host: &str,
+        nip_fi_issuers: &[String],
+        requires_nip_fi: bool,
+    ) -> Result<EnsuredCommunityRecord> {
         self.ensure_configured_community_with_operation(
             normalized_host,
             nip_fi_issuers,
+            requires_nip_fi,
             crate::observability::WriterOperation::Authorization,
         )
         .await
@@ -544,6 +562,7 @@ impl Db {
         self.ensure_configured_community_with_operation(
             normalized_host,
             nip_fi_issuers,
+            false,
             crate::observability::WriterOperation::Bootstrap,
         )
         .await
@@ -553,14 +572,15 @@ impl Db {
         &self,
         normalized_host: &str,
         nip_fi_issuers: &[String],
+        requires_nip_fi: bool,
         operation: crate::observability::WriterOperation,
     ) -> Result<EnsuredCommunityRecord> {
         let connection = crate::observability::acquire_writer(&self.pool, operation).await?;
         let mut connection = sqlx::Transaction::begin(connection, None).await?;
         let row = sqlx::query(
             r#"
-            INSERT INTO communities (host)
-            VALUES ($1)
+            INSERT INTO communities (host, requires_nip_fi, policy_generation)
+            VALUES ($1, $2, CASE WHEN $2 THEN 1 ELSE 0 END)
             ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
             WHERE communities.deletion_state = 'active'
               AND communities.deleted_at IS NULL
@@ -568,6 +588,7 @@ impl Db {
             "#,
         )
         .bind(normalized_host)
+        .bind(requires_nip_fi)
         .fetch_optional(&mut *connection)
         .await?
         .ok_or_else(|| {
@@ -580,6 +601,11 @@ impl Db {
         let host: String = row.try_get("host")?;
         let created: bool = row.try_get("created")?;
         if created {
+            if requires_nip_fi && nip_fi_issuers.is_empty() {
+                return Err(DbError::AccessDenied(
+                    "required community creation needs NIP-FI issuer bindings".into(),
+                ));
+            }
             self.insert_nip_fi_issuers_in_transaction(&mut connection, id, nip_fi_issuers)
                 .await?;
         }
@@ -623,6 +649,31 @@ impl Db {
         nip_fi_issuers: &[String],
         relay_keypair: &nostr::Keys,
     ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
+        self.create_community_with_owner_and_nip_fi_policy(
+            normalized_host,
+            owner_pubkey,
+            nip_fi_issuers,
+            false,
+            relay_keypair,
+        )
+        .await
+    }
+
+    /// Atomically create a community, owner, issuer bindings and initial NIP-FI
+    /// policy (generation 1 when required, otherwise 0). Identical retries keep
+    /// the original policy and bindings. Required creation needs issuers.
+    #[datastore_span(
+        name = "create_community_with_owner_and_nip_fi_policy",
+        system = "postgresql"
+    )]
+    pub async fn create_community_with_owner_and_nip_fi_policy(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+        nip_fi_issuers: &[String],
+        requires_nip_fi: bool,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
         use relay_members::MembershipWrite;
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let connection = crate::observability::acquire_writer(
@@ -644,17 +695,23 @@ impl Db {
 
         let row = sqlx::query(
             r#"
-            INSERT INTO communities (host)
-            VALUES ($1)
+            INSERT INTO communities (host, requires_nip_fi, policy_generation)
+            VALUES ($1, $2, CASE WHEN $2 THEN 1 ELSE 0 END)
             ON CONFLICT (lower(host)) DO NOTHING
             RETURNING id, host
             "#,
         )
         .bind(normalized_host)
+        .bind(requires_nip_fi)
         .fetch_optional(&mut *tx)
         .await?;
 
         if let Some(row) = row {
+            if requires_nip_fi && nip_fi_issuers.is_empty() {
+                return Err(DbError::AccessDenied(
+                    "required community creation needs NIP-FI issuer bindings".into(),
+                ));
+            }
             let id: Uuid = row.try_get("id")?;
             let host: String = row.try_get("host")?;
 

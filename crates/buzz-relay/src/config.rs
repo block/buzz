@@ -403,6 +403,9 @@ pub struct Config {
     /// (`BUZZ_NIP_FI_PROVISION_BINDING`). `None` binds nothing at creation.
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+    /// Require NIP-FI for newly provisioned tenant communities (default false).
+    /// Deployment bootstrap and existing rows retain their policy.
+    pub nip_fi_require_new_communities: bool,
 
     /// Permit new irreversible FI upgrade acceptances. Default off; receipt
     /// recovery/status remain available (`BUZZ_NIP_FI_UPGRADES_ENABLED`).
@@ -1422,6 +1425,17 @@ impl Config {
 
         let nip_fi = crate::nip_fi_config::NipFiRelayConfig::from_env()?;
         let nip_fi_provision_binding = crate::nip_fi_config::parse_provision_binding()?;
+        let nip_fi_require_new_communities =
+            parse_bool("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES", false)?;
+        if nip_fi_require_new_communities
+            && (nip_fi.source != crate::nip_fi_config::CommunitySource::Database
+                || nip_fi_provision_binding.is_none())
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES requires BUZZ_NIP_FI_COMMUNITY_SOURCE=database \
+                 and BUZZ_NIP_FI_PROVISION_BINDING".into(),
+            ));
+        }
         let nip_fi_resolver_bounds =
             crate::nip_fi_resolver::ResolverBounds::from_env(db_pool_size)?;
         if nip_fi.source == crate::nip_fi_config::CommunitySource::Database
@@ -1500,6 +1514,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_require_new_communities,
             nip_fi_upgrades_enabled: parse_bool("BUZZ_NIP_FI_UPGRADES_ENABLED", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
@@ -1608,7 +1623,8 @@ mod tests {
     // lets that configuration start.
     #[test]
     fn database_source_config_guards_refuse_startup() {
-        const VARS: [&str; 6] = [
+        const VARS: [&str; 7] = [
+            "BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES",
             "BUZZ_NIP_FI_COMMUNITY_SOURCE",
             "BUZZ_NIP_FI_COMMUNITIES",
             "BUZZ_NIP_FI_ISSUERS",
@@ -1630,6 +1646,16 @@ mod tests {
             Err(ConfigError::InvalidValue(message)) => message,
             other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
         };
+
+        std::env::remove_var("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES");
+        assert!(!Config::from_env().unwrap().nip_fi_require_new_communities);
+        std::env::set_var("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES", "false");
+        assert!(!Config::from_env().unwrap().nip_fi_require_new_communities);
+        std::env::set_var("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES", "treu");
+        assert!(refusal().contains("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES must be true or false"));
+        std::env::set_var("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES", "true");
+        assert!(refusal().contains("requires BUZZ_NIP_FI_COMMUNITY_SOURCE=database"));
+        std::env::remove_var("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES");
 
         std::env::set_var("BUZZ_NIP_FI_COMMUNITY_SOURCE", "ldap");
         assert!(refusal().contains("must be \"env\" or \"database\""));
@@ -1657,6 +1683,8 @@ mod tests {
         );
         std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
         assert!(refusal().contains("requires BUZZ_NIP_FI_PROVISION_BINDING"));
+        std::env::set_var("BUZZ_NIP_FI_REQUIRE_NEW_COMMUNITIES", "true");
+        assert!(refusal().contains("BUZZ_NIP_FI_PROVISION_BINDING"));
 
         std::env::set_var(
             "BUZZ_NIP_FI_PROVISION_BINDING",
@@ -1664,6 +1692,20 @@ mod tests {
         );
         let config = Config::from_env().expect("complete database-source config");
         assert!(config.nip_fi_provision_binding.is_some());
+        assert!(config.nip_fi_require_new_communities);
+        assert!(!config.nip_fi_upgrades_enabled);
+        // This creation default never changes mode or enables global enforcement.
+        for (mode, expected) in [
+            ("off", buzz_auth::NipFiMode::Off),
+            ("shadow", buzz_auth::NipFiMode::Shadow),
+            ("enforce", buzz_auth::NipFiMode::Enforce),
+            ("deny_protected", buzz_auth::NipFiMode::DenyProtected),
+        ] {
+            std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+            let config = Config::from_env().unwrap();
+            assert!(config.nip_fi_require_new_communities);
+            assert_eq!(config.nip_fi.mode, expected);
+        }
     }
 
     // Mutation: parsing the resolver bounds only when the resolver is built

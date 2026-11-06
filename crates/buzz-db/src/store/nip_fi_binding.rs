@@ -512,70 +512,93 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn create_with_owner_binds_in_the_insert_transaction() {
+    async fn creation_policy_is_atomic_and_create_only_on_both_paths() {
         let db = setup_db().await;
-        let host = unique_host("create");
-        let created = db
-            .create_community_with_owner_and_nip_fi_issuers(
-                &host,
-                OWNER,
-                &issuers(),
-                &nostr::Keys::generate(),
-            )
-            .await
-            .map(|write| write.outcome)
-            .expect("create");
-        assert!(matches!(
-            created,
-            CreateCommunityWithOwnerResult::Created(_)
-        ));
-        assert_eq!(bound(&db, &host).await, Some(issuers()));
+        let keys = nostr::Keys::generate();
+        for create_only in [true, false] {
+            for required in [false, true] {
+                let host = unique_host("policy");
+                let owner = nostr::Keys::generate().public_key().to_hex();
+                let id = if create_only {
+                    let write = db
+                        .create_community_with_owner_and_nip_fi_policy(
+                            &host,
+                            &owner,
+                            &issuers(),
+                            required,
+                            &keys,
+                        )
+                        .await
+                        .expect("create");
+                    let CreateCommunityWithOwnerResult::Created(record) = write.outcome else {
+                        panic!("not created")
+                    };
+                    record.id
+                } else {
+                    db.ensure_configured_community_with_nip_fi_policy(&host, &issuers(), required)
+                        .await
+                        .expect("ensure")
+                        .id
+                };
+                let before = db.community_auth_policy(id).await.unwrap().unwrap();
+                assert_eq!(before.requires_nip_fi, required);
+                assert_eq!(before.policy_generation, i64::from(required));
+                assert_eq!(bound(&db, &host).await, Some(issuers()));
 
-        // An identical retry returns the record without new rows.
-        db.create_community_with_owner_and_nip_fi_issuers(
-            &host,
-            OWNER,
-            &["https://other.example".to_string()],
-            &nostr::Keys::generate(),
-        )
-        .await
-        .map(|write| write.outcome)
-        .expect("retry");
-        assert_eq!(bound(&db, &host).await, Some(issuers()));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn ensure_binds_only_when_it_creates_the_row() {
-        let db = setup_db().await;
-        let host = unique_host("ensure");
-        let first = db
-            .ensure_configured_community_with_nip_fi_issuers(&host, &issuers())
-            .await
-            .expect("ensure");
-        assert!(first.created);
-        assert_eq!(bound(&db, &host).await, Some(issuers()));
-
-        let again = db
-            .ensure_configured_community_with_nip_fi_issuers(
-                &host,
-                &["https://other.example".to_string()],
-            )
-            .await
-            .expect("ensure existing");
-        assert!(!again.created);
-        assert_eq!(bound(&db, &host).await, Some(issuers()));
+                // Both enabling and disabling the default leave existing rows
+                // intact. Missing current bindings must not refuse a retry.
+                if create_only {
+                    let _write = db
+                        .create_community_with_owner_and_nip_fi_policy(
+                            &host,
+                            &owner,
+                            &[],
+                            !required,
+                            &keys,
+                        )
+                        .await
+                        .expect("retry");
+                } else {
+                    let again = db
+                        .ensure_configured_community_with_nip_fi_policy(&host, &[], !required)
+                        .await
+                        .expect("converge");
+                    assert!(!again.created);
+                }
+                assert_eq!(db.community_auth_policy(id).await.unwrap().unwrap(), before);
+                assert_eq!(bound(&db, &host).await, Some(issuers()));
+                if required {
+                    assert_eq!(
+                        db.unbind_nip_fi_issuer(id, ISS, true).await.unwrap(),
+                        NipFiUnbind::RequiredIssuer
+                    );
+                }
+            }
+            // No row, owner or bindings survive a refused required creation.
+            let host = unique_host("unbound-required");
+            let owner = nostr::Keys::generate().public_key().to_hex();
+            let refused = if create_only {
+                db.create_community_with_owner_and_nip_fi_policy(&host, &owner, &[], true, &keys)
+                    .await
+                    .map(|_| ())
+            } else {
+                db.ensure_configured_community_with_nip_fi_policy(&host, &[], true)
+                    .await
+                    .map(|_| ())
+            };
+            assert!(refused.is_err());
+            assert!(!community_exists(&db, &host).await);
+        }
 
         let bootstrap = unique_host("bootstrap");
-        db.ensure_configured_community_for_bootstrap(&bootstrap, &issuers())
+        let record = db
+            .ensure_configured_community_for_bootstrap(&bootstrap, &issuers())
             .await
             .expect("bootstrap");
+        let policy = db.community_auth_policy(record.id).await.unwrap().unwrap();
+        assert!(!policy.requires_nip_fi);
+        assert_eq!(policy.policy_generation, 0);
         assert_eq!(bound(&db, &bootstrap).await, Some(issuers()));
-        let unbound = unique_host("bootstrap-unbound");
-        db.ensure_configured_community_for_bootstrap(&unbound, &[])
-            .await
-            .expect("bootstrap unbound");
-        assert_eq!(bound(&db, &unbound).await, Some(Vec::new()));
     }
 
     #[tokio::test]
@@ -587,10 +610,11 @@ mod postgres_tests {
 
         let create = unique_host("fail-create");
         assert!(db
-            .create_community_with_owner_and_nip_fi_issuers(
+            .create_community_with_owner_and_nip_fi_policy(
                 &create,
                 OWNER,
                 &invalid,
+                true,
                 &nostr::Keys::generate()
             )
             .await
@@ -600,7 +624,7 @@ mod postgres_tests {
 
         let ensure = unique_host("fail-ensure");
         assert!(db
-            .ensure_configured_community_with_nip_fi_issuers(&ensure, &invalid)
+            .ensure_configured_community_with_nip_fi_policy(&ensure, &invalid, true)
             .await
             .is_err());
         assert!(!community_exists(&db, &ensure).await);

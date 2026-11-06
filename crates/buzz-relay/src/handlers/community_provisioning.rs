@@ -278,10 +278,11 @@ pub async fn provision_community(
         })?;
         let write = state
             .db
-            .create_community_with_owner_and_nip_fi_issuers(
+            .create_community_with_owner_and_nip_fi_policy(
                 &request.host,
                 owner_hex,
                 nip_fi_issuers,
+                state.config.nip_fi_require_new_communities,
                 &state.relay_keypair,
             )
             .await
@@ -323,7 +324,11 @@ pub async fn provision_community(
     // create_only so an existing owner can never be rotated by a create race.
     let record = state
         .db
-        .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
+        .ensure_configured_community_with_nip_fi_policy(
+            &request.host,
+            nip_fi_issuers,
+            state.config.nip_fi_require_new_communities,
+        )
         .await
         .map_err(|e| format!("failed to create community: {e}"))?;
     state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
