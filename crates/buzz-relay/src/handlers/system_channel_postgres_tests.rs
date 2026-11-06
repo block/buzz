@@ -1722,6 +1722,34 @@ async fn named_filters_keep_live_delivery_beside_unnamed_siblings() {
     later.drop_database().await;
 }
 
+/// A group-state `#d` REQ that names more channels than the explicit-channel
+/// limit is served, not refused, as it was before `#d` routed live: its
+/// history comes from the cached access set, and it routes community-global
+/// only, retaining no per-channel topic. Clients such as the legacy desktop
+/// app send one unbatched `#d` query for every channel the user is in.
+/// Mutation: refuse when `channels_named_by_filters` exceeds the limit → RED
+/// (CLOSED instead of EOSE).
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn group_state_names_past_the_channel_limit_are_served() {
+    use buzz_pubsub::EventTopic;
+    let f = fixture().await;
+    let reader = Keys::generate();
+    let channel = create_channel(&f.state, &f.tenant, &reader, &[&["visibility", "private"]]).await;
+    let mut d = vec![channel.to_string()];
+    d.extend(
+        (0..crate::handlers::req::MAX_EXPLICIT_CHANNEL_VALUES).map(|_| Uuid::new_v4().to_string()),
+    );
+
+    let live = LiveReq::open(&f, &reader, json!([{"kinds": [39000], "#d": d}])).await;
+    assert_eq!(live.history, [group_state_id(&f, channel, 39000).await]);
+    assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 0);
+    assert_eq!(refcount(&f, EventTopic::Global).await, 1);
+
+    live.close(&f).await;
+    assert_eq!(refcount(&f, EventTopic::Global).await, 0);
+}
+
 /// A cache-negative on a non-writer pod can lag a join. A REQ confirms every
 /// channel its filters name against the database, so a recently joined
 /// channel still enters the history and live scope of the filter that names

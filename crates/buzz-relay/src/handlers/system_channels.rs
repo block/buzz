@@ -127,16 +127,53 @@ fn named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
         .filter_map(|value| value.parse::<Uuid>().ok())
 }
 
-/// Every channel ID that some filter names (see [`named_channels`]), once
-/// each, in request order. A request confirms these against the database,
-/// because each one can enter its filter's history and live scope.
-pub(crate) fn channels_named_by_filters(filters: &[Filter]) -> Vec<Uuid> {
+/// Channel IDs that `filter` names with `#h`. Malformed values are skipped.
+fn h_named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
+    filter
+        .generic_tags
+        .get(&SingleLetterTag::lowercase(Alphabet::H))
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.parse::<Uuid>().ok())
+}
+
+/// Which channel names enter a request's membership confirmation and its
+/// filters' live scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveNames {
+    /// `#h`, and group-state `#d` (see [`named_channels`]).
+    All,
+    /// `#h` only. A request whose names exceed the explicit-channel limit
+    /// only because of group-state `#d` keeps the behavior from before `#d`
+    /// routed live: its `#d` channels are served from the cached access set
+    /// in history, and its group-state filters route community-global only.
+    HOnly,
+}
+
+/// Every distinct channel the filters name under `names`, in request order,
+/// plus the [`LiveNames`] to use. `#d` names are dropped, rather than the
+/// request refused, when counting them would pass `limit`; callers bound
+/// `#h` names separately.
+pub(crate) fn channels_named_by_filters(
+    filters: &[Filter],
+    limit: usize,
+) -> (Vec<Uuid>, LiveNames) {
     let mut seen = HashSet::new();
-    filters
+    let all: Vec<Uuid> = filters
         .iter()
         .flat_map(named_channels)
         .filter(|id| seen.insert(*id))
-        .collect()
+        .collect();
+    if all.len() <= limit {
+        return (all, LiveNames::All);
+    }
+    let mut seen = HashSet::new();
+    let h_only = filters
+        .iter()
+        .flat_map(h_named_channels)
+        .filter(|id| seen.insert(*id))
+        .collect();
+    (h_only, LiveNames::HOnly)
 }
 
 /// Whether `filter` opts in to every readable system channel: its kinds are
@@ -219,18 +256,22 @@ pub(crate) fn filter_channel_scope<'a>(
 /// filter also receives later replacements for the channels its `#d` names.
 /// A filter that reaches a channel only through the implicit set or a system
 /// opt-in does not receive that channel's live events; its history read is
-/// unchanged.
+/// unchanged. With [`LiveNames::HOnly`], `#d` does not name channels.
 pub(crate) fn filter_live_scope(
     filter: &Filter,
     implicit: &[Uuid],
     named_only: &NamedOnlyChannels,
+    names: LiveNames,
 ) -> SubscriptionScope {
     let readable: HashSet<Uuid> = filter_channel_scope(filter, implicit, named_only)
         .iter()
         .copied()
         .collect();
-    let scope =
-        SubscriptionScope::channels(named_channels(filter).filter(|id| readable.contains(id)));
+    let named: Vec<Uuid> = match names {
+        LiveNames::All => named_channels(filter).collect(),
+        LiveNames::HOnly => h_named_channels(filter).collect(),
+    };
+    let scope = SubscriptionScope::channels(named.into_iter().filter(|id| readable.contains(id)));
     if filter
         .generic_tags
         .contains_key(&SingleLetterTag::lowercase(Alphabet::H))
@@ -380,13 +421,44 @@ mod tests {
     }
 
     #[test]
+    fn group_state_names_past_the_limit_drop_out_instead_of_refusing() {
+        let h = Uuid::new_v4();
+        let d: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        let filters = [
+            filter(serde_json::json!({"kinds": [9], "#h": [h.to_string()]})),
+            filter(serde_json::json!({"kinds": [39000], "#d": d})),
+        ];
+        let (named, names) = channels_named_by_filters(&filters, 4);
+        assert_eq!((named.len(), names), (4, LiveNames::All));
+        assert_eq!(
+            channels_named_by_filters(&filters, 3),
+            (vec![h], LiveNames::HOnly)
+        );
+
+        // With `#h` names only, a group-state `#d` filter routes as it did
+        // before `#d` routed live: community-global, no named channels.
+        let open = Uuid::new_v4();
+        let readable = of_type("system", &[]);
+        let by_d = filter(serde_json::json!({"kinds": [39000], "#d": [open.to_string()]}));
+        assert_eq!(
+            filter_live_scope(&by_d, &[open], &readable, LiveNames::HOnly),
+            SubscriptionScope::global()
+        );
+        let by_h = filter(serde_json::json!({"kinds": [9], "#h": [open.to_string()]}));
+        assert_eq!(
+            filter_live_scope(&by_h, &[open], &readable, LiveNames::HOnly),
+            SubscriptionScope::channels([open])
+        );
+    }
+
+    #[test]
     fn live_scope_holds_only_the_readable_channels_a_filter_names() {
         let open = Uuid::new_v4();
         let private_outside = Uuid::new_v4();
         let system = Uuid::new_v4();
         let implicit = vec![open];
         let readable = of_type("system", &[system]);
-        let live = |json| filter_live_scope(&filter(json), &implicit, &readable);
+        let live = |json| filter_live_scope(&filter(json), &implicit, &readable, LiveNames::All);
 
         // #h: own readable channels, no global topic.
         assert_eq!(

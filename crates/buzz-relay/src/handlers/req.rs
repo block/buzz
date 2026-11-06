@@ -120,19 +120,11 @@ pub async fn handle_req(
     };
 
     // Every distinct channel a filter names, including group-state `#d`, is
-    // confirmed below; bound that set before any membership I/O.
-    let named_channels = super::system_channels::channels_named_by_filters(&filters);
-    if named_channels.len() > MAX_EXPLICIT_CHANNEL_VALUES {
-        super::close::refuse(
-            &sub_id,
-            "restricted: too many explicit channels",
-            &conn,
-            &state,
-        )
-        .await;
-        access.deny("too_many_channels");
-        return;
-    }
+    // confirmed below. `#h` is bounded above; past the same limit, `#d`
+    // names are left out of confirmation and live routing rather than
+    // refused, as before `#d` routed live.
+    let (named_channels, live_names) =
+        super::system_channels::channels_named_by_filters(&filters, MAX_EXPLICIT_CHANNEL_VALUES);
 
     let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
@@ -450,6 +442,7 @@ pub async fn handle_req(
                     filter,
                     &accessible_channels,
                     &named_only,
+                    live_names,
                 ),
             )
         })
