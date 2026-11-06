@@ -2802,6 +2802,9 @@ mod tests {
     // A lazy-pool state cannot seed the community — this test belongs in the
     // isolated postgres lane so it has a real DB. It is gated `#[ignore]` so it
     // does not run in the unit-test lane where no DB is available.
+    #[path = "policy_sweep_postgres_tests.rs"]
+    mod policy_sweep_postgres_tests;
+
     mod postgres_tests {
         use super::*;
         use std::sync::Arc;
@@ -3193,7 +3196,7 @@ mod tests {
             }
         }
 
-        async fn real_db_state() -> Option<Arc<AppState>> {
+        pub(super) async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
 

@@ -112,7 +112,7 @@ const RECEIPT: &str = "SELECT u.*, true AS requires_nip_fi,
         AND EXISTS (SELECT 1 FROM community_nip_fi_issuers i
             WHERE i.community_id = c.id AND i.issuer = u.expected_issuer)
     THEN 'pending' ELSE 'unavailable' END AS state,
-    ARRAY['registry_baseline_unverified']::text[] AS pending_reasons
+    ARRAY['connection_closure_unverified']::text[] AS pending_reasons
     FROM community_auth_upgrades u
     LEFT JOIN communities c ON c.id = u.target_community_id
     WHERE u.operation_id = $1";

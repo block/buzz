@@ -45,6 +45,7 @@ pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 pub(crate) enum CommunityDisconnectReason {
     CommunityArchived,
     CommunityDeleted,
+    AuthPolicyUpgraded,
     /// NIP-FI: the connection's proven pubkey was added to the deny set.
     AuthorizationDenied,
     /// The authenticated pubkey lost access to the community (e.g. a ban).
@@ -64,6 +65,10 @@ impl CommunityDisconnectReason {
             Self::CommunityDeleted => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("community deleted"),
+            })),
+            Self::AuthPolicyUpgraded => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("community authentication upgraded"),
             })),
             Self::AuthorizationDenied => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
@@ -507,6 +512,23 @@ impl CommunityConnectionRegistry {
         closed
     }
 
+    /// Enforced FI admission is attached before registration. Later NIP-42 AUTH
+    /// cannot turn a legacy or observed-shadow socket into an FI admission.
+    fn disconnect_auth_policy(&self, community_id: CommunityId) -> usize {
+        let mut closed = 0;
+        for entry in self.connections.iter() {
+            let (community, control) = entry.value();
+            if *community == community_id
+                && control.nip_fi_enforce().is_none()
+                && !control.cancel.is_cancelled()
+            {
+                control.disconnect_community(CommunityDisconnectReason::AuthPolicyUpgraded);
+                closed += 1;
+            }
+        }
+        closed
+    }
+
     /// Disconnects every registered socket admitted under NIP-FI `issuer` whose
     /// proven pubkey matches `pubkey`, across all communities.  A same-key
     /// socket admitted under a different issuer (or with no assertion) is not
@@ -713,6 +735,8 @@ pub(crate) async fn run_registered_community_connection<
     OnNotRun: FnOnce() -> OnNotRunFuture,
     OnNotRunFuture: Future<Output = ()>,
 {
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_community_registration(community_id).await;
     let cancel = control.cancel.clone();
     let _guard = registry.register(connection_id, community_id, control.clone());
 
@@ -2558,21 +2582,42 @@ impl AppState {
             .await
     }
 
-    /// Revalidate all communities with live sockets and cancel inactive ones.
+    /// Revalidate lifecycle and effective FI policy for every locally bound community.
     ///
-    /// This is the durable backstop for Redis pub/sub's lossy offline-subscriber
-    /// semantics: a pod that missed a successful publish eventually observes the
-    /// archived row directly.
+    /// Reads the writer by immutable ID, independent of host-cache/pubsub delivery.
+    /// Failed reads retain sockets until a later sweep; late registrations are
+    /// included next time. This closes sockets, not already-running work.
     pub async fn revalidate_live_communities(&self) -> usize {
         let (closed, failures) = revalidate_registered_communities(
             &self.community_connections,
             |community_id| async move {
-                // Nearly every live community is active. An unlocked read keeps
-                // the per-tick row lock off them; the fence re-checks under the
-                // lock before closing anything.
-                if self.db.is_community_active(community_id).await? {
+                let mode = self.config.nip_fi.mode;
+                if mode.evaluates() {
+                    let policy = tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        self.db.community_auth_policy(community_id),
+                    )
+                    .await
+                    .map_err(|_| {
+                        buzz_db::DbError::InvalidData("community policy read timed out".into())
+                    })??;
+                    if let Some(policy) = policy {
+                        return Ok(
+                            if crate::nip_fi_policy::effective(mode, policy.requires_nip_fi)
+                                .enforces()
+                            {
+                                self.community_connections
+                                    .disconnect_auth_policy(community_id)
+                            } else {
+                                0
+                            },
+                        );
+                    }
+                } else if self.db.is_community_active(community_id).await? {
+                    // Off and repair mode retain their existing lifecycle-only behavior.
                     return Ok(0);
                 }
+                // Recheck inactive rows under the existing archive/deletion fence.
                 self.disconnect_if_inactive(community_id)
                     .await
                     .map(|disconnected| disconnected.unwrap_or(0))
@@ -2580,7 +2625,7 @@ impl AppState {
         )
         .await;
         for (community_id, error) in failures {
-            tracing::warn!(%community_id, %error, "community lifecycle revalidation failed; retaining its sockets until next tick");
+            tracing::warn!(%community_id, %error, "community lifecycle or auth policy revalidation failed; retaining its sockets until next tick");
         }
         closed
     }
@@ -5141,6 +5186,15 @@ pub(crate) mod tests {
             registry.bound_communities(),
             HashSet::from([archived_a, failed, archived_c])
         );
+        // A failed read is not latched: a later sweep retries that community.
+        let (closed, failures) = revalidate_registered_communities(&registry, |community| {
+            let registry = &registry;
+            async move { Ok(registry.disconnect_auth_policy(community)) }
+        })
+        .await;
+        assert!(failures.is_empty());
+        assert_eq!(closed, 1);
+        assert!(cancel_failed.is_cancelled());
     }
 
     #[tokio::test]

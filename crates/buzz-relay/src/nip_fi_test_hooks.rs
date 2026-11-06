@@ -154,6 +154,7 @@ macro_rules! make_hook {
     };
 }
 
+make_hook!(community_registration_hook, before_community_registration);
 make_hook!(auth_commit_hook, before_auth_commit);
 make_hook!(event_ingest_hook, before_event_ingest);
 make_hook!(req_registration_hook, before_req_registration);
