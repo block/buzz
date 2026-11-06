@@ -397,9 +397,9 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
             .unwrap()
             .sign_with_keys(&outsider)
             .unwrap();
-    let error = publish(&state, &tenant, &outsider, owner_edit)
-        .await
-        .unwrap_err();
+    let Err(error) = publish(&state, &tenant, &outsider, owner_edit).await else {
+        panic!("owner edit was accepted");
+    };
     assert!(
         matches!(error, crate::handlers::ingest::IngestError::Rejected(ref reason)
         if reason == "restricted: attachment is not accessible"),
