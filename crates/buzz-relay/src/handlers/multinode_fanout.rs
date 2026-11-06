@@ -7,12 +7,13 @@
 //! their order while different channels are delivered concurrently.
 //!
 //! Live delivery never loses an event silently. An event is lost when its
-//! worker's queue is full, or when it waited longer than [`MAX_QUEUE_DELAY`]
-//! there. Either way the syncs it would have reached get `CLOSED "resync: ..."`
-//! (NIP-AR Sync rule 5), and the connections it would have reached are fenced
-//! and closed so their clients catch up from their cursor. When the dispatcher
-//! itself lags the broadcast, it cannot tell which events it skipped, so it does
-//! the same for every subscribed connection.
+//! worker's queue is full, or when it is not delivered within
+//! [`MAX_QUEUE_DELAY`] of this node reading it from Redis. Either way the syncs
+//! it would have reached get `CLOSED "resync: ..."` (NIP-AR Sync rule 5), and
+//! the connections it would have reached are fenced and closed so their
+//! clients catch up from their cursor. When the dispatcher itself lags the
+//! broadcast, it cannot tell which events it skipped, so it does the same for
+//! every subscribed connection.
 //!
 //! A client resumes from the newest `created_at` it received, minus a few
 //! seconds of slack. Recovery depends on that cursor never getting further
@@ -20,13 +21,18 @@
 //! - A fence is immediate and atomic with the live send path, so after it no
 //!   newer frame is queued to the connection. Frames queued before it were
 //!   produced no later than the fence.
-//! - Every event a worker withholds or drops is at most [`MAX_QUEUE_DELAY`] old
-//!   when the fence lands, even when other workers or local fan-out are ahead.
+//! - Every event a worker withholds or drops was read from Redis at most
+//!   [`MAX_QUEUE_DELAY`] before the fence lands, even when other workers or
+//!   local fan-out are ahead.
 //!
-//! So the cursor ends at most [`MAX_QUEUE_DELAY`] (plus clock skew) past any
-//! event the connection missed. The socket close itself goes through one paced
-//! closer so a hot channel cannot turn into a reconnect storm (Review-Proven
-//! Rule 9).
+//! So a missed event is replayed as long as `MAX_QUEUE_DELAY`, plus its
+//! writer's clock skew and its publish-to-Redis delay, stays under the
+//! client's slack. The relay accepts `created_at` far outside that, and an
+//! ordinary reconnect has the same limit: only a client-side rewind can recover
+//! an event whose writer's clock is further behind. Dispatcher lag, where the
+//! skipped events are never seen, is not bounded either. The socket close
+//! itself goes through one paced closer so a hot channel cannot turn into a
+//! reconnect storm (Review-Proven Rule 9).
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -59,7 +65,8 @@ const CLOSE_TICK: Duration = Duration::from_millis(10);
 /// The resync reason for a sync whose live entry was lost here.
 const LAG_RESYNC: &str = "resync: live delivery lagged";
 
-/// An event waiting for its worker, and when it counts as lost.
+/// An event waiting for its worker, and when it counts as lost: its deadline
+/// runs from when this node read it from Redis, not from dispatch.
 struct Queued {
     community_id: CommunityId,
     stored: StoredEvent,
@@ -70,8 +77,8 @@ impl Queued {
     fn new(channel_event: ChannelEvent) -> Self {
         Self {
             community_id: channel_event.community_id,
+            deadline: channel_event.received_at + MAX_QUEUE_DELAY,
             stored: pubsub_stored_event(channel_event),
-            deadline: Instant::now() + MAX_QUEUE_DELAY,
         }
     }
 }
@@ -329,6 +336,7 @@ mod tests {
             event: EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), n.to_string())
                 .sign_with_keys(&Keys::generate())
                 .expect("sign presence"),
+            received_at: Instant::now(),
         }
     }
 
@@ -516,6 +524,23 @@ mod tests {
         assert!(!cancel.is_cancelled(), "the close waits for the closer");
     }
 
+    /// The deadline runs from Redis receipt: an event that already waited out
+    /// its deadline in the broadcast before dispatch is lost, not delivered.
+    #[tokio::test(start_paused = true)]
+    async fn event_that_waited_before_dispatch_is_lost_not_delivered() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut frames, _cancel) = presence_subscriber(&state);
+        let (dispatcher, mut queues) = Dispatcher::new(1, 4);
+
+        let received = presence(0);
+        tokio::time::advance(MAX_QUEUE_DELAY).await;
+        dispatcher.dispatch(&state, received);
+        let queued = queues[0].try_recv().expect("queued");
+        deliver_or_lose(&state, &dispatcher.closer, queued).await;
+        assert!(frames.try_recv().is_err(), "not delivered late");
+        assert_eq!(pending(&dispatcher), HashSet::from([conn]));
+    }
+
     /// A delivery that stalls (here on a database that accepts connections
     /// but never answers) is cut off at its deadline and handled as lost.
     #[tokio::test(start_paused = true)]
@@ -544,6 +569,7 @@ mod tests {
             event: EventBuilder::new(Kind::Custom(9), "stalls")
                 .sign_with_keys(&Keys::generate())
                 .expect("sign"),
+            received_at: Instant::now(),
         };
         let closer = LagCloser::default();
 

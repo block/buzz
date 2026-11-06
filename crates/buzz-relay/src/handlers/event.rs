@@ -2488,6 +2488,7 @@ mod tests {
                             community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                             topic: EventTopic::Global,
                             event,
+                            received_at: tokio::time::Instant::now(),
                         },
                     )
                     .await;
@@ -2583,6 +2584,7 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2606,6 +2608,7 @@ mod tests {
                     community_id: community,
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2648,6 +2651,7 @@ mod tests {
                     community_id: community_b,
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2677,6 +2681,7 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -3498,6 +3503,7 @@ mod tests {
                     community_id,
                     topic: buzz_pubsub::EventTopic::Channel(channel_id),
                     event: artifact(channel_id).event,
+                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
