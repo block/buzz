@@ -9,9 +9,10 @@
 //!   in-flight work is cancelled and no new work is admitted until the count
 //!   held falls under the new limit.
 //!
-//! Every limit change and every permit release that retires a permit happens
-//! under one lock, so a newer limit always supersedes an older one: there is
-//! no background resize to race.
+//! Every limit change, every permit release and every admission settles
+//! against the shrink debt under one lock, so a newer limit always supersedes
+//! an older one: there is no background resize to race, and a permit tokio
+//! returns from a cancelled waiter is retired rather than admitted.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -105,14 +106,28 @@ impl ConcurrencyGate {
     /// Wait up to `wait` for a permit, in arrival order. `None` means the
     /// caller must be shed.
     pub async fn admit(&self, wait: Duration) -> Option<GatePermit> {
-        let permit = tokio::time::timeout(wait, Arc::clone(&self.inner.permits).acquire_owned())
-            .await
-            .ok()?
-            .ok()?;
-        Some(GatePermit {
-            permit: Some(permit),
-            inner: Arc::clone(&self.inner),
-        })
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let permit =
+                tokio::time::timeout_at(deadline, Arc::clone(&self.inner.permits).acquire_owned())
+                    .await
+                    .ok()?
+                    .ok()?;
+            let mut state = self.inner.state();
+            if state.debt == 0 {
+                drop(state);
+                return Some(GatePermit {
+                    permit: Some(permit),
+                    inner: Arc::clone(&self.inner),
+                });
+            }
+            // While there is debt every permit should be held, so this one
+            // leaked back without a `GatePermit` release: tokio returns a
+            // permit it had assigned to a waiter that was then cancelled.
+            // Retire it and keep waiting.
+            state.debt -= 1;
+            permit.forget();
+        }
     }
 
     /// Permits free to admit right now (tests).
@@ -259,6 +274,40 @@ mod tests {
         tokio::task::yield_now().await;
         gate.set_limit(2);
         assert!(waiter.await.expect("join"), "the raise admits the waiter");
+    }
+
+    /// Tokio hands a released permit to the first waiter before that waiter
+    /// runs. If the waiter is cancelled after a shrink, tokio returns the
+    /// permit to the semaphore directly, never through `GatePermit::drop`;
+    /// the next admission must retire it against the debt instead.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_waiter_cannot_reopen_a_lowered_gate() {
+        let gate = ConcurrencyGate::new(2);
+        let first = gate.admit(WAIT).await.expect("first holder");
+        let second = gate.admit(WAIT).await.expect("second holder");
+        let waiter = tokio::spawn({
+            let gate = gate.clone();
+            async move { gate.admit(WAIT).await.is_some() }
+        });
+        tokio::task::yield_now().await; // the waiter queues
+        drop(first); // tokio assigns this permit to the queued waiter
+        gate.set_limit(1); // nothing free to forget: one permit of debt
+        waiter.abort(); // cancelled before it runs again
+        assert!(waiter.await.expect_err("aborted").is_cancelled());
+
+        assert!(
+            gate.admit(WAIT).await.is_none(),
+            "one holder already fills limit 1"
+        );
+        drop(second);
+        let admitted = gate.admit(WAIT).await.expect("the holder left");
+        assert!(gate.admit(WAIT).await.is_none(), "limit 1 holds");
+        drop(admitted);
+        assert_eq!(
+            gate.available(),
+            1,
+            "the permits that exist match the limit"
+        );
     }
 
     #[test]

@@ -12,7 +12,11 @@
 //! A positive value sets the limit, clamped to the ceiling; zero, a negative
 //! value, or no value leaves the gate at its ceiling. A flag can therefore
 //! only tighten a cap, never loosen one past what the relay starts with, and
-//! a provider outage or a deleted flag puts every gate back at its ceiling.
+//! a deleted flag or a provider that has not initialized puts every gate back
+//! at its ceiling. Once LaunchDarkly has delivered values, they stay in force
+//! through a later outage (the SDK serves its last-known data), so a cap
+//! tightened during an incident is not lost when the provider connection
+//! drops.
 //! A lowered gate never cancels admitted work: it admits nothing new until
 //! the count in flight falls under the new limit.
 //!

@@ -16,7 +16,8 @@
 //! malformed proxy URL) fail startup. LaunchDarkly itself being unreachable
 //! does not: the relay starts on declared defaults and the SDK keeps
 //! connecting in the background, because no safety invariant may depend on
-//! remote flag availability.
+//! remote flag availability. After LaunchDarkly first delivers data, a lost
+//! connection leaves its last-known values in force until it reconnects.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,8 +136,10 @@ impl FeatureFlags {
     }
 
     /// Report provider health after a round of evaluations: log malformed
-    /// environment values once each, and publish whether the provider is
-    /// serving real values (`buzz_feature_flags_ready`).
+    /// environment values once each, and publish whether the provider has
+    /// initialized (`buzz_feature_flags_ready`). It does not track the
+    /// connection afterwards: an initialized LaunchDarkly client keeps serving
+    /// its last-known values through an outage.
     pub fn report(&self) {
         if let Some(environment) = &self.environment {
             for diagnostic in environment.take_diagnostics() {

@@ -75,8 +75,10 @@ Startup fails on a local configuration error: an unknown provider,
 `launchdarkly` without an SDK key, or a malformed Relay Proxy URL. It does not
 fail when LaunchDarkly is unreachable: the relay waits briefly for flag data,
 then serves declared defaults while the SDK keeps connecting, and
-`buzz_feature_flags_ready{provider}` reports whether real values are being
-served.
+`buzz_feature_flags_ready{provider}` reports whether the provider has
+initialized. Once initialized, LaunchDarkly serves its last-known values
+through a later outage, so the gauge stays 1 and flag values do not revert to
+defaults until the SDK reconnects and receives new data.
 
 ## `buzz-db` Boundary (approved correction)
 
