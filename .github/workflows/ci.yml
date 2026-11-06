@@ -106,13 +106,10 @@ jobs:
               - 'scripts/mobile-release-source.sh'
               - 'scripts/mobile-worktree-overrides.sh'
               - 'scripts/mobile-worktree-clean.sh'
-              - 'scripts/publish-mobile-release-candidate.sh'
               - 'scripts/release-rulesets.sh'
               - 'scripts/test-mobile-release-contract.sh'
-              - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
               - 'scripts/ci-hermit-retry.sh'
-              - '.github/workflows/mobile-release-candidate.yml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/_ci-*.yml'
       - name: Select runtime suites conservatively at the PR file-list limit
@@ -136,9 +133,7 @@ jobs:
           scripts/test-oss-desktop-promotion.sh
           scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
-        run: |
-          scripts/test-mobile-release-contract.sh
-          scripts/test-mobile-release-candidate-publisher.sh
+        run: scripts/test-mobile-release-contract.sh
       - name: Desktop instance environment contract
         run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
