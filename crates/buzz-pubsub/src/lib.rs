@@ -259,16 +259,19 @@ impl PubSubManager {
         };
 
         if should_subscribe {
-            // The wake-up is lossless and coalesced: if the bounded command
-            // queue is full, the subscriber still reconciles the whole
-            // desired-topic map without waiting for a Redis reconnect.
-            self.subscription_changed.notify_one();
             match self
                 .subscription_tx
                 .try_send(subscriber::SubscriptionCommand::Subscribe(topic_key))
             {
+                // A queued command subscribes in order; a closed queue means
+                // the subscriber is gone, and a restart re-subscribes the
+                // whole desired-topic map.
                 Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
+                    // The wake-up is lossless and coalesced: the subscriber
+                    // reconciles the desired-topic map on the live link
+                    // instead of waiting for a Redis reconnect.
+                    self.subscription_changed.notify_one();
                     tracing::warn!(
                         ?topic_key,
                         "pubsub subscription command queue full; reconciliation scheduled"
@@ -730,8 +733,11 @@ mod tests {
     /// A retain past a full command queue neither waits for the subscriber
     /// (callers hold a lifecycle lock) nor loses the topic: it leaves a
     /// reconciliation wake-up, and the topic is in the desired map the
-    /// subscriber re-reads. Mutation: `send().await` instead of `try_send`
-    /// hangs at the timeout below; no `notify_one` fails the wake-up check.
+    /// subscriber re-reads. Retains that fit in the queue leave no wake-up,
+    /// so first retains do not each make the subscriber rescan the map.
+    /// Mutation: `send().await` instead of `try_send` hangs at the timeout
+    /// below; no `notify_one` fails the wake-up check; `notify_one` on every
+    /// first retain fails the no-wake-up check.
     #[tokio::test]
     async fn queue_full_retain_does_not_wait_and_schedules_reconciliation() {
         let manager = make_manager().await;
@@ -741,8 +747,16 @@ mod tests {
                 .retain_topic(&filler, EventTopic::Channel(Uuid::from_u128(id as u128)))
                 .await;
         }
-        // Drain the wake-ups the fillers left (coalesced into one permit).
-        manager.subscription_changed.notified().await;
+        // Retains that fit in the queue leave no reconciliation wake-up.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                manager.subscription_changed.notified()
+            )
+            .await
+            .is_err(),
+            "a queued subscribe needs no reconciliation"
+        );
 
         let dropped_ctx = ctx(0xbbbb, "b.example");
         let dropped = EventTopic::Channel(Uuid::from_u128(0xcccc));
