@@ -168,9 +168,18 @@ that requires membership rejects both `seed` and `run`. With
 every member: the humans and agents assigned to each channel up to the
 largest ramp step, and the hot-thread root and authors in its channel. It
 sends kind:9000 events of up to 100 members, `seed_concurrency` at a time,
-signed by the community owner, before posting any history. A rerun adds
+signed by the channel's creator, before posting any history. A rerun adds
 nobody new, and any member the relay refuses fails the seed. Seeded history
-in a private channel is posted by its own members.
+and replies in a private channel are posted by its creator.
+
+The relay limits HTTP calls per pubkey, so `seed` spreads its writes across
+channel creators. The community owner creates its first 8 channels and each
+further block of 8 has its own creator identity, derived from `run_id`. A
+creator signs its channels' creation, member adds and thread roots (`run`
+looks roots up by it), plus, in private channels, their history and replies.
+Each signer stays at a few hundred seed writes in total, whatever the
+community's channel count. History and replies in open channels rotate
+across all humans.
 
 ## Desktop clients
 
