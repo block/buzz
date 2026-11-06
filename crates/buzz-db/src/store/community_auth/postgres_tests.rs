@@ -581,7 +581,7 @@ async fn apply(db: &Db, request: &PolicyRequest) -> PolicyRecord {
     else {
         panic!("policy refused")
     };
-    record
+    *record
 }
 
 #[tokio::test]
@@ -609,7 +609,7 @@ async fn policy_enable_disable_reenable_history_and_identity() {
         db.set_community_nip_fi_policy(&enable, Err("upgrades_disabled"))
             .await
             .unwrap(),
-        PolicyOutcome::Accepted(old)
+        PolicyOutcome::Accepted(Box::new(old))
     );
     let reenable = intent(&tuple, true, 2, false);
     let third = apply(&db, &reenable).await;

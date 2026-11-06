@@ -136,7 +136,7 @@ pub async fn set_community_nip_fi_policy(
                 buzz_core::CommunityId::from_uuid(record.acceptance.community_id),
                 &record.acceptance.expected_host,
             ));
-            Ok(response(&state, record))
+            Ok(response(&state, *record))
         }
         PolicyOutcome::Refused(code) => Err(coded_api_error(
             match code {

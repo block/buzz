@@ -83,7 +83,7 @@ impl PolicyRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyOutcome {
     /// Durable acceptance or identical read-only replay.
-    Accepted(PolicyRecord),
+    Accepted(Box<PolicyRecord>),
     /// No mutation or receipt was committed.
     Refused(&'static str),
 }
@@ -353,7 +353,7 @@ impl Db {
                 .write_community_nip_fi_policy(request, None, configured_trust)
                 .await?
             {
-                PolicyOutcome::Accepted(record) => UpgradeOutcome::Accepted(record.legacy()),
+                PolicyOutcome::Accepted(record) => UpgradeOutcome::Accepted((*record).legacy()),
                 PolicyOutcome::Refused(code) => UpgradeOutcome::Refused(code),
             },
         )
@@ -365,7 +365,7 @@ impl Db {
         intent: Option<(bool, i64, bool)>,
         configured_trust: std::result::Result<(), &'static str>,
     ) -> Result<PolicyOutcome> {
-        let desired = intent.map_or(true, |i| i.0);
+        let desired = intent.is_none_or(|i| i.0);
         let expected_generation = intent.map(|i| i.1);
         let expected_state = intent.map(|i| i.2);
         let connection = crate::observability::acquire_writer(
@@ -394,7 +394,7 @@ impl Db {
                     && record.expected_policy_generation == expected_generation
                     && record.expected_requires_nip_fi == expected_state
                 {
-                    PolicyOutcome::Accepted(record)
+                    PolicyOutcome::Accepted(Box::new(record))
                 } else {
                     PolicyOutcome::Refused("idempotency_conflict")
                 },
@@ -522,7 +522,7 @@ impl Db {
             .fetch_one(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(PolicyOutcome::Accepted(record))
+        Ok(PolicyOutcome::Accepted(Box::new(record)))
     }
 }
 
