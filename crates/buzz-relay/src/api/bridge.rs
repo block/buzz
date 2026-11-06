@@ -10573,10 +10573,14 @@ pub(crate) mod postgres_tests {
 
     /// A shed history read answers 503 `database unavailable` on every
     /// bridge `/query` branch that serves one: channel window, the three
-    /// feeds and legacy thread replies. A saturated reader (every connection
-    /// checked out, none idle) rejects history reads instead of moving them
-    /// to the writer, the same `PoolTimedOut` as a full history gate.
-    /// Mutation: map any of these branches through `internal_error` → RED.
+    /// feeds, legacy thread replies and search hydration. A WS search whose
+    /// hydration is shed closes with the retryable `error: database error`
+    /// instead of an EOSE that would read as "no matches". A saturated reader
+    /// (every connection checked out, none idle) rejects history reads
+    /// instead of moving them to the writer, the same `PoolTimedOut` as a
+    /// full history gate. Mutations: map any of these branches through
+    /// `internal_error`, or let a failed WS hydration fall through to EOSE
+    /// → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn shed_history_read_maps_to_503_on_every_bridge_branch() {
@@ -10603,11 +10607,14 @@ pub(crate) mod postgres_tests {
                 "thread replies",
                 serde_json::json!({"kinds": [9], "#e": [&fx.root], "depth_limit": 1}),
             ),
+            ("search hydrate", fx.search_filter()),
         ];
         for (branch, filter) in &cases {
             let (status, body) = fx.http("/query", filter).await;
             assert_eq!(status, StatusCode::OK, "healthy {branch}: {body}");
         }
+        let frame = fx.ws_search().await;
+        assert!(frame.contains("root needle"), "healthy WS search: {frame}");
 
         let mut held = Vec::new();
         for _ in 0..fx.replica.options().get_max_connections() {
@@ -10624,6 +10631,14 @@ pub(crate) mod postgres_tests {
                 "shed {branch}: {body}"
             );
         }
+        assert_eq!(
+            fx.ws_search().await,
+            format!(
+                r#"["CLOSED","s","{}"]"#,
+                crate::handlers::req::DATABASE_ERROR_CLOSED
+            ),
+            "shed WS search hydration"
+        );
 
         drop(held);
         fx.drop().await;
