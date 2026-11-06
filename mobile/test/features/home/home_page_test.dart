@@ -161,7 +161,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
       expect(find.text('General').hitTestable(), findsOneWidget);
-      await tester.tap(find.text('Inbox'));
+      await tester.tap(find.text('Activity'));
       await tester.pumpAndSettle();
       expect(find.byType(ActivityPage), findsOneWidget);
       Navigator.of(tester.element(find.byType(ActivityPage))).pop();
