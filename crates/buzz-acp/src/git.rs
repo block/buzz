@@ -12,8 +12,22 @@ pub(crate) struct GitEnvironment {
 
 impl GitEnvironment {
     pub(crate) fn for_config(config: &mut crate::config::Config) -> anyhow::Result<Self> {
-        let environment =
-            Self::install(&config.keys, &config.relay_url, &std::env::current_exe()?)?;
+        let broker_mode = config.key_broker_account.is_some();
+        let mut environment = Self::install_with(
+            &config.keys,
+            &config.relay_url,
+            &std::env::current_exe()?,
+            !broker_mode,
+        )?;
+        // Broker mode keeps the key out of every child's environment.
+        if let Some(account) = &config.key_broker_account {
+            environment
+                .env
+                .retain(|(name, _)| name != "BUZZ_PRIVATE_KEY");
+            environment
+                .env
+                .push((crate::key_broker::ACCOUNT_ENV.into(), account.clone()));
+        }
         config
             .persona_env_vars
             .retain(|(name, _)| !is_managed_env(name));
@@ -28,6 +42,17 @@ impl GitEnvironment {
         relay_url: &str,
         executable: &Path,
     ) -> anyhow::Result<Self> {
+        Self::install_with(keys, relay_url, executable, true)
+    }
+
+    /// With `persist_key` false, no key file exists and no config names one:
+    /// the Git helpers read the key from the broker when Git runs them.
+    fn install_with(
+        keys: &nostr::Keys,
+        relay_url: &str,
+        executable: &Path,
+        persist_key: bool,
+    ) -> anyhow::Result<Self> {
         let agent = GitIdentityMode::from_value(std::env::var_os(GIT_IDENTITY_ENV).as_deref())?
             == GitIdentityMode::Agent;
         let dir = tempfile::Builder::new().prefix("buzz-acp-git-").tempdir()?;
@@ -37,8 +62,10 @@ impl GitEnvironment {
             symlink(executable, &dir.path().join("git-sign-nostr"))?;
         }
         let keyfile = dir.path().join(".nostr-key");
-        let secret = Zeroizing::new(keys.secret_key().to_secret_hex());
-        write_keyfile_atomic(&keyfile, secret.as_bytes())?;
+        if persist_key {
+            let secret = Zeroizing::new(keys.secret_key().to_secret_hex());
+            write_keyfile_atomic(&keyfile, secret.as_bytes())?;
+        }
         let info = KeyInfo {
             keyfile_path: keyfile
                 .to_str()
@@ -61,12 +88,15 @@ impl GitEnvironment {
         let relay = relay.as_str().trim_end_matches('/');
         // `user` mode keeps only relay auth; its commits carry the operator's
         // own identity, so no attribution or signing is installed.
-        let managed = if agent {
+        let mut managed = if agent {
             let display_name = std::env::var("BUZZ_ACP_DISPLAY_NAME").ok();
             identity_entries(&info, relay, display_name.as_deref())
         } else {
             vec![("nostr.keyfile".into(), info.keyfile_path.clone())]
         };
+        if !persist_key {
+            managed.retain(|(key, _)| !same_config_key(key, "nostr.keyfile"));
+        }
         // In `user` mode nothing later overrides inherited identity or signing,
         // so drop agent mode's own managed keys, the author/committer
         // overrides and includes.
@@ -83,6 +113,9 @@ impl GitEnvironment {
                         .any(|(managed, _)| same_config_key(managed, key))
             });
         }
+        if !persist_key {
+            inherited.retain(|(key, _)| !same_config_key(key, "nostr.keyfile"));
+        }
         let mut env = build_git_env(relay, &managed, inherited);
         let mut paths = vec![dir.path().to_path_buf()];
         paths.extend(std::env::split_paths(
@@ -96,7 +129,10 @@ impl GitEnvironment {
         ));
         env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
         // CLI flags must work even when the caller did not export these variables.
-        env.push(("BUZZ_PRIVATE_KEY".into(), secret.to_string()));
+        if persist_key {
+            let secret = Zeroizing::new(keys.secret_key().to_secret_hex());
+            env.push(("BUZZ_PRIVATE_KEY".into(), secret.to_string()));
+        }
         env.push(("BUZZ_RELAY_URL".into(), relay_url.to_owned()));
         // MCP children start from a cleared env; forward the resolved mode so a
         // nested harness keeps it instead of defaulting to `agent`.
@@ -387,6 +423,7 @@ pub(crate) fn is_managed_env(name: &str) -> bool {
             "PATH"
                 | "GIT_TERMINAL_PROMPT"
                 | "BUZZ_PRIVATE_KEY"
+                | crate::key_broker::ACCOUNT_ENV
                 | "BUZZ_RELAY_URL"
                 | GIT_IDENTITY_ENV
         )
