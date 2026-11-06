@@ -10823,7 +10823,10 @@ pub(crate) mod postgres_tests {
             .expect("lock replica events");
         let search: nostr::Filter =
             serde_json::from_value(fx.search_filter()).expect("search filter");
-        let live_owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
+        // `before_search_query` runs after the claim and before the query, so
+        // the live entry must already be gone there: the timeout CLOSED,
+        // which also retires it, has not happened yet.
+        let (arrived, release) = crate::nip_fi_test_hooks::search_query_hook::arm(fx.community);
         let task = tokio::spawn(handle_req(
             "x".into(),
             vec![search],
@@ -10831,11 +10834,10 @@ pub(crate) mod postgres_tests {
             conn.clone(),
             fx.state.clone(),
         ));
-        // Once search has claimed `x` its hydrate blocks on the lock. The old
-        // live fan-out must already be retired then, not only at final cleanup.
-        while conn.subscriptions.lock().await.get("x") == Some(&live_owner) {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived)
+            .await
+            .expect("search reaches its query")
+            .expect("hook armed");
         assert!(
             fx.state
                 .sub_registry
@@ -10844,6 +10846,8 @@ pub(crate) mod postgres_tests {
             "accepting search must retire live fan-out"
         );
         assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+        assert!(rx.is_empty(), "nothing sent before the query");
+        release.notify_one();
         task.await.expect("search task");
         locker.rollback().await.expect("unlock");
 

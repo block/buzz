@@ -121,6 +121,7 @@ jobs:
           cargo nextest archive \
             --cargo-profile ci \
             -p buzz-db \
+            -p buzz-pubsub \
             -p buzz-relay \
             -p buzz-relay-mesh \
             -p buzz-test-client \
@@ -582,6 +583,13 @@ jobs:
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay-mesh) and test(/^registry::tests::external_infra_redis::/)' \
+            --run-ignored ignored-only
+      - name: Pubsub subscriber reconciliation regression
+        # Runs the live Redis subscriber; the test dials redis://127.0.0.1:6379.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-pubsub) and test(=tests::live_subscriber_recovers_a_dropped_subscribe_hint)' \
             --run-ignored ignored-only
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
