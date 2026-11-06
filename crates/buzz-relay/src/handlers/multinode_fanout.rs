@@ -15,6 +15,11 @@
 //! broadcast, it cannot tell which events it skipped, so it does the same for
 //! every subscribed connection.
 //!
+//! An ephemeral event (presence, typing, observer frames) is never stored, so
+//! no reconnect can replay it. Losing one is only counted: closing its
+//! recipients would recover nothing, and a global presence event reaches most
+//! of a community's connections.
+//!
 //! A client resumes from the newest `created_at` it received, minus a few
 //! seconds of slack. Recovery depends on that cursor never getting further
 //! ahead of a lost event than the slack:
@@ -44,6 +49,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use buzz_core::kind::{event_kind_u32, is_ephemeral};
 use buzz_core::CommunityId;
 use buzz_pubsub::ChannelEvent;
 use tokio::sync::mpsc::error::TrySendError;
@@ -139,7 +145,8 @@ async fn deliver_or_lose(state: &Arc<AppState>, closer: &LagCloser, queued: Queu
 /// One known event will not be delivered: resync the syncs and fence and
 /// close the connections it would have reached. Matching skips the access
 /// gate, so a recipient that would have been filtered out may be closed too;
-/// that costs a reconnect, never a leak.
+/// that costs a reconnect, never a leak. A lost ephemeral event is only
+/// counted, since no reconnect can replay it.
 fn lose(
     state: &AppState,
     closer: &LagCloser,
@@ -147,6 +154,11 @@ fn lose(
     stored: &StoredEvent,
     reason: &'static str,
 ) {
+    if is_ephemeral(event_kind_u32(&stored.event)) {
+        metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => "ephemeral")
+            .increment(1);
+        return;
+    }
     metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => reason).increment(1);
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     state.artifact_syncs.resync_matches(&matches, LAG_RESYNC);
@@ -301,15 +313,22 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::handlers::event::fan_out_event_to_local_subscribers;
 
     fn community() -> CommunityId {
         CommunityId::from_uuid(Uuid::nil())
     }
 
-    /// A connection with one presence subscription, its frame receiver, and
+    /// A stored kind: a lost event of it can be replayed, so its loss closes.
+    const STORED: u16 = 1;
+    /// An ephemeral kind: a lost event of it cannot be replayed.
+    const PRESENCE: u16 = KIND_PRESENCE_UPDATE as u16;
+
+    /// A connection with one subscription to `kind`, its frame receiver, and
     /// its cancellation token.
-    fn presence_subscriber(
+    fn subscriber(
         state: &AppState,
+        kind: u16,
     ) -> (ConnId, mpsc::Receiver<Message>, CancellationToken) {
         let conn_id = Uuid::new_v4();
         let (tx, rx) = mpsc::channel(64);
@@ -329,20 +348,20 @@ mod tests {
         );
         state.sub_registry.register(
             conn_id,
-            "presence".to_string(),
-            vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
+            "sub".to_string(),
+            vec![Filter::new().kind(Kind::Custom(kind))],
             None,
         );
         (conn_id, rx, cancel)
     }
 
-    fn presence(n: usize) -> ChannelEvent {
+    fn event(kind: u16, n: usize) -> ChannelEvent {
         ChannelEvent {
             community_id: community(),
             topic: EventTopic::Global,
-            event: EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), n.to_string())
+            event: EventBuilder::new(Kind::Custom(kind), n.to_string())
                 .sign_with_keys(&Keys::generate())
-                .expect("sign presence"),
+                .expect("sign event"),
             received_at: Instant::now(),
         }
     }
@@ -355,11 +374,11 @@ mod tests {
     #[tokio::test]
     async fn delivers_one_topic_in_order_through_workers() {
         let state = crate::state::tests::test_state().await;
-        let (_conn, mut frames, cancel) = presence_subscriber(&state);
+        let (_conn, mut frames, cancel) = subscriber(&state, STORED);
         let (tx, rx) = broadcast::channel(64);
         let handle = spawn(Arc::clone(&state), rx);
 
-        let sent: Vec<_> = (0..20).map(presence).collect();
+        let sent: Vec<_> = (0..20).map(|n| event(STORED, n)).collect();
         for event in &sent {
             tx.send(event.clone()).expect("broadcast");
         }
@@ -386,20 +405,20 @@ mod tests {
     #[tokio::test]
     async fn full_worker_queue_closes_the_dropped_events_recipients() {
         let state = crate::state::tests::test_state().await;
-        let (reached, _frames, _cancel) = presence_subscriber(&state);
+        let (reached, _frames, _cancel) = subscriber(&state, STORED);
         let other = Uuid::new_v4();
         state.sub_registry.register(
             other,
             "other-kind".to_string(),
-            vec![Filter::new().kind(Kind::Custom(1))],
+            vec![Filter::new().kind(Kind::Custom(7))],
             None,
         );
         // Hold the only queue's receiver without draining it.
         let (dispatcher, _queues) = Dispatcher::new(1, 1);
 
-        dispatcher.dispatch(&state, presence(0));
+        dispatcher.dispatch(&state, event(STORED, 0));
         assert!(pending(&dispatcher).is_empty(), "the first event fits");
-        dispatcher.dispatch(&state, presence(1));
+        dispatcher.dispatch(&state, event(STORED, 1));
         assert_eq!(pending(&dispatcher), HashSet::from([reached]));
     }
 
@@ -408,11 +427,11 @@ mod tests {
     #[tokio::test]
     async fn local_echo_on_a_full_queue_closes_nothing() {
         let state = crate::state::tests::test_state().await;
-        let _subscriber = presence_subscriber(&state);
+        let _subscriber = subscriber(&state, STORED);
         let (dispatcher, _queues) = Dispatcher::new(1, 1);
-        dispatcher.dispatch(&state, presence(0));
+        dispatcher.dispatch(&state, event(STORED, 0));
 
-        let echo = presence(1);
+        let echo = event(STORED, 1);
         state.mark_local_event(echo.community_id, &echo.event.id);
         dispatcher.dispatch(&state, echo);
         assert!(pending(&dispatcher).is_empty());
@@ -422,8 +441,8 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_lag_closes_every_subscribed_connection() {
         let state = crate::state::tests::test_state().await;
-        let (first, _f1, _c1) = presence_subscriber(&state);
-        let (second, _f2, _c2) = presence_subscriber(&state);
+        let (first, _f1, _c1) = subscriber(&state, STORED);
+        let (second, _f2, _c2) = subscriber(&state, STORED);
         let (dispatcher, _queues) = Dispatcher::new(1, 1);
 
         dispatcher.lagged(&state, 7);
@@ -435,7 +454,7 @@ mod tests {
     async fn closer_cancels_queued_connections_in_paced_batches() {
         let state = crate::state::tests::test_state().await;
         let subscribers: Vec<_> = (0..CLOSE_BATCH + 1)
-            .map(|_| presence_subscriber(&state))
+            .map(|_| subscriber(&state, STORED))
             .collect();
         let closer = Arc::new(LagCloser::default());
         tokio::spawn(Arc::clone(&closer).run(Arc::clone(&state)));
@@ -470,17 +489,17 @@ mod tests {
     #[tokio::test]
     async fn dropped_event_fences_its_recipients_before_their_close() {
         let state = crate::state::tests::test_state().await;
-        let (_conn, mut frames, cancel) = presence_subscriber(&state);
+        let (_conn, mut frames, cancel) = subscriber(&state, STORED);
         let (dispatcher, _queues) = Dispatcher::new(1, 1);
         assert!(
-            worker_delivers(&state, &dispatcher.closer, &mut frames, presence(0)).await,
+            worker_delivers(&state, &dispatcher.closer, &mut frames, event(STORED, 0)).await,
             "delivers before any loss"
         );
-        dispatcher.dispatch(&state, presence(1));
-        dispatcher.dispatch(&state, presence(2)); // dropped
+        dispatcher.dispatch(&state, event(STORED, 1));
+        dispatcher.dispatch(&state, event(STORED, 2)); // dropped
 
         assert!(
-            !worker_delivers(&state, &dispatcher.closer, &mut frames, presence(3)).await,
+            !worker_delivers(&state, &dispatcher.closer, &mut frames, event(STORED, 3)).await,
             "an event after the loss must not reach the fenced connection"
         );
         assert!(
@@ -493,11 +512,11 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_lag_fences_every_subscribed_connection() {
         let state = crate::state::tests::test_state().await;
-        let (_conn, mut frames, cancel) = presence_subscriber(&state);
+        let (_conn, mut frames, cancel) = subscriber(&state, STORED);
         let (dispatcher, _queues) = Dispatcher::new(1, 1);
         dispatcher.lagged(&state, 3);
 
-        assert!(!worker_delivers(&state, &dispatcher.closer, &mut frames, presence(0)).await);
+        assert!(!worker_delivers(&state, &dispatcher.closer, &mut frames, event(STORED, 0)).await);
         assert!(!cancel.is_cancelled());
     }
 
@@ -508,24 +527,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn backlogged_event_is_delivered_by_its_deadline_or_lost() {
         let state = crate::state::tests::test_state().await;
-        let (conn, mut frames, cancel) = presence_subscriber(&state);
+        let (conn, mut frames, cancel) = subscriber(&state, STORED);
         let (dispatcher, mut queues) = Dispatcher::new(1, 4);
         let queue = &mut queues[0];
 
-        dispatcher.dispatch(&state, presence(0));
+        dispatcher.dispatch(&state, event(STORED, 0));
         tokio::time::advance(MAX_QUEUE_DELAY - Duration::from_millis(1)).await;
         let in_time = queue.try_recv().expect("queued");
         deliver_or_lose(&state, &dispatcher.closer, in_time).await;
         assert!(frames.try_recv().is_ok(), "delivered inside its deadline");
 
-        dispatcher.dispatch(&state, presence(1)); // R
+        dispatcher.dispatch(&state, event(STORED, 1)); // R
         tokio::time::advance(MAX_QUEUE_DELAY).await;
         let late = queue.try_recv().expect("queued");
         deliver_or_lose(&state, &dispatcher.closer, late).await;
         assert!(frames.try_recv().is_err(), "R is not delivered late");
         assert_eq!(pending(&dispatcher), HashSet::from([conn]));
         assert!(
-            !worker_delivers(&state, &dispatcher.closer, &mut frames, presence(2)).await,
+            !worker_delivers(&state, &dispatcher.closer, &mut frames, event(STORED, 2)).await,
             "R's recipient is fenced until it closes"
         );
         assert!(!cancel.is_cancelled(), "the close waits for the closer");
@@ -536,10 +555,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn event_that_waited_before_dispatch_is_lost_not_delivered() {
         let state = crate::state::tests::test_state().await;
-        let (conn, mut frames, _cancel) = presence_subscriber(&state);
+        let (conn, mut frames, _cancel) = subscriber(&state, STORED);
         let (dispatcher, mut queues) = Dispatcher::new(1, 4);
 
-        let received = presence(0);
+        let received = event(STORED, 0);
         tokio::time::advance(MAX_QUEUE_DELAY).await;
         dispatcher.dispatch(&state, received);
         let queued = queues[0].try_recv().expect("queued");
@@ -563,7 +582,7 @@ mod tests {
         )
         .await;
         let channel_id = Uuid::new_v4();
-        let (conn, mut frames, _cancel) = presence_subscriber(&state);
+        let (conn, mut frames, _cancel) = subscriber(&state, STORED);
         state.sub_registry.register(
             conn,
             "channel".to_string(),
@@ -599,7 +618,7 @@ mod tests {
     async fn each_close_batch_is_counted_as_it_closes() {
         let state = crate::state::tests::test_state().await;
         let subscribers: Vec<_> = (0..CLOSE_BATCH + 1)
-            .map(|_| presence_subscriber(&state))
+            .map(|_| subscriber(&state, STORED))
             .collect();
         let closer = LagCloser::default();
         closer.queue(&state, subscribers.iter().map(|(conn_id, _, _)| *conn_id));
@@ -620,5 +639,79 @@ mod tests {
             })
             .sum();
         assert_eq!(counted, CLOSE_BATCH as u64);
+    }
+
+    /// A lost ephemeral event cannot be replayed, so it is only counted: its
+    /// recipients are neither fenced nor closed. A stored event lost on the
+    /// same full queue still closes them.
+    #[tokio::test(start_paused = true)]
+    async fn lost_ephemeral_event_is_counted_and_closes_nothing() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut frames, cancel) = subscriber(&state, PRESENCE);
+        state.sub_registry.register(
+            conn,
+            "stored".to_string(),
+            vec![Filter::new().kind(Kind::Custom(STORED))],
+            None,
+        );
+        let (dispatcher, _queues) = Dispatcher::new(1, 1);
+        dispatcher.dispatch(&state, event(PRESENCE, 0));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            dispatcher.dispatch(&state, event(PRESENCE, 1)); // queue full
+        });
+        let reasons: Vec<String> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_multinode_fanout_dropped_total")
+            .flat_map(|(key, ..)| {
+                key.key()
+                    .labels()
+                    .map(|label| label.value().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(reasons, ["ephemeral"], "counted as an ephemeral drop");
+        assert!(
+            pending(&dispatcher).is_empty(),
+            "a full queue closes nothing"
+        );
+
+        let stale = event(PRESENCE, 2);
+        tokio::time::advance(MAX_QUEUE_DELAY).await;
+        deliver_or_lose(&state, &dispatcher.closer, Queued::new(stale)).await;
+        assert!(frames.try_recv().is_err(), "still never delivered late");
+        assert!(
+            pending(&dispatcher).is_empty(),
+            "a stale one closes nothing"
+        );
+
+        assert!(
+            worker_delivers(&state, &dispatcher.closer, &mut frames, event(PRESENCE, 3)).await,
+            "nor fences the connection"
+        );
+        dispatcher.dispatch(&state, event(STORED, 4)); // queue full
+        assert_eq!(pending(&dispatcher), HashSet::from([conn]));
+        assert!(!cancel.is_cancelled());
+    }
+
+    /// The fence holds on relay-local fan-out too, not only on the workers.
+    #[tokio::test]
+    async fn fence_withholds_local_fan_out() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut frames, _cancel) = subscriber(&state, STORED);
+        let local = |n| pubsub_stored_event(event(STORED, n));
+
+        fan_out_event_to_local_subscribers(&state, community(), &local(0)).await;
+        assert!(frames.try_recv().is_ok(), "delivers before the fence");
+        state.conn_manager.fence_live_delivery(conn);
+        fan_out_event_to_local_subscribers(&state, community(), &local(1)).await;
+        assert!(
+            frames.try_recv().is_err(),
+            "a fenced connection gets nothing"
+        );
     }
 }
