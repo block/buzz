@@ -28,7 +28,7 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
       var general = 0;
 
       for (final channel in channels) {
-        if (!channel.isMember || channel.isArchived) continue;
+        if (!channel.showsInChannelList) continue;
 
         if (readState.locallyForcedChannelIds.contains(channel.id)) {
           general++;
