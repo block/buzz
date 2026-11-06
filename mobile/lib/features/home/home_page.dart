@@ -169,18 +169,18 @@ class HomePage extends HookConsumerWidget {
                               clipBehavior: Clip.none,
                               children: [
                                 Positioned(
-                                  top: -1,
-                                  right: 3,
+                                  top: 0,
+                                  right: 4,
                                   child: Container(
                                     key: const Key('home-inbox-dot'),
-                                    width: 8,
-                                    height: 8,
+                                    width: 10,
+                                    height: 10,
                                     decoration: BoxDecoration(
                                       shape: BoxShape.circle,
                                       color: context.colors.primary,
                                       border: Border.all(
                                         color: context.controlSurface,
-                                        width: 1,
+                                        width: 2,
                                       ),
                                     ),
                                   ),
