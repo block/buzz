@@ -1274,6 +1274,13 @@ impl<'a> Unacked<'a> {
         }
     }
 
+    /// Fails every publish still awaiting its `OK` with `reason`.
+    fn fail(&mut self, reason: &str) {
+        for (_, pending, _) in self.waiting.drain(..) {
+            pending.err(reason);
+        }
+    }
+
     /// Leaves every publish unjudged once its socket is gone, which is
     /// recorded as such.
     fn forget(&mut self) {
@@ -1506,7 +1513,8 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         // At the stop, publishes still awaiting their `OK` settle within
         // their deadlines while the HTTP action finishes, as a human's
         // publish in flight does. One never answered outlasts the shutdown
-        // grace and fails the run.
+        // grace and fails the run, and a socket lost before they all settle
+        // fails the rest.
         while ok && stopped(&shared) && !unacked.is_empty() {
             let wait = unacked
                 .deadline()
@@ -1523,7 +1531,10 @@ async fn agent(shared: Arc<Shared>, global: usize) {
             match received {
                 Some(Ok(RelayMessage::Ok(answer))) => unacked.answer(&answer),
                 Some(Ok(_)) | Some(Err(WsClientError::Timeout)) | None => {}
-                Some(Err(_)) => break,
+                Some(Err(e)) => {
+                    unacked.fail(&format!("disconnected before OK: {e}"));
+                    break;
+                }
             }
             unacked.expire(Instant::now());
         }
@@ -2215,6 +2226,8 @@ hold_secs = 1
         /// Each EVENT's `OK` follows this long after `ok_delay`, without
         /// holding up the frames after it.
         ok_lag: Duration,
+        /// Drops the socket this long after the handshake.
+        close_after: Option<Duration>,
     }
 
     impl FakeRelay {
@@ -2224,6 +2237,7 @@ hold_secs = 1
             history_delay: Duration::ZERO,
             slow_ok: None,
             ok_lag: Duration::ZERO,
+            close_after: None,
         };
     }
 
@@ -2264,52 +2278,62 @@ hold_secs = 1
                             }
                         }
                     });
-                    while let Some(Ok(Message::Text(text))) = ws.next().await {
-                        let frame: Value = serde_json::from_str(&text).unwrap();
-                        let reply = match frame[0].as_str() {
-                            Some("AUTH") => json!(["OK", frame[1]["id"], true, ""]),
-                            Some("REQ") => {
-                                seen.reqs.fetch_add(1, Ordering::SeqCst);
-                                let id = frame[1].as_str().unwrap_or_default();
-                                if id.starts_with(HISTORY_PREFIX) {
-                                    tokio::time::sleep(relay.history_delay).await;
-                                }
-                                json!(["EOSE", frame[1]])
-                            }
-                            Some("EVENT") => {
-                                if let Some(k) = frame[1]["kind"].as_u64() {
-                                    seen.kinds.lock().unwrap().push((k, Instant::now()));
-                                }
-                                let tags = frame[1]["tags"].as_array().cloned().unwrap_or_default();
-                                if let Some(h) = tags.iter().find(|t| t[0] == "h") {
-                                    let h = h[1].as_str().unwrap_or_default().to_string();
-                                    seen.channels.lock().unwrap().push(h);
-                                }
-                                let Some(mut delay) = relay.ok_delay else {
-                                    continue;
-                                };
-                                if let Some((after, slow)) = relay.slow_ok {
-                                    if opened.elapsed() >= after {
-                                        delay = slow;
+                    let serve = async move {
+                        while let Some(Ok(Message::Text(text))) = ws.next().await {
+                            let frame: Value = serde_json::from_str(&text).unwrap();
+                            let reply = match frame[0].as_str() {
+                                Some("AUTH") => json!(["OK", frame[1]["id"], true, ""]),
+                                Some("REQ") => {
+                                    seen.reqs.fetch_add(1, Ordering::SeqCst);
+                                    let id = frame[1].as_str().unwrap_or_default();
+                                    if id.starts_with(HISTORY_PREFIX) {
+                                        tokio::time::sleep(relay.history_delay).await;
                                     }
+                                    json!(["EOSE", frame[1]])
                                 }
-                                tokio::time::sleep(delay).await;
-                                let ok = json!(["OK", frame[1]["id"], true, ""]);
-                                if !relay.ok_lag.is_zero() {
-                                    let out = out.clone();
-                                    tokio::spawn(async move {
-                                        tokio::time::sleep(relay.ok_lag).await;
-                                        let _ = out.send(ok);
-                                    });
-                                    continue;
+                                Some("EVENT") => {
+                                    if let Some(k) = frame[1]["kind"].as_u64() {
+                                        seen.kinds.lock().unwrap().push((k, Instant::now()));
+                                    }
+                                    let tags =
+                                        frame[1]["tags"].as_array().cloned().unwrap_or_default();
+                                    if let Some(h) = tags.iter().find(|t| t[0] == "h") {
+                                        let h = h[1].as_str().unwrap_or_default().to_string();
+                                        seen.channels.lock().unwrap().push(h);
+                                    }
+                                    let Some(mut delay) = relay.ok_delay else {
+                                        continue;
+                                    };
+                                    if let Some((after, slow)) = relay.slow_ok {
+                                        if opened.elapsed() >= after {
+                                            delay = slow;
+                                        }
+                                    }
+                                    tokio::time::sleep(delay).await;
+                                    let ok = json!(["OK", frame[1]["id"], true, ""]);
+                                    if !relay.ok_lag.is_zero() {
+                                        let out = out.clone();
+                                        tokio::spawn(async move {
+                                            tokio::time::sleep(relay.ok_lag).await;
+                                            let _ = out.send(ok);
+                                        });
+                                        continue;
+                                    }
+                                    ok
                                 }
-                                ok
+                                _ => continue,
+                            };
+                            if out.send(reply).is_err() {
+                                return;
                             }
-                            _ => continue,
-                        };
-                        if out.send(reply).is_err() {
-                            return;
                         }
+                    };
+                    // Ending `serve` drops both halves of the socket.
+                    match relay.close_after {
+                        Some(after) => {
+                            let _ = tokio::time::timeout(after, serve).await;
+                        }
+                        None => serve.await,
                     }
                 });
             }
@@ -2807,7 +2831,7 @@ channels_per_member = 1
 query_interval_secs = 0.0
 events_per_hour = 0.0
 observer_frames_per_hour = 0.0
-presence_interval_secs = 0.5
+presence_interval_secs = 1.0
 [[ramp]]
 users = 1.0
 hold_secs = 2
@@ -2839,6 +2863,68 @@ hold_secs = 2
                 .contains("unfinished at stop"),
             "{report}"
         );
+    }
+
+    /// A relay that drops the socket after the stop, with publishes still
+    /// awaiting their `OK`: they fail, so the drop cannot pass the run.
+    #[tokio::test]
+    async fn a_socket_lost_with_publishes_awaiting_their_ok_at_the_stop_fails_the_run() {
+        let (addr, _) = fake_ws_relay(FakeRelay {
+            ok_delay: None,
+            close_after: Some(Duration::from_millis(2500)),
+            ..FakeRelay::PROMPT
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 0
+agents = 1
+channels_per_member = 1
+[agent]
+query_interval_secs = 0.0
+events_per_hour = 0.0
+observer_frames_per_hour = 0.0
+presence_interval_secs = 1.0
+[[ramp]]
+users = 1.0
+hold_secs = 2
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with(
+                scenario,
+                net,
+                Shard { index: 0, count: 1 },
+                Duration::from_secs(5),
+            ),
+        )
+        .await
+        .expect("the run returns")
+        .expect_err("publishes lost with their socket fail the run");
+        assert_eq!(report["clients_cancelled"], 0, "{report}");
+        let closing = &report["shutdown"];
+        assert!(
+            closing["ops"]["publish_ephemeral_ok"]["errors"].as_u64() > Some(0),
+            "{report}"
+        );
+        assert!(
+            closing["failures"]
+                .to_string()
+                .contains("disconnected before OK"),
+            "{report}"
+        );
+        assert!(!closing["abort_reason"].is_null(), "{report}");
     }
 
     /// A relay that completes the handshake and then never reads: a publish
