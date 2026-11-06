@@ -2240,6 +2240,44 @@ async fn never_joined_auto_join_channels_routed_reads_the_bounded_replica() {
     assert_eq!(ids.expect("entry too old"), vec![writer_channel]);
 }
 
+/// Migration 0087 over an operator's concurrent prebuild of
+/// `idx_channels_auto_join` only checks the catalog. It neither waits for
+/// channel writers nor replaces the prebuild.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn auto_join_index_migration_accepts_a_prebuild_without_waiting_for_writers() {
+    let (pool, _scratch) =
+        ScratchDb::migrated_through(&admin_url().await, "auto_join_prebuild", 86).await;
+    sqlx::query(
+        "CREATE INDEX CONCURRENTLY idx_channels_auto_join ON public.channels (community_id) \
+         WHERE auto_join AND channel_type = 'stream' AND visibility = 'open' \
+           AND archived_at IS NULL AND deleted_at IS NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("prebuild idx_channels_auto_join");
+    let oid = || async {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT to_regclass('public.idx_channels_auto_join')::oid::bigint",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look up index")
+    };
+    let prebuilt = oid().await;
+
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE channels IN ROW EXCLUSIVE MODE")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    crate::migration::run_migrations_through(&pool, 87)
+        .await
+        .expect("accept the prebuild without waiting for channel writers");
+    writer.rollback().await.unwrap();
+    assert_eq!(oid().await, prebuilt, "the prebuild is not replaced");
+}
+
 /// Community separation across every routed seam, verified on
 /// REPLICA-SERVED reads.
 ///
