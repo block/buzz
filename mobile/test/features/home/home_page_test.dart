@@ -235,6 +235,17 @@ void main() {
       final expandedHeader = tester.widget<FrostedAppBar>(
         find.byType(FrostedAppBar),
       );
+      BorderSide filterOutline() => tester
+          .widget<FilterChip>(
+            find
+                .descendant(
+                  of: find.byType(MessagesFilters),
+                  matching: find.byType(FilterChip),
+                )
+                .first,
+          )
+          .side!;
+      expect(filterOutline(), BorderSide.none);
       scroll.jumpTo(expandedHeader.bottomHeight / 4);
       await tester.pump();
       expect(
@@ -249,6 +260,7 @@ void main() {
             .opacity,
         closeTo(0.75, 0.01),
       );
+      expect(filterOutline(), BorderSide.none);
       scroll.jumpTo(expandedHeader.bottomHeight);
       await tester.pump();
       expect(
@@ -259,9 +271,12 @@ void main() {
             .opacity,
         0,
       );
+      expect(filterOutline().width, 1);
+      expect(filterOutline().color.a, closeTo(0.01, 0.001));
       scroll.jumpTo(0);
       await tester.pump();
       expect(tester.getTopLeft(title).dy, titleTop);
+      expect(filterOutline(), BorderSide.none);
       await tester.drag(
         find.byType(CustomScrollView).first,
         const Offset(0, -2000),
