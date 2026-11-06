@@ -82,7 +82,7 @@ pub async fn cmd_report_message(
     }
     .map_err(|e| CliError::Usage(format!("invalid report: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client
         .submit_event(event)
         .await
@@ -177,7 +177,11 @@ mod tests {
     }
 
     fn client(url: String) -> BuzzClient {
-        BuzzClient::new(url, Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
@@ -260,7 +264,11 @@ mod tests {
         let ok = r#"{"event_id":"e1","accepted":true,"message":""}"#;
 
         let (url, captured) = fake_relay(message_by(&me), StatusCode::OK, ok).await;
-        let client = BuzzClient::new(url, keys.clone(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(keys.clone()),
+        )
+        .unwrap();
         cmd_report_message(
             &client,
             ReportParams {
@@ -282,7 +290,8 @@ mod tests {
         );
 
         let (url, captured) = fake_relay(serde_json::json!([]), StatusCode::OK, ok).await;
-        let client = BuzzClient::new(url, keys, None, None).unwrap();
+        let client =
+            BuzzClient::new(url, crate::credentials::Credentials::from_keys(keys)).unwrap();
         cmd_report_message(
             &client,
             ReportParams {

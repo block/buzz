@@ -598,18 +598,14 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     };
 
     let step = StepTimer::start(StartupStep::RedisConnect);
-    let redis_pool = {
-        let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
-        cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
-    };
+    // One-time bootstrap gate, deliberately before AppState and therefore before
+    // the health listener binds. Post-start Redis failures are dependency
+    // failures and must never move readiness; never having connected at all is
+    // a broken deployment, not a blip.
+    buzz_relay::state::verify_redis_command_path(&config.redis_url).await?;
+    let redis_pool = buzz_pubsub::redis_connection(&config.redis_url)
+        .map_err(|e| anyhow::anyhow!("Redis connection setup failed: {e}"))?;
     let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with AppState
-                                                // One-time bootstrap gate, deliberately before AppState and therefore before
-                                                // the health listener binds. Post-start Redis failures are dependency
-                                                // failures and must never move readiness; never having connected at all is
-                                                // a broken deployment, not a blip.
-    buzz_relay::state::verify_redis_command_path(&redis_health_pool).await?;
     info!("Redis command path connected");
     let pubsub = Arc::new(
         PubSubManager::new(&config.redis_url, redis_pool)
@@ -1438,7 +1434,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     let router = build_router(Arc::clone(&state));
     let health_router = build_health_router(Arc::clone(&state));
 
-    // Pool metrics: periodic background task polling DB + Redis pool stats.
+    // Pool metrics: periodic background task polling DB pool stats and probing
+    // the shared Redis command connection.
     {
         let pool_state = Arc::clone(&state);
         let interval_secs = std::env::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
@@ -1484,11 +1481,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     }
                 }
 
-                let rs = pool_state.redis_pool.status();
-                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
-                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
-                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
-                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+                relay_metrics::probe_redis_command_connection(&pool_state.redis_pool).await;
 
                 let deletion_store = pool_state.db.deletion_store();
                 match deletion_store.reap_expired_serving_write_leases(1000).await {

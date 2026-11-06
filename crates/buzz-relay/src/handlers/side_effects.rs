@@ -3539,12 +3539,19 @@ pub(crate) async fn persist_deletion(
     };
     let targets: Vec<buzz_db::DeletionTarget<'_>> = planned
         .iter()
-        .map(|p| buzz_db::DeletionTarget {
-            event_id: &p.id,
-            parent_event_id: p.parent_id.as_deref(),
-            root_event_id: p.root_id.as_deref(),
+        .map(|p| {
+            Ok(buzz_db::DeletionTarget {
+                event_id: &p.id,
+                created_at: chrono::DateTime::from_timestamp(
+                    p.target.event.created_at.as_secs() as i64,
+                    0,
+                )
+                .ok_or_else(|| anyhow::anyhow!("invalid deletion target timestamp"))?,
+                parent_event_id: p.parent_id.as_deref(),
+                root_event_id: p.root_id.as_deref(),
+            })
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
     let (stored, inserted, deleted) = state
         .db
         .insert_deletion_event(tenant.community(), event, channel_id, thread_meta, &targets)
