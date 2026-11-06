@@ -166,7 +166,12 @@ void main() {
       // The third waits for a slot. The replacements are too large to save,
       // so the old copies go rather than showing in their place.
       replacement.complete();
-      await _settle();
+      await _until(() async {
+        for (final url in _externalUrls) {
+          if (await cache.read(url) != null) return false;
+        }
+        return true;
+      });
       expect(fetched, _externalUrls);
     });
     replaceExternal = null;
@@ -315,6 +320,16 @@ void main() {
       }
     },
   );
+}
+
+/// Waits for background work that a fixed delay cannot bound on a slow
+/// machine, such as several refreshes running one after another.
+Future<void> _until(Future<bool> Function() done) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 10));
+  while (!await done()) {
+    if (DateTime.now().isAfter(deadline)) fail('timed out');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
 }
 
 /// Lets fire-and-forget disk writes and refreshes finish.
