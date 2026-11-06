@@ -2792,6 +2792,9 @@ mod tests {
         );
     }
 
+    #[path = "policy_sweep_postgres_tests.rs"]
+    mod policy_sweep;
+
     // ── F6: document fallback (postgres-only) ───────────────────────────────────
     //
     // A no-`Accept` plain GET / to a successfully mapped host must bypass the
@@ -3193,7 +3196,7 @@ mod tests {
             }
         }
 
-        async fn real_db_state() -> Option<Arc<AppState>> {
+        pub(super) async fn real_db_state() -> Option<Arc<AppState>> {
             let db_url = crate::test_support::database_url();
             let pool = sqlx::PgPool::connect(&db_url).await.ok()?;
 
