@@ -42,6 +42,7 @@ import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
 import 'compose_drafts_provider.dart';
 import 'dm_resurface.dart';
+import 'feed_item.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
@@ -152,16 +153,25 @@ class ActivityPage extends HookConsumerWidget {
       localDoneSet: localState.doneIds,
     );
 
-    bool includesSender(String pubkey) {
-      final pk = pubkey.toLowerCase();
-      final isAgent = agents.contains(pk) || profiles[pk]?.ownerPubkey != null;
-      return sender.value == 'Anyone' ||
-          (sender.value == 'Agents' ? isAgent : !isAgent);
+    // Rows mark channel bot members as agents, so the sender filter does too.
+    final channelAgents = <String, Set<String>>{};
+    bool includesSender(FeedItem e) {
+      if (sender.value == 'Anyone') return true;
+      final pk = e.pubkey.toLowerCase();
+      final channelId = e.channelId;
+      final known = channelId == null
+          ? agents
+          : channelAgents.putIfAbsent(
+              channelId,
+              () => ref.watch(agentMentionPubkeysProvider(channelId)),
+            );
+      final isAgent = known.contains(pk) || profiles[pk]?.ownerPubkey != null;
+      return sender.value == 'Agents' ? isAgent : !isAgent;
     }
 
-    // Mentions and sender filters apply to each event before regrouping, so
-    // a row shows the matching activity rather than a later unrelated reply
-    // from the same conversation.
+    // Mentions, Threads and sender filters apply to each event before
+    // regrouping, so a row shows the matching activity rather than a later
+    // unrelated message from the same conversation.
     final candidates = buildInboxItems(
       allItems
           .expand((i) => i.groupItems)
@@ -169,7 +179,8 @@ class ActivityPage extends HookConsumerWidget {
             (e) =>
                 (filter.value != InboxFilter.mention ||
                     e.category == 'mention') &&
-                includesSender(e.pubkey),
+                (filter.value != InboxFilter.thread || isThreadReply(e.tags)) &&
+                includesSender(e),
           ),
       isDmChannel: (id) => channelById[id]?.isDm ?? false,
     );

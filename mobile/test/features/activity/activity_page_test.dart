@@ -712,6 +712,107 @@ void main() {
     },
   );
 
+  testWidgets('Agents filter counts channel bot members as agents', (
+    tester,
+  ) async {
+    FeedItem event(String id, String pubkey, String body, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey: pubkey,
+      content: body,
+      createdAt: now - age,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [],
+      category: 'mention',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: [
+            event('b1', 'bot_pk', 'bot reports', 300),
+            event('p1', 'bob_pk', 'person asks', 200),
+          ],
+          needsAction: const [],
+          activity: const [],
+          agentActivity: const [],
+        ),
+        overrides: [
+          channelBotPubkeysProvider(
+            'ch1',
+          ).overrideWith((ref) async => {'bot_pk'}),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agents').last);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('bot reports'), findsOneWidget);
+    expect(find.textContaining('person asks'), findsNothing);
+  });
+
+  testWidgets('Threads filter shows a DM reply, not a later DM message', (
+    tester,
+  ) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
+    );
+    FeedItem dmEvent(
+      String id,
+      String body,
+      int age,
+      List<List<String>> tags,
+    ) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
+      content: body,
+      createdAt: now - age,
+      channelId: 'dm1',
+      channelName: '',
+      tags: tags,
+      category: 'activity',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [
+            dmEvent('dm-reply', 'reply in thread', 300, const [
+              ['e', threadIdRoot1, '', 'root'],
+              ['e', threadIdRoot1, '', 'reply'],
+            ]),
+            dmEvent('dm-top', 'later top level', 200, const []),
+          ],
+          agentActivity: const [],
+        ),
+        channels: [...testChannels, dmChannel],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _chooseActivityType(tester, 'Threads');
+
+    expect(find.textContaining('reply in thread'), findsOneWidget);
+    expect(find.textContaining('later top level'), findsNothing);
+  });
+
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
