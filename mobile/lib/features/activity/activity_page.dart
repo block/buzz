@@ -72,6 +72,15 @@ EdgeInsets _activityScrollPadding(
 /// message preview — while keeping mobile's list → canonical destination
 /// navigation. Row taps deep-link to the represented message (oldest unread
 /// for grouped conversations) rather than just opening the channel.
+const _activityTypeOptions = {
+  InboxFilter.all: 'All',
+  InboxFilter.thread: 'Threads',
+  InboxFilter.mention: 'Mentions',
+  InboxFilter.dm: 'DMs',
+  InboxFilter.reminders: 'Reminders',
+  InboxFilter.drafts: 'Drafts',
+};
+
 class ActivityPage extends HookConsumerWidget {
   const ActivityPage({this.tabReselection, super.key});
 
@@ -487,17 +496,11 @@ class ActivityPage extends HookConsumerWidget {
                       _ActivityMenuButton<InboxFilter>(
                         controlKey: 'activity-type-menu',
                         popoverKey: 'activity-type-popover',
-                        semanticLabel: 'Activity type',
+                        semanticLabel:
+                            'Activity type, ${_activityTypeOptions[filter.value]}',
                         value: filter.value,
                         active: filter.value != InboxFilter.all,
-                        options: const {
-                          InboxFilter.all: 'All',
-                          InboxFilter.thread: 'Threads',
-                          InboxFilter.mention: 'Mentions',
-                          InboxFilter.dm: 'DMs',
-                          InboxFilter.reminders: 'Reminders',
-                          InboxFilter.drafts: 'Drafts',
-                        },
+                        options: _activityTypeOptions,
                         onChanged: (value) => filter.value = value,
                       ),
                       const SizedBox(width: Grid.xxs),

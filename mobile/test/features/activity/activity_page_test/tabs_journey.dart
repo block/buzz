@@ -132,6 +132,7 @@ void _activityTabJourneys(
       find.byKey(const ValueKey('activity-type-menu')),
     );
     expect(type.label, 'All');
+    expect(type.accessibilityLabel, 'Activity type, All');
     expect(type.actions.map((a) => a.label), [
       'All',
       'Threads',
@@ -149,6 +150,14 @@ void _activityTabJourneys(
           )
           .label,
       'Threads',
+    );
+    expect(
+      tester
+          .widget<IosMessageCreateButton>(
+            find.byKey(const ValueKey('activity-type-menu')),
+          )
+          .accessibilityLabel,
+      'Activity type, Threads',
     );
     type.actions.first.onPressed!();
     await tester.pumpAndSettle();
