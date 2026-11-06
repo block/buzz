@@ -117,6 +117,7 @@ enum NativeTabler {
     "link": 0xeade, // link
     "checkmark": 0xea5e, // check
     "checkmark.circle": 0xea67, // circle-check
+    "bell": 0xea35, // bell
     "bell.slash": 0xece9, // bell-off
     "number": 0xeabc, // hash — matches BuzzIcons.hash
     "bubble.left": 0xeaef, // message
