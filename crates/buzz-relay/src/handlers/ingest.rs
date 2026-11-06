@@ -2523,6 +2523,27 @@ pub async fn ingest_event(
 ///   client ceiling (60 s, CANVAS_MAX_FUTURE_SKEW_SECS) < canvas relay bound (300 s) < relay general bound (900 s)
 const CANVAS_MAX_INGEST_FUTURE_SECS: i64 = 300;
 
+/// Reject events whose content or any tag value contains a NUL byte.
+/// Postgres `text` cannot store `\0`, so such an event would otherwise fail
+/// at insert with an encoding error and surface as an internal error.
+fn reject_nul_bytes(event: &Event) -> Result<(), IngestError> {
+    if event.content.contains('\0') {
+        return Err(IngestError::Rejected(
+            "invalid: content contains a NUL byte".into(),
+        ));
+    }
+    if event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().iter().any(|value| value.contains('\0')))
+    {
+        return Err(IngestError::Rejected(
+            "invalid: tag contains a NUL byte".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns `Ok(())` if the canvas event timestamp is within the allowed future
 /// window, or `Err` with a rejection message otherwise.
 ///
@@ -2580,6 +2601,18 @@ async fn ingest_event_inner(
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
+
+    // The size check is a pure, cheap reject: it needs neither the DB nor
+    // signature verification, so oversized events never cost a writer-pool
+    // read or a blocking-pool Schnorr check.
+    const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
+    if event.content.len() > MAX_EVENT_CONTENT_BYTES {
+        return Err(IngestError::Rejected(format!(
+            "invalid: content exceeds maximum size of {} bytes (got {})",
+            MAX_EVENT_CONTENT_BYTES,
+            event.content.len()
+        )));
+    }
 
     // Durable community write fence: persistent ingest is a DB write the
     // deletion engine cannot exclude via serving-write leases (those cover
@@ -2684,15 +2717,6 @@ async fn ingest_event_inner(
         }
     }
 
-    const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
-    if event.content.len() > MAX_EVENT_CONTENT_BYTES {
-        return Err(IngestError::Rejected(format!(
-            "invalid: content exceeds maximum size of {} bytes (got {})",
-            MAX_EVENT_CONTENT_BYTES,
-            event.content.len()
-        )));
-    }
-
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
         return Err(IngestError::AuthFailed(
@@ -2730,6 +2754,11 @@ async fn ingest_event_inner(
     // Ban / timeout write-block. Runs before every kind-specific branch below
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
+
+    // Every path below, command kinds included, stores the event's content
+    // and tags in Postgres, which cannot hold NUL: reject it here instead of
+    // failing at insert with an encoding error.
+    reject_nul_bytes(&event)?;
 
     super::media_access::validate_media_references(tenant, state, &event).await?;
 
@@ -5241,6 +5270,34 @@ mod postgres_tests {
             .tags(nostr_tags)
             .sign_with_keys(&keys)
             .unwrap()
+    }
+
+    /// Postgres `text` cannot hold `\0`; an event carrying one must be a
+    /// client `invalid:` rejection, not a storage error surfacing as a 500.
+    /// Mutation: drop either check in `reject_nul_bytes` and the matching
+    /// case below fails.
+    #[test]
+    fn nul_bytes_in_content_or_tags_are_rejected_as_invalid() {
+        let cases = [
+            (
+                make_event_with_tags(KIND_STREAM_MESSAGE, "a\0b", &[]),
+                "content",
+            ),
+            (
+                make_event_with_tags(KIND_STREAM_MESSAGE, "ok", &[&["h", "chan\0nel"]]),
+                "tag",
+            ),
+        ];
+        for (event, what) in cases {
+            match reject_nul_bytes(&event) {
+                Err(IngestError::Rejected(msg)) => {
+                    assert!(msg.starts_with("invalid: "), "{what}: {msg}");
+                }
+                other => panic!("{what}: NUL byte must be rejected, got {other:?}"),
+            }
+        }
+        let clean = make_event_with_tags(KIND_STREAM_MESSAGE, "ok", &[&["h", "channel"]]);
+        assert!(reject_nul_bytes(&clean).is_ok());
     }
 
     #[test]
@@ -7863,6 +7920,48 @@ mod postgres_tests {
             .await
             .expect("connect test Postgres");
         build_canvas_ingest_state(&db_url, &pool).await
+    }
+
+    /// The NUL reject is wired into the shared ingest seam ahead of command
+    /// routing: a stored kind or a command kind carrying NUL in content or a
+    /// tag is refused as `invalid:` instead of failing at insert.
+    /// Mutations: drop `reject_nul_bytes(&event)?` from `ingest_event_inner`
+    /// (the notes are stored or fail at insert) or move it below the command
+    /// branch (the DM open fails at insert as an internal error) → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ingest_rejects_nul_in_stored_and_command_kinds() {
+        const CONTENT_NUL: &str = "invalid: content contains a NUL byte";
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = owned_agent_fixture(&state, "nul-reject").await;
+        let auth = |keys: &nostr::Keys| IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+
+        let content_nul = EventBuilder::new(Kind::Custom(KIND_TEXT_NOTE as u16), "a\0b")
+            .sign_with_keys(&owner)
+            .expect("sign content-NUL note");
+        let tag_nul = EventBuilder::new(Kind::Custom(KIND_TEXT_NOTE as u16), "ok")
+            .tags([nostr::Tag::parse(["t", "a\0b"]).expect("tag")])
+            .sign_with_keys(&owner)
+            .expect("sign tag-NUL note");
+        let dm_open = EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "a\0b")
+            .tags([nostr::Tag::public_key(owner.public_key())])
+            .sign_with_keys(&agent)
+            .expect("sign dm open");
+        for (event, keys, expected) in [
+            (content_nul, &owner, CONTENT_NUL),
+            (tag_nul, &owner, "invalid: tag contains a NUL byte"),
+            (dm_open, &agent, CONTENT_NUL),
+        ] {
+            match ingest_event(&state, &tenant, event, auth(keys)).await {
+                Err(IngestError::Rejected(msg)) => assert_eq!(msg, expected),
+                Err(other) => panic!("{expected}: got {other:?}"),
+                Ok(_) => panic!("{expected}: accepted"),
+            }
+        }
     }
 
     /// An owner's timeout reaches its agent, and it is enforced before command
