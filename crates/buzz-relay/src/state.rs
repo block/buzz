@@ -447,6 +447,9 @@ struct ConnEntry {
     grace_limit: u8,
     /// Lifecycle control used by `disconnect_nip_fi` for the denial transition.
     community_control: CommunityConnectionControl,
+    /// Set when this node lost a live event the connection should have
+    /// received (see [`ConnectionManager::fence_live_delivery`]).
+    live_fenced: AtomicBool,
 }
 
 /// Community-scoped lifecycle registry shared by every long-lived socket type.
@@ -874,6 +877,7 @@ impl ConnectionManager {
                 admitted: AtomicBool::new(false),
                 grace_limit,
                 community_control,
+                live_fenced: AtomicBool::new(false),
             },
         );
         // Insert-then-check pairs with drain_all's store-then-iterate: either
@@ -1014,6 +1018,16 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Stop live fan-out to a connection that lost a live event, until it
+    /// closes. A client resumes from the newest event it received; delivering
+    /// newer events after the loss would move that cursor past the lost one.
+    /// One-way: the connection must close for its client to recover.
+    pub(crate) fn fence_live_delivery(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.live_fenced.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Cancel a single connection by ID. A no-op if the connection is not
@@ -1317,8 +1331,19 @@ impl ConnectionManager {
     /// Sends an already-serialized UTF-8 text payload to the given connection.
     ///
     /// The shared `Bytes` payload is cloned into the outbound WS message without
-    /// copying the frame body. Callers must only pass valid UTF-8 bytes.
+    /// copying the frame body. Callers must only pass valid UTF-8 bytes. This is
+    /// the live fan-out send path: a fenced connection (see
+    /// [`Self::fence_live_delivery`]) gets nothing.
     pub fn send_to_text_bytes(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
+        // A fenced connection is closing so its client can replay from before
+        // a loss; the close accounts for this frame too.
+        if self
+            .connections
+            .get(&conn_id)
+            .is_some_and(|entry| entry.live_fenced.load(Ordering::SeqCst))
+        {
+            return true;
+        }
         let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
             .expect("relay fan-out frames are serialized UTF-8 JSON");
         self.try_send_ws_message(conn_id, WsMessage::Text(text))

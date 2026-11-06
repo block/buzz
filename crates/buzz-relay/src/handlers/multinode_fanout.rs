@@ -11,9 +11,12 @@
 //! `CLOSED "resync: ..."` (NIP-AR Sync rule 5), and closes the connections it
 //! would have reached so their clients catch up from their cursor. When the
 //! dispatcher itself lags the broadcast, it cannot tell which events it
-//! skipped, so it does the same for every subscribed connection. Closes go
-//! through one paced closer so a hot channel cannot turn into a reconnect storm
-//! (Review-Proven Rule 9).
+//! skipped, so it does the same for every subscribed connection.
+//!
+//! An affected connection is fenced at once: it gets no live EVENT frame from
+//! then on, so its client's resume cursor stays before the loss. The socket
+//! close itself goes through one paced closer so a hot channel cannot turn
+//! into a reconnect storm (Review-Proven Rule 9).
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -125,7 +128,7 @@ impl Dispatcher {
         let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
         state.artifact_syncs.resync_matches(&matches, LAG_RESYNC);
         self.closer
-            .queue(matches.into_iter().map(|(conn_id, _)| conn_id));
+            .queue(state, matches.into_iter().map(|(conn_id, _)| conn_id));
     }
 
     /// The dispatcher skipped `skipped` events it never saw. Any subscription
@@ -136,13 +139,13 @@ impl Dispatcher {
         warn!("Multi-node fan-out lagged by {skipped} messages");
         state.artifact_syncs.resync_all(LAG_RESYNC);
         self.closer
-            .queue(state.sub_registry.subscribed_connections());
+            .queue(state, state.sub_registry.subscribed_connections());
     }
 }
 
-/// Closes connections that lost a live event, at most [`CLOSE_BATCH`] per
-/// [`CLOSE_TICK`]. The pending set holds each connection once and never more
-/// than this node's connections.
+/// Fences connections that lost a live event at once, then closes them at most
+/// [`CLOSE_BATCH`] per [`CLOSE_TICK`]. The pending set holds each connection
+/// once and never more than this node's connections.
 #[derive(Default)]
 struct LagCloser {
     pending: Mutex<HashSet<ConnId>>,
@@ -150,23 +153,36 @@ struct LagCloser {
 }
 
 impl LagCloser {
-    fn queue(&self, conns: impl IntoIterator<Item = ConnId>) {
+    /// Fence `conns` now and queue them for a paced close. Fencing happens
+    /// before this returns, so no event dispatched after the loss reaches them.
+    fn queue(&self, state: &AppState, conns: impl IntoIterator<Item = ConnId>) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let before = pending.len();
-        pending.extend(conns);
+        for conn_id in conns {
+            state.conn_manager.fence_live_delivery(conn_id);
+            pending.insert(conn_id);
+        }
         if pending.len() > before {
             self.wake.notify_one();
         }
     }
 
-    /// Take up to [`CLOSE_BATCH`] pending connections.
-    fn take_batch(&self) -> Vec<ConnId> {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let batch: Vec<ConnId> = pending.iter().take(CLOSE_BATCH).copied().collect();
+    /// Close up to [`CLOSE_BATCH`] pending connections, and count them.
+    /// Returns how many it closed.
+    fn close_batch(&self, state: &AppState) -> usize {
+        let batch: Vec<ConnId> = {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let batch: Vec<ConnId> = pending.iter().take(CLOSE_BATCH).copied().collect();
+            for conn_id in &batch {
+                pending.remove(conn_id);
+            }
+            batch
+        };
         for conn_id in &batch {
-            pending.remove(conn_id);
+            state.conn_manager.cancel_conn(*conn_id);
         }
-        batch
+        metrics::counter!("buzz_multinode_fanout_lag_closed_total").increment(batch.len() as u64);
+        batch.len()
     }
 
     async fn run(self: Arc<Self>, state: Arc<AppState>) {
@@ -174,17 +190,13 @@ impl LagCloser {
             self.wake.notified().await;
             let mut closed = 0usize;
             loop {
-                let batch = self.take_batch();
-                if batch.is_empty() {
+                let batch = self.close_batch(&state);
+                if batch == 0 {
                     break;
                 }
-                for conn_id in &batch {
-                    state.conn_manager.cancel_conn(*conn_id);
-                }
-                closed += batch.len();
+                closed += batch;
                 tokio::time::sleep(CLOSE_TICK).await;
             }
-            metrics::counter!("buzz_multinode_fanout_lag_closed_total").increment(closed as u64);
             warn!(
                 closed,
                 "multi-node fan-out: closed connections that missed live events"
@@ -345,7 +357,7 @@ mod tests {
         let closer = Arc::new(LagCloser::default());
         tokio::spawn(Arc::clone(&closer).run(Arc::clone(&state)));
 
-        closer.queue(subscribers.iter().map(|(conn_id, _, _)| *conn_id));
+        closer.queue(&state, subscribers.iter().map(|(conn_id, _, _)| *conn_id));
         let cancelled = || {
             subscribers
                 .iter()
@@ -356,5 +368,80 @@ mod tests {
         assert_eq!(cancelled(), CLOSE_BATCH, "one batch before the first tick");
         tokio::time::sleep(CLOSE_TICK).await;
         assert_eq!(cancelled(), CLOSE_BATCH + 1, "the rest after one tick");
+    }
+
+    /// Deliver `event` the way a worker does, and report whether the
+    /// subscriber got a frame.
+    async fn worker_delivers(
+        state: &Arc<AppState>,
+        frames: &mut mpsc::Receiver<Message>,
+        event: ChannelEvent,
+    ) -> bool {
+        deliver_pubsub_event(state, event).await;
+        frames.try_recv().is_ok()
+    }
+
+    /// After a known loss, a recipient gets no newer live event while it
+    /// waits for its paced close, so its client cannot resume past the loss.
+    #[tokio::test]
+    async fn dropped_event_fences_its_recipients_before_their_close() {
+        let state = crate::state::tests::test_state().await;
+        let (_conn, mut frames, cancel) = presence_subscriber(&state);
+        assert!(
+            worker_delivers(&state, &mut frames, presence(0)).await,
+            "delivers before any loss"
+        );
+        let (dispatcher, _queues) = Dispatcher::new(1, 1);
+        dispatcher.dispatch(&state, presence(1));
+        dispatcher.dispatch(&state, presence(2)); // dropped
+
+        assert!(
+            !worker_delivers(&state, &mut frames, presence(3)).await,
+            "an event after the loss must not reach the fenced connection"
+        );
+        assert!(
+            !cancel.is_cancelled(),
+            "the close itself waits for the closer"
+        );
+    }
+
+    /// The same fence holds after an unknown loss.
+    #[tokio::test]
+    async fn dispatcher_lag_fences_every_subscribed_connection() {
+        let state = crate::state::tests::test_state().await;
+        let (_conn, mut frames, cancel) = presence_subscriber(&state);
+        let (dispatcher, _queues) = Dispatcher::new(1, 1);
+        dispatcher.lagged(&state, 3);
+
+        assert!(!worker_delivers(&state, &mut frames, presence(0)).await);
+        assert!(!cancel.is_cancelled());
+    }
+
+    /// Each batch is counted when it closes, not when the backlog drains.
+    #[tokio::test]
+    async fn each_close_batch_is_counted_as_it_closes() {
+        let state = crate::state::tests::test_state().await;
+        let subscribers: Vec<_> = (0..CLOSE_BATCH + 1)
+            .map(|_| presence_subscriber(&state))
+            .collect();
+        let closer = LagCloser::default();
+        closer.queue(&state, subscribers.iter().map(|(conn_id, _, _)| *conn_id));
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let closed = metrics::with_local_recorder(&recorder, || closer.close_batch(&state));
+        assert_eq!(closed, CLOSE_BATCH);
+        assert_eq!(closer.pending.lock().expect("pending").len(), 1);
+        let counted: u64 = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_multinode_fanout_lag_closed_total")
+            .map(|(.., value)| match value {
+                metrics_util::debugging::DebugValue::Counter(n) => n,
+                other => panic!("expected a counter, got {other:?}"),
+            })
+            .sum();
+        assert_eq!(counted, CLOSE_BATCH as u64);
     }
 }
