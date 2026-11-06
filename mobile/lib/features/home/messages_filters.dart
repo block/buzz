@@ -10,9 +10,11 @@ import '../../shared/widgets/filter_chip_bar.dart';
 class MessagesFilters extends StatelessWidget {
   const MessagesFilters({
     super.key,
+    this.isCollapsed = false,
     required this.selected,
     required this.onSelected,
   });
+  final bool isCollapsed;
   final String selected;
   final ValueChanged<String> onSelected;
 
@@ -22,8 +24,11 @@ class MessagesFilters extends StatelessWidget {
     child: FilterChipBar<String>(
       useNativeGlass: true,
       matchNativeWidths: true,
-      side: defaultTargetPlatform == TargetPlatform.android
-          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.04))
+      labelOffset: defaultTargetPlatform == TargetPlatform.android
+          ? const Offset(0.5, -1)
+          : Offset.zero,
+      side: defaultTargetPlatform == TargetPlatform.android && isCollapsed
+          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.01))
           : BorderSide.none,
       minControlHeight: defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48,
       horizontalPadding: Grid.gutter,

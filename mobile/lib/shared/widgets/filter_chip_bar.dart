@@ -54,6 +54,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Optional outline for Material capsules.
   final BorderSide side;
 
+  /// Optical adjustment for the visible label within its centered layout box.
+  final Offset labelOffset;
+
   /// Minimum visible capsule height; the hit target may be larger.
   final double minControlHeight;
 
@@ -78,6 +81,7 @@ class FilterChipBar<T> extends StatelessWidget {
     this.useNativeGlass = false,
     this.matchNativeWidths = false,
     this.side = BorderSide.none,
+    this.labelOffset = Offset.zero,
     this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
@@ -240,7 +244,11 @@ class FilterChipBar<T> extends StatelessWidget {
                 minControlHeight - chipVerticalPadding * 2,
               ),
             ),
-            child: Center(widthFactor: 1, heightFactor: 1, child: label),
+            child: Center(
+              widthFactor: 1,
+              heightFactor: 1,
+              child: Transform.translate(offset: labelOffset, child: label),
+            ),
           )
         : label;
     final centeredLabel = Align(

@@ -227,7 +227,8 @@ class HomePage extends HookConsumerWidget {
           ),
         ];
       },
-      messagesFilters: MessagesFilters(
+      messagesFilters: (isCollapsed) => MessagesFilters(
+        isCollapsed: isCollapsed,
         selected: filter.value,
         onSelected: (value) {
           filter.value = value;

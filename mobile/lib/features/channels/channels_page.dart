@@ -129,7 +129,7 @@ class ChannelsPage extends HookConsumerWidget {
   });
 
   final WidgetBuilder settingsPageBuilder;
-  final Widget? messagesFilters;
+  final Widget Function(bool isCollapsed)? messagesFilters;
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
   final Widget? soloSliver;
@@ -738,7 +738,9 @@ class ChannelsPage extends HookConsumerWidget {
                 padding: EdgeInsets.only(
                   right: 60 * headerCollapse.value / filterContentHeight,
                 ),
-                child: messagesFilters,
+                child: messagesFilters!(
+                  headerCollapse.value >= filterContentHeight,
+                ),
               ),
       ),
       body: _ChannelsBody(
