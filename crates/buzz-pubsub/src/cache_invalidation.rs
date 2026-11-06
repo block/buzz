@@ -1,10 +1,10 @@
 //! Cross-pod cache-key invalidation over Redis pub/sub.
 //!
 //! Each relay pod keeps in-memory (moka) membership / accessible-channels /
-//! visibility caches. A membership or visibility change is applied to the local
-//! caches only on the pod that processed the write; other pods would otherwise
-//! rely on the 10s TTL to expire stale entries. This module carries the same
-//! key drops to every pod immediately.
+//! visibility / restriction caches. A change is applied to the local caches
+//! only on the pod that processed the write; other pods would otherwise rely
+//! on each cache's max age to expire stale entries. This module carries the
+//! same key drops to every pod immediately.
 //!
 //! The message is a pure cache-key drop — never an "evict these subscriptions"
 //! payload. The per-event access gate (`filter_fanout_by_access`) is the
@@ -81,6 +81,10 @@ pub enum CacheInvalidation {
     /// Drop all membership / accessible / visibility caches. Mirrors
     /// `invalidate_channel_deleted`.
     ChannelDeleted,
+    /// Drop every cached ban/timeout row in the community after a
+    /// restriction write. Mirrors `invalidate_restrictions`. A pod that
+    /// predates this variant skips it and serves its rows until they age out.
+    Restrictions,
 }
 
 /// A cache invalidation received from a community-scoped Redis channel.
@@ -245,6 +249,7 @@ mod tests {
             },
             CacheInvalidation::AccessibleAll,
             CacheInvalidation::ChannelDeleted,
+            CacheInvalidation::Restrictions,
             CacheInvalidation::Visibility {
                 channel_id: Uuid::from_u128(0xabcd),
             },

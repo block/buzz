@@ -8281,11 +8281,10 @@ pub(crate) mod postgres_tests {
                                 .ban_community_member(community, &key, &actor, None, None)
                                 .await
                                 .expect("ban");
-                            state.invalidate_restriction_cache(community, &key);
                         }
-                        state.invalidate_restriction_cache(community, &target);
+                        state.invalidate_restrictions_local(community);
                     } else {
-                        state.invalidate_restriction_cache(community, &target);
+                        state.invalidate_restrictions_local(community);
                         state.db.pool().close().await;
                     }
                     release.notify_one();

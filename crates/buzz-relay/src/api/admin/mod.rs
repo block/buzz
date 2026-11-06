@@ -1192,8 +1192,15 @@ async fn community_for_host(
     state: &crate::state::AppState,
     host: &str,
 ) -> Result<buzz_core::CommunityId, ApiError> {
+    Ok(tenant_for_host(state, host).await?.community())
+}
+
+async fn tenant_for_host(
+    state: &crate::state::AppState,
+    host: &str,
+) -> Result<buzz_core::TenantContext, ApiError> {
     match crate::tenant::bind_community(state, host).await {
-        Ok(tenant) => Ok(tenant.community()),
+        Ok(tenant) => Ok(tenant),
         Err(crate::tenant::BindError::UnmappedHost) => Err(ApiError::bad_request(
             "unknown_community_host",
             "no community is served at this host",
@@ -1279,7 +1286,7 @@ async fn unban_member(
         .act(&slot)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
-    let community = community_for_host(&state, &query.community_host).await?;
+    let tenant = tenant_for_host(&state, &query.community_host).await?;
 
     let actor_authority = match principal.role {
         AdminRole::Operator => "relay_operator",
@@ -1289,7 +1296,7 @@ async fn unban_member(
     let lifted = state
         .db
         .unban_community_member_with_audit(
-            community,
+            tenant.community(),
             &target_bytes,
             &principal.pubkey,
             actor_authority,
@@ -1298,6 +1305,7 @@ async fn unban_member(
     if !lifted {
         return Err(ApiError::conflict("no active ban for this member"));
     }
+    state.invalidate_restrictions(&tenant);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -1321,7 +1329,7 @@ async fn untimeout_member(
         .act(&slot)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
-    let community = community_for_host(&state, &query.community_host).await?;
+    let tenant = tenant_for_host(&state, &query.community_host).await?;
 
     let actor_authority = match principal.role {
         AdminRole::Operator => "relay_operator",
@@ -1331,7 +1339,7 @@ async fn untimeout_member(
     let lifted = state
         .db
         .untimeout_community_member_with_audit(
-            community,
+            tenant.community(),
             &target_bytes,
             &principal.pubkey,
             actor_authority,
@@ -1340,6 +1348,7 @@ async fn untimeout_member(
     if !lifted {
         return Err(ApiError::conflict("no active timeout for this member"));
     }
+    state.invalidate_restrictions(&tenant);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -2736,11 +2745,19 @@ mod postgres_tests {
             .expect("insert ban fixture for other community");
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
+        // Restriction rows this pod cached before the lift.
+        let cached_keys = [
+            (community, target_pubkey.clone()),
+            (other_community, target_pubkey.clone()),
+        ];
+        for key in cached_keys.clone() {
+            state.seed_restriction(key, buzz_db::moderation::RestrictionState::default());
+        }
         let target_hex = hex::encode(&target_pubkey);
         let path = format!("/members/{target_hex}/ban?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
-            state,
+            Arc::clone(&state),
             Request::builder()
                 .method("DELETE")
                 .uri(&path)
@@ -2756,6 +2773,12 @@ mod postgres_tests {
             StatusCode::NO_CONTENT,
             "unban of an active ban must return 204"
         );
+        // The lift drops the community's cached rows (and, over Redis, every
+        // other pod's); another community's stay.
+        // Mutation: drop `invalidate_restrictions` from the handler → RED.
+        let [lifted, elsewhere] = cached_keys;
+        assert!(state.restriction_cache.entry(&lifted).is_none());
+        assert!(state.restriction_cache.entry(&elsewhere).is_some());
 
         // Ban must be cleared in the target community.
         let ban = db
@@ -2865,11 +2888,19 @@ mod postgres_tests {
         .expect("insert timeout fixture for other community");
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
+        // Restriction rows this pod cached before the lift.
+        let cached_keys = [
+            (community, target_pubkey.clone()),
+            (other_community, target_pubkey.clone()),
+        ];
+        for key in cached_keys.clone() {
+            state.seed_restriction(key, buzz_db::moderation::RestrictionState::default());
+        }
         let target_hex = hex::encode(&target_pubkey);
         let path = format!("/members/{target_hex}/timeout?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
-            state,
+            Arc::clone(&state),
             Request::builder()
                 .method("DELETE")
                 .uri(&path)
@@ -2885,6 +2916,12 @@ mod postgres_tests {
             StatusCode::NO_CONTENT,
             "untimeout of an active timeout must return 204"
         );
+        // The lift drops the community's cached rows (and, over Redis, every
+        // other pod's); another community's stay.
+        // Mutation: drop `invalidate_restrictions` from the handler → RED.
+        let [lifted, elsewhere] = cached_keys;
+        assert!(state.restriction_cache.entry(&lifted).is_none());
+        assert!(state.restriction_cache.entry(&elsewhere).is_some());
 
         // Timeout must be cleared in the target community.
         let restriction = db
@@ -12611,7 +12648,10 @@ mod postgres_tests {
     }
 
     /// A staff ban closes the target's open socket like a kind-9040 ban; a
-    /// staff timeout leaves the target connected.
+    /// staff timeout leaves the target connected. Both drop the community's
+    /// cached restriction rows, so the next request rereads the restriction.
+    /// Mutation: drop `invalidate_restrictions` from the enforcement
+    /// convergence point → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn direct_ban_disconnects_target_and_timeout_does_not() {
@@ -12619,6 +12659,19 @@ mod postgres_tests {
         let (banned, timed_out) = ([0x41u8; 32], [0x42u8; 32]);
         let banned_socket = live_socket(&state, community, &banned);
         let timed_out_socket = live_socket(&state, community, &timed_out);
+        let cached = |target: [u8; 32]| {
+            state
+                .restriction_cache
+                .entry(&(community, target.to_vec()))
+                .is_some()
+        };
+        let seed = |target: [u8; 32]| {
+            state.seed_restriction(
+                (community, target.to_vec()),
+                buzz_db::moderation::RestrictionState::default(),
+            )
+        };
+        seed(timed_out);
 
         let (status, body) = direct_post(
             &state,
@@ -12634,6 +12687,8 @@ mod postgres_tests {
             !timed_out_socket.is_cancelled(),
             "timeout must not disconnect"
         );
+        assert!(!cached(timed_out), "timeout must drop the cached row");
+        seed(banned);
 
         let (status, body) = direct_post(
             &state,
@@ -12646,6 +12701,7 @@ mod postgres_tests {
             banned_socket.is_cancelled(),
             "ban must close the target's socket"
         );
+        assert!(!cached(banned), "ban must drop the cached row");
         assert!(
             !timed_out_socket.is_cancelled(),
             "ban is scoped to its target"

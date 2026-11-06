@@ -3957,15 +3957,15 @@ mod tests {
             assert_eq!(
                 state
                     .community_active
-                    .entry(tenant.community())
+                    .entry(&tenant.community())
                     .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
-                    .map(|cached| cached.state),
+                    .entry(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|(state, _)| state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -3977,12 +3977,15 @@ mod tests {
         }
 
         /// Stored writes read the restriction through the cache, and only
-        /// while the entry is younger than `RESTRICTION_CACHE_MAX_AGE`: a
-        /// fresh cached ban on a sender Postgres has never restricted refuses
-        /// a stored write, and the same row past that age is reread and
-        /// admits it.
-        /// Mutation: make ingest read the restriction uncached, or drop the
-        /// max-age check from `restriction_state_cached` → RED.
+        /// while the entry is younger than 10 s: a cached ban on a sender
+        /// Postgres has never restricted refuses a stored write while fresh
+        /// and 9 s old, and the same row 10 s old is reread and admits it.
+        /// The ages are literals, so the bound a pod that misses an
+        /// invalidation serves stale rows for is pinned independently of
+        /// `RESTRICTION_CACHE_MAX_AGE`.
+        /// Mutation: make ingest read the restriction uncached, drop the
+        /// max-age check, or raise `RESTRICTION_CACHE_MAX_AGE` above 10 s
+        /// → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_honor_cached_ban_until_it_ages_out() {
@@ -4003,15 +4006,22 @@ mod tests {
                 "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            state.restriction_cache.insert(
-                key,
-                crate::state::CachedRestriction {
-                    state: banned,
-                    read_at: std::time::Instant::now()
-                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
-                        .expect("instant past max age"),
-                },
+            let aged = |secs| {
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(secs))
+                    .expect("instant in the past")
+            };
+            state
+                .restriction_cache
+                .seed_read_at(key.clone(), banned.clone(), aged(9));
+            let frame =
+                ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+            assert!(
+                frame.contains("blocked: you are banned"),
+                "a 9 s old cached ban must still refuse a stored write; got {frame}"
             );
+
+            state.restriction_cache.seed_read_at(key, banned, aged(10));
             let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
             assert!(
                 frame.contains(",true,"),

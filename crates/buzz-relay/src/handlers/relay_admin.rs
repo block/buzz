@@ -1437,13 +1437,13 @@ mod postgres_tests {
         assert!(!bystander_socket.is_cancelled(), "the bystander stays");
     }
 
-    /// A timeout and an untimeout each drop the target's cached restriction
-    /// row on the pod that handles them, so typing and observer frames see
-    /// the change at once instead of after the cache TTL.
-    /// Mutation: remove `invalidate_restriction_cache` from either → RED.
+    /// Each of the ban, unban, timeout and untimeout commands drops the
+    /// target's cached restriction row, so HTTP gates, typing and observer
+    /// frames see the change at once instead of after the cache's max age.
+    /// Mutation: remove `invalidate_restrictions` from any of them → RED.
     #[tokio::test]
     #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-    async fn timeout_commands_drop_the_cached_restriction_row() {
+    async fn restriction_commands_drop_the_cached_restriction_row() {
         let host = format!("timeout-cache-{}.example", uuid::Uuid::new_v4().simple());
         let (state, tenant) = workspace_profile_test_state(&host, true).await;
         let (owner, target) = (Keys::generate(), Keys::generate());
@@ -1482,6 +1482,14 @@ mod postgres_tests {
                 buzz_core::kind::KIND_MODERATION_UNTIMEOUT,
                 vec![Tag::public_key(target.public_key())],
             ),
+            command(
+                buzz_core::kind::KIND_MODERATION_BAN,
+                vec![Tag::public_key(target.public_key())],
+            ),
+            command(
+                buzz_core::kind::KIND_MODERATION_UNBAN,
+                vec![Tag::public_key(target.public_key())],
+            ),
         ] {
             state.seed_restriction(
                 key.clone(),
@@ -1493,7 +1501,7 @@ mod postgres_tests {
             .await
             .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
-                state.restriction_cache.get(&key).map(|cached| cached.state),
+                state.restriction_cache.entry(&key).map(|(state, _)| state),
                 None,
                 "kind {} must drop the cached row",
                 event.kind.as_u16()
