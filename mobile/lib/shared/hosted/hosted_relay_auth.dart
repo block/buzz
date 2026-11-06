@@ -96,9 +96,10 @@ class HostedRelayAuth extends ChangeNotifier {
   final bool enabled;
   final DateTime Function() _now;
   final NipFiRequirementFetch _discover;
-  // The latest NIP-FI discovery per hosted relay origin. The issuer refuses
-  // hosts that have not enabled NIP-FI, so those connect without evidence.
-  final _discovery = <String, Future<bool>>{};
+  // NIP-FI discovery per hosted relay origin: the read in flight, shared by
+  // concurrent callers, and the last result. The issuer refuses hosts that have
+  // not enabled NIP-FI, so those connect without evidence.
+  final _discovering = <String, Future<bool>>{};
   final _required = <String, bool>{};
   // One assertion per relay and key, so issuing for an inactive community (for
   // example a background revocation) never evicts the active session's
@@ -239,24 +240,20 @@ class HostedRelayAuth extends ChangeNotifier {
   }
 
   Future<bool> _requires(String origin, bool fresh) async {
-    var pending = fresh ? null : _discovery[origin];
-    if (pending == null) {
-      pending = _discover(Uri.parse(origin));
-      _discovery[origin] = pending;
-    }
+    final known = _required[origin];
+    if (!fresh && known != null) return known;
+    final pending = _discovering[origin] ??= _discover(Uri.parse(origin));
     try {
-      final required = await pending;
-      if (identical(_discovery[origin], pending)) _required[origin] = required;
-      return required;
-    } catch (error) {
-      // Unknown requirements are transient: the caller retries with backoff
-      // rather than guessing in either direction.
-      if (identical(_discovery[origin], pending)) {
-        _discovery.remove(origin);
-        _required.remove(origin);
-      }
+      return _required[origin] = await pending;
+    } on Exception catch (error) {
+      // The last answer stays for requests. Without one, or for a new
+      // connection, retry with backoff rather than guessing.
       debugPrint('NIP-FI discovery failed for $origin: $error');
       throw AccountFailure.unavailable;
+    } finally {
+      if (identical(_discovering[origin], pending)) {
+        _discovering.remove(origin);
+      }
     }
   }
 
@@ -465,7 +462,7 @@ class HostedRelayAuth extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _cached.clear();
-    _discovery.clear();
+    _discovering.clear();
     _required.clear();
     super.dispose();
   }

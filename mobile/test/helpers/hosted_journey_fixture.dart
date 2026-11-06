@@ -199,7 +199,7 @@ class HostedJourneyFixture {
           HostedEnvironment.requiresAuth(request.url.host)) {
         expect(
           request.headers['Nostr-Federated-Identity'],
-          nipFiRequired == false ? isNull : 'Bearer synthetic-assertion',
+          nipFiRequired == true ? 'Bearer synthetic-assertion' : isNull,
         );
         expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
       }

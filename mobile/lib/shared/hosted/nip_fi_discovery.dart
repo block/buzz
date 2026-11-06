@@ -18,11 +18,14 @@ Future<bool> fetchNipFiRequirement(
   Duration deadline = _deadline,
 }) async {
   final abort = Completer<void>();
-  final request = http.AbortableRequest(
-    'GET',
-    Uri.parse(origin.origin).replace(path: '/'),
-    abortTrigger: abort.future,
-  )..headers['Accept'] = 'application/nostr+json';
+  final request =
+      http.AbortableRequest(
+          'GET',
+          Uri.parse(origin.origin).replace(path: '/'),
+          abortTrigger: abort.future,
+        )
+        ..followRedirects = false
+        ..headers['Accept'] = 'application/nostr+json';
   StreamIterator<List<int>>? body;
   Future<List<int>> read() async {
     final response = await client.send(request);
@@ -55,7 +58,7 @@ Future<bool> fetchNipFiRequirement(
 /// NIP-FI Discovery: `limitation.federated_identity` advertises support, as a
 /// shadow-mode host does too; the host-specific `requires_nip_fi` says this
 /// community requires evidence. A relay without the flag requires what it
-/// supports. Matches buzz-app's desktop discovery.
+/// supports. Same requirement rule as buzz-app's desktop discovery.
 bool parseNipFiRequirement(Object? document) {
   if (document is! Map<String, dynamic>) {
     throw const FormatException('NIP-11 document is not an object');

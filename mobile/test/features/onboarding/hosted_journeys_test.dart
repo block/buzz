@@ -856,6 +856,9 @@ void main() {
       await session.reconnect();
       await f.settle(tester);
       expect(f.container.read(hostedRelayAuthProvider).failure, isNull);
+      // Requests keep the last answer instead of failing with discovery.
+      await session.queryRelay(const []);
+      expect(f.sent('/query'), hasLength(2));
       expect(f.sent('/identity/assertions'), isEmpty);
 
       // Once the community requires NIP-FI, its next connection carries one.
