@@ -88,9 +88,10 @@ impl CommunityLanding {
 ///
 /// The set is U+00AD, U+034F, U+061C, U+115F, U+1160, U+17B4, U+17B5,
 /// U+180B–U+180F, U+200B–U+200F, U+202A–U+202E, U+2060–U+206F, U+2800,
-/// U+3164, U+FE00–U+FE0F, U+FEFF, U+FFA0, U+FFF9–U+FFFB, U+1D173–U+1D17A
-/// and U+E0000–U+E007F. NIP-CL publishes it and clients mirror it character
-/// for character, so change all of them together.
+/// U+3164, U+FE00–U+FE0F, U+FEFF, U+FFA0, U+FFF9–U+FFFB, U+1BCA0–U+1BCA3,
+/// U+1D173–U+1D17A, U+E0000–U+E007F and U+E0100–U+E01EF. NIP-CL publishes
+/// it and clients mirror it character for character, so change all of them
+/// together.
 pub fn is_invisible(c: char) -> bool {
     matches!(
         c,
@@ -111,8 +112,10 @@ pub fn is_invisible(c: char) -> bool {
             | '\u{FEFF}'
             | '\u{FFA0}'
             | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
             | '\u{1D173}'..='\u{1D17A}'
             | '\u{E0000}'..='\u{E007F}'
+            | '\u{E0100}'..='\u{E01EF}'
     )
 }
 
@@ -703,6 +706,7 @@ mod tests {
             ("\u{2800}", blank),
             (" \u{200B} ", blank),
             ("\u{FEFF}", blank),
+            ("\u{E0100}", blank),
             ("\u{3164}\u{115F}\u{FFA0}", blank),
             ("\u{00AD}\u{034F}\u{180E}\u{2060}", blank),
             // Bidi controls are invisible too: alone they are blank.
@@ -791,6 +795,10 @@ mod tests {
             ('\u{FFF9}', true, false),
             ('\u{FFFB}', true, false),
             ('\u{FFFC}', false, false),
+            ('\u{1BC9F}', false, false),
+            ('\u{1BCA0}', true, false),
+            ('\u{1BCA3}', true, false),
+            ('\u{1BCA4}', false, false),
             ('\u{1D172}', false, false),
             ('\u{1D173}', true, false),
             ('\u{1D17A}', true, false),
@@ -799,6 +807,10 @@ mod tests {
             ('\u{E0000}', true, false),
             ('\u{E007F}', true, false),
             ('\u{E0080}', false, false),
+            ('\u{E00FF}', false, false),
+            ('\u{E0100}', true, false),
+            ('\u{E01EF}', true, false),
+            ('\u{E01F0}', false, false),
         ];
         for &(c, invisible, bidi) in cases {
             assert_eq!(
