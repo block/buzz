@@ -264,6 +264,9 @@ where
 #[derive(Clone, Debug)]
 pub struct Db {
     pub(crate) pool: PgPool,
+    /// Shared across clones; media authorization may use at most a quarter of
+    /// the writer pool (capped at eight), leaving capacity for ordinary writes.
+    pub(crate) media_authorization_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Optional bounded post-commit producer, shared across handle clones.
     pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
@@ -819,6 +822,7 @@ impl Db {
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue,
             pool,
             max_connections: config.max_connections,
@@ -1377,6 +1381,7 @@ impl Db {
     /// that need push must use [`Db::new`] with `push_enabled` instead.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
@@ -1398,6 +1403,7 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
+            media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
@@ -2172,3 +2178,9 @@ mod pool_role_tests {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod postgres_tests;
+
+fn media_authorization_slots(pool: &PgPool) -> std::sync::Arc<tokio::sync::Semaphore> {
+    std::sync::Arc::new(tokio::sync::Semaphore::new(
+        (pool.options().get_max_connections() as usize / 4).clamp(1, 8),
+    ))
+}

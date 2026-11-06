@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Errors produced by database operations.
 #[derive(Debug, Error)]
 pub enum DbError {
+    /// Media authorization could not reserve capacity within its bounded wait.
+    #[error("media authorization capacity exceeded")]
+    MediaAuthorizationCapacity,
+
     /// A SQLx driver-level error.
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),

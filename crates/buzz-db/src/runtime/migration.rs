@@ -313,6 +313,10 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 mod retirement_postgres_tests;
 
 #[cfg(test)]
+#[path = "media_index_prebuild_postgres_tests.rs"]
+mod media_index_prebuild_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use crate::test_support::ScratchDb;
@@ -898,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 85);
+        assert_eq!(migrations.len(), 86);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -907,6 +911,10 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ADD COLUMN requested_requires_nip_fi BOOLEAN NOT NULL DEFAULT true"));
+        assert!(migrations[85]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE media_uploaders"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3034,6 +3042,8 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "media_uploaders",
+            "media_publications",
             "relay_members",
             "relay_admin_actions",
             "relay_admin_outbox",
@@ -3063,6 +3073,14 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
+        async fn media_edit_index(pool: &PgPool) -> (String, String, String) {
+            sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indoption::text,pg_get_expr(indexprs,indrelid) FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass AND indisvalid AND indisready AND indislive")
+                .fetch_one(pool).await.expect("valid media edit index")
+        }
+        assert_eq!(
+            media_edit_index(&desired).await,
+            media_edit_index(&migrated).await
+        );
         // `channels` columns only: pgschema re-emits `idx_channels_id_live`
         // without its `INCLUDE (community_id)`, an index drift that predates
         // this check.
@@ -3566,6 +3584,7 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("repair ambiguous row");
+        crate::test_support::prebuild_media_edit_index(&pool).await;
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
@@ -3645,6 +3664,7 @@ mod postgres_tests {
             vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
         );
 
+        crate::test_support::prebuild_media_edit_index(&pool).await;
         run_migrations(&pool)
             .await
             .expect("apply remaining migrations to populated database");
@@ -4071,5 +4091,113 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .is_err());
+    }
+    /// Small populated upgrades build inline; contention stays bounded and a
+    /// verified prebuild avoids requesting the writer-conflicting index lock.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn media_edit_index_upgrade_builds_inline_or_verifies_prebuild() {
+        let pool = connect_test_pool().await;
+        for prebuilt in [false, true] {
+            reset_public_schema(&pool).await;
+            run_migrations_through(&pool, 85).await.unwrap();
+            let community = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO communities(id,host) VALUES($1,'media-index-upgrade.example')",
+            )
+            .bind(community)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO events(community_id,id,pubkey,created_at,kind,tags,content,sig) VALUES($1,decode(repeat('a',64),'hex'),decode(repeat('b',64),'hex'),now(),9,'[]','media',decode(repeat('c',128),'hex'))")
+                .bind(community).execute(&pool).await.unwrap();
+            if prebuilt {
+                sqlx::query("CREATE INDEX idx_events_media_edit_target ON events(community_id,id)")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let error = run_migrations(&pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("invalid or wrong definition"),
+                    "{error}"
+                );
+                sqlx::query("DROP INDEX idx_events_media_edit_target")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                crate::test_support::prebuild_media_edit_index(&pool).await;
+            }
+            let mut writer = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE public.events IN ROW EXCLUSIVE MODE")
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            if prebuilt {
+                run_migrations(&pool)
+                    .await
+                    .expect("verified prebuild does not request an index-build lock");
+                writer.rollback().await.unwrap();
+            } else {
+                let error = run_migrations(&pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("lock timeout"),
+                    "index build must obey its lock budget: {error}"
+                );
+                let applied: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version>=86)",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(
+                    !applied,
+                    "failed first new migration must leave version 85 intact"
+                );
+                let old_migrator = sqlx::migrate::Migrator {
+                    migrations: std::borrow::Cow::Owned(
+                        MIGRATOR
+                            .iter()
+                            .filter(|migration| migration.version <= 85)
+                            .cloned()
+                            .collect(),
+                    ),
+                    ..sqlx::migrate::Migrator::DEFAULT
+                };
+                with_exclusive_schema_destruction_lock(&pool, |mut conn| async move {
+                    let result = old_migrator
+                        .run(&mut conn)
+                        .await
+                        .map_err(crate::DbError::from);
+                    (conn, result)
+                })
+                .await
+                .expect("old binary's migrator must still restart after the failed index build");
+                let tables: bool = sqlx::query_scalar("SELECT to_regclass('public.media_uploaders') IS NOT NULL OR to_regclass('public.media_publications') IS NOT NULL")
+                    .fetch_one(&pool).await.unwrap();
+                assert!(
+                    !tables,
+                    "media table expansion must follow the fallible index build"
+                );
+                let recovery_column: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='relay_members' AND column_name='auto_join_pending')")
+                    .fetch_one(&pool).await.unwrap();
+                assert!(recovery_column, "main's migration 84 must remain intact");
+                let policy_columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='community_auth_upgrades' AND column_name IN ('requested_requires_nip_fi','expected_policy_generation','expected_requires_nip_fi')")
+                    .fetch_one(&pool).await.unwrap();
+                assert_eq!(policy_columns, 3, "base migration 85 must remain intact");
+                writer.rollback().await.unwrap();
+                run_migrations(&pool).await.expect(
+                    "small populated database builds its index without operator intervention",
+                );
+            }
+            run_migrations(&pool).await.unwrap();
+            let valid: bool = sqlx::query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass")
+                .fetch_one(&pool).await.unwrap();
+            assert!(valid, "both upgrade paths must leave a valid index");
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "upgrade preserves old relay rows");
+        }
     }
 }

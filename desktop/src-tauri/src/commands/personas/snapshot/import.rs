@@ -443,7 +443,7 @@ pub(crate) fn build_agent_snapshot_import_preview(
 ///      `AgentDefinition` + `ManagedAgentRecord` through the same primitives
 ///      used by the normal create flow.
 ///   3. Publish — kind:30175 definition via retention path; kind:0 profile
-///      via `sync_managed_agent_profile`.
+///      via `publish_created_agent_profile`.
 ///   4. Memory — for each opted-in entry, build a fresh `kind:30174` event
 ///      with `engram::build_event` under the new agent↔owner conversation
 ///      key and POST it to the relay. Failures are collected and returned as
@@ -458,6 +458,8 @@ pub async fn confirm_agent_snapshot_import(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentSnapshotImportResult, String> {
+    let owner_keys = state.signing_keys()?;
+    let captured_relay = relay_ws_url_with_override(&state);
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
     // Locked cards unlock only via this machine's exact key endpoints;
     // anything else fails closed here, before key generation.
@@ -512,8 +514,12 @@ pub async fn confirm_agent_snapshot_import(
     };
 
     // ── Phase 2: mint keys + auth tag (sync, outside lock) ───────────────────
+    if state.signing_keys()?.public_key() != owner_keys.public_key()
+        || relay_ws_url_with_override(&state) != captured_relay
+    {
+        return Err("Workspace changed during import; retry the import".into());
+    }
     let (agent_keys, private_key_nsec, pubkey, auth_tag, owner_pubkey_hex) = {
-        let owner_keys = state.signing_keys()?;
         let agent_keys = nostr::Keys::generate();
         let pubkey = agent_keys.public_key().to_hex();
         let private_key_nsec = agent_keys
@@ -690,11 +696,11 @@ pub async fn confirm_agent_snapshot_import(
     };
 
     // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
-    let relay_url =
-        effective_agent_relay_url(&record.relay_url, &relay_ws_url_with_override(&state));
+    let relay_url = effective_agent_relay_url(&record.relay_url, &captured_relay);
     let profile_sync_error = crate::commands::agents::publish_persona_profile(
         &state,
-        &record.relay_url,
+        &relay_url,
+        &owner_keys,
         &agent_keys,
         &display_name,
         effective_avatar.as_deref(),

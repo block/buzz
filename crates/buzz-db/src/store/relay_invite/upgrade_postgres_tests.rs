@@ -637,6 +637,9 @@ async fn migration_schema_desired_pgschema_reconcile_matches_populated_upgrade()
 
     // Exercise the deployment path against populated data at the complete
     // pinned-main schema through 0074, rather than reproducing its DDL by hand.
+    // Existing partitioned tables require the operator prebuild before pgschema,
+    // which otherwise tries unsupported CREATE INDEX CONCURRENTLY on the parent.
+    crate::test_support::prebuild_media_edit_index(&pool).await;
     apply_pgschema_to_existing_database(&pool).await;
     assert_admission_column(&pool).await;
     assert_join_role_preserved(&pool, cases[0].community).await;

@@ -113,3 +113,9 @@ mod admission_postgres_tests;
 
 /// Durable NIP-FI verified-profile projection state.
 pub mod verified_profiles;
+
+/// Live reference authorization and upload possession.
+pub mod media;
+
+#[cfg(test)]
+mod media_postgres_tests;
