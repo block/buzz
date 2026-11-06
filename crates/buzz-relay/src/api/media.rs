@@ -4763,6 +4763,32 @@ mod tests {
                 0x42, 0x60, 0x82,
             ];
 
+            /// A valid all-black grayscale PNG of the given size.
+            fn blank_png(width: u32, height: u32) -> Vec<u8> {
+                use std::io::Write;
+                let chunk = |png: &mut Vec<u8>, kind: &[u8], data: &[u8]| {
+                    let mut crc = flate2::Crc::new();
+                    crc.update(kind);
+                    crc.update(data);
+                    png.extend((data.len() as u32).to_be_bytes());
+                    png.extend(kind);
+                    png.extend(data);
+                    png.extend(crc.sum().to_be_bytes());
+                };
+                let mut ihdr = [width.to_be_bytes(), height.to_be_bytes()].concat();
+                ihdr.extend([8, 0, 0, 0, 0]);
+                let mut pixels =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                pixels
+                    .write_all(&vec![0; (width as usize + 1) * height as usize])
+                    .expect("compress");
+                let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+                chunk(&mut png, b"IHDR", &ihdr);
+                chunk(&mut png, b"IDAT", &pixels.finish().expect("compress"));
+                chunk(&mut png, b"IEND", &[]);
+                png
+            }
+
             struct Fixture {
                 rt: tokio::runtime::Runtime,
                 state: Arc<AppState>,
@@ -4866,7 +4892,8 @@ mod tests {
 
             /// Regeneration stays a 404 and writes nothing when the sidecar says the
             /// blob is not an image, the original is gone, the original exceeds
-            /// `max_image_bytes`, or every regeneration permit is taken.
+            /// `max_image_bytes` or 25 megapixels, or every regeneration permit
+            /// is taken.
             #[test]
             #[ignore = "requires Postgres and MinIO"]
             fn missing_thumbnail_is_not_regenerated_when_unsafe() {
@@ -4915,6 +4942,16 @@ mod tests {
                 // Original over the size cap.
                 let f = Fixture::new(|c| c.media.max_image_bytes = PNG.len() as u64 - 1);
                 assert_absent(&f, "oversize");
+
+                // Original over the 25 MP pixel cap, within the byte cap.
+                let f = Fixture::new(|_| {});
+                f.rt.block_on(f.state.media_storage.put(
+                    &format!("{}.png", f.sha),
+                    &blank_png(5_001, 5_000),
+                    "image/png",
+                ))
+                .expect("put oversized original");
+                assert_absent(&f, "over 25 MP");
 
                 // No free permit, then a free one.
                 let f = Fixture::new(|_| {});
