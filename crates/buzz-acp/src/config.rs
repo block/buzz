@@ -49,6 +49,9 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+
+    #[error("key broker: {0}")]
+    KeyBroker(String),
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -251,8 +254,25 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
+    /// Required unless --key-broker-account is set.
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY",
+        hide_env_values = true,
+        default_value = "",
+        hide_default_value = true
+    )]
     pub private_key: String,
+
+    /// Read the signing key from the local key broker instead of the
+    /// environment, and give children only this account name.
+    #[arg(
+        long,
+        env = "BUZZ_KEY_BROKER_ACCOUNT",
+        hide_env_values = true,
+        conflicts_with = "private_key"
+    )]
+    pub key_broker_account: Option<String>,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
@@ -553,6 +573,7 @@ pub struct ChannelFilter {
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
+    pub key_broker_account: Option<String>,
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
@@ -972,7 +993,10 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        let keys = match &args.key_broker_account {
+            Some(account) => Keys::parse(crate::key_broker::fetch(account)?.as_str())?,
+            None => Keys::parse(&args.private_key)?,
+        };
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
@@ -1194,6 +1218,7 @@ impl Config {
 
         let config = Config {
             keys,
+            key_broker_account: args.key_broker_account,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
@@ -1577,10 +1602,38 @@ mod tests {
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
 
+    #[test]
+    fn broker_account_replaces_the_private_key_argument() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--key-broker-account",
+            "claude-agent-private-key",
+        ]);
+        assert_eq!(
+            args.key_broker_account.as_deref(),
+            Some("claude-agent-private-key")
+        );
+        assert!(args.private_key.is_empty());
+    }
+
+    #[test]
+    fn broker_account_and_private_key_cannot_both_be_set() {
+        let key = "0".repeat(64);
+        let parsed = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--key-broker-account",
+            "claude-agent-private-key",
+        ]);
+        assert!(parsed.is_err());
+    }
+
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            key_broker_account: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],

@@ -10,6 +10,7 @@ mod edit_routing;
 mod engram_fetch;
 mod filter;
 mod isolated_execution;
+mod key_broker;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -2721,8 +2722,14 @@ pub fn run() -> Result<()> {
         .file_stem()
         .and_then(|name| name.to_str())
     {
-        Some("git-credential-nostr") => std::process::exit(git_credential_nostr::run()),
-        Some("git-sign-nostr") => std::process::exit(git_sign_nostr::run()),
+        Some("git-credential-nostr") => {
+            key_broker::prime_git_helper();
+            std::process::exit(git_credential_nostr::run())
+        }
+        Some("git-sign-nostr") => {
+            key_broker::prime_git_helper();
+            std::process::exit(git_sign_nostr::run())
+        }
         _ => {}
     }
     config::propagate_legacy_env_vars();
@@ -6472,16 +6479,23 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     name: "BUZZ_RELAY_URL".into(),
                     value: config.relay_url.clone(),
                 },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
+                match &config.key_broker_account {
+                    // Broker mode: the MCP child resolves its own key at use time.
+                    Some(account) => EnvVar {
+                        name: key_broker::ACCOUNT_ENV.into(),
+                        value: account.clone(),
+                    },
+                    None => EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
                 },
             ];
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
@@ -10096,6 +10110,17 @@ mod observer_chunk_coalescer_tests {
 
 #[cfg(test)]
 mod build_mcp_servers_tests {
+    #[test]
+    fn broker_mode_gives_the_mcp_child_an_account_and_no_key() {
+        let mut config = test_config();
+        config.mcp_command = "/usr/local/bin/test-mcp".into();
+        config.key_broker_account = Some("claude-agent-private-key".into());
+        let servers = super::build_mcp_servers(&config);
+        let names: Vec<&str> = servers[0].env.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"), "{names:?}");
+        assert!(names.contains(&crate::key_broker::ACCOUNT_ENV), "{names:?}");
+    }
+
     use super::*;
     use std::sync::Mutex;
 
@@ -10105,6 +10130,7 @@ mod build_mcp_servers_tests {
     pub(super) fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            key_broker_account: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -10289,6 +10315,21 @@ mod build_mcp_servers_tests {
             "{entries:?}"
         );
         assert_eq!(value_of("BUZZ_GIT_IDENTITY").as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn broker_mode_keeps_the_key_out_of_child_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = test_config();
+        config.key_broker_account = Some("claude-agent-private-key".into());
+        let _git = git::GitEnvironment::for_config(&mut config).unwrap();
+        let names: Vec<&str> = config
+            .persona_env_vars
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"), "{names:?}");
+        assert!(names.contains(&crate::key_broker::ACCOUNT_ENV), "{names:?}");
     }
 
     #[test]
@@ -11240,6 +11281,7 @@ mod error_outcome_emission_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            key_broker_account: None,
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous
