@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../shared/mentions/mention_rules.dart';
 import '../../../shared/utils/string_utils.dart';
+import '../../../shared/verified_profiles/verified_profile.dart';
 
 /// A mention autocomplete candidate. Mirrors the desktop's
 /// `MentionCandidateForRanking` (desktop/src/features/messages/lib/mentionRanking.ts).
@@ -58,9 +59,12 @@ class MentionCandidate {
     aliases: aliases,
   );
 
-  /// This candidate named by its NIP-FI verified [name], which it is then
-  /// matched, ranked and inserted as. The self-declared name stays searchable.
-  MentionCandidate withVerifiedName(String name) {
+  /// This candidate named by its NIP-FI [verified] display name, which it is
+  /// then matched, ranked and inserted as. The self-declared name stays
+  /// searchable, and so do the verified full name and username, which the
+  /// relay's profile search matches too.
+  MentionCandidate withVerifiedName(VerifiedProfile verified) {
+    final name = verified.displayName;
     final declared = displayName?.trim();
     return MentionCandidate(
       pubkey: pubkey,
@@ -75,8 +79,8 @@ class MentionCandidate {
       contextLabel: contextLabel,
       aliases: [
         ...aliases,
-        if (declared != null && declared.isNotEmpty && declared != name)
-          declared,
+        for (final alias in [declared, ...verifiedAliases(verified)])
+          if (alias != null && alias.isNotEmpty && alias != name) alias,
       ],
     );
   }

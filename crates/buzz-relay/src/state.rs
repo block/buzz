@@ -28,7 +28,6 @@ use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use chrono::{DateTime, Utc};
-use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
@@ -603,24 +602,28 @@ const REDIS_BOOTSTRAP_DRIVER_TIMEOUT: std::time::Duration =
 /// Proves once, during startup, that the Redis command path this pod will serve
 /// from can actually be reached.
 ///
-/// `deadpool_redis` pools dial lazily and `PubSubManager::new` only allocates
-/// channels, so without this nothing in boot ever opened a command connection:
-/// a relay came up against a dead Redis, bound its health listener, and — since
-/// readiness reports local lifecycle only — advertised ready forever. Binding
-/// that listener is a one-way latch, so the check has to happen before it, and
-/// it is deliberately a *startup* gate: once serving, a Redis blip is a
-/// dependency failure and must never change readiness.
-pub async fn verify_redis_command_path(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
+/// The shared command connection dials lazily and `PubSubManager::new` only
+/// allocates channels, so without this nothing in boot ever opened a command
+/// connection: a relay came up against a dead Redis, bound its health
+/// listener, and — since readiness reports local lifecycle only — advertised
+/// ready forever. Binding that listener is a one-way latch, so the check has to
+/// happen before it, and it is deliberately a *startup* gate: once serving, a
+/// Redis blip is a dependency failure and must never change readiness.
+///
+/// The PING runs on a one-shot connection to the same URL so its longer driver
+/// timeouts never apply to serving traffic; the outer timeout bounds connect,
+/// handshake, and PING together.
+pub async fn verify_redis_command_path(redis_url: &str) -> anyhow::Result<()> {
     let ping = async {
-        let connection = pool
-            .get()
+        let client = redis::Client::open(redis_url)
+            .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
+        let config = redis::AsyncConnectionConfig::new()
+            .set_connection_timeout(Some(REDIS_BOOTSTRAP_DRIVER_TIMEOUT))
+            .set_response_timeout(Some(REDIS_BOOTSTRAP_DRIVER_TIMEOUT));
+        let mut connection = client
+            .get_multiplexed_async_connection_with_config(&config)
             .await
             .map_err(|error| anyhow::anyhow!("{REDIS_BOOTSTRAP_FAILURE}: {error}"))?;
-        // This one-shot connection is removed from the pool so extending its
-        // driver timeout cannot leak into normal serving traffic. The relay's
-        // outer timeout below must bound both lazy checkout and PING.
-        let mut connection = deadpool_redis::Connection::take(connection);
-        connection.set_response_timeout(REDIS_BOOTSTRAP_DRIVER_TIMEOUT);
         redis::cmd("PING")
             .query_async::<String>(&mut connection)
             .await
@@ -1394,7 +1397,7 @@ pub struct AppState {
     /// Database connection pool.
     pub db: Db,
     /// Redis pool for readiness health checks.
-    pub redis_pool: deadpool_redis::Pool,
+    pub redis_pool: buzz_pubsub::RedisConnection,
     /// Audit event service, absent when audit logging is disabled.
     pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
@@ -1554,11 +1557,12 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
-    /// Ephemeral-path cache of `is_serving_active` (community not archived or
-    /// deleted). Key: community. TTL only (10s). Persistent ingest keeps the
-    /// uncached read as its durable write fence; on the ephemeral path archive
-    /// also disconnects the community's live sockets.
-    pub serving_active_cache: Arc<moka::sync::Cache<CommunityId, bool>>,
+    /// Community lifecycle answers for socket admission and the ephemeral
+    /// write fence, served for
+    /// [`crate::community_active::COMMUNITY_ACTIVE_MAX_AGE`] after their read's
+    /// connection checkout. Persistent ingest keeps its uncached read as its
+    /// durable write fence, and lifecycle revalidation reads fresh.
+    pub(crate) community_active: Arc<crate::community_active::CommunityActiveCache>,
     /// Cache of the raw ban/timeout row, not the verdict, so a timeout still
     /// lifts the moment `muted_until` passes. (`banned` is computed at read
     /// time, so an expiring ban can outlive its expiry by up to
@@ -1681,7 +1685,7 @@ impl AppState {
     pub fn new(
         config: Config,
         db: Db,
-        redis_pool: deadpool_redis::Pool,
+        redis_pool: buzz_pubsub::RedisConnection,
         audit: impl Into<Option<AuditService>>,
         pubsub: Arc<PubSubManager>,
         auth: AuthService,
@@ -1872,12 +1876,9 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
-            serving_active_cache: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
-                    .build(),
-            ),
+            community_active: Arc::new(crate::community_active::CommunityActiveCache::new(
+                shared_read_wait,
+            )),
             // Readers use an entry only for `RESTRICTION_CACHE_MAX_AGE`; the
             // TTL just reclaims memory.
             restriction_cache: Arc::new(
@@ -2000,22 +2001,17 @@ impl AppState {
         Ok(result)
     }
 
-    /// `is_serving_active` with a 10-second cache, for the ephemeral path only.
-    /// Errors are not cached.
-    pub async fn is_serving_active_cached(
+    /// `is_community_active` served from [`Self::community_active`], for
+    /// socket admission and the ephemeral write fence. Errors are not cached.
+    pub async fn is_community_active_cached(
         &self,
         community_id: CommunityId,
     ) -> Result<bool, buzz_db::DbError> {
-        if let Some(cached) = self.serving_active_cache.get(&community_id) {
-            metrics::counter!("buzz_serving_active_cache_hits_total").increment(1);
-            return Ok(cached);
-        }
-        metrics::counter!("buzz_serving_active_cache_misses_total").increment(1);
-        let result = buzz_deletion::store(&self.db)
-            .is_serving_active(community_id)
-            .await?;
-        self.serving_active_cache.insert(community_id, result);
-        Ok(result)
+        self.community_active
+            .get(community_id, || {
+                self.db.is_community_active_read_at(community_id)
+            })
+            .await
     }
 
     /// `moderation_restriction_state` served from [`Self::restriction_cache`]
@@ -2207,6 +2203,7 @@ impl AppState {
         match invalidation {
             CacheInvalidation::CommunityHost { host } => {
                 self.tenant_host_cache.invalidate(&host);
+                self.community_active.invalidate(community_id);
             }
             CacheInvalidation::Membership { channel_id, pubkey } => {
                 self.invalidate_membership_local(community_id, channel_id, &pubkey);
@@ -2227,6 +2224,7 @@ impl AppState {
     /// Lease expiry, not notification delivery, protects acceptance consistency.
     pub fn invalidate_community_host(&self, tenant: &TenantContext) {
         self.tenant_host_cache.invalidate(tenant.host());
+        self.community_active.invalidate(tenant.community());
         self.spawn_cache_invalidation(
             tenant,
             CacheInvalidation::CommunityHost {
@@ -2515,6 +2513,8 @@ impl AppState {
         archived_at: Option<DateTime<Utc>>,
     ) -> Result<Option<usize>, buzz_db::DbError> {
         self.tenant_host_cache.invalidate_community(community_id);
+        // Before the sweep, so a socket registered after it reads afresh.
+        self.community_active.invalidate(community_id);
         match archived_at {
             Some(archived_at) => {
                 self.db
@@ -3544,9 +3544,7 @@ pub(crate) mod tests {
 
     async fn build_test_state(config: crate::config::Config, pool: sqlx::PgPool) -> Arc<AppState> {
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3822,7 +3820,7 @@ pub(crate) mod tests {
         /// cache's max age, share one read, and its entry still lands fresh:
         /// waiters wait out the leader's pool wait, and the entry is stamped
         /// at connection checkout, not when the miss began.
-        /// Mutations: stamp any of the three entries before the pool wait,
+        /// Mutations: stamp any of the four entries before the pool wait,
         /// or let waiters give up after the cache's max age → RED.
         #[tokio::test(flavor = "current_thread")]
         #[ignore = "requires Postgres"]
@@ -3850,6 +3848,7 @@ pub(crate) mod tests {
             let wait = RESTRICTION_CACHE_MAX_AGE
                 .max(TENANT_HOST_CACHE_MAX_AGE)
                 .max(OPEN_CHANNELS_MAX_AGE)
+                .max(crate::community_active::COMMUNITY_ACTIVE_MAX_AGE)
                 .max(SHARED_READ_STATEMENT_WAIT)
                 + std::time::Duration::from_millis(500);
             let misses = 8;
@@ -3906,6 +3905,78 @@ pub(crate) mod tests {
                 .get(&community)
                 .expect("open-set entry");
             assert!(open.read_at.elapsed() < OPEN_CHANNELS_MAX_AGE);
+
+            let active = behind_held_connection(&pool, wait, misses, || {
+                let reader = Arc::clone(&state);
+                async move { reader.is_community_active_cached(community).await }
+            })
+            .await;
+            assert!(active
+                .into_iter()
+                .all(|active| active.expect("community active read")));
+            assert_eq!(
+                counted(&snapshotter, "buzz_community_active_cache_misses_total"),
+                1
+            );
+            let (_, read_at) = state
+                .community_active
+                .entry(community)
+                .expect("community active entry");
+            assert!(read_at.elapsed() < crate::community_active::COMMUNITY_ACTIVE_MAX_AGE);
+        }
+
+        /// A cached "active" never outlives an archive: an archive this pod
+        /// applies refuses the next check at once, and one it never hears
+        /// about refuses it once the entry is past its max age.
+        /// Mutations: drop the invalidation from `apply_community_disconnect`
+        /// (the first refusal admits), or serve entries past
+        /// `COMMUNITY_ACTIVE_MAX_AGE` (the second admits) → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn archived_community_is_refused_after_invalidation_or_max_age() {
+            let state = test_state().await;
+            let archive = |community: CommunityId| {
+                let pool = state.db.pool().clone();
+                async move {
+                    sqlx::query_scalar::<_, DateTime<Utc>>(
+                        "UPDATE communities SET archived_at = now() WHERE id = $1 RETURNING archived_at",
+                    )
+                    .bind(community.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("archive")
+                }
+            };
+            let community = |label: &str| {
+                let db = state.db.clone();
+                let host = format!("{label}-{}.local", Uuid::new_v4());
+                async move { db.ensure_configured_community(&host).await.unwrap().id }
+            };
+
+            let applied = community("archive-applied").await;
+            assert!(state.is_community_active_cached(applied).await.unwrap());
+            let archived_at = archive(applied).await;
+            assert!(
+                state.is_community_active_cached(applied).await.unwrap(),
+                "within its max age the cached answer stands"
+            );
+            state
+                .apply_community_disconnect(applied, Some(archived_at))
+                .await
+                .expect("disconnect");
+            assert!(
+                !state.is_community_active_cached(applied).await.unwrap(),
+                "an applied archive must refuse the next socket"
+            );
+
+            let missed = community("archive-missed").await;
+            assert!(state.is_community_active_cached(missed).await.unwrap());
+            archive(missed).await;
+            tokio::time::sleep(crate::community_active::COMMUNITY_ACTIVE_MAX_AGE).await;
+            assert!(
+                !state.is_community_active_cached(missed).await.unwrap(),
+                "an unheard archive must refuse once the entry expires"
+            );
         }
 
         /// Open-set reads park on a lock on `channels`, where the test counts

@@ -956,14 +956,20 @@ async fn handle_search_req(
             let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
             let page_empty = search_result.hits.is_empty();
 
-            let hit_ids: Vec<[u8; 32]> =
-                search_result.hits.into_iter().map(|h| h.event_id).collect();
+            let hit_keys: Vec<_> = search_result
+                .hits
+                .iter()
+                .map(|h| (h.event_id, h.created_at))
+                .collect();
 
-            if !hit_ids.is_empty() {
-                let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
+            if !hit_keys.is_empty() {
                 let events = match state
                     .db
-                    .get_events_by_ids_routed("req_search_hydrate", tenant.community(), &id_refs)
+                    .get_events_by_ids_at_routed(
+                        "req_search_hydrate",
+                        tenant.community(),
+                        &hit_keys,
+                    )
                     .await
                 {
                     Ok(evs) => evs,
@@ -1032,7 +1038,7 @@ async fn handle_search_req(
                         .map(|ev| (ev.event.id.to_bytes(), ev))
                         .collect();
 
-                for id_array in &hit_ids {
+                for (id_array, _) in &hit_keys {
                     if emitted >= limit {
                         break;
                     }
@@ -1104,11 +1110,13 @@ pub async fn build_event_query_from_filter(
 /// returning a truncated count.
 pub(crate) const COUNT_FALLBACK_CANDIDATE_LIMIT: i64 = 5_000;
 
-/// Apply the bounded candidate budget used by COUNT post-filter fallbacks.
-pub(crate) fn apply_count_fallback_limit(query: &mut EventQuery) {
+/// Prepare a COUNT post-filter fallback query: the bounded candidate budget,
+/// and exact NIP-01 matching so it counts what the SQL COUNT path would.
+pub(crate) fn prepare_count_fallback(query: &mut EventQuery) {
     let fetch_limit = COUNT_FALLBACK_CANDIDATE_LIMIT + 1;
     query.limit = Some(fetch_limit);
     query.max_limit = Some(fetch_limit);
+    query.exact_match = true;
 }
 
 /// Return whether a COUNT fallback query exceeded its exact-count budget.
@@ -1339,9 +1347,13 @@ fn filter_to_query_params(
     // NIP-CL: a membership notice's `#t` is its channel type. SQL keeps only
     // the types this filter may see; a filter without `#t` sees legacy types.
     let notice_channel_types = buzz_core::filter::notice_channel_types(filter);
+    // NIP-CW: a filter with `#p` is never a plain thread-reply read. Only a
+    // single value reaches SQL as `p_tag_hex`, so mark every `#p` filter here.
+    let exact_match = filter.generic_tags.contains_key(&p_tag);
 
     EventQuery {
         notice_channel_types,
+        exact_match,
         channel_id,
         kinds,
         pubkey,
@@ -3003,7 +3015,11 @@ mod tests {
     fn count_fallback_fetches_one_extra_candidate() {
         let mut query =
             EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()));
-        apply_count_fallback_limit(&mut query);
+        prepare_count_fallback(&mut query);
+        assert!(
+            query.exact_match,
+            "COUNT fallbacks never take the thread route"
+        );
         assert_eq!(query.limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
         assert_eq!(query.max_limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
         assert!(!count_fallback_exceeded(
@@ -4343,6 +4359,8 @@ mod tests {
     }
 
     mod postgres_tests {
+        use super::*;
+
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w3_b2_req_barrier_expiry_mid_flight_blocks_subscription_registration() {
@@ -4354,6 +4372,75 @@ mod tests {
         #[ignore = "requires Postgres"]
         async fn history_timeout_retirement_survives_expiry() {
             super::history_timeout_retirement_survives_expiry_body().await;
+        }
+
+        /// NIP-CW keeps any `#p` filter off the narrowed thread route. Two
+        /// `#p` values never reach SQL as `p_tag_hex`, so without the adapter's
+        /// mark this read took the route and lost a bare reference to the root.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn multi_p_thread_filter_keeps_nip01_results() {
+            use nostr::{EventBuilder, Keys, Kind, Tag};
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect");
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let community_uuid = uuid::Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(format!("multi-p-{}.example", community_uuid.simple()))
+                .execute(&pool)
+                .await
+                .expect("insert community");
+            let channel = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(channel)
+            .bind(community_uuid)
+            .bind(format!("multi-p-{}", channel.simple()))
+            .bind(vec![7_u8; 32])
+            .execute(&pool)
+            .await
+            .expect("insert channel");
+            let community = buzz_core::tenant::CommunityId::from_uuid(community_uuid);
+            let h = Tag::parse(["h", &channel.to_string()]).expect("h tag");
+            let (author, alice, bob) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let root = EventBuilder::new(Kind::Custom(9), "root")
+                .tags([h.clone()])
+                .sign_with_keys(&author)
+                .expect("sign root");
+            let root_hex = root.id.to_hex();
+            // Names the root only in a bare `e` tag, so it has no thread row.
+            let bare = EventBuilder::new(Kind::Custom(9), "bare reference")
+                .tags([
+                    h,
+                    Tag::parse(["e", &root_hex]).expect("e tag"),
+                    Tag::public_key(alice.public_key()),
+                ])
+                .sign_with_keys(&author)
+                .expect("sign bare");
+            for event in [&root, &bare] {
+                db.insert_event(community, event, Some(channel))
+                    .await
+                    .expect("insert event");
+            }
+
+            let filter = Filter::new()
+                .kinds([Kind::Custom(9), Kind::Custom(40002)])
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel.to_string())
+                .custom_tag(SingleLetterTag::lowercase(Alphabet::E), root_hex)
+                .pubkeys([alice.public_key(), bob.public_key()]);
+            let params = filter_to_query_params(&filter, Some(channel), community);
+            let ids: Vec<_> = db
+                .query_events_routed("req_historical", &params)
+                .await
+                .expect("query")
+                .into_iter()
+                .filter(|stored| filters_match(std::slice::from_ref(&filter), stored))
+                .map(|stored| stored.event.id)
+                .collect();
+            assert_eq!(ids, vec![bare.id], "two-value #p reads match NIP-01");
         }
     }
 }

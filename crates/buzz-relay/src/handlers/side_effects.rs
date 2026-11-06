@@ -1513,41 +1513,51 @@ async fn actor_is_relay_operator(
         .map_err(|e| anyhow::anyhow!("relay staff lookup failed: {}", e.message))
 }
 
-/// Sign, store (replacing previous), and fan-out a single addressable discovery event.
+/// Sign, store (replacing previous), and fan-out one of a channel's
+/// relay-signed kind:39000/39001 events, with the tags `build_tags` makes
+/// from the channel and its members.
+///
+/// The inputs, the timestamp and the replacement all sit behind the event's
+/// replacement lock (see `LockedGroupStateSnapshot`). Read outside it, an
+/// auto-join that read `auto_join` before a racing kind:9002 cleared it
+/// stored its snapshot after the edit's, at the same or a later second, and
+/// the stale tag stayed live.
 async fn emit_addressable_discovery_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     kind: u32,
-    tags: Vec<Tag>,
     relay_pubkey_hex: &str,
+    build_tags: impl FnOnce(
+        &buzz_db::channel::ChannelRecord,
+        &[MemberRecord],
+    ) -> anyhow::Result<Vec<Tag>>,
 ) -> anyhow::Result<()> {
-    // Ensure the new event's created_at is strictly greater than any existing event
-    // of the same (kind, pubkey, channel_id). Without this, rapid successive updates
-    // (e.g. set topic then set purpose in the same second) can produce events with
-    // identical created_at, causing the second to be rejected by stale-write protection
-    // (NIP-16 tiebreaker: lower event ID wins, which is random).
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_group_state_lock(tenant.community()).await;
+    let snapshot = state
+        .db
+        .lock_group_state_snapshot(
+            tenant.community(),
+            channel_id,
+            kind as i32,
+            &state.relay_keypair.public_key().to_bytes(),
+        )
+        .await?;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::after_group_state_read(tenant.community()).await;
+    let tags = build_tags(&snapshot.channel, &snapshot.members)?;
+    // One second past the live event, so the replacement never loses a
+    // same-second tiebreak (NIP-16: lower event ID wins, which is random).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let min_ts = {
-        let existing = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![kind as i32]),
-                channel_id: Some(channel_id),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| e.event.created_at.as_secs() + 1)
-            .unwrap_or(now)
-    };
-    let ts = now.max(min_ts);
+    let ts = snapshot
+        .latest_created_at
+        .map(|timestamp| timestamp + 1)
+        .unwrap_or(now)
+        .max(now);
 
     let event = EventBuilder::new(Kind::Custom(kind as u16), "")
         .tags(tags)
@@ -1555,9 +1565,8 @@ async fn emit_addressable_discovery_event(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
 
-    let (stored, was_inserted) = state
-        .db
-        .replace_addressable_event(tenant.community(), &event, Some(channel_id))
+    let (stored, was_inserted) = snapshot
+        .replace(&event)
         .await
         .map_err(|e| anyhow::anyhow!("channel state write failed: {}", e.kind()))?;
     if was_inserted {
@@ -1667,58 +1676,45 @@ pub async fn emit_group_discovery_events(
     state: &Arc<AppState>,
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
-    let channel = state
-        .db
-        .get_channel_for_event_write(tenant.community(), channel_id)
-        .await?;
-    let members = state
-        .db
-        .get_members_for_event_write(tenant.community(), channel_id)
-        .await?;
-
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
 
-    {
-        let tags = buzz_db::channel::group_metadata_tags(&channel, &members)
-            .into_iter()
-            .map(Tag::parse)
-            .collect::<Result<Vec<_>, _>>()?;
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
-            KIND_NIP29_GROUP_METADATA,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
+    emit_addressable_discovery_event(
+        tenant,
+        state,
+        channel_id,
+        KIND_NIP29_GROUP_METADATA,
+        &relay_pubkey_hex,
+        |channel, members| {
+            Ok(buzz_db::channel::group_metadata_tags(channel, members)
+                .into_iter()
+                .map(Tag::parse)
+                .collect::<Result<Vec<_>, _>>()?)
+        },
+    )
+    .await?;
 
-    {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        tags.extend(group_state_identity_tags(&channel.identity())?);
-        for m in members
-            .iter()
-            .filter(|m| m.role == "owner" || m.role == "admin")
-        {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
-        }
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
-            KIND_NIP29_GROUP_ADMINS,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
+    emit_addressable_discovery_event(
+        tenant,
+        state,
+        channel_id,
+        KIND_NIP29_GROUP_ADMINS,
+        &relay_pubkey_hex,
+        |channel, members| {
+            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
+            tags.extend(group_state_identity_tags(&channel.identity())?);
+            // The snapshot already scoped `members` to `GROUP_ADMIN_ROLES`.
+            for m in members {
+                let pubkey_hex = hex::encode(&m.pubkey);
+                tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
+            }
+            Ok(tags)
+        },
+    )
+    .await?;
 
-    // Re-capture membership behind the writer lock immediately before the
-    // authoritative 39002 replacement. Metadata/admin snapshots retain their
-    // existing behavior; only membership publication needs this freshness fence.
+    // The roster takes the same fence behind the channel's membership lock,
+    // which its replacement also validates against.
     let relay_pubkey = state.relay_keypair.public_key().to_bytes();
     let mut member_snapshot = state
         .db
@@ -3491,12 +3487,19 @@ pub(crate) async fn persist_deletion(
     };
     let targets: Vec<buzz_db::DeletionTarget<'_>> = planned
         .iter()
-        .map(|p| buzz_db::DeletionTarget {
-            event_id: &p.id,
-            parent_event_id: p.parent_id.as_deref(),
-            root_event_id: p.root_id.as_deref(),
+        .map(|p| {
+            Ok(buzz_db::DeletionTarget {
+                event_id: &p.id,
+                created_at: chrono::DateTime::from_timestamp(
+                    p.target.event.created_at.as_secs() as i64,
+                    0,
+                )
+                .ok_or_else(|| anyhow::anyhow!("invalid deletion target timestamp"))?,
+                parent_event_id: p.parent_id.as_deref(),
+                root_event_id: p.root_id.as_deref(),
+            })
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
     let (stored, inserted, deleted) = state
         .db
         .insert_deletion_event(tenant.community(), event, channel_id, thread_meta, &targets)

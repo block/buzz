@@ -65,6 +65,7 @@
 		AB1200002F40400100A17E01 /* NativeMessagePresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */; };
 		AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200122F40400100A17E01 /* NativeReactionDetails.swift */; };
 		AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */; };
+		AB12AA012F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12AA022F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift */; };
 		AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -176,6 +177,7 @@
 		AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessagePresentationCoordinator.swift; sourceTree = "<group>"; };
 		AB1200122F40400100A17E01 /* NativeReactionDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeReactionDetails.swift; sourceTree = "<group>"; };
 		AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageImageLoaderTests.swift; sourceTree = "<group>"; };
+		AB12AA022F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEmojiRedirectPolicyTests.swift; sourceTree = "<group>"; };
 		AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePluginTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -215,6 +217,7 @@
 				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
+				AB12AA022F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift */,
 				AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */,
 				BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */,
 				331C80A0294A618700263BE5 /* Fixtures */,
@@ -627,6 +630,7 @@
 				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
+				AB12AA012F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift in Sources */,
 				AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */,
 				BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */,
 			);

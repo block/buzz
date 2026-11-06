@@ -367,14 +367,23 @@ where
     DependencyReport::for_dependencies(postgres, redis, deletion_catalog, started_at.elapsed())
 }
 
-async fn redis_check(pool: &deadpool_redis::Pool, deadline: Instant) -> RedisOutcome {
-    match tokio::time::timeout_at(deadline, pool.get()).await {
+/// PING the shared command connection. The `pool_*` outcome labels predate
+/// the shared connection and are kept so existing dashboards keep matching.
+async fn redis_check(pool: &buzz_pubsub::RedisConnection, deadline: Instant) -> RedisOutcome {
+    let mut connection = pool.clone();
+    let ping = async {
+        redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+    };
+    match tokio::time::timeout_at(deadline, ping).await {
         Err(_) => RedisOutcome::PoolTimeout,
+        Ok(Err(error)) if error.is_timeout() => RedisOutcome::PoolTimeout,
         Ok(Err(error)) => {
-            tracing::debug!(error = %error, "Redis readiness pool acquisition failed");
+            tracing::debug!(error = %error, "Redis readiness PING failed");
             RedisOutcome::PoolError
         }
-        Ok(Ok(_connection)) => RedisOutcome::Success,
+        Ok(Ok(_)) => RedisOutcome::Success,
     }
 }
 
@@ -398,14 +407,22 @@ fn classify_deletion_catalog_result(result: buzz_db::Result<()>) -> DeletionCata
 
 #[async_trait::async_trait]
 pub(crate) trait DependencyEvaluator: Send + Sync {
-    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> DependencyReport;
+    async fn evaluate(
+        &self,
+        db: &Db,
+        redis_pool: &buzz_pubsub::RedisConnection,
+    ) -> DependencyReport;
 }
 
 struct ProductionDependencyEvaluator;
 
 #[async_trait::async_trait]
 impl DependencyEvaluator for ProductionDependencyEvaluator {
-    async fn evaluate(&self, db: &Db, redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+    async fn evaluate(
+        &self,
+        db: &Db,
+        redis_pool: &buzz_pubsub::RedisConnection,
+    ) -> DependencyReport {
         let deadline = Instant::now() + DEPENDENCY_TIMEOUT;
         evaluate_dependencies(
             async { db.readiness_check(deadline).await.into() },
@@ -491,7 +508,7 @@ impl DependencyDiagnostics {
     /// The completion timestamp is written last, once the cache already serves
     /// this report, so the gauge can never describe a sample `/_status` is not
     /// yet answering with.
-    pub(crate) async fn sample(&self, db: &Db, redis_pool: &deadpool_redis::Pool) {
+    pub(crate) async fn sample(&self, db: &Db, redis_pool: &buzz_pubsub::RedisConnection) {
         let report = self.evaluator.evaluate(db, redis_pool).await;
         record_dependency_report(&report);
         let sample = DependencySample {
@@ -595,7 +612,7 @@ pub fn start_dependency_sampler_and_completion_publisher(
 async fn run_dependency_sampler_for_diagnostics(
     diagnostics: Arc<DependencyDiagnostics>,
     db: Db,
-    redis_pool: deadpool_redis::Pool,
+    redis_pool: buzz_pubsub::RedisConnection,
     sample_interval: Duration,
     cancel: CancellationToken,
 ) {
@@ -944,11 +961,9 @@ mod tests {
     /// A `Db` and a Redis pool on a closed port. The scripted evaluators below
     /// never touch either, so no connection is ever attempted; they exist only
     /// to satisfy the production `sample` signature.
-    fn unreachable_dependencies() -> (Db, deadpool_redis::Pool) {
+    fn unreachable_dependencies() -> (Db, buzz_pubsub::RedisConnection) {
         let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/buzz").expect("lazy pg pool");
-        let redis_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("redis pool");
         (Db::from_pool(pool), redis_pool)
     }
 
@@ -956,7 +971,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DependencyEvaluator for FixedEvaluator {
-        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+        async fn evaluate(
+            &self,
+            _db: &Db,
+            _redis_pool: &buzz_pubsub::RedisConnection,
+        ) -> DependencyReport {
             self.0
         }
     }
@@ -969,7 +988,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DependencyEvaluator for DelayedEvaluator {
-        async fn evaluate(&self, _db: &Db, _redis_pool: &deadpool_redis::Pool) -> DependencyReport {
+        async fn evaluate(
+            &self,
+            _db: &Db,
+            _redis_pool: &buzz_pubsub::RedisConnection,
+        ) -> DependencyReport {
             self.started.notify_one();
             self.release.notified().await;
             self.report

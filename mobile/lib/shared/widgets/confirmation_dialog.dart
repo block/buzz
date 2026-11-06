@@ -12,6 +12,22 @@ Future<bool> showDestructiveConfirmation({
   required String title,
   required String message,
   required String confirmLabel,
+}) => showConfirmation(
+  context: context,
+  title: title,
+  message: message,
+  confirmLabel: confirmLabel,
+  destructive: true,
+);
+
+/// Confirms an action using a UIKit alert on iOS.
+/// Returns true only when the person explicitly chooses the confirm action.
+Future<bool> showConfirmation({
+  required BuildContext context,
+  required String title,
+  required String message,
+  required String confirmLabel,
+  bool destructive = false,
 }) async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     return await const MethodChannel(
@@ -21,6 +37,7 @@ Future<bool> showDestructiveConfirmation({
           'message': message,
           'confirmLabel': confirmLabel,
           'cancelLabel': 'Cancel',
+          'destructive': destructive,
           'dark': context.theme.brightness == Brightness.dark,
         }) ==
         true;
@@ -37,9 +54,11 @@ Future<bool> showDestructiveConfirmation({
             ),
             FilledButton(
               onPressed: () => Navigator.of(dialogContext).pop(true),
-              style: FilledButton.styleFrom(
-                backgroundColor: context.colors.error,
-              ),
+              style: destructive
+                  ? FilledButton.styleFrom(
+                      backgroundColor: context.colors.error,
+                    )
+                  : null,
               child: Text(confirmLabel),
             ),
           ],

@@ -1155,6 +1155,7 @@ pub(crate) async fn write_nip43_membership_snapshot(
     crate::store::event_follow_up::after_admitted_insert(
         tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         kind_i32,
         None,
     )
@@ -1194,9 +1195,9 @@ impl Db {
     /// Replica-routed on the bounded arm — the one PERMISSION read routed by
     /// explicit product decision (bounded-stale membership beats the 10s
     /// cache it replaced). Admits and revokes may lag by at most the budget
-    /// `B`; everything else fails closed to the writer, exactly like
-    /// [`Db::query_events_routed_bounded`]. Not precedent for routing other
-    /// permission reads.
+    /// `B`; everything else fails closed to the writer, including a busy
+    /// reader that history reads would be rejected for (see
+    /// [`Db::route_read`]). Not precedent for routing other permission reads.
     #[datastore_span(name = "is_relay_member", system = "postgresql")]
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
         let path = "relay_membership";
@@ -1206,7 +1207,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::Authorization,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match is_relay_member_on(&mut tx, community, pubkey).await {

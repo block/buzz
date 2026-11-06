@@ -6,13 +6,13 @@
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_ENTRY, KIND_EMOJI_SET, KIND_GIT_ISSUE,
+        KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_REPORT, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -154,7 +154,8 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
     Ok(trimmed.to_ascii_lowercase())
 }
 
-fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
+/// Validate a custom emoji image URL: non-empty, at most 2048 bytes, `http(s)://`.
+pub fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
     if url.is_empty() {
         return Err(SdkError::InvalidInput(
             "emoji image URL must not be empty".into(),
@@ -572,6 +573,29 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
         tags.push(tag(&["emoji", &shortcode, &emoji.url])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
+}
+
+/// Search text for a kind:30180 emoji entry: the normalized shortcode with `_`
+/// and `-` turned into spaces, so full-text search sees each word.
+pub fn emoji_entry_search_text(normalized_shortcode: &str) -> String {
+    normalized_shortcode.replace(['_', '-'], " ")
+}
+
+/// Build one custom emoji entry event (kind:30180).
+///
+/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30180, d)`
+/// where `d` is the normalized shortcode. Publishing the same shortcode again
+/// replaces the caller's earlier entry. `content` is the search text from
+/// [`emoji_entry_search_text`].
+pub fn build_emoji_entry(shortcode: &str, url: &str) -> Result<EventBuilder, SdkError> {
+    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
+    check_custom_emoji_url(url)?;
+    let tags = vec![tag(&["d", &shortcode])?, tag(&["emoji", &shortcode, url])?];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_EMOJI_ENTRY as u16),
+        emoji_entry_search_text(&shortcode),
+    )
+    .tags(tags))
 }
 
 /// Build a canvas update event (kind 40100).
@@ -1977,11 +2001,32 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
 /// status — kind 30315 is parameterized-replaceable, so an event carrying
 /// neither is what clients read as "no status".
 pub fn build_user_status(text: &str, emoji: Option<&str>) -> Result<EventBuilder, SdkError> {
+    build_user_status_expiring(text, emoji, None)
+}
+
+/// Like [`build_user_status`], with an optional NIP-40 `["expiration", unix_secs]`
+/// tag after the emoji tag. Clients read the status as cleared once that time
+/// passes. An expiry on a status with neither text nor emoji is rejected,
+/// because that shape is the clear.
+pub fn build_user_status_expiring(
+    text: &str,
+    emoji: Option<&str>,
+    expires_at: Option<u64>,
+) -> Result<EventBuilder, SdkError> {
     let text = text.trim();
     check_content(text, 64 * 1024)?;
+    let emoji = emoji.map(str::trim).filter(|e| !e.is_empty());
+    if expires_at.is_some() && text.is_empty() && emoji.is_none() {
+        return Err(SdkError::InvalidInput(
+            "an expiring status needs text or an emoji".into(),
+        ));
+    }
     let mut tags = vec![tag(&["d", "general"])?];
-    if let Some(emoji) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(emoji) = emoji {
         tags.push(tag(&["emoji", emoji])?);
+    }
+    if let Some(expires_at) = expires_at {
+        tags.push(tag(&["expiration", &expires_at.to_string()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_USER_STATUS as u16), text).tags(tags))
 }
@@ -2089,6 +2134,70 @@ pub fn build_moderation_resolve_report(
         tags.push(tag(&["reason", r])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_RESOLVE_REPORT as u16), "").tags(tags))
+}
+
+/// NIP-56 report types the relay accepts at ingest (`report.rs` `REPORT_TYPES`).
+pub const REPORT_TYPES: &[&str] = &[
+    "illegal",
+    "nudity",
+    "malware",
+    "spam",
+    "impersonation",
+    "profanity",
+    "other",
+];
+
+/// What a NIP-56 report points at.
+#[derive(Debug, Clone, Copy)]
+pub enum ReportTarget<'a> {
+    /// A message: the reported author's pubkey and the event id.
+    Event {
+        /// Hex pubkey of the message author.
+        author_pubkey: &'a str,
+        /// Hex id of the reported event.
+        event_id: &'a str,
+    },
+    /// A user, with no message.
+    Pubkey(&'a str),
+}
+
+/// Build a NIP-56 report (kind 1984).
+///
+/// A message report carries `["p", author]` and `["e", event_id, type]`; a
+/// user report carries `["p", pubkey, type]`. No `h` tag is added: the relay
+/// reads the channel from the stored event. `note` is trimmed and becomes the
+/// content; blank means empty content. Self-tagging is allowed so reporting
+/// your own message or key keeps the `p` tag the relay requires.
+pub fn build_report(
+    target: ReportTarget<'_>,
+    report_type: &str,
+    note: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    if !REPORT_TYPES.contains(&report_type) {
+        return Err(SdkError::InvalidInput(format!(
+            "report type must be one of {} (got: {report_type})",
+            REPORT_TYPES.join(", ")
+        )));
+    }
+    let tags = match target {
+        ReportTarget::Event {
+            author_pubkey,
+            event_id,
+        } => {
+            let author = check_pubkey_hex(author_pubkey, "author_pubkey")?;
+            let event_id = check_hex_exact(event_id, 64, "event_id")?;
+            vec![tag(&["p", &author])?, tag(&["e", &event_id, report_type])?]
+        }
+        ReportTarget::Pubkey(pubkey) => {
+            let pubkey = check_pubkey_hex(pubkey, "pubkey")?;
+            vec![tag(&["p", &pubkey, report_type])?]
+        }
+    };
+    let note = note.map(str::trim).unwrap_or("");
+    check_content(note, 64 * 1024)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_REPORT as u16), note)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 // ---------------------------------------------------------------------------
@@ -3348,6 +3457,51 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 30030);
         assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
         assert!(has_tag(&ev, "emoji", "party"));
+    }
+
+    #[test]
+    fn emoji_entry_happy_path() {
+        let ev = sign(build_emoji_entry(":Party_Parrot-2:", "https://example.com/p.gif").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30180);
+        assert_eq!(ev.content, "party parrot 2");
+        assert!(has_tag(&ev, "d", "party_parrot-2"));
+        let emoji: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().is_some_and(|k| k == "emoji"))
+            .map(|t| t.as_slice().to_vec())
+            .collect();
+        assert_eq!(
+            emoji,
+            vec![vec![
+                "emoji".to_string(),
+                "party_parrot-2".to_string(),
+                "https://example.com/p.gif".to_string()
+            ]]
+        );
+        assert!(!ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().is_some_and(|k| k == "h")));
+    }
+
+    #[test]
+    fn emoji_entry_rejects_bad_input() {
+        for (shortcode, url) in [
+            ("", "https://example.com/p.gif"),
+            ("bad name", "https://example.com/p.gif"),
+            ("bad!", "https://example.com/p.gif"),
+            ("ok", ""),
+            ("ok", "ftp://example.com/p.gif"),
+            ("ok", "javascript:alert(1)"),
+        ] {
+            assert!(
+                build_emoji_entry(shortcode, url).is_err(),
+                "{shortcode:?} {url:?} must be rejected"
+            );
+        }
+        let long = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+        assert!(build_emoji_entry(&long, "https://example.com/p.gif").is_err());
     }
 
     #[test]
@@ -4999,6 +5153,31 @@ mod tests {
     }
 
     #[test]
+    fn expiring_user_status_adds_expiration_after_emoji() {
+        let ev =
+            sign(build_user_status_expiring("lunch", Some("🥪"), Some(1_900_000_000)).unwrap());
+        assert_eq!(ev.content, "lunch");
+        assert_eq!(tag_values(&ev, "expiration"), vec!["1900000000"]);
+        let names: Vec<&str> = ev.tags.iter().map(|t| t.as_slice()[0].as_str()).collect();
+        assert_eq!(names, vec!["d", "emoji", "expiration"]);
+    }
+
+    #[test]
+    fn expiring_user_status_without_expiry_matches_build_user_status() {
+        let plain = sign(build_user_status("same", Some("🚀")).unwrap());
+        let none = sign(build_user_status_expiring("same", Some("🚀"), None).unwrap());
+        assert_eq!(plain.tags, none.tags);
+        assert!(tag_values(&plain, "expiration").is_empty());
+    }
+
+    #[test]
+    fn expiring_user_status_requires_text_or_emoji() {
+        let err = build_user_status_expiring("  ", Some(" "), Some(1_900_000_000)).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(build_user_status_expiring("", Some("🎶"), Some(1_900_000_000)).is_ok());
+    }
+
+    #[test]
     fn user_status_rejects_oversize_text() {
         let err = build_user_status(&"x".repeat(64 * 1024 + 1), None).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
@@ -5275,6 +5454,104 @@ mod tests {
         assert!(has_tag(&ev, "status", "dismissed"));
         assert!(has_tag(&ev, "action", "dismiss"));
         assert!(tag_values(&ev, "reason").is_empty());
+    }
+
+    fn tag_vecs(event: &nostr::Event) -> Vec<Vec<String>> {
+        event.tags.iter().map(|t| t.clone().to_vec()).collect()
+    }
+
+    #[test]
+    fn report_message_shape_matches_desktop() {
+        let author = "AB".repeat(32);
+        let eid = event_id().to_hex();
+        let ev = sign(
+            build_report(
+                ReportTarget::Event {
+                    author_pubkey: &author,
+                    event_id: &eid,
+                },
+                "spam",
+                Some("  buy now  "),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), KIND_REPORT as u16);
+        assert_eq!(ev.content, "buy now");
+        assert_eq!(
+            tag_vecs(&ev),
+            vec![
+                vec!["p".to_string(), "ab".repeat(32)],
+                vec!["e".to_string(), eid, "spam".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn report_keeps_p_tag_when_signer_is_the_reported_user() {
+        let keys = nostr::Keys::generate();
+        let me = keys.public_key().to_hex();
+        let eid = event_id().to_hex();
+        let user = build_report(ReportTarget::Pubkey(&me), "spam", None).unwrap();
+        let msg = build_report(
+            ReportTarget::Event {
+                author_pubkey: &me,
+                event_id: &eid,
+            },
+            "spam",
+            None,
+        )
+        .unwrap();
+        for builder in [user, msg] {
+            let ev = builder.sign_with_keys(&keys).unwrap();
+            assert!(tag_vecs(&ev).iter().any(|t| t[0] == "p" && t[1] == me));
+        }
+    }
+
+    #[test]
+    fn report_user_puts_type_on_p_tag() {
+        let pk = "c".repeat(64);
+        let ev =
+            sign(build_report(ReportTarget::Pubkey(&pk), "impersonation", Some("  ")).unwrap());
+        assert_eq!(ev.content, "");
+        assert_eq!(
+            tag_vecs(&ev),
+            vec![vec!["p".to_string(), pk, "impersonation".to_string()]]
+        );
+    }
+
+    #[test]
+    fn report_accepts_every_relay_type_and_nothing_else() {
+        let pk = "c".repeat(64);
+        for t in REPORT_TYPES {
+            assert!(
+                build_report(ReportTarget::Pubkey(&pk), t, None).is_ok(),
+                "{t}"
+            );
+        }
+        for bad in ["", "Spam", "abuse", "harassment"] {
+            let err = build_report(ReportTarget::Pubkey(&pk), bad, None).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn report_rejects_malformed_ids_and_oversized_note() {
+        let pk = "c".repeat(64);
+        let eid = event_id().to_hex();
+        let bad_author = ReportTarget::Event {
+            author_pubkey: "abc",
+            event_id: &eid,
+        };
+        assert!(build_report(bad_author, "spam", None).is_err());
+        let bad_event = ReportTarget::Event {
+            author_pubkey: &pk,
+            event_id: "abc",
+        };
+        assert!(build_report(bad_event, "spam", None).is_err());
+        assert!(build_report(ReportTarget::Pubkey("xyz"), "spam", None).is_err());
+        let big = "a".repeat(64 * 1024 + 1);
+        let err = build_report(ReportTarget::Pubkey(&pk), "spam", Some(&big)).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 
     #[test]

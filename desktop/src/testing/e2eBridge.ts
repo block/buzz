@@ -367,6 +367,11 @@ type E2eConfig = {
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelTemplates?: ChannelTemplate[];
+    relayEntryPolicy?: {
+      requiredRelay?: string;
+      required: boolean;
+      error?: string;
+    };
     channelsReadError?: string;
     /** Reject successive mock `get_channels` calls, then resume. */
     channelsReadErrors?: (string | null)[];
@@ -13592,8 +13597,32 @@ export function maybeInstallE2eTauriMocks() {
           path: "/tmp/buzz/REPOS/buzz",
           cloned: false,
         };
-      case "get_relay_ws_url":
+      case "fetch_relay_entry_requirements": {
+        const configured = config?.mock?.relayEntryPolicy;
+        const policy =
+          configured?.requiredRelay &&
+          new URL(configured.requiredRelay).href !==
+            new URL((payload as { relayUrl: string }).relayUrl).href
+            ? undefined
+            : configured;
+        if (policy?.error) throw new Error(policy.error);
+        return {
+          required: policy?.required ?? false,
+        };
+      }
+      case "get_relay_ws_url": {
+        if (activeConfig?.mock?.relayEntryPolicy) {
+          const communities = JSON.parse(
+            localStorage.getItem("buzz-communities") ?? "[]",
+          ) as Array<{ id: string; relayUrl: string }>;
+          const active = communities.find(
+            (community) =>
+              community.id === localStorage.getItem("buzz-active-community-id"),
+          );
+          if (active) return active.relayUrl;
+        }
         return getRelayWsUrl(activeConfig);
+      }
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
       case "auto_connect_default_relay_enabled":

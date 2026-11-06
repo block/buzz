@@ -1,7 +1,6 @@
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
-import 'package:buzz/shared/relay/media_image.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
@@ -12,6 +11,13 @@ import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/native_media_headers.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'dart:convert';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -36,6 +42,9 @@ const _fire = '\u{1F525}';
 
 /// 👀 — a real reaction that is deliberately not in the positive-burst set.
 const _eyes = '\u{1F440}';
+
+const _aliceAvatarUrl = 'https://relay.example/media/alice.png';
+const _customEmojiUrl = 'https://relay.example/media/fire.png';
 
 TimelineReaction _reaction({
   String emoji = _fire,
@@ -297,8 +306,17 @@ void main() {
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             userCacheProvider.overrideWith(
               () => _FakeUserCacheNotifier({
-                _alice: const UserProfile(pubkey: _alice, displayName: 'Honey'),
+                _alice: const UserProfile(
+                  pubkey: _alice,
+                  displayName: 'Honey',
+                  avatarUrl: _aliceAvatarUrl,
+                ),
               }),
+            ),
+            // Native image loads bypass the hosted HTTP client, so the sheet
+            // must carry the relay-auth headers for each image itself.
+            nativeMediaHeadersProvider.overrideWithValue(
+              (url) => {'Nostr-Federated-Identity': 'Bearer $url'},
             ),
             channelIdentityNamesProvider('channel').overrideWith(
               (ref) =>
@@ -316,7 +334,13 @@ void main() {
             messageId: _messageId,
             channelId: 'channel',
             reactions: [
-              _reaction(userPubkeys: [_alice, bot, roster]),
+              TimelineReaction(
+                emoji: _fire,
+                count: 3,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice, bot, roster],
+                emojiUrl: _customEmojiUrl,
+              ),
             ],
             onToggle: (_) {},
           ),
@@ -339,6 +363,14 @@ void main() {
       }
 
       expect(labels(calls.first), ['Honey', 'Honey (agent)', 'Roster name']);
+      final avatar = (calls.first['profiles'] as Map)[_alice] as Map;
+      expect(avatar['headers'], {
+        'Nostr-Federated-Identity': 'Bearer $_aliceAvatarUrl',
+      });
+      final reaction = (calls.first['reactions'] as List).single as Map;
+      expect(reaction['headers'], {
+        'Nostr-Federated-Identity': 'Bearer $_customEmojiUrl',
+      });
       // Directory/roster changes must propagate without a user-cache event.
       directoryName = 'Helper';
       container.invalidate(channelIdentityNamesProvider('channel'));
@@ -358,6 +390,211 @@ void main() {
       container.invalidate(channelIdentityNamesProvider('channel'));
       await tester.pumpAndSettle();
       expect(calls, hasLength(count));
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native reaction sheet opens at once and resends media auth after a refresh',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      FlutterSecureStorage.setMockInitialValues({});
+      final keys = nostr.Keys.generate();
+      final organization = Uri.parse('https://org.example');
+      final config = RelayConfig(
+        baseUrl: 'https://relay.example',
+        nsec: keys.nsec,
+      );
+      final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
+      await const FlutterSecureStorage().write(
+        key: 'buzz_hosted_session_org_example_v1',
+        value: jsonEncode({
+          'origin': organization.toString(),
+          'credential': 'secret',
+          'subject': 'member',
+          'expires_at': expiry.toIso8601String(),
+        }),
+      );
+      var clock = DateTime.utc(2026, 11, 4, 12);
+      var issued = 0;
+      Completer<void>? issuerGate;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: BuilderlabAccountClient(
+          accountOrigin: organization,
+          httpClient: MockClient((request) async {
+            if (request.url.path.endsWith('/assertions')) {
+              await issuerGate?.future;
+            }
+            return switch (request.url.path) {
+              '/api/goose/v1/auth/me' => http.Response(
+                jsonEncode({
+                  'subject': 'member',
+                  'expires_at': expiry.toIso8601String(),
+                }),
+                200,
+              ),
+              '/api/goose/v1/buzz/nostr-identities/current' => http.Response(
+                jsonEncode({
+                  'identity': {'pubkey_hex': keys.public},
+                }),
+                200,
+              ),
+              '/api/goose/v1/buzz/identity/assertions' => http.Response(
+                jsonEncode({
+                  'assertion': 'token-${++issued}',
+                  'nostr_pubkey': keys.public,
+                  'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
+                }),
+                200,
+              ),
+              _ => http.Response('{}', 404),
+            };
+          }),
+        ),
+        organizationRelay: (relay) => relay.host == 'relay.example',
+        now: () => clock,
+      );
+      addTearDown(auth.dispose);
+      // The live socket's assertion, issued when the session connected.
+      expect(await auth.headers(config), {
+        'Nostr-Federated-Identity': 'Bearer token-1',
+      });
+      final payloads = <Map<Object?, Object?>>[];
+      final reactionUpdates = <List<Object?>>[];
+      final profileUpdates = <Map<Object?, Object?>>[];
+      var completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          final args = call.arguments as Map<Object?, Object?>;
+          switch (call.method) {
+            case 'reactions':
+              payloads.add(args);
+              return completion.future;
+            case 'updateReactions':
+              reactionUpdates.add(args['reactions'] as List<Object?>);
+            case 'updateProfiles':
+              profileUpdates.add(args['profiles'] as Map<Object?, Object?>);
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            relayConfigProvider.overrideWith(
+              () => _FixedRelayConfigNotifier(config),
+            ),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            userCacheProvider.overrideWith(
+              () => _FakeUserCacheNotifier({
+                _alice: const UserProfile(
+                  pubkey: _alice,
+                  displayName: 'Honey',
+                  avatarUrl: _aliceAvatarUrl,
+                ),
+              }),
+            ),
+            channelIdentityNamesProvider('channel').overrideWith(
+              (ref) => IdentityNameSources(
+                profiles: ref.watch(userCacheProvider),
+              ).scope([_alice]),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: [
+              TimelineReaction(
+                emoji: _fire,
+                count: 1,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice],
+                emojiUrl: _customEmojiUrl,
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // Rendering the row may itself fetch media through the hosted client,
+      // so enter the margin only now (120s lifetime, 30s margin): the socket
+      // is still valid, but the synchronous cache reads as empty.
+      String? authOf(Object? item) =>
+          ((item as Map)['headers'] as Map?)?['Nostr-Federated-Identity']
+              as String?;
+      final issuedBeforeSheet = issued;
+      clock = clock.add(const Duration(seconds: 100));
+      expect(auth.cachedHeaders(config), isNull);
+      // A stalled issuer must not hold the sheet back: cached names and
+      // emoji show at once, and media gets the assertion when it arrives.
+      issuerGate = Completer<void>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pump();
+      final payload = payloads.single;
+      final initialProfiles = payload['profiles'] as Map;
+      expect((initialProfiles[_alice] as Map)['name'], 'Honey');
+      expect(authOf(initialProfiles[_alice]), isNull);
+      expect(authOf((payload['reactions'] as List).single), isNull);
+      expect(issued, issuedBeforeSheet);
+
+      issuerGate.complete();
+      await tester.pumpAndSettle();
+      expect(issued, issuedBeforeSheet + 1);
+      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
+      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+
+      // A fresh assertion needs no refresh, so nothing is resent.
+      reactionUpdates.clear();
+      completion = Completer<Map<String, Object?>>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pumpAndSettle();
+      expect(payloads, hasLength(2));
+      expect(
+        authOf((payloads.last['reactions'] as List).single),
+        'Bearer token-$issued',
+      );
+      expect(reactionUpdates, isEmpty);
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+
+      // Unmounting while a slow issuer is pending sends nothing afterwards:
+      // the sheet's cleanup marks it disposed before auth completes.
+      issuerGate = Completer<void>();
+      clock = clock.add(const Duration(seconds: 200));
+      expect(auth.cachedHeaders(config), isNull);
+      completion = Completer<Map<String, Object?>>();
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$_fire')),
+      );
+      await tester.pump();
+      expect(payloads, hasLength(3));
+      await tester.pumpWidget(const SizedBox());
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
+      reactionUpdates.clear();
+      profileUpdates.clear();
+      issuerGate.complete();
+      await tester.pumpAndSettle();
+      expect(reactionUpdates, isEmpty);
+      expect(profileUpdates, isEmpty);
+      expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     },
   );
@@ -899,4 +1136,13 @@ void main() {
       expect(controller.hasParticles, isFalse);
     });
   });
+}
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  _FixedRelayConfigNotifier(this._config);
+
+  final RelayConfig _config;
+
+  @override
+  RelayConfig build() => _config;
 }

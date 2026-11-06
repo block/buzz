@@ -13,8 +13,11 @@ New application writers stamp every head change, grant, rejoin, removal,
 redaction, and move source. Changes to channel listing also require recovery. Old application updates do not maintain all these
 stamps, so mixed-version serving cannot advertise incremental correctness.
 
-For a populated database, first build the revision lookup index outside a
-transaction, before migration `0076`:
+Relay startup migration and `buzz-admin migrate` build the indexes below
+themselves within the migrations' budgets. A deployment too large for those
+budgets runs with auto-migration off; before applying the migrations out of
+band, first build the revision lookup index outside a transaction, before
+migration `0076`:
 
 ```sql
 CREATE INDEX CONCURRENTLY idx_artifact_revisions_artifact
@@ -39,10 +42,19 @@ CREATE INDEX CONCURRENTLY artifact_revisions_moves
 ```
 
 Migration `0078` verifies each index definition and its valid, ready, and live
-flags. It refuses a populated table whose index is missing. A fresh empty
+flags. Applied directly as SQL, it refuses a populated table whose index is
+missing. A fresh empty
 database can build the indexes under the migration's short budgets.
 Migration `0076` also verifies the exact definition and all three flags.
 Remove an invalid index with `DROP INDEX CONCURRENTLY` before a new build.
+
+Relay startup migration and `buzz-admin migrate` build any of these indexes
+that are missing before applying `0076` and `0078`. They use the migrations'
+one-second lock and five-second statement budgets, which is enough for a small
+database. Each index builds in its own transaction. A database too large for that
+budget fails closed with an error that points here. The migration whose index
+failed is not recorded, while earlier migrations and indexes stay committed.
+Prebuild the rest concurrently as above, then retry.
 
 After all index builds succeed, run `buzz-admin migrate` with the target
 `DATABASE_URL`. It verifies and records `0076`, reapplies the idempotent `0077`,
