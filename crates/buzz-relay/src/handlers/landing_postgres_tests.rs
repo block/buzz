@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::handlers::group_state_postgres_tests::{
     community, create_channel, edit_channel, group_state_tags, http_auth, state,
 };
-use crate::handlers::ingest::ingest_event;
+use crate::handlers::ingest::{ingest_event, IngestError};
 use crate::state::AppState;
 
 const PROTECTED: &str =
@@ -305,11 +305,14 @@ async fn landing_designation_is_projected_advertised_and_protected() {
         .tags([Tag::parse(["h", &b.to_string()]).expect("h tag")])
         .sign_with_keys(&owner)
         .expect("sign 9008");
-    let result = ingest_event(&state, &tenant, delete, http_auth(&owner))
-        .await
-        .expect("ingest 9008");
-    assert!(!result.accepted, "the landing channel is not deleted");
-    assert_eq!(result.message, PROTECTED);
+    match ingest_event(&state, &tenant, delete, http_auth(&owner)).await {
+        Err(IngestError::Rejected(message)) => assert_eq!(message, PROTECTED),
+        Ok(result) => panic!(
+            "the landing channel is not deleted: accepted={} {}",
+            result.accepted, result.message
+        ),
+        Err(error) => panic!("the landing channel is not deleted: {error:?}"),
+    }
     let after = state
         .db
         .get_channel(tenant.community(), b)

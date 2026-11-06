@@ -181,7 +181,7 @@ mod postgres_tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            added_notification_count(&state, community, &member_hex).await,
+            added_notification_count(&state, community, &channels, &member_hex).await,
             2
         );
     }
@@ -305,7 +305,7 @@ mod postgres_tests {
                 .unwrap()
                 .is_none());
             assert_eq!(
-                added_notification_count(&state, community, &member_hex).await,
+                added_notification_count(&state, community, &[channel], &member_hex).await,
                 1
             );
             let leave = EventBuilder::new(Kind::Custom(9022), "")
