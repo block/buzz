@@ -279,6 +279,36 @@ void main() {
       isNotNull,
     );
   });
+
+  testWidgets('a new agent starts on the service-recommended model', (
+    tester,
+  ) async {
+    final h = await AgentsHarness.create();
+    h.registry.models = [
+      {
+        'id': 'premium-model',
+        'display_name': 'Premium model',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+      {
+        'id': 'kgoose-claude-sonnet-4-6',
+        'display_name': 'Sonnet',
+        'supported_reasoning_efforts': ['low', 'medium', 'high'],
+      },
+    ];
+    h.registry.recommendedSelection = {
+      'model_id': 'premium-model',
+      'reasoning_effort': 'high',
+    };
+    await h.open(tester, directory: [existing]);
+    if (!supportsRemoteAgents(h.community)) return;
+    await tester.tap(find.byTooltip('Add agent'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Premium model'), findsOneWidget);
+    expect(find.text('Sonnet'), findsNothing);
+    expect(find.text('high'), findsOneWidget);
+  });
 }
 
 class _StalledPosterClient implements HttpClient {
