@@ -2216,12 +2216,16 @@ async fn never_joined_auto_join_channels_routed_reads_the_bounded_replica() {
     db.fence().force_open_for_tests(chrono::Utc::now());
 
     // Budget unset ⇒ writer.
-    let ids = db.list_never_joined_auto_join_channels_routed(cid, &person).await;
+    let ids = db
+        .list_never_joined_auto_join_channels_routed(cid, &person)
+        .await;
     assert_eq!(ids.expect("gate off"), vec![writer_channel]);
 
     // Budget set + fresh entry ⇒ replica.
     db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
-    let ids = db.list_never_joined_auto_join_channels_routed(cid, &person).await;
+    let ids = db
+        .list_never_joined_auto_join_channels_routed(cid, &person)
+        .await;
     assert_eq!(ids.expect("gate on"), vec![replica_channel]);
 
     // Entry older than the budget ⇒ fail closed to the writer.
@@ -2230,7 +2234,9 @@ async fn never_joined_auto_join_channels_routed_reads_the_bounded_replica() {
         chrono::Utc::now(),
         std::time::Instant::now() - std::time::Duration::from_secs(10),
     );
-    let ids = db.list_never_joined_auto_join_channels_routed(cid, &person).await;
+    let ids = db
+        .list_never_joined_auto_join_channels_routed(cid, &person)
+        .await;
     assert_eq!(ids.expect("entry too old"), vec![writer_channel]);
 }
 

@@ -3111,7 +3111,11 @@ mod postgres_tests {
         };
         let desired_channel_indexes =
             checked_channel_indexes(index_shapes(&desired, "channels").await);
-        assert_eq!(desired_channel_indexes.len(), 2, "desired state has both indexes");
+        assert_eq!(
+            desired_channel_indexes.len(),
+            2,
+            "desired state has both indexes"
+        );
         assert_eq!(
             desired_channel_indexes,
             checked_channel_indexes(index_shapes(&migrated, "channels").await),
