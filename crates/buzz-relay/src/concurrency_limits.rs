@@ -6,8 +6,8 @@
 //!
 //! | Flag | Gate | Ceiling |
 //! |------|------|---------|
-//! | `relay.concurrency.history-reads` | subscription-history reads on the reader pool | the reader-pool share [`buzz_db`] reserves for history |
-//! | `relay.concurrency.auth` | verified NIP-42 AUTH frames in their database checks | none |
+//! | `buzz.relay.concurrency.history-reads` | subscription-history reads on the reader pool | the reader-pool share [`buzz_db`] reserves for history |
+//! | `buzz.relay.concurrency.auth` | verified NIP-42 AUTH frames in their database checks | none |
 //!
 //! A positive value sets the limit, clamped to the ceiling; zero, a negative
 //! value, or no value leaves the gate at its ceiling. A flag can therefore
@@ -23,21 +23,24 @@
 //! The flags are re-read every [`REFRESH_INTERVAL`], so a change reaches every
 //! pod within that interval plus the provider's own propagation delay, with no
 //! restart. `buzz_concurrency_limit{gate}` reports each applied limit, with
-//! `0` meaning no limit.
+//! `0` meaning no limit. A refresh that panics is logged and retried on the
+//! next tick, so one bad evaluation cannot freeze the caps for the life of
+//! the pod. See `docs/operator-concurrency-caps.md` for operating them.
 
 use std::time::Duration;
 
 use buzz_db::ConcurrencyGate;
 use buzz_feature_flags::{EvaluationContext, IntegerFlag};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::feature_flags::FeatureFlags;
 
 /// Cap on subscription-history reads holding a reader connection.
-pub const HISTORY_READS_FLAG: IntegerFlag = IntegerFlag::new("relay.concurrency.history-reads", 0);
+pub const HISTORY_READS_FLAG: IntegerFlag =
+    IntegerFlag::new("buzz.relay.concurrency.history-reads", 0);
 /// Cap on verified AUTH frames running their database checks.
-pub const AUTH_FLAG: IntegerFlag = IntegerFlag::new("relay.concurrency.auth", 0);
+pub const AUTH_FLAG: IntegerFlag = IntegerFlag::new("buzz.relay.concurrency.auth", 0);
 
 /// How often the flags are re-read.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -105,7 +108,9 @@ pub fn apply(flags: &FeatureFlags, gates: &[ManagedGate]) {
 }
 
 /// Apply the flags every [`REFRESH_INTERVAL`] (the first time immediately)
-/// until `cancel` fires.
+/// until `cancel` fires. A panicking refresh is logged and counted
+/// (`buzz_concurrency_limit_refresh_panics_total`), and the next tick tries
+/// again.
 pub async fn run(
     flags: std::sync::Arc<FeatureFlags>,
     gates: Vec<ManagedGate>,
@@ -117,7 +122,13 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
-            _ = interval.tick() => apply(&flags, &gates),
+            _ = interval.tick() => {
+                let refresh = std::panic::AssertUnwindSafe(|| apply(&flags, &gates));
+                if std::panic::catch_unwind(refresh).is_err() {
+                    metrics::counter!("buzz_concurrency_limit_refresh_panics_total").increment(1);
+                    error!("concurrency limit refresh panicked; retrying on the next tick");
+                }
+            }
         }
     }
 }
@@ -218,5 +229,59 @@ mod tests {
 
         cancel.cancel();
         task.await.expect("the loop stops on cancel");
+    }
+
+    /// An evaluator that panics on its first `remaining_panics` calls, then
+    /// reads a fixed value.
+    struct PanicsFirst {
+        remaining_panics: std::sync::atomic::AtomicUsize,
+        value: i64,
+    }
+
+    impl FlagEvaluator for PanicsFirst {
+        fn evaluate_bool(&self, flag: BooleanFlag, _: &EvaluationContext) -> bool {
+            flag.default()
+        }
+
+        fn evaluate_int(&self, _: IntegerFlag, _: &EvaluationContext) -> i64 {
+            use std::sync::atomic::Ordering;
+            let remaining = self.remaining_panics.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.remaining_panics.store(remaining - 1, Ordering::SeqCst);
+                panic!("injected evaluation panic");
+            }
+            self.value
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_refresh_does_not_stop_the_loop() {
+        let flags = Arc::new(FeatureFlags::from_evaluator(
+            "test",
+            Arc::new(PanicsFirst {
+                remaining_panics: 1.into(),
+                value: 4,
+            }),
+        ));
+        let gate = ConcurrencyGate::new(10);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            flags,
+            vec![ManagedGate::new(
+                "history_reads",
+                HISTORY_READS_FLAG,
+                gate.clone(),
+            )],
+            cancel.clone(),
+        ));
+
+        // The first tick panics; the gate keeps its ceiling.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(gate.limit(), 10, "a panicked refresh applies nothing");
+        tokio::time::sleep(REFRESH_INTERVAL).await;
+        assert_eq!(gate.limit(), 4, "the next tick applies the flag");
+
+        cancel.cancel();
+        task.await.expect("the loop survives the panic and stops on cancel");
     }
 }

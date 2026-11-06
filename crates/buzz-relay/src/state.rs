@@ -1428,7 +1428,7 @@ pub struct AppState {
     pub handler_semaphore: Arc<Semaphore>,
     /// Cap on NIP-42 AUTH frames past signature verification and into their
     /// database checks at once. Unbounded until an operator sets a limit
-    /// through the `relay.concurrency.auth` flag (see
+    /// through the `buzz.relay.concurrency.auth` flag (see
     /// [`crate::concurrency_limits`]).
     pub auth_gate: buzz_db::ConcurrencyGate,
     /// Semaphore limiting concurrent git subprocess operations across

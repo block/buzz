@@ -583,13 +583,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
             let attempt = AuthAttempt::nip42(&conn, pubkey, true);
-            // Concurrency cap (`relay.concurrency.auth`, unbounded unless set).
+            // Concurrency cap (`buzz.relay.concurrency.auth`, unbounded unless set).
             // The signature is proven, so only real logins queue for the
             // database checks below, and the permit is held through them. A
             // shed login gets a bare close, as an auth timeout does: clients
             // reconnect from that on their jittered backoff, while an `OK
             // false` parks some clients and retries others in lockstep.
-            let Some(_auth_permit) = state.auth_gate.admit(AUTH_PERMIT_WAIT).await else {
+            let Some(_concurrency_permit) = state.auth_gate.admit(AUTH_PERMIT_WAIT).await else {
                 metrics::counter!("buzz_auth_failures_total", "reason" => "concurrency_limit")
                     .increment(1);
                 if attempt.reject(&conn, AuthOutcome::ConcurrencyLimit) {
@@ -1143,15 +1143,51 @@ mod tests {
 
         drop(held);
         let admitted = AuthHarness::new(false);
-        admitted.run(admitted.auth_event(), state).await;
-        assert_eq!(
-            metric_counter(
-                &snapshotter.snapshot().into_vec(),
-                "buzz_auth_outcomes_total",
-                Some("concurrency_limit"),
-            ),
-            1,
-            "the first login is shed, the second with a free permit is not"
+        admitted
+            .run(admitted.auth_event(), std::sync::Arc::clone(&state))
+            .await;
+        // Every AUTH records exactly one outcome. The admitted login's is the
+        // stub database's failure, so it got past the gate to its checks.
+        let mut outcomes: Vec<(String, u64)> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_auth_outcomes_total")
+            .map(|(key, _, _, value)| {
+                let outcome = key
+                    .key()
+                    .labels()
+                    .find(|label| label.key() == "outcome")
+                    .map(|label| label.value().to_owned())
+                    .unwrap_or_default();
+                let DebugValue::Counter(count) = value else {
+                    panic!("buzz_auth_outcomes_total must be a counter");
+                };
+                (outcome, count)
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        outcomes.sort();
+        assert_eq!(outcomes.len(), 2, "one outcome per login: {outcomes:?}");
+        assert!(
+            outcomes
+                .iter()
+                .any(|(outcome, count)| outcome == "concurrency_limit" && *count == 1),
+            "the first login is shed: {outcomes:?}"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|(outcome, count)| outcome != "concurrency_limit" && *count == 1),
+            "the second login, with a free permit, passes the gate: {outcomes:?}"
+        );
+        assert!(
+            state
+                .auth_gate
+                .admit(std::time::Duration::from_millis(10))
+                .await
+                .is_some(),
+            "the admitted login returns its permit"
         );
     }
 

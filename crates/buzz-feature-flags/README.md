@@ -167,8 +167,9 @@ zero and pick the first positive-weight variation.
   `EnvironmentEvaluator`, or LaunchDarkly); provider precedence/stacking is out
   of scope.
 - If LaunchDarkly is used, call evaluator `close()` during process shutdown.
-  `close()` blocks the calling thread while it flushes analytics, so async
-  shutdown code should offload it to a blocking shutdown path.
+  `close()` blocks the calling thread while it flushes analytics and has no
+  deadline of its own, so async shutdown code should run it off the runtime
+  and bound the wait (the relay gives it a detached thread and 2 s).
 - Safety invariants must never rely on remote-flag availability.
 
 ## Build and Test Expectations

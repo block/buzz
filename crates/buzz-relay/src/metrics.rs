@@ -43,7 +43,7 @@ pub(crate) enum AuthOutcome {
     NotRelayMember,
     /// NIP-FI key pairing mismatch: the NIP-42 key differs from the asserted key.
     PairingMismatch,
-    /// Shed by the AUTH concurrency cap (`relay.concurrency.auth`).
+    /// Shed by the AUTH concurrency cap (`buzz.relay.concurrency.auth`).
     ConcurrencyLimit,
     Timeout,
     Disconnect,

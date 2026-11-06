@@ -35,6 +35,11 @@ const RELAY_PROXY_ENV: &str = "BUZZ_LAUNCHDARKLY_RELAY_PROXY_URL";
 /// on declared defaults.
 const LAUNCHDARKLY_START_WAIT: Duration = Duration::from_secs(3);
 
+/// How long shutdown waits for LaunchDarkly's final analytics flush. The flush
+/// has no deadline of its own, and an unreachable events endpoint must not
+/// spend the pod's termination grace.
+const LAUNCHDARKLY_CLOSE_WAIT: Duration = Duration::from_secs(2);
+
 /// The provider selected by [`PROVIDER_ENV`].
 #[derive(Debug)]
 enum Provider {
@@ -160,13 +165,38 @@ impl FeatureFlags {
         });
     }
 
-    /// Stop the provider's background work. LaunchDarkly's close blocks while
-    /// it flushes analytics, so it runs on the blocking pool.
+    /// Stop the provider's background work, waiting at most
+    /// [`LAUNCHDARKLY_CLOSE_WAIT`].
     pub async fn close(&self) {
-        if let Some(launchdarkly) = self.launchdarkly.clone() {
-            if let Err(error) = tokio::task::spawn_blocking(move || launchdarkly.close()).await {
-                warn!(%error, "LaunchDarkly shutdown failed");
-            }
+        self.close_within(LAUNCHDARKLY_CLOSE_WAIT).await;
+    }
+
+    /// LaunchDarkly's close blocks while it flushes analytics, so it runs on
+    /// its own detached thread: past `wait`, shutdown moves on and process
+    /// exit ends the flush. (The blocking pool would not do: the runtime
+    /// waits for its tasks when it drops.)
+    async fn close_within(&self, wait: Duration) {
+        let Some(launchdarkly) = self.launchdarkly.clone() else {
+            return;
+        };
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("launchdarkly-close".into())
+            .spawn(move || {
+                launchdarkly.close();
+                let _ = closed_tx.send(());
+            });
+        if let Err(error) = spawned {
+            warn!(%error, "LaunchDarkly shutdown failed");
+            return;
+        }
+        match tokio::time::timeout(wait, closed_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => warn!("LaunchDarkly shutdown failed"),
+            Err(_) => warn!(
+                ?wait,
+                "LaunchDarkly did not finish its final flush; shutting down without it"
+            ),
         }
     }
 }
@@ -262,7 +292,7 @@ mod tests {
         let flags = FeatureFlags::build(provider, Duration::from_millis(50))
             .await
             .expect("an unreachable provider must not fail startup");
-        let flag = buzz_feature_flags::IntegerFlag::new("relay.concurrency.auth", 0);
+        let flag = buzz_feature_flags::IntegerFlag::new("buzz.relay.concurrency.auth", 0);
         assert_eq!(
             flags
                 .evaluator()
@@ -271,6 +301,43 @@ mod tests {
             "an uninitialized provider serves the declared default"
         );
         flags.close().await;
+    }
+
+    #[tokio::test]
+    async fn close_is_bounded_when_launchdarkly_hangs() {
+        let _already_installed = rustls::crypto::ring::default_provider().install_default();
+        // A proxy that accepts connections and never answers: every SDK
+        // request, the final analytics flush included, hangs.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let provider = parse(&[
+            (PROVIDER_ENV, "launchdarkly"),
+            (SDK_KEY_ENV, "sdk-key"),
+            (RELAY_PROXY_ENV, &format!("http://{address}")),
+        ])
+        .expect("valid configuration");
+        let flags = FeatureFlags::build(provider, Duration::from_millis(50))
+            .await
+            .expect("a hanging provider must not fail startup");
+        // An evaluation queues an analytics event for the final flush.
+        let flag = buzz_feature_flags::IntegerFlag::new("buzz.relay.concurrency.auth", 0);
+        flags
+            .evaluator()
+            .evaluate_int(flag, &buzz_feature_flags::EvaluationContext::for_process());
+
+        let started = std::time::Instant::now();
+        flags.close_within(Duration::from_millis(200)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "close returns at its deadline, not when the flush gives up: {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

@@ -1579,7 +1579,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     state.community_revalidator_cancel.cancel();
     concurrency_limits_cancel.cancel();
-    feature_flags.close().await;
     state.dependency_sampler_cancel.cancel();
     state.dependency_completion_publisher_cancel.cancel();
 
@@ -1589,6 +1588,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     audit_shutdown
         .drain(std::time::Duration::from_secs(5))
         .await;
+
+    // Last of the drains, and bounded: LaunchDarkly's final analytics flush.
+    feature_flags.close().await;
 
     // Flush pending OTEL spans before exit.
     if let telemetry::TracerInit::Enabled(tp) = tracer_init {

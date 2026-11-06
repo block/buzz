@@ -19,7 +19,7 @@ path = "src/main.rs"
 buzz-core = { workspace = true }
 buzz-conformance = { workspace = true }
 buzz-db = { workspace = true }
-# The relay chooses its flag provider at startup (BUZZ_FEATURE_FLAG_PROVIDER),
+# The relay chooses its flag provider at startup (BUZZ_FEATURE_FLAGS_PROVIDER),
 # so every build carries the LaunchDarkly adapter; it is inert unless selected.
 buzz-feature-flags = { workspace = true, features = ["launchdarkly"] }
 buzz-datastore-tracing = { workspace = true }
