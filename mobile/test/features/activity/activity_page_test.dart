@@ -879,6 +879,60 @@ void main() {
     },
   );
 
+  testWidgets(
+    'reading a thread row under People leaves hidden agent replies unread',
+    (tester) async {
+      FeedItem threadEvent(String id, String pubkey, int age) => FeedItem(
+        id: id,
+        kind: 9,
+        pubkey: pubkey,
+        content: 'body $id',
+        createdAt: now - age,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', threadIdRoot1, '', 'root'],
+          ['e', threadIdRoot1, '', 'reply'],
+        ],
+        category: 'mention',
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          knownAgentPubkeys: const {'agent_pk'},
+          feed: HomeFeedResponse(
+            mentions: [
+              threadEvent('g1', 'agent_pk', 300),
+              threadEvent('p1', 'bob_pk', 200),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> chooseSender(String label) async {
+        await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+      }
+
+      await chooseSender('People');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-p1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
+
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsOneWidget);
+    },
+  );
+
   testWidgets('sender filter preloads authors hidden under newer rows', (
     tester,
   ) async {

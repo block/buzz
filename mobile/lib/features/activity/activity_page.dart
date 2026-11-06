@@ -186,8 +186,6 @@ class ActivityPage extends HookConsumerWidget {
           (channelById[id]?.isDm ?? false) ||
           ref.read(channelsProvider.notifier).hiddenDmIds.contains(id),
     );
-    // A filtered DM row holds only part of its conversation, so the DM
-    // channel marker would also read events this view hides.
     final rowsArePartial =
         filter.value == InboxFilter.thread ||
         filter.value == InboxFilter.mention ||
@@ -220,8 +218,10 @@ class ActivityPage extends HookConsumerWidget {
       ref
           .read(inboxLocalStateProvider.notifier)
           .clearUnread(groupedInboxItemIds(item));
+      // A filtered row holds only part of its conversation, so channel and
+      // thread markers would also read events this view hides.
       final isDmRow = item.conversationId.startsWith('dm:');
-      if (isDmRow && rowsArePartial) {
+      if (rowsArePartial && item.item.channelId != null) {
         for (final e in {item.item, ...item.groupItems}) {
           notifier.markContextRead(msgContextKey(e.id), e.createdAt);
         }
