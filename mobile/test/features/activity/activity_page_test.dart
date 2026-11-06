@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
+import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
-import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -30,6 +34,8 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
+
+part 'activity_page_test/tabs_journey.dart';
 
 void main() {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -168,6 +174,14 @@ void main() {
     );
   }
 
+  _activityTabJourneys(
+    ({Set<String> knownAgentPubkeys = const {}, TextScaler? textScaler}) =>
+        buildTestable(
+          knownAgentPubkeys: knownAgentPubkeys,
+          textScaler: textScaler,
+        ),
+  );
+
   testWidgets('shows loading skeleton while feed loads', (tester) async {
     await tester.pumpWidget(
       await buildTestable(activityNotifier: _PendingActivityNotifier.new),
@@ -195,51 +209,31 @@ void main() {
     expect(find.text('No activity yet'), findsOneWidget);
   });
 
-  testWidgets('Inbox exposes close navigation for its modal route', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildTestable());
-    await tester.pumpAndSettle();
-
-    final appBar = tester.widget<FrostedAppBar>(
-      find.byType(FrostedAppBar).last,
-    );
-    expect(appBar.automaticallyImplyLeading, isFalse);
-    expect(appBar.nativeLeading?.symbol, 'xmark');
-    expect(appBar.nativeLeading?.label, 'Close inbox');
-    expect(appBar.nativeTitle, 'Inbox');
-    expect(appBar.frosted, isTrue);
-
-    expect(appBar.bottomHeight, Grid.xxs);
-    expect(appBar.centerTitle, isFalse);
-    expect(find.byTooltip('Back'), findsNothing);
-  });
-
-  testWidgets('sizes the Activity app bar for its custom title style', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      await buildTestable(textScaler: const TextScaler.linear(2)),
-    );
-    await tester.pumpAndSettle();
-
-    final appBar = tester.widget<FrostedAppBar>(
-      find.byType(FrostedAppBar).last,
-    );
-    final titleStyle = appBar.titleStyle!;
-    expect(titleStyle.fontSize, 22);
-    expect(
-      tester.getSize(find.byType(ClipRect).last).height,
-      closeTo(
-        frostedAppBarHeight(
-          tester.element(find.byType(FrostedAppBar).last),
-          titleStyle: titleStyle,
-          bottomHeight: Grid.xxs,
-        ),
-        0.01,
-      ),
-    );
-  });
+  testWidgets(
+    'Activity keeps its header above the clipped feed at large text',
+    (tester) async {
+      await tester.pumpWidget(
+        await buildTestable(textScaler: const TextScaler.linear(2)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Close activity'), findsOneWidget);
+      expect(find.byTooltip('Back'), findsNothing);
+      expect(find.byType(FrostedAppBar), findsNothing);
+      final filters = find.byKey(const ValueKey('activity-filters'));
+      final viewport = find.byKey(const ValueKey('activity-content-viewport'));
+      final cutoff = tester.getBottomLeft(filters).dy;
+      expect(tester.getTopLeft(viewport).dy, cutoff);
+      expect(
+        tester.getBottomLeft(find.text('Activity')).dy,
+        lessThanOrEqualTo(tester.getTopLeft(filters).dy),
+      );
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -300));
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(viewport).dy, cutoff);
+      expect(tester.getBottomLeft(filters).dy, cutoff);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('keeps footer clearance inside the scrollable content', (
     tester,
@@ -248,12 +242,6 @@ void main() {
       await buildTestable(mediaPadding: const EdgeInsets.only(bottom: 88)),
     );
     await tester.pumpAndSettle();
-
-    final safeArea = tester.widget<SafeArea>(
-      find.byKey(const ValueKey('activity-content-safe-area')),
-    );
-    expect(safeArea.top, isFalse);
-    expect(safeArea.bottom, isFalse);
 
     final padding = tester.widget<SliverPadding>(
       find.descendant(
@@ -315,17 +303,19 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
+    final filterTrigger = find.byKey(const ValueKey('activity-sender-menu'));
     expect(
       tester.getSize(filterTrigger).height,
       greaterThanOrEqualTo(Grid.xl),
       reason: 'The Activity filter trigger must keep a 48dp touch target.',
     );
 
+    await tester.ensureVisible(filterTrigger);
+    await tester.pumpAndSettle();
     await tester.tap(filterTrigger);
     await tester.pump();
 
-    final surface = find.byKey(const ValueKey('activity-filter-popover'));
+    final surface = find.byKey(const ValueKey('activity-sender-popover'));
     final fade = find.byKey(const ValueKey('activity-popover-fade'));
     final scale = find.byKey(const ValueKey('activity-popover-scale'));
     expect(surface, findsOneWidget);
@@ -368,103 +358,20 @@ void main() {
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
-    final items = tester.widgetList<PopupMenuItem<InboxFilter>>(
-      find.byType(PopupMenuItem<InboxFilter>),
+    final items = tester.widgetList<PopupMenuItem<String>>(
+      find.byType(PopupMenuItem<String>),
     );
-    expect(items, hasLength(InboxFilter.values.length));
+    expect(items, hasLength(3));
     expect(
       items.every((item) => item.height >= Grid.xl),
       isTrue,
       reason: 'Activity filter choices must keep 48dp touch targets.',
     );
 
-    await tester.tap(find.descendant(of: surface, matching: find.text('All')));
-    await tester.pumpAndSettle();
-    final optionsTrigger = find.byKey(const ValueKey('activity-options-menu'));
-    expect(
-      tester.getSize(optionsTrigger),
-      const Size(Grid.xl, Grid.xl),
-      reason: 'Activity options must retain a 48dp touch target.',
-    );
-    await tester.tap(optionsTrigger);
-    await tester.pump();
-
-    final optionsSurface = find.byKey(
-      const ValueKey('activity-options-popover'),
-    );
-    final optionsMaterial = tester.widget<Material>(optionsSurface);
-    final optionsShape = optionsMaterial.shape! as RoundedRectangleBorder;
-    expect(tester.getSize(optionsSurface).width, 216);
-    expect(optionsShape.borderRadius, BorderRadius.circular(Radii.popover));
-    expect(optionsMaterial.elevation, appPopoverElevation);
-    expect(
-      tester
-          .widget<ScaleTransition>(
-            find.byKey(const ValueKey('activity-popover-scale')),
-          )
-          .alignment,
-      Alignment.topRight,
-    );
-  });
-
-  testWidgets('filter stays indicator-free when drafts and reminders exist', (
-    tester,
-  ) async {
-    final dueReminder = Reminder(
-      id: 'reminder-1',
-      notBefore: now - 1,
-      status: 'pending',
-      target: const ReminderTarget(
-        eventId: 'm1',
-        channelId: 'ch1',
-        preview: 'Follow up',
-        authorPubkey:
-            'a11ce00000000000000000000000000000000000000000000000000000000000',
-      ),
-      note: null,
-      createdAt: now - 60,
-      eventId: 'reminder-event-1',
-    );
-    final draft = ComposeDraft(
-      key: 'ch1',
-      channelId: 'ch1',
-      threadHeadId: null,
-      text: 'Unsent review note',
-      updatedAt: now,
-    );
-
-    await tester.pumpWidget(
-      await buildTestable(drafts: [draft], reminders: [dueReminder]),
-    );
-    await tester.pumpAndSettle();
-
-    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
-    expect(
-      find.descendant(
-        of: filterTrigger,
-        matching: find.byWidgetPredicate((widget) {
-          if (widget is! Container) return false;
-          final constraints = widget.constraints;
-          return constraints?.minWidth == 6 && constraints?.minHeight == 6;
-        }),
-      ),
-      findsNothing,
-    );
-
-    await tester.tap(filterTrigger);
-    await tester.pumpAndSettle();
-    final filterPopover = find.byKey(const ValueKey('activity-filter-popover'));
-    expect(
-      find.descendant(of: filterPopover, matching: find.text('1')),
-      findsNothing,
-    );
-
     await tester.tap(
-      find.descendant(of: filterPopover, matching: find.text('Drafts')),
+      find.descendant(of: surface, matching: find.text('Anyone')),
     );
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('draft-row-ch1')), findsOneWidget);
-    expect(find.text('Unsent review note'), findsOneWidget);
   });
 
   testWidgets('rows lead with sender, contextual label, and preview', (
@@ -482,7 +389,10 @@ void main() {
     // Contextual labels + channel chips.
     expect(find.text('Mentioned in'), findsOneWidget);
     expect(find.text('Thread in'), findsOneWidget);
-    expect(find.text('#general'), findsNWidgets(2)); // mention + agent
+    expect(
+      find.text('#general'),
+      findsNWidgets(2),
+    ); // mention and agent activity
     expect(find.text('#engineering'), findsOneWidget);
 
     // Context labels and channel pills share the compact Activity style.
@@ -631,11 +541,11 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(
-      await buildTestable(knownAgentPubkeys: const {'agent_pk'}),
+      await buildTestable(knownAgentPubkeys: const {'bob_pk'}),
     );
     await tester.pumpAndSettle();
 
-    final agentRow = find.byKey(const ValueKey('inbox-row-ag1'));
+    final agentRow = find.byKey(const ValueKey('inbox-row-a1'));
     final agentAvatar = tester.widget<AvatarImage>(
       find.descendant(of: agentRow, matching: find.byType(AvatarImage)),
     );
@@ -709,44 +619,39 @@ void main() {
     expect(find.byKey(const ValueKey('inbox-unread-dot-a1')), findsOneWidget);
   });
 
-  testWidgets('New boundary separates unread rows from read rows', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      await buildTestable(
-        // Mention (2m ago) and agent (1m ago) unread; thread (1h ago) read.
-        readContexts: {'thread:$threadIdRoot1': now, 'ch2': now},
-      ),
-    );
-    await tester.pumpAndSettle();
+  testWidgets(
+    'chronological Activity does not imply a contiguous unread boundary',
+    (tester) async {
+      await tester.pumpWidget(
+        await buildTestable(
+          // Mention (2m ago) and agent (1m ago) unread; thread (1h ago) read.
+          readContexts: {'thread:$threadIdRoot1': now, 'ch2': now},
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('New'), findsOneWidget);
-  });
+      expect(find.text('New'), findsNothing);
+    },
+  );
 
-  testWidgets('filter menu switches sources and shows empty states', (
-    tester,
-  ) async {
+  testWidgets('tabs switch sources and show empty states', (tester) async {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Mentions'));
+    await _chooseActivityType(tester, 'Mentions');
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Hey check this out'), findsOneWidget);
     expect(find.textContaining('Deployed the fix'), findsNothing);
     expect(find.textContaining('Job completed successfully'), findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Needs Action'));
+    await _chooseActivityType(tester, 'DMs');
     await tester.pumpAndSettle();
 
-    expect(find.text('Nothing needs your action'), findsOneWidget);
+    expect(find.text('No direct messages yet'), findsOneWidget);
   });
 
-  testWidgets('filter menu supports accessibility text scaling', (
+  testWidgets('sender menu supports accessibility text scaling', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -754,11 +659,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('activity-sender-menu')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
     await tester.pumpAndSettle();
 
     expect(
-      find.byKey(const ValueKey('activity-filter-popover')),
+      find.byKey(const ValueKey('activity-sender-popover')),
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
@@ -811,48 +720,20 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Threads'));
+    await _chooseActivityType(tester, 'Threads');
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Deployed the fix'), findsOneWidget);
     expect(find.textContaining('Hey check this out'), findsNothing);
   });
 
-  testWidgets('reminders filter shows the reminders empty surface', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildTestable());
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Reminders'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('No reminders'), findsOneWidget);
-  });
-
-  testWidgets('drafts filter shows the drafts empty surface', (tester) async {
-    await tester.pumpWidget(await buildTestable());
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Drafts'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('No drafts'), findsOneWidget);
-  });
-
   testWidgets('unread-only toggle hides read rows', (tester) async {
     await tester.pumpWidget(await buildTestable(readContexts: {'ch1': now}));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-options-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Show unread'));
+    expect(find.byKey(const ValueKey('activity-options-menu')), findsNothing);
+    expect(find.text('Mark all as read'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('activity-unread-filter')));
     await tester.pumpAndSettle();
 
     // Only the unread thread row remains.

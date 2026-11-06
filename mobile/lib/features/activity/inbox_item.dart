@@ -8,6 +8,7 @@ import 'feed_item.dart';
 enum InboxFilter {
   all,
   mention,
+  dm,
   thread,
   needsAction,
   activity,
@@ -56,8 +57,8 @@ String inboxConversationId(
 }) {
   final thread = threadReferenceOf(tags);
   final threadId = thread.rootId ?? thread.parentId;
-  if (threadId != null) return threadId;
   if (dmChannelId != null) return 'dm:$dmChannelId';
+  if (threadId != null) return threadId;
   return eventId;
 }
 
@@ -165,6 +166,7 @@ class InboxItem {
 bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
   return switch (filter) {
     InboxFilter.all => true,
+    InboxFilter.dm => item.conversationId.startsWith('dm:'),
     InboxFilter.thread => [
       item.item,
       ...item.groupItems,
