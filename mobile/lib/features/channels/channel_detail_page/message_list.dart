@@ -1171,16 +1171,7 @@ class _MessageList extends HookConsumerWidget {
                 ) +
                 Grid.xs,
             child: Center(
-              child: IconButton.filled(
-                key: const ValueKey('channel-jump-to-oldest-unread'),
-                onPressed: scrollToOldestUnread,
-                tooltip: 'Jump to oldest unread message',
-                style: IconButton.styleFrom(
-                  backgroundColor: context.controlSurface,
-                  foregroundColor: context.colors.onPrimaryContainer,
-                ),
-                icon: const Icon(BuzzIcons.chevronUp, size: 20),
-              ),
+              child: _JumpToOldestUnreadButton(onPressed: scrollToOldestUnread),
             ),
           )
         else
