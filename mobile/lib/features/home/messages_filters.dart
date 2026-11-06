@@ -22,6 +22,9 @@ class MessagesFilters extends StatelessWidget {
     child: FilterChipBar<String>(
       useNativeGlass: true,
       matchNativeWidths: true,
+      side: defaultTargetPlatform == TargetPlatform.android
+          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.1))
+          : BorderSide.none,
       minControlHeight: defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48,
       horizontalPadding: Grid.gutter,
       selected: selected,

@@ -51,6 +51,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses the native iOS label widths for Material capsules too.
   final bool matchNativeWidths;
 
+  /// Optional outline for Material capsules.
+  final BorderSide side;
+
   /// Minimum visible capsule height; the hit target may be larger.
   final double minControlHeight;
 
@@ -74,6 +77,7 @@ class FilterChipBar<T> extends StatelessWidget {
     this.expandItems = false,
     this.useNativeGlass = false,
     this.matchNativeWidths = false,
+    this.side = BorderSide.none,
     this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
@@ -253,7 +257,7 @@ class FilterChipBar<T> extends StatelessWidget {
           : RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(Radii.lg),
             ),
-      side: BorderSide.none,
+      side: side,
       label: fillWidth
           ? SizedBox(width: double.infinity, child: centeredLabel)
           : centeredLabel,
