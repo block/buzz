@@ -84,7 +84,7 @@ env_names = d.dig("spec", "template", "spec", "containers", 0, "env")
 required = Set.new(%w[
   DATABASE_URL BUZZ_PUSH_APNS_CERT_PATH
   BUZZ_PUSH_APNS_TOPIC BUZZ_PUSH_APP_ATTEST_APP_ID
-  BUZZ_PUSH_GRANT_KEYS BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
+  BUZZ_PUSH_TOKEN_KEYS BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS
 ])
 assert!(required.subset?(env_names))
 assert!(!env_names.include?("BUZZ_PUSH_GATEWAY_ORIGIN"))

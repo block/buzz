@@ -9,9 +9,7 @@ use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
     authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation},
-    grant::{GrantKey, GrantKeyring},
     http::ApplicationRuntime,
-    model::EndpointGrant,
     router,
     token::{TokenKey, TokenKeyring},
     AppState,
@@ -48,8 +46,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     let authority = Arc::new(MemoryAuthorityStore::default());
     let token_keyring =
         Arc::new(TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap());
-    let grant_keyring =
-        Arc::new(GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap());
+    let (grant, grant_hash) = crate::grant::issue().unwrap();
     let installation_id = Uuid::new_v4();
     authority
         .create_installation(
@@ -68,10 +65,11 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         )
         .await
         .unwrap();
-    let delegation_id = Uuid::new_v4();
+    let delegation_id = crate::grant::id(&grant_hash);
     authority
         .upsert_delegation(Delegation {
             id: delegation_id,
+            grant_hash,
             installation_id,
             relay_pubkey: keys.public_key().to_hex(),
             endpoint_epoch: 1,
@@ -82,20 +80,8 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         })
         .await
         .unwrap();
-    let grant = grant_keyring
-        .issue(&EndpointGrant {
-            v: 1,
-            delegation_id,
-            relay_pubkey: keys.public_key().to_hex(),
-
-            endpoint_epoch: 1,
-            generation: 1,
-            expires_at: now() + 600,
-        })
-        .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
-        grant_keyring,
         authority,
         token_keyring,
         application: Arc::new(ApplicationRuntime {

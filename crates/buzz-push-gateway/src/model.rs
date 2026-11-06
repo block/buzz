@@ -18,28 +18,13 @@ pub const WIRE_VERSION: u8 = 1;
 
 /// Relay request. It deliberately has no application-payload field:
 /// the gateway emits one compiled-in APNs reconnect payload for every delivery.
-/// `endpoint_grant` is opaque authenticated ciphertext minted by the gateway
-/// sealing key and persisted with the relay-owned lease.
+/// `endpoint_grant` is a random opaque capability persisted with the relay-owned lease.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryRequest {
     pub v: u8,
     pub endpoint_grant: String,
     pub request_id: uuid::Uuid,
-    pub expires_at: i64,
-}
-
-/// Opaque delivery capability plaintext. It contains no APNs token: the random
-/// delegation id resolves through durable authority state, while the remaining
-/// fields are authenticated fences that make stale or cross-relay use fail.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EndpointGrant {
-    pub v: u8,
-    pub delegation_id: uuid::Uuid,
-    pub relay_pubkey: String,
-    pub endpoint_epoch: i64,
-    pub generation: i64,
     pub expires_at: i64,
 }
 

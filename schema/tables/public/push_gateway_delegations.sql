@@ -1,5 +1,6 @@
 CREATE TABLE push_gateway_delegations (
     id UUID PRIMARY KEY,
+    grant_hash BYTEA,
     installation_id UUID NOT NULL REFERENCES push_gateway_installations(id),
     relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
     endpoint_epoch BIGINT NOT NULL CHECK (endpoint_epoch > 0),

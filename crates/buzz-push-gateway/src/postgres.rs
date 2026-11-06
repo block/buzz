@@ -344,8 +344,8 @@ impl AuthorityStore for PostgresAuthorityStore {
             return Err(AuthorityError::Rejected);
         }
         let relay = hex::decode(&d.relay_pubkey).map_err(|_| AuthorityError::Rejected)?;
-        let result=sqlx::query("INSERT INTO push_gateway_delegations(id,installation_id,relay_pubkey,endpoint_epoch,generation,not_before,expires_at,revoked_at) VALUES($1,$2,$3,$4,$5,$6,$7,NULL) ON CONFLICT(installation_id,relay_pubkey) DO UPDATE SET id=EXCLUDED.id,endpoint_epoch=EXCLUDED.endpoint_epoch,generation=EXCLUDED.generation,not_before=EXCLUDED.not_before,expires_at=EXCLUDED.expires_at,revoked_at=NULL,updated_at=now() WHERE EXCLUDED.generation > push_gateway_delegations.generation")
-            .bind(d.id).bind(d.installation_id).bind(relay).bind(d.endpoint_epoch).bind(d.generation).bind(at(d.not_before)?).bind(at(d.expires_at)?).execute(&mut *tx).await.map_err(db)?;
+        let result=sqlx::query("INSERT INTO push_gateway_delegations(id,installation_id,relay_pubkey,endpoint_epoch,generation,not_before,expires_at,revoked_at,grant_hash) VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8) ON CONFLICT(installation_id,relay_pubkey) DO UPDATE SET id=EXCLUDED.id,endpoint_epoch=EXCLUDED.endpoint_epoch,generation=EXCLUDED.generation,not_before=EXCLUDED.not_before,expires_at=EXCLUDED.expires_at,revoked_at=NULL,grant_hash=EXCLUDED.grant_hash,updated_at=now() WHERE EXCLUDED.generation > push_gateway_delegations.generation")
+            .bind(d.id).bind(d.installation_id).bind(relay).bind(d.endpoint_epoch).bind(d.generation).bind(at(d.not_before)?).bind(at(d.expires_at)?).bind(d.grant_hash.to_vec()).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
         }
@@ -411,10 +411,8 @@ impl AuthorityStore for PostgresAuthorityStore {
     }
     async fn authorize_delivery(
         &self,
-        did: Uuid,
+        grant_hash: [u8; 32],
         relay: &str,
-        epoch: i64,
-        generation: i64,
         event_id: &str,
         request_id: Uuid,
         request_expires_at: i64,
@@ -422,6 +420,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         quota_max_deliveries: i64,
         now: i64,
     ) -> Result<DeliveryPermit, AuthorityError> {
+        let did = crate::grant::id(&grant_hash);
         let relay_bytes = hex::decode(relay).map_err(|_| AuthorityError::Rejected)?;
         let event_bytes = hex::decode(event_id).map_err(|_| AuthorityError::Rejected)?;
         if event_bytes.len() != 32 {
@@ -444,26 +443,28 @@ impl AuthorityStore for PostgresAuthorityStore {
         if i.try_get::<Option<DateTime<Utc>>, _>("revoked_at")
             .map_err(db)?
             .is_some()
-            || i.try_get::<i64, _>("endpoint_epoch").map_err(db)? != epoch
             || i.try_get::<DateTime<Utc>, _>("expires_at").map_err(db)? < at(now)?
         {
             return Err(AuthorityError::Rejected);
         }
         let d = sqlx::query(
-            "SELECT installation_id,expires_at FROM push_gateway_delegations
-             WHERE id=$1 AND relay_pubkey=$2 AND endpoint_epoch=$3 AND generation=$4
-               AND revoked_at IS NULL AND not_before<=$5 AND expires_at>=$5
+            "SELECT installation_id,endpoint_epoch,generation,expires_at FROM push_gateway_delegations
+             WHERE id=$1 AND relay_pubkey=$2 AND grant_hash=$3
+               AND revoked_at IS NULL AND not_before<=$4 AND expires_at>=$4
              FOR UPDATE",
         )
         .bind(did)
         .bind(&relay_bytes)
-        .bind(epoch)
-        .bind(generation)
+        .bind(grant_hash.to_vec())
         .bind(at(now)?)
         .fetch_optional(&mut *tx)
         .await
         .map_err(db)?
         .ok_or(AuthorityError::Rejected)?;
+        let epoch: i64 = d.try_get("endpoint_epoch").map_err(db)?;
+        if i.try_get::<i64, _>("endpoint_epoch").map_err(db)? != epoch {
+            return Err(AuthorityError::Rejected);
+        }
         let installation_id: Uuid = d.try_get("installation_id").map_err(db)?;
         let authority = DeliveryAuthority {
             delegation_id: did,
@@ -472,7 +473,7 @@ impl AuthorityStore for PostgresAuthorityStore {
 
             token_ciphertext: i.try_get("token_ciphertext").map_err(db)?,
             endpoint_epoch: epoch,
-            generation,
+            generation: d.try_get("generation").map_err(db)?,
             expires_at: ts(d.try_get("expires_at").map_err(db)?),
         };
         if request_expires_at < now || request_expires_at > authority.expires_at {
@@ -568,6 +569,8 @@ impl AuthorityStore for PostgresAuthorityStore {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+
+    include!("postgres/grants_tests.rs");
     use sqlx::{postgres::PgPoolOptions, AssertSqlSafe};
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- fixed localhost-only test credential
@@ -932,6 +935,12 @@ mod postgres_tests {
         .execute(pool)
         .await
         .expect("insert delegation");
+        sqlx::query("UPDATE push_gateway_delegations SET grant_hash=$2 WHERE id=$1")
+            .bind(Uuid::from_u128(DELEGATION_ID))
+            .bind(crate::grant::test_hash(Uuid::from_u128(DELEGATION_ID)).to_vec())
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -959,6 +968,7 @@ mod postgres_tests {
         store
             .upsert_delegation(Delegation {
                 id: Uuid::from_u128(2),
+                grant_hash: crate::grant::test_hash(Uuid::from_u128(2)),
                 installation_id: Uuid::from_u128(1),
                 relay_pubkey: RELAY_HEX.to_owned(),
                 endpoint_epoch: 1,
@@ -1066,10 +1076,8 @@ mod postgres_tests {
     ) -> impl std::future::Future<Output = Result<DeliveryPermit, AuthorityError>> + 'a {
         let now = Utc::now().timestamp();
         store.authorize_delivery(
-            Uuid::from_u128(DELEGATION_ID),
+            crate::grant::test_hash(Uuid::from_u128(DELEGATION_ID)),
             RELAY_HEX,
-            1,
-            1,
             event_hex,
             request_id,
             now + 300,
