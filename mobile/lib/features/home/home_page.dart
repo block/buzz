@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/hosted/organization_environment.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/community/community_membership_provider.dart';
@@ -100,11 +101,13 @@ class HomePage extends HookConsumerWidget {
       settingsPageBuilder: settingsPageBuilder,
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
-          (
-            label: 'Switch community',
-            symbol: 'arrow.left.arrow.right',
-            onPressed: openSwitcher,
-          ),
+          // An internal build reaches only its organization's community.
+          if (!OrganizationEnvironment.enabled)
+            (
+              label: 'Switch community',
+              symbol: 'arrow.left.arrow.right',
+              onPressed: openSwitcher,
+            ),
           if (canInvite && communityInvitePageBuilder != null)
             (
               label: 'Invite',
@@ -208,7 +211,9 @@ class HomePage extends HookConsumerWidget {
             child: defaultTargetPlatform == TargetPlatform.iOS
                 ? IosMessageCreateButton(
                     actions: moreActions,
-                    dividerBefore: const {1},
+                    dividerBefore: OrganizationEnvironment.enabled
+                        ? const {}
+                        : const {1},
                     icon: 'more',
                     avatarUrl: communityIcon,
                     avatarInitial: communityName.isEmpty
@@ -223,7 +228,9 @@ class HomePage extends HookConsumerWidget {
                     label: 'Community menu',
                     backgroundColor: context.colors.surfaceContainerHighest,
                     actions: moreActions,
-                    dividerBefore: const {1},
+                    dividerBefore: OrganizationEnvironment.enabled
+                        ? const {}
+                        : const {1},
                     width: 48,
                     height: 48,
                     trigger: CommunityAvatar(

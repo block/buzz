@@ -117,6 +117,23 @@ class OrganizationSignIn extends ChangeNotifier {
     }
   }
 
+  /// Ends the organization session, so the next sign-in goes through single
+  /// sign-on again.
+  Future<void> signOut() async {
+    if (_disposed) return;
+    final attempt = ++_attempt;
+    failure = null;
+    _set(OrganizationSessionStatus.checking);
+    try {
+      await account.clearLocalSession();
+    } on AccountFailure catch (error) {
+      if (attempt != _attempt) return;
+      failure = error;
+    }
+    if (attempt != _attempt) return;
+    _set(_currentStatus());
+  }
+
   Future<void> cancel() async {
     ++_attempt;
     try {
