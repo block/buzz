@@ -1265,7 +1265,6 @@ dependencies = [
  "http",
  "launchdarkly-server-sdk",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -1444,6 +1443,7 @@ dependencies = [
  "buzz-datastore-tracing",
  "buzz-db",
  "buzz-deletion",
+ "buzz-feature-flags",
  "buzz-media",
  "buzz-pubsub",
  "buzz-relay-mesh",

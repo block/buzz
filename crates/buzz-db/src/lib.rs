@@ -46,6 +46,9 @@ macro_rules! superseded_with_mentions_sql {
 mod runtime;
 mod store;
 
+/// Concurrency caps whose limit can change at runtime.
+pub mod concurrency_gate;
+
 /// Database error types.
 pub mod error;
 
@@ -102,6 +105,7 @@ pub use community::{
     CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord, UnarchiveCommunityResult,
     UnarchivedCommunityRecord,
 };
+pub use concurrency_gate::{ConcurrencyGate, GatePermit};
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
