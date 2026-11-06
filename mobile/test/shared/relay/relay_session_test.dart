@@ -832,7 +832,12 @@ void main() {
     test('posts the name query to /profiles/search with NIP-98 auth', () async {
       final h = harness(
         (_) => http.Response(
-          jsonEncode([profileJson(0, 'wes'), profileJson(1, 'note')]),
+          jsonEncode([
+            profileJson(0, 'wes'),
+            profileJson(1, 'note'),
+            // A person with no kind:0 is found by their verified head.
+            profileJson(30382, 'head'),
+          ]),
           200,
         ),
       );
@@ -841,7 +846,7 @@ void main() {
           .read(relaySessionProvider.notifier)
           .searchProfiles('  wes ', limit: 8);
 
-      expect(events.map((event) => event.kind), [0]);
+      expect(events.map((event) => event.kind), [0, 30382]);
       expect(h.requests, hasLength(1));
       final request = h.requests.single;
       expect(request.method, 'POST');

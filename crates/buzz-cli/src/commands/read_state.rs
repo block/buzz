@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 
 use buzz_core::kind::KIND_READ_STATE;
-use nostr::nips::nip44;
 use nostr::Event;
 use serde_json::{json, Value};
 
@@ -53,7 +52,7 @@ impl ReadState {
 /// a relay without the extension is an error rather than a partial read.
 pub(crate) async fn fetch(client: &BuzzClient) -> Result<ReadState, CliError> {
     let community_id = discover_snapshot(client).await?;
-    let me = client.keys().public_key().to_hex();
+    let me = client.public_key().to_hex();
     let filter = json!({
         "kinds": [KIND_READ_STATE],
         "authors": [me],
@@ -61,7 +60,7 @@ pub(crate) async fn fetch(client: &BuzzClient) -> Result<ReadState, CliError> {
     });
     let raw = client.query(&filter).await?;
     let events = snapshot_events(&raw, &community_id, &me)?;
-    merge(client.keys(), events)
+    merge(client.credentials(), events).await
 }
 
 fn cannot_prove_complete(detail: impl std::fmt::Display) -> CliError {
@@ -200,8 +199,11 @@ fn decode(event: &Event, plaintext: &str) -> Result<Result<HashMap<String, u64>,
 
 /// Verify, decrypt and max-merge raw relay events. Events that are not read-state
 /// coordinates are ignored; a coordinate that cannot be read is an error.
-pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, CliError> {
-    let me = keys.public_key();
+pub(crate) async fn merge(
+    credentials: &crate::credentials::Credentials,
+    raw: Vec<Value>,
+) -> Result<ReadState, CliError> {
+    let me = credentials.public_key();
     let mut heads: HashMap<String, Event> = HashMap::new();
     for value in raw {
         let event: Event = serde_json::from_value(value)
@@ -234,8 +236,10 @@ pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, Cl
     let mut ordered: Vec<_> = heads.into_iter().collect();
     ordered.sort_by(|a, b| a.0.cmp(&b.0));
     for (d_tag, event) in ordered {
-        let plaintext = nip44::decrypt(keys.secret_key(), &me, &event.content)
-            .map_err(|e| unreadable(&event, e))?;
+        let plaintext = credentials
+            .nip44_decrypt(&me, &event.content)
+            .await?
+            .ok_or_else(|| unreadable(&event, "not valid NIP-44 ciphertext for your key"))?;
         match decode(&event, &plaintext)? {
             Ok(contexts) => {
                 for (key, ts) in contexts {
@@ -253,9 +257,21 @@ pub(crate) fn merge(keys: &nostr::Keys, raw: Vec<Value>) -> Result<ReadState, Cl
 pub(crate) mod tests {
     use super::*;
     use axum::{body::Bytes, extract::State, routing::get, routing::post, Json, Router};
+    use nostr::nips::nip44;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    /// Merge with local `keys`; the local-key signer never suspends.
+    fn merge(keys: &Keys, raw: Vec<Value>) -> Result<ReadState, CliError> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(super::merge(
+                &crate::credentials::Credentials::from_keys(keys.clone()),
+                raw,
+            ))
+    }
 
     pub(crate) const COMMUNITY: &str = "5f0c1b9e-2d0b-4f4e-9a7c-0d6f3f3f3f3f";
 
@@ -432,7 +448,11 @@ pub(crate) mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (
-            BuzzClient::new(url, keys.clone(), None, None).unwrap(),
+            BuzzClient::new(
+                url,
+                crate::credentials::Credentials::from_keys(keys.clone()),
+            )
+            .unwrap(),
             bodies,
         )
     }

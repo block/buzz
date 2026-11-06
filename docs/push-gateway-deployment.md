@@ -398,6 +398,9 @@ remain enforced. No mobile App Attest audiences or relay activation settings cha
 The public listener bounds enrollment, anonymous challenges, management,
 revocation and delivery independently. Each source has a bounded rate and
 concurrency share; revocation retains four slots (at most two per source).
+IPv6 addresses in the same /64 share a budget. Sources are mapped to 4,096
+randomly keyed buckets per request type; collisions share limits. This bounds
+memory without rejecting all new sources when the table fills.
 V1 revocation still needs an anonymous challenge: distributed challenge floods
 can exhaust the shared durable issuance quota, so this is not a guarantee of
 revocation availability under arbitrary distributed attacks.

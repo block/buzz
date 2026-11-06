@@ -333,6 +333,7 @@ run_unit_tests() {
       connection::tests::dispatcher_counts_each_req_and_count_frame_once \
       connection::tests::read_before_login_logs_one_denial_from_the_handler \
       connection::tests::read_refused_by_a_full_handler_semaphore_logs_one_denial \
+      connection::tests::saturated_handler_write_line_records_whether_its_ok_was_queued \
       connection::tests::read_refused_by_unavailable_admission_logs_one_denial \
       handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial \
       nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line \

@@ -12,6 +12,8 @@ import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
+import '../../shared/verified_profiles/verified_profile.dart';
+import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
@@ -271,37 +273,35 @@ List<String> relayMemberPubkeysFromEvents(List<NostrEvent> events) {
   return pubkeys.toList();
 }
 
-/// Converts kind:0 events into a deduplicated people directory.
+/// Converts the people a profile search found into a directory.
 ///
 /// The directory listing is alphabetized. Search results pass
 /// [alphabetize] false to keep the relay's order, which ranks the best name
-/// match first; each person keeps the place of their first result.
+/// match first.
 @visibleForTesting
-List<DirectoryUser> directoryUsersFromProfileEvents(
-  List<NostrEvent> events, {
+List<DirectoryUser> directoryUsersFromSearch(
+  List<SearchedPerson> people, {
   bool alphabetize = true,
 }) {
-  final latestByPubkey = <String, NostrEvent>{};
-  for (final event in events) {
-    if (event.kind != 0) {
-      continue;
-    }
-    final pubkey = event.pubkey.toLowerCase();
-    final current = latestByPubkey[pubkey];
-    if (current == null || event.createdAt > current.createdAt) {
-      latestByPubkey[pubkey] = event;
-    }
+  DirectoryUser fromProfile(String pubkey, NostrEvent event) {
+    final profile = ProfileData.fromEvent(event);
+    return DirectoryUser(
+      pubkey: pubkey,
+      displayName: profile.displayName,
+      avatarUrl: profile.avatarUrl,
+      nip05Handle: profile.nip05,
+      isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
+    );
   }
 
   final users = [
-    for (final event in latestByPubkey.values)
-      if (ProfileData.fromEvent(event) case final profile)
+    for (final person in people)
+      if (person.profile case final event?)
+        fromProfile(person.pubkey, event)
+      else
         DirectoryUser(
-          pubkey: profile.pubkey.toLowerCase(),
-          displayName: profile.displayName,
-          avatarUrl: profile.avatarUrl,
-          nip05Handle: profile.nip05,
-          isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
+          pubkey: person.pubkey,
+          displayName: person.verified?.displayName,
         ),
   ];
   if (alphabetize) {
