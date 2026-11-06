@@ -6746,6 +6746,19 @@ void main() {
           ),
           findsOneWidget,
         );
+        final floatingOpacity = find
+            .descendant(
+              of: stickyHeader,
+              matching: find.byType(AnimatedOpacity),
+            )
+            .first;
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+        await tester.drag(messageList, const Offset(0, 60));
+        await tester.pump();
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 1);
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(seconds: 1));
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
       },
     );
 
@@ -15281,6 +15294,36 @@ void main() {
         ),
         findsOneWidget,
       );
+
+      final floatingOpacity = find
+          .descendant(of: stickyHeader, matching: find.byType(AnimatedOpacity))
+          .first;
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+      await tester.drag(listFinder, const Offset(0, -60));
+      await tester.pump();
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 1);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+
+      // Returning to the head must restore the in-flow date after idle,
+      // even though the date index still identifies it as the active day.
+      list.itemScrollController!.jumpTo(index: 0);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      final inlineDate = find
+          .byKey(
+            ValueKey('channel-day-divider-opacity-${timestampForDay(1, 0)}'),
+          )
+          .last;
+      expect(tester.widget<AnimatedOpacity>(inlineDate).opacity, 1);
+      final inlineSemantics = tester.widget<ExcludeSemantics>(
+        find
+            .ancestor(of: inlineDate, matching: find.byType(ExcludeSemantics))
+            .first,
+      );
+      expect(inlineSemantics.excluding, isFalse);
 
       list.itemScrollController!.jumpTo(index: 70);
       await tester.pumpAndSettle();
