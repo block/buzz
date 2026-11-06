@@ -485,7 +485,11 @@ fn advance_query_cursor(
         filter.get("until").and_then(serde_json::Value::as_u64),
         filter.get("before_id").and_then(serde_json::Value::as_str),
     ) {
-        if (created_at, id) >= (until, before_id) {
+        // The relay pages newest first, equal timestamps by ascending id:
+        // the next page lies at `created_at < until`, or at `until` past `before_id`.
+        let older = created_at < until
+            || (created_at == until && id.to_ascii_lowercase() > before_id.to_ascii_lowercase());
+        if !older {
             return Err(stalled_query(
                 "the relay did not move the cursor to older events",
             ));

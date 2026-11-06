@@ -185,7 +185,7 @@ mod tests {
                         Some(id) => {
                             let at = f["until"].as_u64().unwrap();
                             let t = e["created_at"].as_u64().unwrap();
-                            t < at || (t == at && e["id"].as_str().unwrap() < id)
+                            t < at || (t == at && e["id"].as_str().unwrap() > id)
                         }
                     };
                     let page: Vec<_> = events
@@ -236,6 +236,35 @@ mod tests {
 
         assert_eq!(dms.len(), 1, "{dms:?}");
         assert_eq!(dms[0]["dm_id"], "dm-0");
+        assert!(log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|f| f["before_id"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn pages_past_a_hidden_dm_with_the_same_timestamp() {
+        // Equal timestamps come back in ascending id order.
+        let same = |n: u64| {
+            let mut e = dm(n);
+            e["created_at"] = serde_json::json!(1_000);
+            e
+        };
+        let events = vec![
+            same(1),
+            same(2),
+            serde_json::json!({
+                "id": "f".repeat(64), "kind": 30622, "created_at": 5_000,
+                "tags": [["h", "dm-1"]],
+            }),
+        ];
+        let (base, log) = relay(events).await;
+
+        let dms = list_dms(&client(base), 1).await.unwrap();
+
+        assert_eq!(dms.len(), 1, "{dms:?}");
+        assert_eq!(dms[0]["dm_id"], "dm-2");
         assert!(log
             .lock()
             .unwrap()
