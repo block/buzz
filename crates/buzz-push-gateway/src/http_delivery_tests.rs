@@ -547,3 +547,26 @@ async fn slow_enrollment_bodies_are_bounded_without_occupying_revocation_capacit
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn v1_encrypted_grant_relay_budget_returns_bounded_retry_after() {
+    let (app, keys, template, sends) = fixture().await;
+    for attempt in 0..6 {
+        let mut value: serde_json::Value = serde_json::from_slice(&template).unwrap();
+        value["request_id"] = Uuid::new_v4().to_string().into();
+        let body = serde_json::to_vec(&value).unwrap();
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let response = app
+            .clone()
+            .oneshot(request(DIRECT_URL, None, auth, body))
+            .await
+            .unwrap();
+        if attempt < 5 {
+            assert_eq!(response.status(), StatusCode::OK);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()["retry-after"], "60");
+        }
+    }
+    assert_eq!(sends.load(Ordering::SeqCst), 5);
+}
