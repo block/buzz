@@ -22,6 +22,16 @@ final mediaHttpClientProvider = Provider<http.Client>((ref) {
   return client;
 });
 
+/// The provider [MediaImage] shows [url] with at full size (no decode
+/// bound), for warming it with `precacheImage`.
+MediaImageProvider mediaImageProviderFor(WidgetRef ref, String url) =>
+    MediaImageProvider(
+      url: url,
+      auth: ref.read(mediaGetAuthServiceProvider),
+      client: ref.read(mediaHttpClientProvider),
+      diskCache: ref.read(mediaDiskCacheProvider),
+    );
+
 /// An [ImageProvider] for relay-hosted (and arbitrary remote) media that fixes
 /// the fetch-stampede failure modes of `Image.network` + per-build auth
 /// headers:
