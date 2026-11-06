@@ -1373,13 +1373,10 @@ async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Ta
     let me = keys.public_key().to_hex();
     let mut tags = vec![tag(["h", &turn.channel])];
     if let Some(target) = &turn.target {
+        // A reply carrying only a `reply` marker answers the root directly.
         let id = target.id.to_hex();
-        let root = target
-            .tags
-            .iter()
-            .find(|t| t.as_slice().get(3).is_some_and(|m| m == "root"))
-            .and_then(|t| t.content())
-            .map_or_else(|| id.clone(), str::to_string);
+        let markers = buzz_core::nip10::parse_thread_markers(&target.tags);
+        let root = markers.root.or(markers.reply).unwrap_or_else(|| id.clone());
         tags.extend(reply_tags(&root, &id));
     }
     let reply = EventBuilder::new(
@@ -2403,9 +2400,11 @@ hold_secs = 2
     async fn agent_turns_read_react_stream_reply_and_remove_their_reactions() {
         let (ws, seen) = fake_ws_relay(FakeRelay::PROMPT).await;
         let channel = identity::channel_id("t", 0, 0);
+        // A human's thread reply: only a `reply` marker, naming the root.
         let author = Keys::generate();
+        let root_id = "a".repeat(64);
         let target = EventBuilder::new(kind(KIND_STREAM_MESSAGE), "question")
-            .tags([tag(["h", &channel])])
+            .tags([tag(["h", &channel]), tag(["e", &root_id, "", "reply"])])
             .sign_with_keys(&author)
             .unwrap();
         let posted: Log<Event> = Default::default();
@@ -2495,13 +2494,14 @@ hold_secs = 3
             let e = reaction.tags.iter().find(|t| t.kind().as_str() == "e");
             assert_eq!(e.and_then(|t| t.content()), Some(target_id.as_str()));
         }
-        // Every finished turn replied in the target's thread and deleted
-        // both of its reactions; only a turn cut by the stop leaves any.
+        // Every finished turn replied in the target's thread, under the
+        // target's own root, and deleted both of its reactions; only a turn
+        // cut by the stop leaves any.
         let replies: Vec<&Event> = of(KIND_STREAM_MESSAGE).collect();
         assert!(!replies.is_empty(), "{posted:?}");
         for reply in &replies {
             let markers = buzz_core::nip10::parse_thread_markers(&reply.tags);
-            assert_eq!(markers.root.as_deref(), Some(target_id.as_str()));
+            assert_eq!(markers.root.as_deref(), Some(root_id.as_str()));
             assert_eq!(markers.reply.as_deref(), Some(target_id.as_str()));
         }
         let deleted: Vec<String> = of(KIND_DELETION)
