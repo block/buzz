@@ -22,7 +22,7 @@ import '../../profile/presence_cache_provider.dart';
 /// Typing pause before a mention query hits the relay search endpoint.
 const mentionSearchDebounce = Duration(milliseconds: 200);
 
-/// Global user search for mention autocomplete — kind:0 prefix search via
+/// Global user search for mention autocomplete — profile name search via
 /// the relay HTTP bridge. Mirrors desktop's `useInfiniteUserSearchQuery`
 /// feeding `useMentions` (source 4: people and agents outside the channel).
 ///
@@ -47,21 +47,20 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
       final session = ref.read(relaySessionProvider.notifier);
       final events = await session.searchProfiles(trimmed);
 
-      // Keep only the latest kind:0 event per pubkey (the bridge does not
-      // honor the `kinds` filter under search, and may return several
-      // profile revisions — mirrors desktop's `list_user_search_results`).
-      final latestByPubkey = <String, NostrEvent>{};
-      for (final event in events) {
-        if (event.kind != 0) continue;
-        final pk = event.pubkey.toLowerCase();
-        final current = latestByPubkey[pk];
-        if (current == null || event.createdAt > current.createdAt) {
-          latestByPubkey[pk] = event;
-        }
-      }
-
+      // Each person once, by their newest kind:0; someone with none, by
+      // their verified head.
+      final found = await ref
+          .read(verifiedProfilesProvider.notifier)
+          .searched(events);
       final people = [
-        for (final event in latestByPubkey.values) _profileFromEvent(event),
+        for (final person in found)
+          if (person.profile case final profile?)
+            _profileFromEvent(profile)
+          else
+            UserProfile(
+              pubkey: person.pubkey,
+              displayName: person.verified?.displayName,
+            ),
       ];
       // A search that outlived its query or community is not kept.
       if (!disposed) ref.read(mentionSearchCacheProvider).put(trimmed, people);
@@ -317,7 +316,7 @@ List<MentionCandidate> _chooserCandidates(
   candidates = [
     for (final candidate in candidates)
       switch (verified[candidate.pubkey.toLowerCase()]) {
-        final profile? => candidate.withVerifiedName(profile.displayName),
+        final profile? => candidate.withVerifiedName(profile),
         null => candidate,
       },
   ];
@@ -360,7 +359,7 @@ List<UserProfile> verifiedMentionMatches(
           pubkey: key,
           name: value.displayName,
           label: value.displayName,
-          aliases: [value.displayName],
+          aliases: [value.displayName, ...verifiedAliases(value)],
           member: false,
         ),
       ], query).isNotEmpty)

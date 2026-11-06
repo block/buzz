@@ -147,7 +147,7 @@ fn newest_by_d(events: Vec<Value>) -> HashMap<String, Value> {
 async fn member_channel_ids(client: &BuzzClient) -> Result<Vec<String>, CliError> {
     let filter = json!({
         "kinds": [KIND_GROUP_MEMBERS],
-        "#p": [client.keys().public_key().to_hex()],
+        "#p": [client.public_key().to_hex()],
     });
     let events = client
         .query_all_bounded(filter, MEMBER_CHANNEL_LIMIT)
@@ -241,7 +241,7 @@ async fn count_channel(
         .query_paginated(filter, bounds.events_per_channel)
         .await?;
     let capped = events.len() >= bounds.events_per_channel as usize;
-    let me = client.keys().public_key().to_hex();
+    let me = client.public_key().to_hex();
     let unread = events
         .iter()
         .filter(|e| is_unread(e, &me, last_read_at, state))
@@ -454,7 +454,11 @@ mod tests {
     async fn world() -> World {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
         World {
             client,
             relay,
@@ -478,7 +482,7 @@ mod tests {
         }
 
         fn member(&self, channel: &str) {
-            let me = self.client.keys().public_key();
+            let me = self.client.public_key();
             let tags = vec![nostr::Tag::identifier(channel), nostr::Tag::public_key(me)];
             self.push(self.signed(&Keys::generate(), 39002, tags, 1));
         }
@@ -509,7 +513,12 @@ mod tests {
 
         fn read_state(&self, slot: &str, contexts: Value, at: u64) {
             let plaintext = json!({"v": 1, "client_id": slot, "contexts": contexts}).to_string();
-            self.push(slot_event(self.client.keys(), slot, &plaintext, at));
+            self.push(slot_event(
+                &self.client.credentials().test_keys(),
+                slot,
+                &plaintext,
+                at,
+            ));
         }
 
         fn queries_for(&self, kind: u64) -> Vec<Value> {
@@ -535,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn counts_unread_with_desktop_rules() {
         let mut w = world().await;
-        let me = w.client.keys().clone();
+        let me = w.client.credentials().test_keys();
         let other = w.other.clone();
         for (id, name) in [(GEN, "general"), (DEV, "dev"), (OLD, "old")] {
             w.member(id);
@@ -706,7 +715,12 @@ mod tests {
         w.member(GEN);
         w.channel(GEN, "general", &[]);
         w.read_state("a", json!({GEN: 1}), 1);
-        w.push(slot_event(w.client.keys(), "b", "garbage", 2));
+        w.push(slot_event(
+            &w.client.credentials().test_keys(),
+            "b",
+            "garbage",
+            2,
+        ));
 
         let err = unread(&w.client, &[], None, &BOUNDS).await.unwrap_err();
         assert!(err.to_string().contains("unreadable"), "{err}");

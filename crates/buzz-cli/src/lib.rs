@@ -1,7 +1,12 @@
 pub mod agent_management;
+mod cached_assertion;
 mod client;
 mod commands;
+mod credentials;
+#[cfg(unix)]
+mod desktop_provider;
 mod error;
+mod federated_identity;
 mod help_tree;
 mod links;
 mod validate;
@@ -9,7 +14,6 @@ mod validate;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use client::BuzzClient;
 use error::CliError;
-use nostr::Keys;
 use uuid::Uuid;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
@@ -125,8 +129,13 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
+  BUZZ_FEDERATED_IDENTITY_ADAPTER  NIP-FA adapter base URL  [optional]
+    Set both for relays that enforce federated identity (NIP-FI). The token
+    is a human session for your own key, not an agent grant. The CLI requests
+    an assertion, the adapter mints it, and the CLI sends it on every request.
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -329,9 +338,58 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Credentials: pair this CLI with the running Buzz desktop
+    #[command(subcommand)]
+    Auth(AuthCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// The Buzz desktop as a credential provider (macOS and Linux)
+    #[command(subcommand)]
+    Desktop(DesktopAuthCmd),
+}
+
+#[derive(Subcommand)]
+enum DesktopAuthCmd {
+    /// Ask the running Buzz desktop to let this CLI act as you on --relay.
+    /// Approve in Buzz; the token is stored in the OS keychain.
+    Pair {
+        /// Name shown in the desktop's approval prompt
+        #[arg(long, default_value = "buzz CLI")]
+        name: String,
+        /// Desktop instance, when more than one is running
+        #[arg(long)]
+        instance: Option<String>,
+    },
+    /// Forget paired tokens (all instances unless --instance). Local only.
+    Unpair {
+        #[arg(long)]
+        instance: Option<String>,
+    },
+}
+
+#[cfg(unix)]
+async fn run_auth(cmd: AuthCmd, relay_url: &str) -> Result<(), CliError> {
+    let AuthCmd::Desktop(cmd) = cmd;
+    let out = match cmd {
+        DesktopAuthCmd::Pair { name, instance } => {
+            desktop_provider::pair(relay_url, &name, instance.as_deref()).await?
+        }
+        DesktopAuthCmd::Unpair { instance } => desktop_provider::unpair(instance.as_deref())?,
+    };
+    println!("{out}");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn run_auth(_: AuthCmd, _: &str) -> Result<(), CliError> {
+    Err(CliError::Usage(
+        "the Buzz desktop credential provider is not available on Windows yet".into(),
+    ))
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2275,7 +2333,7 @@ pub enum ModerationCmd {
 /// and the BIP-340 signature. Inputs that are already valid JSON — or not
 /// recognizable as the shorthand — are returned unchanged so the strict
 /// parser reports the error on the original bytes.
-fn normalize_auth_tag_input(input: &str) -> String {
+pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
     let trimmed = input.trim();
     if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
         return trimmed.to_owned();
@@ -2296,9 +2354,28 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
-async fn run(cli: Cli) -> Result<(), CliError> {
-    let relay_url = client::normalize_relay_url(&cli.relay);
+/// Binds the configured community: `auth` pairs it, anything else builds
+/// the client. A desktop binds the whole community URL, trailing slash
+/// included, so pairing and the credential chain take it as configured; only
+/// requests use the trimmed base, which the client derives. The two steps are parameters so a test can
+/// run them against a fake desktop.
+pub(crate) async fn connect(
+    configured: &str,
+    command: Cmd,
+    pair: impl AsyncFnOnce(AuthCmd, &str) -> Result<(), CliError>,
+    credentials: impl AsyncFnOnce(&str) -> Result<credentials::Credentials, CliError>,
+) -> Result<Option<(Cmd, BuzzClient)>, CliError> {
+    // Pairing runs before any credential exists.
+    if let Cmd::Auth(sub) = command {
+        pair(sub, configured).await?;
+        return Ok(None);
+    }
+    let credentials = credentials(configured).await?;
+    let client = BuzzClient::new(configured.to_owned(), credentials)?;
+    Ok(Some((command, client)))
+}
 
+async fn run(cli: Cli) -> Result<(), CliError> {
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
@@ -2307,44 +2384,23 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
-    // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
-
-    // NIP-OA: parse and verify the auth tag if provided.
-    //
-    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
-    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
-    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
-    // JSON; all validation and signature verification happen on the strict
-    // path below, unchanged.
-    let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref input) if !input.is_empty() => {
-            let json = normalize_auth_tag_input(input);
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
-                CliError::Auth(format!(
-                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-                    keys.public_key().to_hex()
-                ))
-            })?;
-            // Canonical wire form derives from the parsed-and-verified tag
-            // (same shape as buzz-acp's RestClient), never from raw input.
-            let canonical = serde_json::to_string(tag.as_slice())
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
-            (Some(tag), Some(canonical))
-        }
-        _ => (None, None),
+    // Credential chain: the first link that applies to this relay is the
+    // identity (see `credentials`).
+    let settings = credentials::Settings {
+        private_key: cli.private_key,
+        auth_tag: cli.auth_tag,
+        ..Default::default()
+    }
+    .with_env_evidence();
+    let Some((command, client)) = connect(&cli.relay, cli.command, run_auth, async |relay| {
+        credentials::resolve(settings, relay).await
+    })
+    .await?
+    else {
+        return Ok(());
     };
 
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
-
-    match cli.command {
+    match command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -2368,7 +2424,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Auth(_) => unreachable!("handled above"),
     }
 }
 
@@ -2561,6 +2617,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "auth",
             "canvas",
             "channels",
             "dms",

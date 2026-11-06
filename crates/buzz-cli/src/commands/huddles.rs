@@ -763,7 +763,11 @@ mod tests {
     }
 
     fn client(base: &str) -> BuzzClient {
-        BuzzClient::new(base.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     #[tokio::test]

@@ -9529,7 +9529,19 @@ void main() {
         );
         await tester.pumpAndSettle();
 
+        // A stray tap asks first; Cancel leaves no Huddle behind.
         await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.pumpAndSettle();
+        expect(find.text('Start a Huddle?'), findsOneWidget);
+        await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+        await tester.pumpAndSettle();
+        expect(find.text('Start a Huddle?'), findsNothing);
+        expect(relaySession.huddleCreatePublishStarted.isCompleted, isFalse);
+
+        await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
+        await tester.pump();
         await relaySession.huddleCreatePublishStarted.future;
         var transitionCompleted = false;
         final transition =

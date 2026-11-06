@@ -90,6 +90,10 @@ pub enum DbError {
     #[error("read-state snapshot exceeds event or byte limit")]
     ReadStateSnapshotTooLarge,
 
+    /// A complete membership snapshot exceeds its bounded resource budget.
+    #[error("membership snapshot exceeds channel or byte limit")]
+    MembershipSnapshotTooLarge,
+
     /// A complete thread window exceeds its request-wide work allowance.
     #[error("thread window exceeds {0} budget")]
     ThreadWindowBudgetExceeded(&'static str),
