@@ -199,7 +199,6 @@ pub async fn community_nip_fi_policy_status(
             let fields = mode_fields(&state, Some(policy.requires_nip_fi));
             Ok(Json(serde_json::json!({
                 "community_id": id, "expected_host": host,
-                "requires_nip_fi": policy.requires_nip_fi, "policy_generation": policy.policy_generation,
                 "expected_policy_generation": policy.policy_generation,
                 "expected_requires_nip_fi": policy.requires_nip_fi,
                 "mode": fields["mode"], "effective_required": fields["effective_required"],
