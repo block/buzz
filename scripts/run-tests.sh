@@ -98,6 +98,11 @@ run_unit_tests() {
   run_test_step "buzz-pubsub conn_control tests" \
     cargo test -p buzz-pubsub --lib conn_control::tests:: -- --nocapture
 
+  # Shared Redis connection timeout bounds (loopback fake peers; infra-free).
+  # Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub connection tests" \
+    cargo test -p buzz-pubsub --lib connection::tests:: -- --nocapture
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -328,6 +333,7 @@ run_unit_tests() {
       connection::tests::dispatcher_counts_each_req_and_count_frame_once \
       connection::tests::read_before_login_logs_one_denial_from_the_handler \
       connection::tests::read_refused_by_a_full_handler_semaphore_logs_one_denial \
+      connection::tests::saturated_handler_write_line_records_whether_its_ok_was_queued \
       connection::tests::read_refused_by_unavailable_admission_logs_one_denial \
       handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial \
       nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line \

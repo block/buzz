@@ -54,6 +54,7 @@ class FakeRegistry extends BuilderlabAccountClient {
       'supported_reasoning_efforts': ['max'],
     },
   ];
+  Map<String, dynamic>? recommendedSelection;
   Completer<void>? catalogGate;
   bool failCatalog = false;
   bool failListing = false;
@@ -98,7 +99,10 @@ class FakeRegistry extends BuilderlabAccountClient {
       case '/v3/beekeeper/get-model-catalog':
         await catalogGate?.future;
         if (failCatalog) throw StateError('Catalog unavailable.');
-        return {'models': models};
+        return {
+          'models': models,
+          'recommended_selection': ?recommendedSelection,
+        };
       case '/v3/beekeeper/list-agents':
         if (failListing) throw StateError('Registry unavailable.');
         return {'status': 1, 'agents': listed};

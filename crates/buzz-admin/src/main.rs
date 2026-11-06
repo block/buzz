@@ -663,11 +663,8 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&redis_url);
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
-    };
+    let redis_pool = buzz_pubsub::redis_connection(&redis_url)
+        .map_err(|e| anyhow::anyhow!("Redis connection setup failed: {e}"))?;
 
     let pubsub = Arc::new(
         PubSubManager::new(&redis_url, redis_pool)

@@ -200,6 +200,7 @@ void main() {
         );
         expect(calls.single.arguments, containsPair('confirmLabel', 'Remove'));
         expect(calls.single.arguments, containsPair('cancelLabel', 'Cancel'));
+        expect(calls.single.arguments, containsPair('destructive', true));
         expect(find.byType(AlertDialog), findsNothing);
         expect(actions.calls, isEmpty);
         response.complete(confirmed);

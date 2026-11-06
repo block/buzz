@@ -6,6 +6,7 @@ import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
