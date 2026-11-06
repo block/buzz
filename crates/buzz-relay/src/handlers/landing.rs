@@ -4,12 +4,12 @@
 //!
 //! The designation lives on the `communities` row (see
 //! [`buzz_db::landing`]); NIP-11 `landing_channel` is its authoritative read
-//! and the `["landing"]` / `["welcome", text]` tags on the channel's
-//! kind:39000 are a projection. A relay owner or admin moves it with a
-//! kind:9002 `landing` tag. With no designation, the relay adopts or creates
-//! `general` here, lazily: at provisioning, at boot for the deployment
-//! community, and on every human admission. A NULL designation is the retry
-//! record.
+//! and the `["landing"]`, `["welcome", text]` and `["welcome_title", text]`
+//! tags on the channel's kind:39000 are a projection. A relay owner or admin
+//! moves it with a kind:9002 `landing` tag. With no designation, the relay
+//! adopts or creates `general` here, lazily: at provisioning, at boot for
+//! the deployment community, and on every human admission. A NULL
+//! designation is the retry record.
 
 use std::sync::Arc;
 
@@ -25,18 +25,19 @@ use super::side_effects::{self, SelfJoinOutcome};
 use crate::nip_fi_gate::SessionAdmissionGate;
 use crate::state::AppState;
 
-/// Refusal for a kind:9002 `landing` or `welcome` tag from an actor who is
-/// not a relay owner or admin.
+/// Refusal for a kind:9002 `landing`, `welcome` or `welcome_title` tag from
+/// an actor who is not a relay owner or admin.
 pub(crate) const NOT_AUTHORIZED: &str =
-    "actor not authorized: landing and welcome require a relay owner or admin";
+    "actor not authorized: landing, welcome and welcome_title require a relay owner or admin";
 
-/// Validates a kind:9002's `landing` and `welcome` tags. Returns whether the
-/// event carries either; the caller then requires a relay owner or admin and
-/// a stream channel.
+/// Validates a kind:9002's `landing`, `welcome` and `welcome_title` tags.
+/// Returns whether the event carries any of them; the caller then requires a
+/// relay owner or admin and a stream channel.
 ///
 /// `["landing", "true"]` designates the channel; there is no way to turn the
 /// designation off, only to move it. `["welcome", text]` sets the welcome
-/// message and `["welcome", ""]` restores the default. Each may appear once.
+/// message (Markdown source, stored as-is) and `["welcome_title", text]` its
+/// title; `""` restores the client default for either. Each may appear once.
 pub(crate) fn validate_tags(event: &Event) -> anyhow::Result<bool> {
     let tags = |name: &str| {
         event
@@ -46,9 +47,11 @@ pub(crate) fn validate_tags(event: &Event) -> anyhow::Result<bool> {
             .map(|tag| tag.as_slice().get(1).map(String::as_str))
             .collect::<Vec<_>>()
     };
-    let (landing, welcome) = (tags("landing"), tags("welcome"));
-    if landing.len() > 1 || welcome.len() > 1 {
-        anyhow::bail!("kind:9002 may include at most one landing and one welcome tag");
+    let (landing, welcome, title) = (tags("landing"), tags("welcome"), tags("welcome_title"));
+    if landing.len() > 1 || welcome.len() > 1 || title.len() > 1 {
+        anyhow::bail!(
+            "kind:9002 may include at most one landing, one welcome and one welcome_title tag"
+        );
     }
     if let Some(value) = landing.first() {
         match value {
@@ -62,20 +65,28 @@ pub(crate) fn validate_tags(event: &Event) -> anyhow::Result<bool> {
             None => anyhow::bail!("landing tag must have a value"),
         }
     }
-    if let Some(value) = welcome.first() {
-        match value {
-            None => anyhow::bail!(
-                "welcome tag must have a value (text, or empty to restore the default)"
+    let texts: [(&str, &[Option<&str>], fn(&str) -> Option<&'static str>); 2] = [
+        ("welcome", &welcome, buzz_db::landing::welcome_message_error),
+        (
+            "welcome_title",
+            &title,
+            buzz_db::landing::welcome_title_error,
+        ),
+    ];
+    for (name, values, text_error) in texts {
+        match values.first() {
+            None | Some(Some("")) => {}
+            Some(None) => anyhow::bail!(
+                "{name} tag must have a value (text, or empty to restore the default)"
             ),
-            Some("") => {}
-            Some(text) => {
-                if let Some(error) = buzz_db::landing::welcome_message_error(text) {
+            Some(Some(text)) => {
+                if let Some(error) = text_error(text) {
                     anyhow::bail!("{error}");
                 }
             }
         }
     }
-    Ok(!landing.is_empty() || !welcome.is_empty())
+    Ok(!landing.is_empty() || !welcome.is_empty() || !title.is_empty())
 }
 
 /// Makes sure the community has a landing channel (see
@@ -344,11 +355,23 @@ mod tests {
             .expect("sign")
     }
 
-    /// The `landing`/`welcome` rules of §3.3, with the exact receipt text a
-    /// client shows.
+    /// The `landing`/`welcome`/`welcome_title` rules, with the exact receipt
+    /// text a client shows.
+    ///
+    /// Mutations: drop `'\t'` from the message's allowed controls → the
+    /// Markdown indentation row is refused (RED); validate the title with
+    /// the message rule → the title line break row is accepted (RED).
     #[test]
     fn landing_and_welcome_tag_rules() {
-        let long = "a".repeat(buzz_db::landing::WELCOME_MAX_CHARS + 1);
+        use buzz_db::landing::{
+            welcome_message_error, welcome_title_error, WELCOME_MAX_CHARS, WELCOME_TITLE_MAX_CHARS,
+        };
+        let long = "a".repeat(WELCOME_MAX_CHARS + 1);
+        let at_limit = "a".repeat(WELCOME_MAX_CHARS);
+        let long_title = "a".repeat(WELCOME_TITLE_MAX_CHARS + 1);
+        let markdown = "# Hi!\n\n- read [#rules](nostr:naddr1x)\n\tindented code";
+        let duplicate =
+            "kind:9002 may include at most one landing, one welcome and one welcome_title tag";
         let cases: &[(&[&[&str]], Result<bool, &str>)] = &[
             (&[&["h", "x"], &["name", "n"]], Ok(false)),
             (&[&["landing", "true"]], Ok(true)),
@@ -358,6 +381,26 @@ mod tests {
                 Ok(true),
             ),
             (&[&["welcome", "Hi"]], Ok(true)),
+            (&[&["welcome", markdown]], Ok(true)),
+            (&[&["welcome", at_limit.as_str()]], Ok(true)),
+            // The client's full-state form, and its three-tag predecessor.
+            (
+                &[
+                    &["landing", "true"],
+                    &["welcome", "Hi"],
+                    &["welcome_title", "Welcome aboard"],
+                ],
+                Ok(true),
+            ),
+            (
+                &[
+                    &["landing", "true"],
+                    &["welcome", ""],
+                    &["welcome_title", ""],
+                ],
+                Ok(true),
+            ),
+            (&[&["welcome_title", "Hello, team"]], Ok(true)),
             (
                 &[&["landing", "false"]],
                 Err("landing cannot be turned off; make another channel the landing channel"),
@@ -372,24 +415,41 @@ mod tests {
                 Err("welcome tag must have a value (text, or empty to restore the default)"),
             ),
             (
-                &[&["landing", "true"], &["landing", "true"]],
-                Err("kind:9002 may include at most one landing and one welcome tag"),
+                &[&["welcome_title"]],
+                Err("welcome_title tag must have a value (text, or empty to restore the default)"),
             ),
             (
-                &[&["welcome", "a"], &["welcome", "b"]],
-                Err("kind:9002 may include at most one landing and one welcome tag"),
+                &[&["landing", "true"], &["landing", "true"]],
+                Err(duplicate),
+            ),
+            (&[&["welcome", "a"], &["welcome", "b"]], Err(duplicate)),
+            (
+                &[&["welcome_title", "a"], &["welcome_title", "b"]],
+                Err(duplicate),
             ),
             (
                 &[&["welcome", "   "]],
-                Err(buzz_db::landing::welcome_message_error("   ").expect("blank refused")),
+                Err(welcome_message_error("   ").expect("blank refused")),
             ),
             (
                 &[&["welcome", long.as_str()]],
-                Err(buzz_db::landing::welcome_message_error(&long).expect("long refused")),
+                Err(welcome_message_error(&long).expect("long refused")),
             ),
             (
-                &[&["welcome", "tab\there"]],
-                Err(buzz_db::landing::welcome_message_error("tab\there").expect("control refused")),
+                &[&["welcome", "bell\u{7}"]],
+                Err(welcome_message_error("bell\u{7}").expect("control refused")),
+            ),
+            (
+                &[&["welcome", "Hi"], &["welcome_title", " \t "]],
+                Err(welcome_title_error(" \t ").expect("blank title refused")),
+            ),
+            (
+                &[&["welcome_title", long_title.as_str()]],
+                Err(welcome_title_error(&long_title).expect("long title refused")),
+            ),
+            (
+                &[&["landing", "true"], &["welcome_title", "Two\nlines"]],
+                Err(welcome_title_error("Two\nlines").expect("title line break refused")),
             ),
         ];
         for (tags, expected) in cases {

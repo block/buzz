@@ -431,18 +431,21 @@ async fn advertised_landing_channel() -> (Option<String>, serde_json::Value) {
 }
 
 /// Submit the client's full-state landing kind:9002 (`landing` plus
-/// `welcome`, `""` for the default) and return the OK frame.
+/// `welcome` and `welcome_title`, `""` for a default) and return the OK
+/// frame.
 async fn set_landing_ws(
     url: &str,
     channel_id: &str,
     signer: &Keys,
     welcome: &str,
+    title: &str,
 ) -> (bool, String) {
     let event = EventBuilder::new(Kind::Custom(9002), "")
         .tags([
             Tag::parse(["h", channel_id]).unwrap(),
             Tag::parse(["landing", "true"]).unwrap(),
             Tag::parse(["welcome", welcome]).unwrap(),
+            Tag::parse(["welcome_title", title]).unwrap(),
             Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()]).unwrap(),
         ])
         .sign_with_keys(signer)
@@ -461,23 +464,24 @@ fn has_tag(tags: &[Vec<String>], name: &str) -> bool {
         .any(|t| t.first().map(String::as_str) == Some(name))
 }
 
-/// The `welcome` tag's text, if present.
-fn welcome_tag(tags: &[Vec<String>]) -> Option<String> {
+/// The text of the tag named `name` (`welcome`, `welcome_title`), if present.
+fn text_tag(tags: &[Vec<String>], name: &str) -> Option<String> {
     tags.iter()
-        .find(|t| t.first().map(String::as_str) == Some("welcome"))
+        .find(|t| t.first().map(String::as_str) == Some(name))
         .and_then(|t| t.get(1).cloned())
 }
 
 /// The landing channel journey on the shared relay. A fresh person's AUTH
 /// joins them to the advertised landing channel, whose kind:39000 carries
 /// `["landing"]`. A relay owner moves the designation with the client's
-/// full-state kind:9002 (twice: it is idempotent); NIP-11 and both
-/// channels' kind:39000 follow. The landing channel refuses an archive, a
-/// non-admin is refused, and the designation moves back.
+/// full-state kind:9002 (twice: it is idempotent), carrying a Markdown
+/// welcome and a title; NIP-11 and both channels' kind:39000 follow. The
+/// landing channel refuses an archive, a non-admin is refused, and the
+/// designation moves back.
 ///
 /// The relay is shared with the other e2e tests, so the part that moves the
-/// designation runs under `catch_unwind` and the original designation and
-/// welcome are restored before any failure is reported.
+/// designation runs under `catch_unwind` and the original designation,
+/// welcome and title are restored before any failure is reported.
 #[tokio::test]
 #[ignore]
 async fn test_landing_channel_journey() {
@@ -518,7 +522,8 @@ async fn test_landing_channel_journey() {
     );
     let original_tags = group_metadata_tags(&url, &owner, &original).await;
     assert!(has_tag(&original_tags, "landing"), "{original_tags:?}");
-    let original_welcome = welcome_tag(&original_tags).unwrap_or_default();
+    let original_welcome = text_tag(&original_tags, "welcome").unwrap_or_default();
+    let original_title = text_tag(&original_tags, "welcome_title").unwrap_or_default();
 
     let target = create_test_channel(&owner).await;
     let moved =
@@ -527,7 +532,8 @@ async fn test_landing_channel_journey() {
             .await;
 
     // Leave the shared relay as found, even after a failed assertion.
-    let restored = set_landing_ws(&url, &original, &owner, &original_welcome).await;
+    let restored =
+        set_landing_ws(&url, &original, &owner, &original_welcome, &original_title).await;
     let advertised = advertised_landing_channel().await.0;
     let archived = set_metadata_ws(&url, &target, &owner, "archived", "true").await;
     if let Err(panic) = moved {
@@ -550,10 +556,11 @@ async fn test_landing_channel_journey() {
 /// from `original` to `target`; the caller restores it.
 async fn landing_move_journey(url: &str, owner: &Keys, original: &str, target: &str) {
     const PROTECTED: &str = "invalid: this is the community's landing channel; make another channel the landing channel first";
-    let welcome = "Welcome to the e2e community.\nSay hello.";
+    let welcome = "Welcome to the **e2e** community.\n\n- Say hello\n\tindented";
+    let title = "Welcome, testers";
     for attempt in ["move", "idempotent resend"] {
         assert_eq!(
-            set_landing_ws(url, target, owner, welcome).await,
+            set_landing_ws(url, target, owner, welcome, title).await,
             (true, String::new()),
             "{attempt}"
         );
@@ -564,11 +571,17 @@ async fn landing_move_journey(url: &str, owner: &Keys, original: &str, target: &
     );
     let target_tags = group_metadata_tags(url, owner, target).await;
     assert!(has_tag(&target_tags, "landing"), "{target_tags:?}");
-    assert_eq!(welcome_tag(&target_tags).as_deref(), Some(welcome));
+    assert_eq!(text_tag(&target_tags, "welcome").as_deref(), Some(welcome));
+    assert_eq!(
+        text_tag(&target_tags, "welcome_title").as_deref(),
+        Some(title)
+    );
     let previous_tags = group_metadata_tags(url, owner, original).await;
     assert!(
-        !has_tag(&previous_tags, "landing") && !has_tag(&previous_tags, "welcome"),
-        "the previous landing channel drops both tags: {previous_tags:?}"
+        ["landing", "welcome", "welcome_title"]
+            .iter()
+            .all(|name| !has_tag(&previous_tags, name)),
+        "the previous landing channel drops all three tags: {previous_tags:?}"
     );
 
     assert_eq!(
@@ -576,10 +589,10 @@ async fn landing_move_journey(url: &str, owner: &Keys, original: &str, target: &
         (false, PROTECTED.to_string())
     );
     assert_eq!(
-        set_landing_ws(url, original, &Keys::generate(), "").await,
+        set_landing_ws(url, original, &Keys::generate(), "", "").await,
         (
             false,
-            "invalid: actor not authorized: landing and welcome require a relay owner or admin"
+            "invalid: actor not authorized: landing, welcome and welcome_title require a relay owner or admin"
                 .to_string()
         )
     );

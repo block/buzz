@@ -1,6 +1,7 @@
-//! Postgres-backed tests for the landing channel: the kind:9002 `landing` and
-//! `welcome` tags with their exact receipts, the kind:39000 projection, the
-//! protections, the NIP-11 advertisement and provisioning's adoption.
+//! Postgres-backed tests for the landing channel: the kind:9002 `landing`,
+//! `welcome` and `welcome_title` tags with their exact receipts, the
+//! kind:39000 projection, the protections, the NIP-11 advertisement and
+//! provisioning's adoption.
 
 use std::sync::Arc;
 
@@ -35,19 +36,24 @@ async fn relay_member(state: &AppState, tenant: &TenantContext, role: &str) -> K
 }
 
 /// The landing projection on `channel_id`'s kind:39000: whether it carries
-/// `["landing"]`, and its `welcome` text.
+/// `["landing"]`, then its `welcome` and `welcome_title` texts.
 async fn projection(
     state: &AppState,
     tenant: &TenantContext,
     channel_id: Uuid,
-) -> (bool, Option<String>) {
+) -> (bool, Option<String>, Option<String>) {
     let tags = group_state_tags(state, tenant, channel_id, 39000).await;
     let landing = tags.iter().any(|tag| tag.len() == 1 && tag[0] == "landing");
-    let welcome = tags
-        .iter()
-        .find(|tag| tag.first().map(String::as_str) == Some("welcome"))
-        .map(|tag| tag.get(1).cloned().unwrap_or_default());
-    (landing, welcome)
+    let text = |name: &str| {
+        tags.iter()
+            .find(|tag| tag.first().map(String::as_str) == Some(name))
+            .map(|tag| tag.get(1).cloned().unwrap_or_default())
+    };
+    (landing, text("welcome"), text("welcome_title"))
+}
+
+fn some(text: &str) -> Option<String> {
+    Some(text.to_string())
 }
 
 /// NIP-11 `landing_channel` for the tenant's host.
@@ -58,13 +64,13 @@ async fn advertised(state: &AppState, tenant: &TenantContext) -> Option<String> 
     }
 }
 
-/// Only a relay owner or admin may send `landing` or `welcome`, only on a
-/// stream, with valid values; every refusal carries the contract's exact
-/// receipt text and designates nothing.
+/// Only a relay owner or admin may send `landing`, `welcome` or
+/// `welcome_title`, only on a stream, with valid values; every refusal
+/// carries the contract's exact receipt text and designates nothing.
 ///
-/// Mutations: drop `landing`/`welcome` from the relay-role check → the
-/// channel owner's edits are accepted (RED); drop the stream check → the
-/// forum is designated (RED).
+/// Mutations: drop `landing`/`welcome`/`welcome_title` from the relay-role
+/// check → the channel owner's edits are accepted (RED); drop the stream
+/// check → the forum is designated (RED).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn landing_tags_need_a_relay_owner_or_admin_and_a_stream() {
@@ -76,15 +82,17 @@ async fn landing_tags_need_a_relay_owner_or_admin_and_a_stream() {
     let stream = create_channel(&state, &tenant, &owner, &[]).await;
     let forum = create_channel(&state, &tenant, &owner, &[&["channel_type", "forum"]]).await;
 
-    let not_authorized =
-        "invalid: actor not authorized: landing and welcome require a relay owner or admin";
+    let not_authorized = "invalid: actor not authorized: landing, welcome and welcome_title require a relay owner or admin";
+    let not_landing = "invalid: welcome and welcome_title can only be set on the landing channel";
+    let long_title = "a".repeat(buzz_db::landing::WELCOME_TITLE_MAX_CHARS + 1);
     let cases: &[(&Keys, Uuid, &[&[&str]], &str)] = &[
         (&owner, stream, &[&["landing", "true"]], not_authorized),
         (&owner, stream, &[&["welcome", "Hi"]], not_authorized),
+        (&owner, stream, &[&["welcome_title", "Hi"]], not_authorized),
         (
             &member,
             stream,
-            &[&["landing", "true"], &["welcome", ""]],
+            &[&["landing", "true"], &["welcome", ""], &["welcome_title", ""]],
             not_authorized,
         ),
         (
@@ -115,14 +123,44 @@ async fn landing_tags_need_a_relay_owner_or_admin_and_a_stream() {
             &admin,
             stream,
             &[&["landing", "true"], &["welcome", "a\u{7}b"]],
-            "invalid: welcome message must be plain text (line breaks only)",
+            "invalid: welcome message must not contain control characters other than line breaks and tabs",
         ),
         (
             &admin,
             stream,
-            &[&["welcome", "Hi"]],
-            "invalid: welcome can only be set on the landing channel",
+            &[&["welcome_title"]],
+            "invalid: welcome_title tag must have a value (text, or empty to restore the default)",
         ),
+        (
+            &admin,
+            stream,
+            &[&["landing", "true"], &["welcome_title", "  "]],
+            "invalid: welcome title must not be blank",
+        ),
+        (
+            &admin,
+            stream,
+            &[&["landing", "true"], &["welcome_title", long_title.as_str()]],
+            "invalid: welcome title is too long (max 120 characters)",
+        ),
+        (
+            &admin,
+            stream,
+            &[
+                &["landing", "true"],
+                &["welcome", "Hi"],
+                &["welcome_title", "Two\nlines"],
+            ],
+            "invalid: welcome title must be a single line without control characters",
+        ),
+        (
+            &admin,
+            stream,
+            &[&["welcome_title", "Hi"], &["welcome_title", "Hello"]],
+            "invalid: kind:9002 may include at most one landing, one welcome and one welcome_title tag",
+        ),
+        (&admin, stream, &[&["welcome", "Hi"]], not_landing),
+        (&admin, stream, &[&["welcome_title", "Hi"]], not_landing),
     ];
     for (keys, channel, tags, expected) in cases {
         assert_eq!(
@@ -147,13 +185,16 @@ async fn landing_tags_need_a_relay_owner_or_admin_and_a_stream() {
 
 /// The client's full-state form designates a channel, is idempotent on the
 /// current landing channel, and moves the designation. kind:39000 carries
-/// `["landing"]` and the custom `welcome` on the landing channel only, the
-/// previous landing channel is re-signed without them, and NIP-11 follows.
-/// While designated, archive, private, TTL and kind:9008 delete are refused.
+/// `["landing"]` and the custom `welcome` and `welcome_title` on the landing
+/// channel only, the previous landing channel is re-signed without them, and
+/// NIP-11 follows. The three-tag form without `welcome_title` keeps the
+/// title. While designated, archive, private, TTL and kind:9008 delete are
+/// refused.
 ///
 /// Mutations: drop the previous-landing re-emission → `a` keeps its tags
 /// (RED); emit the tags for every channel → `b` carries them early (RED);
-/// drop the 9008 pre-check → the delete is accepted (RED).
+/// drop `welcome_title` from the persist parse → the title never appears
+/// (RED); drop the 9008 pre-check → the delete is accepted (RED).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn landing_designation_is_projected_advertised_and_protected() {
@@ -165,20 +206,27 @@ async fn landing_designation_is_projected_advertised_and_protected() {
     let b = create_channel(&state, &tenant, &owner, &[]).await;
     let id = |channel: Uuid| Some(channel.hyphenated().to_string());
 
+    // Markdown source with a `nostr:` link and tab indentation, stored
+    // and projected byte for byte.
+    let markdown = "# Hi all!\n\nSay hello in [#intros](nostr:naddr1x).\n\n\tindented";
     edit_channel(
         &state,
         &tenant,
         &admin,
         a,
-        &[&["landing", "true"], &["welcome", "Hi all!\nSay hello."]],
+        &[
+            &["landing", "true"],
+            &["welcome", markdown],
+            &["welcome_title", "Welcome aboard"],
+        ],
     )
     .await
     .expect("designate a");
     assert_eq!(
         projection(&state, &tenant, a).await,
-        (true, Some("Hi all!\nSay hello.".into()))
+        (true, some(markdown), some("Welcome aboard"))
     );
-    assert_eq!(projection(&state, &tenant, b).await, (false, None));
+    assert_eq!(projection(&state, &tenant, b).await, (false, None, None));
     assert_eq!(advertised(&state, &tenant).await, id(a));
 
     edit_channel(
@@ -189,11 +237,29 @@ async fn landing_designation_is_projected_advertised_and_protected() {
         &[&["landing", "true"], &["welcome", ""]],
     )
     .await
+    .expect("the three-tag form on the landing channel");
+    assert_eq!(
+        projection(&state, &tenant, a).await,
+        (true, None, some("Welcome aboard")),
+        "an empty welcome restores the default and leaves the title"
+    );
+    edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        a,
+        &[
+            &["landing", "true"],
+            &["welcome", ""],
+            &["welcome_title", ""],
+        ],
+    )
+    .await
     .expect("the full-state form on the landing channel");
     assert_eq!(
         projection(&state, &tenant, a).await,
-        (true, None),
-        "an empty welcome restores the default"
+        (true, None, None),
+        "empty values restore both defaults"
     );
     assert_eq!(advertised(&state, &tenant).await, id(a));
 
@@ -202,17 +268,21 @@ async fn landing_designation_is_projected_advertised_and_protected() {
         &tenant,
         &admin,
         b,
-        &[&["landing", "true"], &["welcome", "Moved"]],
+        &[
+            &["landing", "true"],
+            &["welcome", "Moved"],
+            &["welcome_title", "New home"],
+        ],
     )
     .await
     .expect("move to b");
     assert_eq!(
         projection(&state, &tenant, b).await,
-        (true, Some("Moved".into()))
+        (true, some("Moved"), some("New home"))
     );
     assert_eq!(
         projection(&state, &tenant, a).await,
-        (false, None),
+        (false, None, None),
         "the previous landing channel is re-signed without its tags"
     );
     assert_eq!(advertised(&state, &tenant).await, id(b));
@@ -309,7 +379,10 @@ async fn provisioning_creates_the_landing_general() {
             .as_deref(),
         Some("owner")
     );
-    assert_eq!(projection(&state, &tenant, landing).await, (true, None));
+    assert_eq!(
+        projection(&state, &tenant, landing).await,
+        (true, None, None)
+    );
     assert_eq!(
         advertised(&state, &tenant).await,
         Some(landing.hyphenated().to_string())

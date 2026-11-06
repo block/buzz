@@ -1640,6 +1640,9 @@ pub struct ChannelMetadataEdit {
     /// the default (`Some(None)`). Accepted only on the landing channel, or
     /// with `landing`.
     pub welcome: Option<Option<String>>,
+    /// Set the community's welcome title, or restore the default, as for
+    /// `welcome`.
+    pub welcome_title: Option<Option<String>>,
 }
 
 /// The result of [`Db::apply_channel_metadata_event`].
@@ -1737,13 +1740,13 @@ pub(crate) async fn apply_channel_metadata_event(
             ));
         }
     }
-    // `landing` and `welcome` are community settings on the `communities`
-    // row, locked after this channel's row. Eligibility is decided here,
-    // under the row lock, on the state this event leaves behind, so one
-    // event cannot designate a channel and archive it. The protections
-    // (archive, private, TTL) are enforced by the writes below.
+    // `landing`, `welcome` and `welcome_title` are community settings on
+    // the `communities` row, locked after this channel's row. Eligibility is
+    // decided here, under the row lock, on the state this event leaves
+    // behind, so one event cannot designate a channel and archive it. The
+    // protections (archive, private, TTL) are enforced by the writes below.
     let mut previous_landing = None;
-    if edit.landing || edit.welcome.is_some() {
+    if edit.landing || edit.welcome.is_some() || edit.welcome_title.is_some() {
         if edit.landing && !landing_eligible_after(&mut locked, &edit).await? {
             return Err(DbError::AccessDenied(
                 crate::landing::LANDING_INELIGIBLE.to_string(),
@@ -1760,9 +1763,12 @@ pub(crate) async fn apply_channel_metadata_event(
                 crate::landing::WELCOME_NOT_LANDING.to_string(),
             ));
         }
-        if let Some(welcome) = &edit.welcome {
-            crate::landing::set_welcome(locked.tx(), welcome.as_deref()).await?;
-        }
+        crate::landing::set_welcome(
+            locked.tx(),
+            edit.welcome.as_ref().map(Option::as_deref),
+            edit.welcome_title.as_ref().map(Option::as_deref),
+        )
+        .await?;
     }
     crate::insert_mentions_in_transaction(locked.tx(), event, Some(channel_id)).await?;
 
@@ -1775,6 +1781,7 @@ pub(crate) async fn apply_channel_metadata_event(
         channel_authority: _,
         landing: _,
         welcome: _,
+        welcome_title: _,
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {

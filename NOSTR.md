@@ -53,11 +53,11 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join`, `landing` and `welcome` tags: relay owner/admin (see [Default channels](#default-channels) and [Landing channel](#landing-channel)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join`, `landing`, `welcome` and `welcome_title` tags: relay owner/admin (see [Default channels](#default-channels) and [Landing channel](#landing-channel)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel; `landing`, and `welcome` when customized, on the landing channel |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel; `landing`, and `welcome` and `welcome_title` when customized, on the landing channel |
 | **Unlisted channels** | ✅ | kind:9002 `["unlisted", "true"\|"false"]`, owner/admin, or at creation on kind:9007. An unlisted open channel is left out of every read that does not name it, for non-members: channel lists, kind:39000 without `#d`, messages, COUNT, NIP-50 search and artifact queries. Naming it by `#h` (or `#d` on 39000–39003) reads it, and kind:9021 joins it, as for any open channel. See [Unlisted channels](#unlisted-channels). |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags for all members |
@@ -277,7 +277,7 @@ channel again.
 Every community has at most one **landing channel**: the open stream a
 person is joined to first when they enter the community, and the channel a
 client opens when it has nothing better to show. Its kind:39000 also carries
-the community's custom welcome message, if one is set.
+the community's custom welcome message and its title, when they are set.
 
 **Designation.** The relay stores the designation on the community, so there
 is never more than one. Clients read it from NIP-11:
@@ -294,23 +294,29 @@ is never more than one. Clients read it from NIP-11:
 - `landing_channel` is a lowercase hyphenated UUID, omitted (never `null` or
   `""`) when no channel is designated. It is read live (`Cache-Control:
   no-store`), so a GET after an accepted write reflects it. NIP-11 is
-  unauthenticated, so the id is public; the welcome text is not published
-  there.
+  unauthenticated, so the id is public; the welcome message and title are
+  not published there.
 - The relay-signed kind:39000 whose `d` is the landing channel carries a bare
-  `["landing"]` tag, and `["welcome", "<text>"]` while a custom message is
-  set. These are a projection of the stored designation, re-signed whenever
-  it moves; NIP-11 is the authoritative read. The re-emission runs after the
+  `["landing"]` tag, `["welcome", "<message>"]` while a custom message is
+  set, and `["welcome_title", "<title>"]` while a custom title is set. These
+  are a projection of the stored designation, re-signed whenever it moves;
+  NIP-11 is the authoritative read. The re-emission runs after the
   designation has committed and is not retried, so anything that loses or
   reorders it (a failed emission, two moves whose re-emissions race, or a
   relay pod from before this feature re-signing a channel's 39000 during a
-  rolling deploy) can leave a stale `landing` or `welcome` tag on a channel
-  that is no longer the landing channel, or a `landing` tag missing from the
-  one that is, until that channel's next kind:39000. When the tags
-  and NIP-11 disagree, NIP-11 is right: a client takes the landing channel
-  from NIP-11 and ignores `landing` and `welcome` on any other channel's
-  39000. The welcome text is plain text: `\n` is a line break and nothing
-  else is interpreted. With no custom message, clients show their own default
-  text.
+  rolling deploy) can leave a stale `landing`, `welcome` or `welcome_title`
+  tag on a channel that is no longer the landing channel, or a `landing` tag
+  missing from the one that is, until that channel's next kind:39000. When
+  the tags and NIP-11 disagree, NIP-11 is right: a client takes the landing
+  channel from NIP-11 and ignores `landing`, `welcome` and `welcome_title` on
+  any other channel's 39000.
+- The welcome message is Markdown source. The relay stores and projects it
+  exactly as received and interprets none of it: rendering the Markdown,
+  and turning `nostr:` links (NIP-21) to channels, messages and people into
+  navigation, is a client concern, as is treating the text as untrusted
+  input. The title is one line of plain text. With no custom message or
+  title, clients show their own default for that part, so a client can
+  customize either alone.
 
 **Adoption.** With no designation, the relay adopts the oldest open,
 unarchived stream named `general` (case-insensitive) without a TTL,
@@ -331,45 +337,59 @@ tokens need the `AdminChannels` scope):
 | Tag | Meaning |
 |---|---|
 | `["landing", "true"]` | Make this channel the landing channel |
-| `["welcome", "<text>"]` | Set the custom welcome message |
-| `["welcome", ""]` | Restore the client default |
+| `["welcome", "<message>"]` | Set the custom welcome message (Markdown source) |
+| `["welcome", ""]` | Restore the client's default message |
+| `["welcome_title", "<title>"]` | Set the custom welcome title |
+| `["welcome_title", ""]` | Restore the client's default title |
 
 ```json
 {"kind":9002,"content":"","tags":[["h","<new id>"],["landing","true"]]}
-{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome","Hi all!\nIntroduce yourself here."]]}
-{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome",""]]}
+{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome","# Hi all!\n\nSay hello, then read the **pinned** posts."],["welcome_title","Welcome to Acme"]]}
+{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome",""],["welcome_title",""]]}
+{"kind":9002,"content":"","tags":[["h","<landing id>"],["landing","true"],["welcome","Hi all!"]]}
 ```
 
 - `landing` moves the designation in one transaction; the previous landing
   channel loses its tags and its protections. Nobody is added or removed.
   It is idempotent: `landing` on the current landing channel changes
-  nothing, so a client may always send the full state (`landing` plus
-  `welcome`).
+  nothing, so a client may always send the full state (`landing`,
+  `welcome` and `welcome_title`, as in the second and third examples).
 - `landing` needs a stream that the event leaves open, unarchived and
   without a TTL, decided under the channel's lock.
-- `welcome` is community configuration. It is accepted on the current
-  landing channel, or with `landing` in the same event, and moves with the
-  designation. The text is 1–1000 Unicode scalar values, not blank, with no
-  control characters other than `\n`. The relay stores exactly what it
-  receives.
+- `welcome` and `welcome_title` are community configuration. Each is
+  accepted on the current landing channel, or with `landing` in the same
+  event, and moves with the designation. Each is a partial update: an
+  absent tag leaves that value unchanged, so the form without
+  `welcome_title` (the last example) keeps the title.
+- The message is 1–4000 Unicode scalar values, not blank, with no control
+  characters other than `\n` and `\t` (so `\r` is refused: send `\n` line
+  endings).
+- The title is 1–120 Unicode scalar values, not blank, on one line, with no
+  control characters at all (`\n` and `\t` included).
+- The relay stores both exactly as it receives them and validates nothing
+  else about them (see the Markdown note above).
 - The designation cannot be turned off, only moved.
 
 Refusals (`accepted: false`):
 
 | Condition | `message` |
 |---|---|
-| Sender is not a relay owner or admin | `invalid: actor not authorized: landing and welcome require a relay owner or admin` |
+| Sender is not a relay owner or admin | `invalid: actor not authorized: landing, welcome and welcome_title require a relay owner or admin` |
 | `landing` on a non-stream channel | `invalid: landing is only available on stream channels` |
 | `["landing", "false"]` | `invalid: landing cannot be turned off; make another channel the landing channel` |
 | Any other `landing` value | `invalid: invalid landing value: <v> (must be "true")` |
 | `landing` with no value | `invalid: landing tag must have a value` |
 | `welcome` with no value | `invalid: welcome tag must have a value (text, or empty to restore the default)` |
-| More than one `landing` or `welcome` tag | `invalid: kind:9002 may include at most one landing and one welcome tag` |
-| Whitespace-only text | `invalid: welcome message must not be blank` |
-| More than 1000 characters | `invalid: welcome message is too long (max 1000 characters)` |
-| Control characters other than `\n` | `invalid: welcome message must be plain text (line breaks only)` |
+| `welcome_title` with no value | `invalid: welcome_title tag must have a value (text, or empty to restore the default)` |
+| More than one `landing`, `welcome` or `welcome_title` tag | `invalid: kind:9002 may include at most one landing, one welcome and one welcome_title tag` |
+| Whitespace-only message | `invalid: welcome message must not be blank` |
+| Message over 4000 characters | `invalid: welcome message is too long (max 4000 characters)` |
+| Message with a control character other than `\n` or `\t` | `invalid: welcome message must not contain control characters other than line breaks and tabs` |
+| Whitespace-only title | `invalid: welcome title must not be blank` |
+| Title over 120 characters | `invalid: welcome title is too long (max 120 characters)` |
+| Title with any control character (`\n` and `\t` included) | `invalid: welcome title must be a single line without control characters` |
 | Ineligible target channel | `invalid: landing requires an open, unarchived channel without a ttl` |
-| `welcome` on another channel without `landing` | `invalid: welcome can only be set on the landing channel` |
+| `welcome` or `welcome_title` on another channel without `landing` | `invalid: welcome and welcome_title can only be set on the landing channel` |
 | A protected operation (below) | `invalid: this is the community's landing channel; make another channel the landing channel first` |
 
 An `error: …` message means the outcome is uncertain: read back before
@@ -384,8 +404,8 @@ allowed.
 
 **Rollout.** During a rolling deploy, relay pods from before this feature do
 not advertise `landing_channel`, enroll nobody at AUTH, do not enforce the
-protections, and re-sign a channel's kind:39000 without its `landing` and
-`welcome` tags. The designation itself is unaffected, and a newer pod
+protections, and re-sign a channel's kind:39000 without its `landing`,
+`welcome` and `welcome_title` tags. The designation itself is unaffected, and a newer pod
 re-signs the tags at the channel's next change. A landing channel archived,
 made private or given a TTL through an old pod stays designated but
 ineligible: the relay counts it
@@ -430,7 +450,7 @@ All discovery events include a `d` tag set to the channel UUID (NIP-29 addressab
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>`, `join_role` (always); `public` or `private`; `restricted` (private channels, and `join_role=guest`); `closed` (private channels only); `unlisted` (unlisted channels); `about` (if description non-empty); `hidden` (DM channels and private system channels); `auto_join` (open, unarchived channels with the setting on, see [Default channels](#default-channels)); `landing` and `welcome` (the landing channel only, see [Landing channel](#landing-channel)) | Group metadata. The access flags follow the channel settings (see [Announce channels](#announce-channels)). |
+| **39000** | `d=<uuid>`, `name`, `t=<channel_type>`, `P=<creator>`, `created_at=<unix seconds>`, `join_role` (always); `public` or `private`; `restricted` (private channels, and `join_role=guest`); `closed` (private channels only); `unlisted` (unlisted channels); `about` (if description non-empty); `hidden` (DM channels and private system channels); `auto_join` (open, unarchived channels with the setting on, see [Default channels](#default-channels)); `landing`, `welcome` and `welcome_title` (the landing channel only, see [Landing channel](#landing-channel)) | Group metadata. The access flags follow the channel settings (see [Announce channels](#announce-channels)). |
 | **39001** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags with role label (`owner`, `admin`) | Admin list |
 | **39002** | `d=<uuid>`, `t=<channel_type>`, `P=<creator>`, `p` tags for all members | Member list |
 

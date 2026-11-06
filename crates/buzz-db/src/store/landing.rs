@@ -1,10 +1,11 @@
 //! The community's landing channel and its welcome message.
 //!
-//! Both live on the community's `communities` row (`landing_channel_id`,
-//! `welcome_message`), so a community has at most one landing channel by
-//! construction and a move is a single-row update. NIP-11 `landing_channel`
-//! is the authoritative read; the landing channel's kind:39000 carries a
-//! projection of it ([`CommunityLanding::group_metadata_tags`]).
+//! All three live on the community's `communities` row (`landing_channel_id`,
+//! `welcome_message`, `welcome_title`), so a community has at most one
+//! landing channel by construction and a move is a single-row update. NIP-11
+//! `landing_channel` is the authoritative read; the landing channel's
+//! kind:39000 carries a projection of it
+//! ([`CommunityLanding::group_metadata_tags`]).
 //!
 //! Lock order: a writer that locks both a channel row and the `communities`
 //! row locks the channel row first. Moving the designation to a channel
@@ -28,12 +29,18 @@ pub const LANDING_PROTECTED: &str =
 /// without a TTL, judged on the state the request leaves behind.
 pub const LANDING_INELIGIBLE: &str = "landing requires an open, unarchived channel without a ttl";
 
-/// Refusal for a welcome message sent to a channel that is not, and does not
-/// become, the landing channel.
-pub const WELCOME_NOT_LANDING: &str = "welcome can only be set on the landing channel";
+/// Refusal for a welcome message or title sent to a channel that is not, and
+/// does not become, the landing channel.
+pub const WELCOME_NOT_LANDING: &str =
+    "welcome and welcome_title can only be set on the landing channel";
 
-/// The longest welcome message, in Unicode scalar values.
-pub const WELCOME_MAX_CHARS: usize = 1000;
+/// The longest welcome message, in Unicode scalar values. The message is
+/// Markdown source, which the relay stores as-is; rendering it is a client
+/// concern.
+pub const WELCOME_MAX_CHARS: usize = 4000;
+
+/// The longest welcome title, in Unicode scalar values.
+pub const WELCOME_TITLE_MAX_CHARS: usize = 120;
 
 /// The name of the landing channel the relay adopts or creates.
 pub const LANDING_CHANNEL_NAME: &str = "general";
@@ -43,36 +50,65 @@ pub const LANDING_CHANNEL_NAME: &str = "general";
 pub struct CommunityLanding {
     /// The landing channel, if one is designated.
     pub channel_id: Option<Uuid>,
-    /// The custom welcome message; `None` means the client default.
+    /// The custom welcome message (Markdown source); `None` means the client
+    /// default.
     pub welcome: Option<String>,
+    /// The custom welcome title; `None` means the client default.
+    pub welcome_title: Option<String>,
 }
 
 impl CommunityLanding {
     /// The kind:39000 tags for `channel_id`: a bare `["landing"]` while it is
-    /// the landing channel, then `["welcome", text]` while a custom message
-    /// is set. Empty for every other channel, so a re-emission after a move
-    /// drops both from the previous landing channel.
+    /// the landing channel, then `["welcome", text]` and
+    /// `["welcome_title", text]` while each is customized. Empty for every
+    /// other channel, so a re-emission after a move drops all three from the
+    /// previous landing channel.
     pub fn group_metadata_tags(&self, channel_id: Uuid) -> Vec<Vec<String>> {
         if self.channel_id != Some(channel_id) {
             return Vec::new();
         }
         let mut tags = vec![vec!["landing".to_owned()]];
-        if let Some(welcome) = self.welcome.as_deref().filter(|w| !w.is_empty()) {
-            tags.push(vec!["welcome".to_owned(), welcome.to_owned()]);
+        for (name, text) in [
+            ("welcome", &self.welcome),
+            ("welcome_title", &self.welcome_title),
+        ] {
+            if let Some(text) = text.as_deref().filter(|t| !t.is_empty()) {
+                tags.push(vec![name.to_owned(), text.to_owned()]);
+            }
         }
         tags
     }
 }
 
 /// Why `text` cannot be a custom welcome message, or `None` when it can.
-/// The caller handles the empty string, which restores the default.
+/// The message is Markdown source, so line breaks and tabs are allowed; no
+/// other control character is. The caller handles the empty string, which
+/// restores the default.
 pub fn welcome_message_error(text: &str) -> Option<&'static str> {
     if text.trim().is_empty() {
         Some("welcome message must not be blank")
     } else if text.chars().count() > WELCOME_MAX_CHARS {
-        Some("welcome message is too long (max 1000 characters)")
-    } else if text.chars().any(|c| c.is_control() && c != '\n') {
-        Some("welcome message must be plain text (line breaks only)")
+        Some("welcome message is too long (max 4000 characters)")
+    } else if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        Some("welcome message must not contain control characters other than line breaks and tabs")
+    } else {
+        None
+    }
+}
+
+/// Why `text` cannot be a custom welcome title, or `None` when it can: one
+/// line of text, with no control character at all. The caller handles the
+/// empty string, which restores the default.
+pub fn welcome_title_error(text: &str) -> Option<&'static str> {
+    if text.trim().is_empty() {
+        Some("welcome title must not be blank")
+    } else if text.chars().count() > WELCOME_TITLE_MAX_CHARS {
+        Some("welcome title is too long (max 120 characters)")
+    } else if text.chars().any(char::is_control) {
+        Some("welcome title must be a single line without control characters")
     } else {
         None
     }
@@ -134,15 +170,17 @@ async fn read_landing(
     conn: &mut PgConnection,
     community_id: CommunityId,
 ) -> Result<CommunityLanding> {
-    let row: Option<(Option<Uuid>, Option<String>)> =
-        sqlx::query_as("SELECT landing_channel_id, welcome_message FROM communities WHERE id = $1")
-            .bind(community_id.as_uuid())
-            .fetch_optional(conn)
-            .await?;
-    let (channel_id, welcome) = row.unwrap_or_default();
+    let row: Option<(Option<Uuid>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT landing_channel_id, welcome_message, welcome_title FROM communities WHERE id = $1",
+    )
+    .bind(community_id.as_uuid())
+    .fetch_optional(conn)
+    .await?;
+    let (channel_id, welcome, welcome_title) = row.unwrap_or_default();
     Ok(CommunityLanding {
         channel_id,
         welcome: welcome.filter(|w| !w.is_empty()),
+        welcome_title: welcome_title.filter(|t| !t.is_empty()),
     })
 }
 
@@ -170,15 +208,32 @@ pub(crate) async fn set_designation(tx: &mut AdmittedTx, channel_id: Uuid) -> Re
     Ok(())
 }
 
-/// Sets (or, with `None`, clears) the welcome message on `tx`, which holds
-/// the community row lock ([`lock_designation`]).
-pub(crate) async fn set_welcome(tx: &mut AdmittedTx, welcome: Option<&str>) -> Result<()> {
+/// Writes the welcome message and title on `tx`, which holds the community
+/// row lock ([`lock_designation`]), in one statement. Each is a partial
+/// update: `None` leaves it unchanged, `Some(None)` restores the default and
+/// `Some(Some(text))` sets it.
+pub(crate) async fn set_welcome(
+    tx: &mut AdmittedTx,
+    message: Option<Option<&str>>,
+    title: Option<Option<&str>>,
+) -> Result<()> {
+    if message.is_none() && title.is_none() {
+        return Ok(());
+    }
     let community_id = tx.community();
-    sqlx::query("UPDATE communities SET welcome_message = $2 WHERE id = $1")
-        .bind(community_id.as_uuid())
-        .bind(welcome)
-        .execute(tx.conn())
-        .await?;
+    sqlx::query(
+        "UPDATE communities SET \
+         welcome_message = CASE WHEN $2 THEN $3 ELSE welcome_message END, \
+         welcome_title = CASE WHEN $4 THEN $5 ELSE welcome_title END \
+         WHERE id = $1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(message.is_some())
+    .bind(message.flatten())
+    .bind(title.is_some())
+    .bind(title.flatten())
+    .execute(tx.conn())
+    .await?;
     Ok(())
 }
 
@@ -409,7 +464,8 @@ async fn create_general(
 }
 
 impl Db {
-    /// Returns the community's landing channel and welcome message.
+    /// Returns the community's landing channel and welcome message and
+    /// title.
     #[datastore_span(name = "get_community_landing", system = "postgresql")]
     pub async fn get_community_landing(
         &self,
@@ -462,15 +518,29 @@ mod tests {
         let custom = CommunityLanding {
             channel_id: Some(landing),
             welcome: Some("Hi all!\nSay hello.".to_string()),
+            welcome_title: Some("Welcome aboard".to_string()),
         };
         assert_eq!(
             custom.group_metadata_tags(landing),
-            vec![tag(&["landing"]), tag(&["welcome", "Hi all!\nSay hello."])]
+            vec![
+                tag(&["landing"]),
+                tag(&["welcome", "Hi all!\nSay hello."]),
+                tag(&["welcome_title", "Welcome aboard"]),
+            ]
         );
         assert!(custom.group_metadata_tags(other).is_empty());
+        let title_only = CommunityLanding {
+            welcome: None,
+            ..custom.clone()
+        };
+        assert_eq!(
+            title_only.group_metadata_tags(landing),
+            vec![tag(&["landing"]), tag(&["welcome_title", "Welcome aboard"])]
+        );
         let default_text = CommunityLanding {
             channel_id: Some(landing),
             welcome: None,
+            welcome_title: None,
         };
         assert_eq!(
             default_text.group_metadata_tags(landing),
@@ -485,36 +555,64 @@ mod tests {
     fn welcome_message_rules() {
         let at_limit = "a".repeat(WELCOME_MAX_CHARS);
         let over_limit = "é".repeat(WELCOME_MAX_CHARS + 1);
+        let control = Some(
+            "welcome message must not contain control characters other than line breaks and tabs",
+        );
         let cases: &[(&str, Option<&str>)] = &[
             ("Welcome!", None),
             ("Hi all!\nIntroduce yourself here.", None),
             (" padded ", None),
             (&at_limit, None),
+            // Markdown source: headings, links, nostr: references and
+            // tab-indented code are all just text to the relay.
+            (
+                "# Welcome\n\nSee [#rules](nostr:naddr1abc) and nostr:npub1xyz.\n\n\tcode",
+                None,
+            ),
+            ("tab\there", None),
             ("   ", Some("welcome message must not be blank")),
             ("\n\n", Some("welcome message must not be blank")),
+            ("\t\n", Some("welcome message must not be blank")),
             (
                 &over_limit,
-                Some("welcome message is too long (max 1000 characters)"),
+                Some("welcome message is too long (max 4000 characters)"),
             ),
-            (
-                "tab\there",
-                Some("welcome message must be plain text (line breaks only)"),
-            ),
-            (
-                "windows\r\nline",
-                Some("welcome message must be plain text (line breaks only)"),
-            ),
-            (
-                "bell\u{7}",
-                Some("welcome message must be plain text (line breaks only)"),
-            ),
+            ("windows\r\nline", control),
+            ("bell\u{7}", control),
+            ("next line\u{85}", control),
         ];
         for (text, expected) in cases {
             assert_eq!(welcome_message_error(text), *expected, "{text:?}");
         }
-        // The limit counts scalar values, not bytes: 1000 multi-byte
+        // The limit counts scalar values, not bytes: 4000 multi-byte
         // characters fit.
         assert_eq!(welcome_message_error(&"é".repeat(WELCOME_MAX_CHARS)), None);
+    }
+
+    #[test]
+    fn welcome_title_rules() {
+        let at_limit = "é".repeat(WELCOME_TITLE_MAX_CHARS);
+        let over_limit = "a".repeat(WELCOME_TITLE_MAX_CHARS + 1);
+        let control = Some("welcome title must be a single line without control characters");
+        let cases: &[(&str, Option<&str>)] = &[
+            ("Welcome to Acme", None),
+            ("👋 Hi, team!", None),
+            (" padded ", None),
+            (&at_limit, None),
+            ("", Some("welcome title must not be blank")),
+            ("   ", Some("welcome title must not be blank")),
+            ("\n", Some("welcome title must not be blank")),
+            (
+                &over_limit,
+                Some("welcome title is too long (max 120 characters)"),
+            ),
+            ("Two\nlines", control),
+            ("tab\there", control),
+            ("bell\u{7}", control),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(welcome_title_error(text), *expected, "{text:?}");
+        }
     }
 }
 
@@ -602,12 +700,18 @@ mod postgres_tests {
         }
     }
 
-    /// The client's full-state form: `landing` plus `welcome` (`""`
-    /// restores the default).
-    fn full_state(welcome: &str) -> ChannelMetadataEdit {
+    /// A `welcome` or `welcome_title` tag value: `""` restores the default.
+    fn text(value: &str) -> Option<Option<String>> {
+        Some((!value.is_empty()).then(|| value.to_string()))
+    }
+
+    /// The client's full-state form: `landing` plus `welcome` and
+    /// `welcome_title`.
+    fn full_state(welcome: &str, title: &str) -> ChannelMetadataEdit {
         ChannelMetadataEdit {
             landing: true,
-            welcome: Some((!welcome.is_empty()).then(|| welcome.to_string())),
+            welcome: text(welcome),
+            welcome_title: text(title),
             ..Default::default()
         }
     }
@@ -620,10 +724,11 @@ mod postgres_tests {
         }
     }
 
-    fn landing(channel_id: Uuid, welcome: Option<&str>) -> CommunityLanding {
+    fn landing(channel_id: Uuid, welcome: Option<&str>, title: Option<&str>) -> CommunityLanding {
         CommunityLanding {
             channel_id: Some(channel_id),
             welcome: welcome.map(str::to_string),
+            welcome_title: title.map(str::to_string),
         }
     }
 
@@ -650,14 +755,17 @@ mod postgres_tests {
     }
 
     /// A kind:9002 `landing` designates the channel and moves the
-    /// designation, carrying the welcome message; the full-state form on
-    /// the current landing channel is idempotent; `welcome` elsewhere and
-    /// every ineligible post-state are refused and change nothing.
+    /// designation, carrying the welcome message and title; the full-state
+    /// form on the current landing channel is idempotent; `welcome` and
+    /// `welcome_title` are partial updates of each other; either elsewhere,
+    /// and every ineligible post-state, is refused and changes nothing.
     ///
     /// Mutations: report `previous_landing` on a re-designation → RED;
     /// check eligibility on the pre-state → the same-event archive, private
     /// and ttl rows are accepted → RED; drop the welcome landing check →
-    /// the welcome on `b` is accepted → RED.
+    /// the welcome on `b` is accepted → RED; write `welcome_title`
+    /// unconditionally in `set_welcome` → the welcome-alone edit clears the
+    /// title → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn kind_9002_moves_the_designation_and_accepts_the_full_state_form() {
@@ -665,55 +773,63 @@ mod postgres_tests {
         let a = open_stream(&db, community, "lobby").await;
         let b = open_stream(&db, community, "town-square").await;
 
-        let write = apply(&db, community, a, full_state("Hi all"))
+        let write = apply(&db, community, a, full_state("Hi all", "Welcome aboard"))
             .await
             .expect("designate a");
         assert_eq!(write.previous_landing, None);
         assert_eq!(
             db.get_community_landing(community).await.expect("landing"),
-            landing(a, Some("Hi all"))
+            landing(a, Some("Hi all"), Some("Welcome aboard"))
         );
 
-        let write = apply(&db, community, a, full_state(""))
+        let write = apply(&db, community, a, full_state("", ""))
             .await
             .expect("full state on the landing channel");
         assert!(write.inserted);
         assert_eq!(write.previous_landing, None, "re-designating is not a move");
         assert_eq!(
             db.get_community_landing(community).await.expect("landing"),
-            landing(a, None),
-            "an empty welcome restores the default"
+            landing(a, None, None),
+            "empty values restore the defaults"
         );
 
-        apply(
-            &db,
-            community,
-            a,
+        for edit in [
             ChannelMetadataEdit {
-                welcome: Some(Some("Second".into())),
+                welcome_title: text("Hello"),
                 ..Default::default()
             },
-        )
-        .await
-        .expect("welcome alone on the landing channel");
-        assert_eq!(
-            refusal(
-                apply(
-                    &db,
-                    community,
-                    b,
-                    ChannelMetadataEdit {
-                        welcome: Some(Some("Elsewhere".into())),
-                        ..Default::default()
-                    },
-                )
+            ChannelMetadataEdit {
+                welcome: text("Second"),
+                ..Default::default()
+            },
+        ] {
+            apply(&db, community, a, edit)
                 .await
-            ),
-            WELCOME_NOT_LANDING
-        );
+                .expect("welcome or welcome_title alone on the landing channel");
+        }
         assert_eq!(
             db.get_community_landing(community).await.expect("landing"),
-            landing(a, Some("Second"))
+            landing(a, Some("Second"), Some("Hello")),
+            "each is a partial update of the other"
+        );
+        for edit in [
+            ChannelMetadataEdit {
+                welcome: text("Elsewhere"),
+                ..Default::default()
+            },
+            ChannelMetadataEdit {
+                welcome_title: text("Elsewhere"),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                refusal(apply(&db, community, b, edit).await),
+                WELCOME_NOT_LANDING
+            );
+        }
+        assert_eq!(
+            db.get_community_landing(community).await.expect("landing"),
+            landing(a, Some("Second"), Some("Hello"))
         );
 
         let write = apply(&db, community, b, designate())
@@ -722,8 +838,8 @@ mod postgres_tests {
         assert_eq!(write.previous_landing, Some(a));
         assert_eq!(
             db.get_community_landing(community).await.expect("landing"),
-            landing(b, Some("Second")),
-            "the welcome moves with the designation"
+            landing(b, Some("Second"), Some("Hello")),
+            "the welcome and its title move with the designation"
         );
 
         let private = channel(
@@ -789,7 +905,7 @@ mod postgres_tests {
         }
         assert_eq!(
             db.get_community_landing(community).await.expect("landing"),
-            landing(b, Some("Second")),
+            landing(b, Some("Second"), Some("Hello")),
             "a refused move changes nothing"
         );
         let a_after = db.get_channel(community, a).await.expect("a");

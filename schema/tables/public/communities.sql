@@ -27,6 +27,9 @@ CREATE TABLE communities (
     -- relay keeps the designation on an eligible channel itself.
     landing_channel_id UUID,
     welcome_message TEXT,
+    -- The welcome message's custom title, set via kind:9002
+    -- `welcome_title`. Added by migration 0085.
+    welcome_title TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at     TIMESTAMPTZ,
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),

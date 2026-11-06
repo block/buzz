@@ -718,7 +718,7 @@ pub async fn validate_admin_event(
                 .any(|t| is_metadata_tag(&t.kind().to_string()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join, landing, welcome)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join, landing, welcome, welcome_title)"
                 ));
             }
 
@@ -817,10 +817,11 @@ pub async fn validate_admin_event(
                     }
                 }
             }
-            // `landing` and `welcome` are community settings too, with the
-            // same relay-role authority. Whether the channel may be the
-            // landing channel, and whether `welcome` targets it, is decided
-            // in the write, under the channel row lock.
+            // `landing`, `welcome` and `welcome_title` are community
+            // settings too, with the same relay-role authority. Whether the
+            // channel may be the landing channel, and whether `welcome` and
+            // `welcome_title` target it, is decided in the write, under the
+            // channel row lock.
             let sets_landing = super::landing::validate_tags(event)?;
             if sets_auto_join || sets_landing {
                 let relay_role = state
@@ -881,8 +882,9 @@ pub async fn validate_admin_event(
 
             // name/about/archived/visibility/ttl/labels/join_role/unlisted
             // require owner/admin; topic/purpose allow any member who may
-            // post; auto_join, landing and welcome were decided above by
-            // relay role, so an event carrying only those needs neither.
+            // post; auto_join, landing, welcome and welcome_title were
+            // decided above by relay role, so an event carrying only those
+            // needs neither.
             let has_member_tag = event
                 .tags
                 .iter()
@@ -1486,7 +1488,7 @@ const MEMBER_METADATA_TAGS: &[&str] = &["topic", "purpose"];
 
 /// kind:9002 tags that a relay owner or admin may change, whatever their
 /// channel role.
-const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join", "landing", "welcome"];
+const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join", "landing", "welcome", "welcome_title"];
 
 /// True when `kind` is a kind:9002 tag that changes channel metadata.
 fn is_metadata_tag(kind: &str) -> bool {
@@ -2416,8 +2418,11 @@ pub(crate) async fn persist_edit_metadata(
                 edit.landing = true;
             }
             // Validated during authorization; the empty string restores the
-            // default.
+            // default. The message is stored exactly as sent.
             "welcome" => edit.welcome = Some((!val.is_empty()).then(|| val.to_string())),
+            "welcome_title" => {
+                edit.welcome_title = Some((!val.is_empty()).then(|| val.to_string()))
+            }
             _ => {}
         }
     }
@@ -2536,9 +2541,9 @@ pub(crate) async fn persist_edit_metadata(
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
     }
-    // The previous landing channel's kind:39000 drops its `landing` and
-    // `welcome` tags. Clients read the designation from NIP-11, so a failed
-    // re-emission leaves only a stale projection.
+    // The previous landing channel's kind:39000 drops its `landing`,
+    // `welcome` and `welcome_title` tags. Clients read the designation from
+    // NIP-11, so a failed re-emission leaves only a stale projection.
     if let Some(previous) = write.previous_landing {
         if let Err(e) = emit_group_discovery_events(tenant, state, previous).await {
             warn!(channel = %previous, error = %e, "NIP-29 discovery re-emission for the previous landing channel failed");
