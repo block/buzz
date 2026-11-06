@@ -775,28 +775,30 @@ final buzzPushLeaseRevocationOutboxProvider =
                 ref.read(communityListProvider).value ??
                 await ref.read(communityStorageProvider).loadAll();
             // Recheck at execution: another community may have opted in since
-            // this cleanup was journaled. Sharing is installation-scoped.
-            revokeGateway =
-                originalTarget['relayPubkey'] == '' ||
-                !communities
-                    .where((community) => community.pushNotificationsEnabled)
-                    .any((community) {
-                      final matching = grants.where(
-                        (grant) =>
-                            grant.relayOrigin ==
-                            canonicalBuzzPushRelayOrigin(community.relayUrl),
-                      );
-                      return matching.any(
-                        (grant) =>
-                            grant.relayPubkey ==
-                                originalTarget['relayPubkey'] &&
-                            (originalTarget.containsKey('installationHandle')
-                                ? grant.gatewayInstallationHandle ==
-                                      originalTarget['installationHandle']
-                                : grant.relayOrigin ==
-                                      originalTarget['relayOrigin']),
-                      );
-                    });
+            // this cleanup was journaled. Until inventory resolves the target,
+            // any enabled community on its origin may own the native authority.
+            revokeGateway = !communities
+                .where((community) => community.pushNotificationsEnabled)
+                .any((community) {
+                  if (originalTarget['relayPubkey'] == '') {
+                    return canonicalBuzzPushRelayOrigin(community.relayUrl) ==
+                        originalTarget['relayOrigin'];
+                  }
+                  final matching = grants.where(
+                    (grant) =>
+                        grant.relayOrigin ==
+                        canonicalBuzzPushRelayOrigin(community.relayUrl),
+                  );
+                  return matching.any(
+                    (grant) =>
+                        grant.relayPubkey == originalTarget['relayPubkey'] &&
+                        (originalTarget.containsKey('installationHandle')
+                            ? grant.gatewayInstallationHandle ==
+                                  originalTarget['installationHandle']
+                            : grant.relayOrigin ==
+                                  originalTarget['relayOrigin']),
+                  );
+                });
           }
           await publishBuzzPushLeaseRevocation(
             record,

@@ -208,77 +208,109 @@ void main() {
       },
     );
 
-    test(
-      'opt-out reaches relay while gateway cleanup remains durable',
-      () async {
-        await HttpOverrides.runWithHttpOverrides(() async {
-          final relay = await PushRelayFixture.start();
-          addTearDown(relay.close);
-          final communities = CommunityStorage(secure: secure);
-          final subscriptions = [
-            BuzzPushSubscription(
-              filter: BuzzPushFilter(kinds: [9], pTags: [keys.public]),
-              notificationClass: 'default',
-            ),
-          ];
-          final community =
-              Community.create(
-                name: 'Team',
-                relayUrl: relay.httpUrl,
-                nsec: keys.nsec,
-                pubkey: keys.public,
-              ).copyWith(
-                pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
-                  desired: subscriptions,
-                ).withAccepted(subscriptions: subscriptions, generation: 7),
+    for (final sharedSibling in [false, true]) {
+      test(
+        'opt-out reaches its relay lease while preserving shared gateway=$sharedSibling',
+        () async {
+          await HttpOverrides.runWithHttpOverrides(() async {
+            final relay = await PushRelayFixture.start();
+            addTearDown(relay.close);
+            final communities = CommunityStorage(secure: secure);
+            final subscriptions = [
+              BuzzPushSubscription(
+                filter: BuzzPushFilter(kinds: [9], pTags: [keys.public]),
+                notificationClass: 'default',
+              ),
+            ];
+            final community =
+                Community.create(
+                  name: 'Team',
+                  relayUrl: relay.httpUrl,
+                  nsec: keys.nsec,
+                  pubkey: keys.public,
+                ).copyWith(
+                  pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                    desired: subscriptions,
+                  ).withAccepted(subscriptions: subscriptions, generation: 7),
+                );
+            await communities.save(community);
+            final siblingKeys = nostr.Keys('3' * 64);
+            final sibling = Community.create(
+              name: 'Same origin, different member',
+              relayUrl: '${relay.wsUrl}/',
+              nsec: siblingKeys.nsec,
+              pubkey: siblingKeys.public,
+            );
+            expect(sibling.pubkey, isNot(community.pubkey));
+            expect(
+              sibling.pushLeaseInstallationId,
+              isNot(community.pushLeaseInstallationId),
+            );
+            if (sharedSibling) await communities.save(sibling);
+            final grant = _nativeGrant(
+              _grant(
+                expiresAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
+              ),
+            )..['relayOrigin'] = relay.wsUrl;
+            var calls = 0;
+            messenger.setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'endpointGrants') return [grant];
+              if (call.method == 'revokePushDelegation') {
+                calls++;
+                grant['endpointGrant'] = '';
+                throw PlatformException(code: 'app_attest_unavailable');
+              }
+              return null;
+            });
+            final container = ProviderContainer(
+              overrides: [
+                communityStorageProvider.overrideWithValue(communities),
+                communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+                buzzPushLeaseRevocationStorageProvider.overrideWithValue(
+                  storage,
+                ),
+              ],
+            );
+            await container.read(communityListProvider.future);
+            await container
+                .read(communityListProvider.notifier)
+                .setPushNotificationsEnabled(community.id, false);
+            await container
+                .read(buzzPushLeaseRevocationOutboxProvider)
+                .trigger();
+            expect(calls, sharedSibling ? 0 : 1);
+            expect(relay.leases.single['active'], isFalse);
+            expect(relay.leases.single['generation'], 8);
+            final saved = await communities.loadAll();
+            final disabled = saved.firstWhere(
+              (value) => value.id == community.id,
+            );
+            if (sharedSibling) {
+              expect(
+                saved.firstWhere((value) => value.id == sibling.id).toJson(),
+                sibling.toJson(),
               );
-          await communities.save(community);
-          final grant = _nativeGrant(
-            _grant(
-              expiresAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
-            ),
-          )..['relayOrigin'] = relay.wsUrl;
-          var calls = 0;
-          messenger.setMockMethodCallHandler(channel, (call) async {
-            if (call.method == 'endpointGrants') return [grant];
-            if (call.method == 'revokePushDelegation') {
-              calls++;
-              grant['endpointGrant'] = '';
-              throw PlatformException(code: 'app_attest_unavailable');
             }
-            return null;
-          });
-          final container = ProviderContainer(
-            overrides: [
-              communityStorageProvider.overrideWithValue(communities),
-              communitySnapshotWriterProvider.overrideWithValue((_) async {}),
-              buzzPushLeaseRevocationStorageProvider.overrideWithValue(storage),
-            ],
-          );
-          await container.read(communityListProvider.future);
-          await container
-              .read(communityListProvider.notifier)
-              .setPushNotificationsEnabled(community.id, false);
-          await container.read(buzzPushLeaseRevocationOutboxProvider).trigger();
-          expect(calls, 1);
-          expect(relay.leases.single['active'], isFalse);
-          expect(relay.leases.single['generation'], 8);
-          final disabled = (await communities.loadAll()).single;
-          expect(disabled.pushNotificationsEnabled, isFalse);
-          expect(
-            disabled.pushSubscriptionState.pendingTombstoneGeneration,
-            isNull,
-          );
-          final pending = (await storage.loadAll()).single;
-          expect(pending.gatewayOnly, isTrue);
-          expect(
-            pending.gatewayRevocation?['installationHandle'],
-            grant['gatewayInstallationHandle'],
-          );
-          container.dispose();
-        }, DirectPushHttp());
-      },
-    );
+            expect(disabled.pushNotificationsEnabled, isFalse);
+            expect(
+              disabled.pushSubscriptionState.pendingTombstoneGeneration,
+              isNull,
+            );
+            final pending = await storage.loadAll();
+            if (sharedSibling) {
+              expect(pending, isEmpty);
+            } else {
+              expect(pending.single.gatewayOnly, isTrue);
+              expect(
+                pending.single.gatewayRevocation?['installationHandle'],
+                grant['gatewayInstallationHandle'],
+              );
+            }
+            container.dispose();
+          }, DirectPushHttp());
+        },
+      );
+    }
 
     for (final gatewayFails in [true, false]) {
       test(
