@@ -2865,13 +2865,15 @@ hold_secs = 2
         );
     }
 
-    /// A relay that drops the socket after the stop, with publishes still
-    /// awaiting their `OK`: they fail, so the drop cannot pass the run.
+    /// A relay that drops the socket while the agent drains its publishes at
+    /// the stop: the ones still awaiting their `OK` fail, so the drop cannot
+    /// pass the run. The agent's loop wakes at least every second, so it is
+    /// draining well before the drop, 2 s after the 2 s hold ends.
     #[tokio::test]
     async fn a_socket_lost_with_publishes_awaiting_their_ok_at_the_stop_fails_the_run() {
         let (addr, _) = fake_ws_relay(FakeRelay {
             ok_delay: None,
-            close_after: Some(Duration::from_millis(2500)),
+            close_after: Some(Duration::from_secs(4)),
             ..FakeRelay::PROMPT
         })
         .await;
@@ -2906,7 +2908,7 @@ hold_secs = 2
                 scenario,
                 net,
                 Shard { index: 0, count: 1 },
-                Duration::from_secs(5),
+                Duration::from_secs(10),
             ),
         )
         .await
