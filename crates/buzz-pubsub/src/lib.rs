@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use buzz_core::TenantContext;
 use nostr::PublicKey;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
@@ -122,6 +122,10 @@ impl PubSubConfig {
     }
 }
 
+/// Capacity of the subscriber command queue. A full queue loses only a
+/// subscribe hint: the desired-topic map is reconciled separately.
+const SUBSCRIPTION_COMMAND_CAPACITY: usize = 4096;
+
 /// Central pub/sub manager for a Buzz relay instance.
 pub struct PubSubManager {
     pool: crate::RedisConnection,
@@ -133,6 +137,8 @@ pub struct PubSubManager {
     desired_topics: subscriber::DesiredTopics,
     subscription_tx: mpsc::Sender<subscriber::SubscriptionCommand>,
     subscription_rx: Mutex<Option<mpsc::Receiver<subscriber::SubscriptionCommand>>>,
+    /// Coalesced wake-up: reconcile desired topics with the live Redis link.
+    subscription_changed: Arc<Notify>,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
@@ -155,7 +161,7 @@ impl PubSubManager {
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
         let (nip_fi_disconnect_tx, _) = broadcast::channel(4096);
-        let (subscription_tx, subscription_rx) = mpsc::channel(4096);
+        let (subscription_tx, subscription_rx) = mpsc::channel(SUBSCRIPTION_COMMAND_CAPACITY);
 
         Ok(Self {
             pool,
@@ -164,6 +170,7 @@ impl PubSubManager {
             desired_topics: Arc::new(Mutex::new(HashMap::new())),
             subscription_tx,
             subscription_rx: Mutex::new(Some(subscription_rx)),
+            subscription_changed: Arc::new(Notify::new()),
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
@@ -187,6 +194,7 @@ impl PubSubManager {
             self.broadcast_tx.clone(),
             self.desired_topics.clone(),
             subscription_rx,
+            self.subscription_changed.clone(),
             self.link.clone(),
         )
         .await;
@@ -238,7 +246,8 @@ impl PubSubManager {
     /// Retain local interest in a scoped Redis event topic.
     ///
     /// The first retain for a topic asks the subscriber task to `SUBSCRIBE`.
-    /// Additional retains only increment the local desired refcount.
+    /// Additional retains only increment the local desired refcount. It never
+    /// waits on the subscriber: callers hold a connection's lifecycle lock.
     pub async fn retain_topic(&self, ctx: &TenantContext, topic: EventTopic) {
         let topic_key = EventTopicKey::from_context(ctx, topic);
         let should_subscribe = {
@@ -250,10 +259,22 @@ impl PubSubManager {
         };
 
         if should_subscribe {
-            let _ = self
+            // The wake-up is lossless and coalesced: if the bounded command
+            // queue is full, the subscriber still reconciles the whole
+            // desired-topic map without waiting for a Redis reconnect.
+            self.subscription_changed.notify_one();
+            match self
                 .subscription_tx
-                .send(subscriber::SubscriptionCommand::Subscribe(topic_key))
-                .await;
+                .try_send(subscriber::SubscriptionCommand::Subscribe(topic_key))
+            {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        ?topic_key,
+                        "pubsub subscription command queue full; reconciliation scheduled"
+                    );
+                }
+            }
         }
     }
 
@@ -704,6 +725,47 @@ mod tests {
 
         manager.release_topic(&ctx_b, topic).await;
         assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 0);
+    }
+
+    /// A retain past a full command queue neither waits for the subscriber
+    /// (callers hold a lifecycle lock) nor loses the topic: it leaves a
+    /// reconciliation wake-up, and the topic is in the desired map the
+    /// subscriber re-reads. Mutation: `send().await` instead of `try_send`
+    /// hangs at the timeout below; no `notify_one` fails the wake-up check.
+    #[tokio::test]
+    async fn queue_full_retain_does_not_wait_and_schedules_reconciliation() {
+        let manager = make_manager().await;
+        let filler = ctx(0xaaaa, "a.example");
+        for id in 0..SUBSCRIPTION_COMMAND_CAPACITY {
+            manager
+                .retain_topic(&filler, EventTopic::Channel(Uuid::from_u128(id as u128)))
+                .await;
+        }
+        // Drain the wake-ups the fillers left (coalesced into one permit).
+        manager.subscription_changed.notified().await;
+
+        let dropped_ctx = ctx(0xbbbb, "b.example");
+        let dropped = EventTopic::Channel(Uuid::from_u128(0xcccc));
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.retain_topic(&dropped_ctx, dropped),
+        )
+        .await
+        .expect("a retain must not wait on a full command queue");
+        assert_eq!(manager.topic_refcount(&dropped_ctx, dropped).await, 1);
+
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            manager.subscription_changed.notified(),
+        )
+        .await
+        .expect("a queue-full retain must leave a reconciliation wake-up");
+        let missing = subscriber::missing_desired_topics(
+            &manager.desired_topics,
+            &std::collections::HashSet::new(),
+        )
+        .await;
+        assert!(missing.contains(&EventTopicKey::from_context(&dropped_ctx, dropped)));
     }
 
     #[tokio::test]

@@ -53,9 +53,32 @@ pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 // the range fails the build.
 const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
 
-/// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
+/// Admit a `REQ` and handle it inline. The read loop admits before it spawns
+/// the handler, so arrival order decides ownership; this is the same path for
+/// callers that run the handler in place.
+#[cfg(test)]
 pub async fn handle_req(
     sub_id: String,
+    filters: Vec<Filter>,
+    before_ids: Vec<Option<Vec<u8>>>,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+) {
+    let Ok(owner) = super::close::admit(&sub_id, &conn).await else {
+        return;
+    };
+    handle_admitted_req(sub_id, owner, filters, before_ids, conn, state).await;
+}
+
+/// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
+///
+/// The REQ was admitted by `close::admit` with `owner`. Every exit before
+/// the claim refuses through `close_if_owner`, so a request that a newer
+/// same-ID `REQ` or a `CLOSE` superseded during its access checks sends
+/// nothing and registers nothing.
+pub async fn handle_admitted_req(
+    sub_id: String,
+    owner: u64,
     filters: Vec<Filter>,
     before_ids: Vec<Option<Vec<u8>>>,
     conn: Arc<ConnectionState>,
@@ -66,37 +89,33 @@ pub async fn handle_req(
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => {
                 if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
-                    conn.send(RelayMessage::notice("restricted: insufficient scope"));
-                    super::close::refuse(&sub_id, "restricted: insufficient scope", &conn, &state)
-                        .await;
+                    super::close::refuse_if_owner_with_notice(
+                        &sub_id,
+                        owner,
+                        "restricted: insufficient scope",
+                        "restricted: insufficient scope",
+                        &conn,
+                        &state,
+                    )
+                    .await;
                     access.deny("insufficient_scope");
                     return;
                 }
 
                 let pk_bytes = ctx.pubkey.to_bytes().to_vec();
 
-                let subs = conn.subscriptions.lock().await;
-                if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
-                    // A new ID has no old holder to retire, but a lost CLOSED
-                    // would leave the client waiting on a refused request.
-                    if !conn.send(RelayMessage::closed(
-                        &sub_id,
-                        "error: too many subscriptions",
-                    )) {
-                        conn.cancel.cancel();
-                    }
-                    access.deny("too_many_subscriptions");
-                    return;
-                }
-
                 (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
             }
             _ => {
-                conn.send(RelayMessage::notice(
+                super::close::refuse_if_owner_with_notice(
+                    &sub_id,
+                    owner,
                     "auth-required: authenticate before subscribing",
-                ));
-                super::close::refuse(&sub_id, "auth-required: not authenticated", &conn, &state)
-                    .await;
+                    "auth-required: not authenticated",
+                    &conn,
+                    &state,
+                )
+                .await;
                 access.deny("auth_required");
                 return;
             }
@@ -107,9 +126,10 @@ pub async fn handle_req(
     let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
         Ok(ids) => ids,
         Err(()) => {
-            super::close::refuse(
+            super::close::close_if_owner(
                 &sub_id,
-                "restricted: too many explicit channels",
+                owner,
+                Some("restricted: too many explicit channels"),
                 &conn,
                 &state,
             )
@@ -138,7 +158,14 @@ pub async fn handle_req(
             Ok(ids) => ids,
             Err(e) => {
                 warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get accessible channels");
-                super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+                super::close::close_if_owner(
+                    &sub_id,
+                    owner,
+                    Some(DATABASE_ERROR_CLOSED),
+                    &conn,
+                    &state,
+                )
+                .await;
                 access.error("database_error");
                 return;
             }
@@ -163,7 +190,14 @@ pub async fn handle_req(
         Ok(ids) => ids,
         Err(e) => {
             warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get readable named-only channels");
-            super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+            super::close::close_if_owner(
+                &sub_id,
+                owner,
+                Some(DATABASE_ERROR_CLOSED),
+                &conn,
+                &state,
+            )
+            .await;
             access.error("database_error");
             return;
         }
@@ -212,7 +246,14 @@ pub async fn handle_req(
                     error_kind = %e.kind(),
                     "Channel membership confirmation failed"
                 );
-                super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+                super::close::close_if_owner(
+                    &sub_id,
+                    owner,
+                    Some(DATABASE_ERROR_CLOSED),
+                    &conn,
+                    &state,
+                )
+                .await;
                 access.error("database_error");
                 return;
             }
@@ -232,7 +273,14 @@ pub async fn handle_req(
         .await
         {
             warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to classify repaired channels");
-            super::close::refuse(&sub_id, DATABASE_ERROR_CLOSED, &conn, &state).await;
+            super::close::close_if_owner(
+                &sub_id,
+                owner,
+                Some(DATABASE_ERROR_CLOSED),
+                &conn,
+                &state,
+            )
+            .await;
             access.error("database_error");
             return;
         }
@@ -258,7 +306,14 @@ pub async fn handle_req(
         .as_ref()
         .is_some_and(|authorized| authorized.is_empty())
     {
-        super::close::refuse(&sub_id, "restricted: not a channel member", &conn, &state).await;
+        super::close::close_if_owner(
+            &sub_id,
+            owner,
+            Some("restricted: not a channel member"),
+            &conn,
+            &state,
+        )
+        .await;
         access.deny("not_channel_member");
         return;
     }
@@ -278,14 +333,20 @@ pub async fn handle_req(
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE] gate is off_mode when no assertion
                 // exists, so SessionExpired here always implies an active FI session.
-                super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state)
-                    .await;
+                super::close::close_if_owner(
+                    &sub_id,
+                    owner,
+                    Some("restricted: authorization denied"),
+                    &conn,
+                    &state,
+                )
+                .await;
                 access.deny("session_expired");
                 return;
             }
         };
         // One-shot like search: accepting it replaces the ID's old holder.
-        let Some(owner) = claim_search_subscription(&sub_id, &conn, &state).await else {
+        let Some(owner) = claim_admitted_search(&sub_id, owner, &conn, &state).await else {
             return;
         };
         unless_cancelled(
@@ -316,9 +377,10 @@ pub async fn handle_req(
     if channel_id.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
         if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            super::close::refuse(
+            super::close::close_if_owner(
                 &sub_id,
-                "restricted: p-gated events require #p matching your pubkey",
+                owner,
+                Some("restricted: p-gated events require #p matching your pubkey"),
                 &conn,
                 &state,
             )
@@ -327,9 +389,10 @@ pub async fn handle_req(
             return;
         }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
-            super::close::refuse(
+            super::close::close_if_owner(
                 &sub_id,
-                "restricted: agent-engram reads require authors=[self] or #p=[self]",
+                owner,
+                Some("restricted: agent-engram reads require authors=[self] or #p=[self]"),
                 &conn,
                 &state,
             )
@@ -338,9 +401,10 @@ pub async fn handle_req(
             return;
         }
         if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
-            super::close::refuse(
+            super::close::close_if_owner(
                 &sub_id,
-                "restricted: author-only kinds require authors=[self]",
+                owner,
+                Some("restricted: author-only kinds require authors=[self]"),
                 &conn,
                 &state,
             )
@@ -357,9 +421,10 @@ pub async fn handle_req(
     let has_search = filters.iter().any(|f| f.search.is_some());
     if has_search {
         if filters.iter().any(|f| f.search.is_none()) {
-            super::close::refuse(
+            super::close::close_if_owner(
                 &sub_id,
-                "error: mixed search and non-search filters not supported",
+                owner,
+                Some("error: mixed search and non-search filters not supported"),
                 &conn,
                 &state,
             )
@@ -376,13 +441,19 @@ pub async fn handle_req(
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-                super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state)
-                    .await;
+                super::close::close_if_owner(
+                    &sub_id,
+                    owner,
+                    Some("restricted: authorization denied"),
+                    &conn,
+                    &state,
+                )
+                .await;
                 access.deny("session_expired");
                 return;
             }
         };
-        let Some(owner) = claim_search_subscription(&sub_id, &conn, &state).await else {
+        let Some(owner) = claim_admitted_search(&sub_id, owner, &conn, &state).await else {
             return;
         };
         let search = async {
@@ -425,7 +496,14 @@ pub async fn handle_req(
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
             // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-            super::close::refuse(&sub_id, "restricted: authorization denied", &conn, &state).await;
+            super::close::close_if_owner(
+                &sub_id,
+                owner,
+                Some("restricted: authorization denied"),
+                &conn,
+                &state,
+            )
+            .await;
             access.deny("session_expired");
             return;
         }
@@ -447,7 +525,8 @@ pub async fn handle_req(
             )
         })
         .collect();
-    let Some(owner) = claim_live_subscription(&sub_id, live_filters, &conn, &state).await else {
+    let Some(owner) = claim_admitted_live(&sub_id, owner, live_filters, &conn, &state).await
+    else {
         return;
     };
 
@@ -1665,24 +1744,38 @@ async fn handle_huddle_liveness_req(
     }
 }
 
-/// Claim `sub_id` for a live REQ under the lifecycle lock: record a fresh
-/// owner token, register for fan-out (replacing any same-ID entry), retain its
-/// topics, and release the replaced scope's. Each filter carries its own
-/// server-resolved live scope; the subscription retains each topic in their
-/// union once. Returns the owner token, or `None` once the connection is
-/// closing — the caller then exits silently.
+/// Admit and claim `sub_id` for a live REQ in one step, as a handler run in
+/// place would. `None` if the connection is closing or a newer request took
+/// the ID between the two steps.
+#[cfg(test)]
 pub(crate) async fn claim_live_subscription(
     sub_id: &str,
     filters: Vec<(Filter, SubscriptionScope)>,
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
-    let mut subs = conn.subscriptions.lock().await;
-    if conn.cancel.is_cancelled() {
+    let owner = super::close::admit(sub_id, conn).await.ok()?;
+    claim_admitted_live(sub_id, owner, filters, conn, state).await
+}
+
+/// Claim `sub_id` for the live REQ admitted with `owner`, under the lifecycle
+/// lock: register for fan-out (replacing any same-ID entry), retain its
+/// topics, and release the replaced scope's. Each filter carries its own
+/// server-resolved live scope; the subscription retains each topic in their
+/// union once. Returns `owner`, or `None` once
+/// the connection is closing or a newer same-ID REQ or a `CLOSE` superseded
+/// this request — the caller then exits silently.
+pub(crate) async fn claim_admitted_live(
+    sub_id: &str,
+    owner: u64,
+    filters: Vec<(Filter, SubscriptionScope)>,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> Option<u64> {
+    let subs = conn.subscriptions.lock().await;
+    if conn.cancel.is_cancelled() || subs.get(sub_id) != Some(&owner) {
         return None;
     }
-    let owner = super::close::next_owner();
-    subs.insert(sub_id.to_string(), owner);
     // A sync that held the ID stops; the registry entry and topics below are
     // replaced in place.
     state.artifact_syncs.remove(conn.conn_id, sub_id);
@@ -1711,22 +1804,33 @@ pub(crate) async fn claim_live_subscription(
     Some(owner)
 }
 
-/// Claim `sub_id` for a one-shot search or huddle-liveness REQ under the
-/// lifecycle lock. Accepting it retires whatever holds the ID (NIP-01
-/// replacement), even though neither registers for fan-out. `None` once the
-/// connection is closing.
+/// Admit and claim `sub_id` for a one-shot REQ in one step, as a handler run
+/// in place would.
+#[cfg(test)]
 async fn claim_search_subscription(
     sub_id: &str,
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
-    let mut subs = conn.subscriptions.lock().await;
-    if conn.cancel.is_cancelled() {
+    let owner = super::close::admit(sub_id, conn).await.ok()?;
+    claim_admitted_search(sub_id, owner, conn, state).await
+}
+
+/// Claim `sub_id` for the one-shot search or huddle-liveness REQ admitted with
+/// `owner`, under the lifecycle lock. Accepting it retires whatever holds the
+/// ID (NIP-01 replacement), even though neither registers for fan-out. `None`
+/// once the connection is closing or this request was superseded.
+async fn claim_admitted_search(
+    sub_id: &str,
+    owner: u64,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> Option<u64> {
+    let subs = conn.subscriptions.lock().await;
+    if conn.cancel.is_cancelled() || subs.get(sub_id) != Some(&owner) {
         return None;
     }
-    super::close::retire_locked(&mut subs, sub_id, conn, state).await;
-    let owner = super::close::next_owner();
-    subs.insert(sub_id.to_string(), owner);
+    super::close::retire_holder_locked(sub_id, conn, state).await;
     Some(owner)
 }
 
@@ -2182,8 +2286,10 @@ mod tests {
                 .acquire_owned()
                 .await
                 .expect("permit");
+            let owner = super::super::close::admit("s", &conn).await.expect("admit");
             super::super::artifact_sync::handle_sync(
                 "s".into(),
+                owner,
                 filter,
                 Arc::clone(&conn),
                 Arc::clone(&state),
@@ -2646,6 +2752,53 @@ mod tests {
             vec![r#"["CLOSED","x","restricted: channel access revoked"]"#.to_string()]
         );
         state.conn_manager.deregister(conn.conn_id);
+    }
+
+    /// A request admitted before a newer same-ID request, or before a
+    /// `CLOSE`, can no longer claim: an older REQ finishing its access checks
+    /// late must not replace the newer one, and a closed ID must stay closed.
+    /// Mutation: drop the owner check from `claim_admitted_live` → the stale
+    /// claim registers → RED.
+    #[tokio::test]
+    async fn superseded_or_closed_requests_cannot_claim() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let refcount = |c| {
+            state
+                .pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Channel(c))
+        };
+
+        let older = super::super::close::admit("x", &conn).await.expect("admit");
+        let newer = super::super::close::admit("x", &conn).await.expect("admit");
+        claim_admitted_live("x", newer, scoped(&text_filters(), Some(&[b])), &conn, &state)
+            .await
+            .expect("the newest request claims");
+        let stale =
+            claim_admitted_live("x", older, scoped(&text_filters(), Some(&[a])), &conn, &state).await;
+        assert_eq!(stale, None);
+        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&newer));
+        assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
+        assert_eq!((refcount(a).await, refcount(b).await), (0, 1));
+
+        let pending = super::super::close::admit("y", &conn).await.expect("admit");
+        super::super::close::handle_close("y".into(), Arc::clone(&conn), Arc::clone(&state)).await;
+        let late =
+            claim_admitted_live("y", pending, scoped(&text_filters(), Some(&[a])), &conn, &state).await;
+        let late_search = claim_admitted_search("y", pending, &conn, &state).await;
+        assert_eq!((late, late_search), (None, None));
+        assert!(!registered(&state, &conn, "y"));
+        assert_eq!(refcount(a).await, 0);
+        assert!(
+            !super::super::close::close_if_owner("y", pending, Some("late"), &conn, &state).await
+        );
+        assert_eq!(
+            closed_frames(&mut send_rx),
+            vec![r#"["CLOSED","y",""]"#.to_string()],
+            "only the CLOSE acknowledgement"
+        );
     }
 
     /// Connection cleanup fences later claims: a detached REQ task resuming

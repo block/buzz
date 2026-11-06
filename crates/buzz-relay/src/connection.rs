@@ -1489,10 +1489,31 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
+            // Admit before spawning: arrival order decides which request owns
+            // the ID, so a later same-ID REQ or a CLOSE fences this one even
+            // while its handler is still in access checks.
+            let owner = match handlers::close::admit(&sub_id, &conn).await {
+                Ok(owner) => owner,
+                Err(not_admitted) => {
+                    if not_admitted == handlers::close::NotAdmitted::TooManySubscriptions {
+                        crate::access::ReadLog::refused_read(
+                            "req",
+                            &conn,
+                            &sub_id,
+                            &filters,
+                            "too_many_subscriptions",
+                        );
+                    }
+                    return;
+                }
+            };
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
             tokio::spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, before_ids, conn, state).await;
+                    handlers::req::handle_admitted_req(
+                        sub_id, owner, filters, before_ids, conn, state,
+                    )
+                    .await;
                     drop(permit);
                 }
                 .instrument(span),
@@ -1521,11 +1542,29 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
+            // Admitted before spawning, like a REQ.
+            let owner = match handlers::close::admit(&sub_id, &conn).await {
+                Ok(owner) => owner,
+                Err(not_admitted) => {
+                    if not_admitted == handlers::close::NotAdmitted::TooManySubscriptions {
+                        crate::access::ReadLog::refused_sync(
+                            &conn,
+                            &sub_id,
+                            filter.as_ref().ok(),
+                            "too_many_subscriptions",
+                        );
+                    }
+                    return;
+                }
+            };
             let span =
                 tracing::info_span!("ws.artifact_sync", conn_id = %conn.conn_id, sub_id = %sub_id);
             tokio::spawn(
                 async move {
-                    handlers::artifact_sync::handle_sync(sub_id, filter, conn, state, permit).await;
+                    handlers::artifact_sync::handle_sync(
+                        sub_id, owner, filter, conn, state, permit,
+                    )
+                    .await;
                 }
                 .instrument(span),
             );
@@ -2837,6 +2876,90 @@ pub(crate) mod tests {
             assert_eq!(frame, serde_json::json!(["CLOSED", "s", reason]), "{case}");
             assert!(rx.try_recv().is_err(), "{case}: only CLOSED is sent");
         }
+    }
+
+    /// Let every spawned REQ handler finish: each holds a handler permit
+    /// until it returns.
+    async fn wait_for_handlers(state: &AppState, permits: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.handler_semaphore.available_permits() < permits {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("spawned handlers finish");
+    }
+
+    fn frames(rx: &mut mpsc::Receiver<WsMessage>) -> Vec<serde_json::Value> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|message| match message {
+                WsMessage::Text(text) => serde_json::from_str(&text).expect("valid JSON frame"),
+                other => panic!("unexpected websocket message: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// `REQ x` whose handler has not run yet, then `CLOSE x`: the request is
+    /// retired with the ID. When its handler runs, it sends nothing after the
+    /// acknowledgement and registers nothing. The read loop admits before it
+    /// spawns, so this holds however the handler is scheduled.
+    /// Mutation: admit inside the spawned handler instead → the handler's
+    /// refusal follows `CLOSED` → RED.
+    #[tokio::test]
+    async fn close_fences_a_req_whose_handler_has_not_run() {
+        for sync in [false, true] {
+            let state = crate::state::tests::test_state().await;
+            let permits = state.handler_semaphore.available_permits();
+            // Unauthenticated: admission quotas do not apply, and the handler
+            // refuses without a database.
+            let (conn, mut rx) = test_conn_with_auth(AuthState::Failed);
+            let filter = if sync {
+                serde_json::json!({"artifact": "current", "#h": [uuid::Uuid::new_v4().to_string()]})
+            } else {
+                serde_json::json!({"kinds": [1]})
+            };
+            let req = serde_json::json!(["REQ", "x", filter]).to_string();
+            handle_text_message(req, Arc::clone(&conn), Arc::clone(&state)).await;
+            let close = serde_json::json!(["CLOSE", "x"]).to_string();
+            handle_text_message(close, Arc::clone(&conn), Arc::clone(&state)).await;
+            wait_for_handlers(&state, permits).await;
+
+            assert_eq!(
+                frames(&mut rx),
+                vec![serde_json::json!(["CLOSED", "x", ""])],
+                "sync: {sync}"
+            );
+            assert!(conn.subscriptions.lock().await.is_empty(), "sync: {sync}");
+            assert!(
+                state.sub_registry.get_filters(conn.conn_id, "x").is_none(),
+                "sync: {sync}"
+            );
+        }
+    }
+
+    /// Two same-ID REQs whose handlers have not run: only the newer one may
+    /// answer. The older one's refusal must not close the ID the newer one
+    /// owns. Mutation: refuse in-handler with an unconditional retire → two
+    /// NOTICE/CLOSED pairs → RED.
+    #[tokio::test]
+    async fn only_the_newest_same_id_req_answers() {
+        let state = crate::state::tests::test_state().await;
+        let permits = state.handler_semaphore.available_permits();
+        let (conn, mut rx) = test_conn_with_auth(AuthState::Failed);
+        for kind in [1, 7] {
+            let req = serde_json::json!(["REQ", "x", {"kinds": [kind]}]).to_string();
+            handle_text_message(req, Arc::clone(&conn), Arc::clone(&state)).await;
+        }
+        wait_for_handlers(&state, permits).await;
+
+        assert_eq!(
+            frames(&mut rx),
+            vec![
+                serde_json::json!(["NOTICE", "auth-required: authenticate before subscribing"]),
+                serde_json::json!(["CLOSED", "x", "auth-required: not authenticated"]),
+            ]
+        );
+        assert!(conn.subscriptions.lock().await.is_empty());
     }
 
     /// An ordinary REQ that `handle_req` itself refuses, before it claims its
