@@ -1037,14 +1037,17 @@ hold_secs = 1
 
     /// Seeds [`PRIVATE`] against a relay that answers each event's first
     /// `throttles` submissions with the relay's HTTP 429. Returns the outcome
-    /// and how many times each event was submitted.
+    /// and how many times each write was submitted.
     async fn seed_throttled(throttles: usize) -> (anyhow::Result<()>, HashMap<String, usize>) {
         let tries: Arc<std::sync::Mutex<HashMap<String, usize>>> = Default::default();
         let seen = tries.clone();
         let addr = fake_http(move |_, _, body| {
             let event: Event = serde_json::from_slice(body).unwrap();
             let mut seen = seen.lock().unwrap();
-            let n = seen.entry(event.id.to_hex()).or_default();
+            // A kind:9000 is re-signed on each try, so key writes by what they
+            // say rather than their id.
+            let write = format!("{} {} {:?}", event.pubkey, event.content, event.tags);
+            let n = seen.entry(write).or_default();
             *n += 1;
             if *n <= throttles {
                 let error = "rate-limited: quota exceeded; retry in 0s";
