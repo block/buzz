@@ -408,7 +408,7 @@ pub struct Config {
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
 
-    /// Permit new irreversible FI upgrade acceptances. Default off; receipt
+    /// Permit new community FI policy enables and disables. Default off; receipt
     /// recovery/status remain available (`BUZZ_NIP_FI_UPGRADES_ENABLED`).
     pub nip_fi_upgrades_enabled: bool,
 

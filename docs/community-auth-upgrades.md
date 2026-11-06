@@ -127,8 +127,10 @@ Stop an uncertain initiating caller and preserve its operation evidence. Read
 current policy before deciding whether to issue a new explicit CAS disable.
 A timeout is not permission to discard the original request or edit SQL.
 Disable is a supported operator action; acceptance is no longer monotonic.
-Last-issuer removal is allowed after disable, and re-enable must recheck trust
-and the exact binding. Removing trust never implicitly clears stored policy.
+Disable removes the required-policy block on last-issuer removal; the separate
+last-binding guard still applies. The operator unbind command keeps the last
+issuer for bindable hosts. Re-enable must recheck trust and the exact binding.
+Removing trust never implicitly clears stored policy.
 
 Close the mutation gate to stop new changes while keeping recovery available.
 Use established archive/lifecycle containment or repair FI trust as appropriate;
