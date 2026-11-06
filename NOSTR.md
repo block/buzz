@@ -450,6 +450,15 @@ joined to it.
   both; once the row has committed, the default channels follow even if its
   announcement failed, because the row is entry evidence.
 
+**New members.** To decide whether a viewer is new, and so whether to show
+them the welcome, a client sends one read: `{"authors": ["<viewer>"],
+"until": <T - 600>, "limit": 1}`, with no `kinds`, `#h` or `#p`. T is when
+the client first opened the community on that device; the ten minutes keep
+the events the viewer publishes while joining from counting. An empty result
+means the viewer is new. Relays must answer this read, not refuse it: a filter whose
+`authors` are all the reader's own pubkey passes the `#p` rule for p-gated
+kinds (see [Membership notifications](#membership-notifications)).
+
 ### Group Discovery
 
 The relay emits NIP-29 group state events when channels are created, updated, or membership changes.
@@ -549,6 +558,9 @@ may sign these.
 > include a `#p` filter where **all** `#p` values match the authenticated pubkey. The relay rejects
 > subscriptions that omit `#p` or include other pubkeys (prevents eavesdropping on others' membership
 > changes and DMs). Error: `restricted: p-gated events require #p matching your pubkey`.
+> A filter whose `authors` are **all** the authenticated pubkey is also admitted, with or without
+> `#p` or `kinds`: an event the reader signed is theirs to read, and these kinds are signed by the
+> relay (44100, 44101) or a throwaway key (1059), so such a filter cannot return another reader's.
 
 ```bash
 nak req -k 44100 -k 44101 --tag "p=<your-hex-pubkey>" \

@@ -1807,6 +1807,26 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
     found_id
 }
 
+/// Authorize read access for filters that can match a [`P_GATED_KINDS`] kind:
+/// gift wraps, membership notices, DM visibility snapshots, agent observer
+/// frames and agent turn metrics. A filter with no `kinds` can match all of
+/// them.
+///
+/// Such a filter is authorized when at least one of these holds:
+///   - `authors` is non-empty and every entry equals the authed pubkey. An
+///     event the reader signed is always theirs to read. Gift wraps are
+///     signed by throwaway keys, and membership notices and DM visibility
+///     snapshots by the relay, so `authors=[self]` can never fish those out
+///     of another reader's inbox. Clients rely on this to ask whether the
+///     reader has signed anything at all (`{authors:[self], until, limit:1}`
+///     with no `kinds`; NOSTR.md "Landing channel").
+///   - `ids` is non-empty and the filter names no [`RESULT_GATED_KINDS`]
+///     kind (see below).
+///   - `#p` is non-empty and every entry equals the authed pubkey.
+///
+/// The per-result gate (`reader_authorized_for_event`) still applies to
+/// whatever a passing filter returns, so result-gated kinds are delivered
+/// only to the pubkey in their `#p`, whichever rule admitted the filter.
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
@@ -1815,6 +1835,16 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
                 .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !can_match_p_gated {
+            return true;
+        }
+
+        let authors_are_self = filter.authors.as_ref().is_some_and(|authors| {
+            !authors.is_empty()
+                && authors
+                    .iter()
+                    .all(|a| a.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
+        });
+        if authors_are_self {
             return true;
         }
 
@@ -3409,6 +3439,105 @@ mod tests {
             p_gated_filters_authorized(&[owner_p_and_ids], authed),
             "kind:44200 with matching #p and ids must be allowed"
         );
+    }
+
+    /// `authors=[self]` admits a filter that can match p-gated kinds: an event
+    /// the reader signed is theirs, and gift wraps (throwaway keys) and
+    /// membership notices (relay key) are never signed by another reader. The
+    /// kindless form is the client's "has this viewer written anything" read
+    /// (NOSTR.md "Landing channel").
+    #[test]
+    fn p_gate_admits_authors_self() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let me = nostr::Keys::generate().public_key();
+        let other = nostr::Keys::generate().public_key();
+        let authed = me.to_hex();
+        let until = nostr::Timestamp::from(1_700_000_000);
+        let gift_wrap = nostr::Kind::Custom(buzz_core::kind::KIND_GIFT_WRAP as u16);
+
+        let cases = [
+            (
+                "kindless authors=[self] with until and limit",
+                Filter::new().author(me).until(until).limit(1),
+                true,
+            ),
+            (
+                "kindless authors=[other]",
+                Filter::new().author(other).until(until).limit(1),
+                false,
+            ),
+            (
+                "kindless authors=[self, other]",
+                Filter::new().authors([me, other]).until(until).limit(1),
+                false,
+            ),
+            (
+                "kindless with no authors and no #p",
+                Filter::new().until(until).limit(1),
+                false,
+            ),
+            (
+                "kindless #p=[self]",
+                Filter::new().custom_tags(p_tag, [authed.as_str()]),
+                true,
+            ),
+            (
+                "kindless #p=[other]",
+                Filter::new().custom_tags(p_tag, [other.to_hex()]),
+                false,
+            ),
+            (
+                "authors=[other] with #p=[self]",
+                Filter::new()
+                    .author(other)
+                    .custom_tags(p_tag, [authed.as_str()]),
+                true,
+            ),
+            (
+                "gift wrap authors=[self]",
+                Filter::new().kind(gift_wrap).author(me),
+                true,
+            ),
+            (
+                "gift wrap authors=[other]",
+                Filter::new().kind(gift_wrap).author(other),
+                false,
+            ),
+            (
+                "kinds without a p-gated kind, authors=[other]",
+                Filter::new()
+                    .kinds([nostr::Kind::Custom(9), nostr::Kind::Custom(39000)])
+                    .author(other),
+                true,
+            ),
+            (
+                "kinds without a p-gated kind, no authors",
+                Filter::new().kind(nostr::Kind::Custom(9)),
+                true,
+            ),
+        ];
+        for (name, filter, admitted) in cases {
+            assert_eq!(
+                p_gated_filters_authorized(&[filter], &authed),
+                admitted,
+                "{name}"
+            );
+        }
+
+        // Every filter in the REQ must pass: an authors=[self] filter does not
+        // carry an unscoped sibling through.
+        let mine = Filter::new().author(me).until(until).limit(1);
+        let unscoped = Filter::new().until(until);
+        assert!(!p_gated_filters_authorized(&[mine, unscoped], &authed));
+
+        // The sibling gates already admit the kindless authors=[self] read, so
+        // the gate chain on REQ, COUNT, /query and /count lets it through.
+        let mine = Filter::new().author(me).until(until).limit(1);
+        assert!(engram_filters_authorized(
+            std::slice::from_ref(&mine),
+            &authed
+        ));
+        assert!(author_only_filters_authorized(&[mine], &authed));
     }
 
     #[test]
