@@ -1550,6 +1550,7 @@ async fn fan_out_from_another_pod(f: &Fixture, channel: Uuid, name: &str) -> Str
             community_id: f.tenant.community(),
             topic: buzz_pubsub::EventTopic::Channel(channel),
             event,
+            received_at: tokio::time::Instant::now(),
         },
     )
     .await;
