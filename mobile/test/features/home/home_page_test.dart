@@ -323,12 +323,39 @@ void main() {
         final badge = tester.widget<Badge>(
           find.byKey(const Key('home-inbox-badge')),
         );
-        expect(badge.isLabelVisible, unread);
+        expect(badge.smallSize, 6);
+        final opacity = tester.widget<AnimatedOpacity>(
+          find.ancestor(
+            of: find.byKey(const Key('home-inbox-badge')),
+            matching: find.byType(AnimatedOpacity),
+          ),
+        );
+        expect(opacity.opacity, unread ? 1 : 0);
+        expect(opacity.duration, const Duration(milliseconds: 150));
+        expect(
+          tester.getSize(find.byKey(const Key('home-inbox-badge'))),
+          const Size.square(24),
+        );
         expect(
           find.byTooltip(unread ? 'Inbox, unread items' : 'Inbox'),
           findsOneWidget,
         );
       }
+      await tester.pumpWidget(
+        await buildHome(inboxUnread: true, disableAnimations: true),
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<AnimatedOpacity>(
+              find.ancestor(
+                of: find.byKey(const Key('home-inbox-badge')),
+                matching: find.byType(AnimatedOpacity),
+              ),
+            )
+            .duration,
+        Duration.zero,
+      );
       debugDefaultTargetPlatformOverride = null;
     });
   }

@@ -129,32 +129,51 @@ class HomePage extends HookConsumerWidget {
               !nativeControlsVisible)
             const SizedBox(width: 44, height: 44)
           else
-            Badge(
-              key: const Key('home-inbox-badge'),
-              isLabelVisible: hasUnreadInbox,
-              backgroundColor: context.colors.primary,
-              smallSize: 8,
-              offset: const Offset(-4, 4),
-              child: defaultTargetPlatform == TargetPlatform.iOS
-                  ? IosGlassNavigationButton(
-                      icon: IosGlassNavigationIcon.bell,
-                      semanticLabel: inboxLabel,
-                      width: 44,
-                      height: 44,
-                      controlSize: 44,
-                      foregroundColor: context.colors.onSurface,
-                      onPressed: openInbox,
-                    )
-                  : IconButton.filledTonal(
-                      tooltip: inboxLabel,
-                      style: IconButton.styleFrom(
-                        backgroundColor: context.controlSurface,
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                defaultTargetPlatform == TargetPlatform.iOS
+                    ? IosGlassNavigationButton(
+                        icon: IosGlassNavigationIcon.bell,
+                        semanticLabel: inboxLabel,
+                        width: 44,
+                        height: 44,
+                        controlSize: 44,
                         foregroundColor: context.colors.onSurface,
-                        minimumSize: const Size.square(48),
+                        onPressed: openInbox,
+                      )
+                    : IconButton.filledTonal(
+                        tooltip: inboxLabel,
+                        style: IconButton.styleFrom(
+                          backgroundColor: context.controlSurface,
+                          foregroundColor: context.colors.onSurface,
+                          minimumSize: const Size.square(48),
+                        ),
+                        icon: const Icon(BuzzIcons.bell),
+                        onPressed: openInbox,
                       ),
-                      icon: const Icon(BuzzIcons.bell),
-                      onPressed: openInbox,
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: ExcludeSemantics(
+                      child: Center(
+                        child: AnimatedOpacity(
+                          opacity: hasUnreadInbox ? 1 : 0,
+                          duration: reducedMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 150),
+                          curve: Curves.easeOut,
+                          child: Badge(
+                            key: const Key('home-inbox-badge'),
+                            backgroundColor: context.colors.primary,
+                            smallSize: 6,
+                            child: const SizedBox.square(dimension: 24),
+                          ),
+                        ),
+                      ),
                     ),
+                  ),
+                ),
+              ],
             ),
           const SizedBox(width: Grid.xs),
           SizedBox(
