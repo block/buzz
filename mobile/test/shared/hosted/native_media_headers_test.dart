@@ -1,10 +1,13 @@
+import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
 final _nsec = nostr.Keys.generate().nsec;
 
@@ -55,6 +58,7 @@ ProviderContainer _container(HostedRelayAuth hosted) => ProviderContainer(
 );
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test('native media headers add the relay assertion only for relay media', () {
     final hosted = _CachedHostedRelayAuth();
     addTearDown(hosted.dispose);
@@ -104,6 +108,24 @@ void main() {
     expect(headers['Nostr-Federated-Identity'], 'Bearer fresh-token');
     expect(hosted.requested, [Uri.parse(url)]);
 
+    // A posterless video's first-frame preview hands the native player the
+    // renewed assertion too.
+    const videoUrl = 'https://relay.example/media/clip.mp4';
+    final player = _HeaderRecordingVideoPlayer();
+    final previousPlayer = VideoPlayerPlatform.instance;
+    VideoPlayerPlatform.instance = player;
+    addTearDown(() => VideoPlayerPlatform.instance = previousPlayer);
+    expect(
+      await container.read(videoPreviewFrameLoaderProvider)(videoUrl),
+      isNull,
+    );
+    expect(player.headers.single['Authorization'], startsWith('Nostr '));
+    expect(
+      player.headers.single['Nostr-Federated-Identity'],
+      'Bearer fresh-token',
+    );
+    expect(hosted.requested.last, Uri.parse(videoUrl));
+
     // A failed renewal still sends the media proof, and the relay decides.
     final failing = _ExpiredHostedRelayAuth(fail: true);
     addTearDown(failing.dispose);
@@ -115,4 +137,30 @@ void main() {
     expect(fallback['Authorization'], startsWith('Nostr '));
     expect(fallback, isNot(contains('Nostr-Federated-Identity')));
   });
+}
+
+/// Records the headers each native player is created with, then fails its
+/// initialization so the preview loader gives up.
+class _HeaderRecordingVideoPlayer extends VideoPlayerPlatform {
+  final headers = <Map<String, String>>[];
+
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> setMixWithOthers(bool mixWithOthers) async {}
+
+  @override
+  Future<int?> createWithOptions(VideoCreationOptions options) async {
+    headers.add(options.dataSource.httpHeaders);
+    return headers.length;
+  }
+
+  @override
+  Stream<VideoEvent> videoEventsFor(int playerId) => Stream.error(
+    PlatformException(code: 'VideoError', message: 'Fake init failure'),
+  );
+
+  @override
+  Future<void> dispose(int playerId) async {}
 }
