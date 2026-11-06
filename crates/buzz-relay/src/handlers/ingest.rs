@@ -8164,8 +8164,7 @@ mod postgres_tests {
         http_membership(&state, &tenant, &agent, Some(owner.public_key()))
             .await
             .expect("a timeout does not refuse HTTP admission");
-        match enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key()).await
-        {
+        match enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key()).await {
             Err(IngestError::AuthFailed(msg)) => assert!(
                 msg.starts_with("restricted: you are timed out until "),
                 "got {msg:?}"
