@@ -272,8 +272,9 @@ impl RelayInfo {
             "buzz-unlisted-channels".to_string(),
             // kind:9050 edits an existing Solo member's access.
             "buzz-solo-member-role".to_string(),
-            // NIP-11 `landing_channel`, kind:9002 `landing`/`welcome` and the
-            // landing kind:39000 tags (NOSTR.md, Landing channel).
+            // NIP-11 `landing_channel`, kind:9002 `landing`/`welcome`/
+            // `welcome_title` and the landing kind:39000 tags (NOSTR.md,
+            // Landing channel).
             "buzz-landing-channel".to_string(),
         ];
         let gif = gif_provider.map(|provider| {

@@ -1036,7 +1036,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 107);
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -1153,6 +1153,14 @@ mod postgres_tests {
         let desired = crate::test_support::desired_state_schema_sql();
         assert!(desired.contains("landing_channel_id UUID,"));
         assert!(desired.contains("welcome_message TEXT,"));
+        // Welcome title (0107): one more nullable community column, the
+        // same shape.
+        assert_eq!(migrations[106].version, 107);
+        let welcome_title = strip_sql_comments(migrations[106].sql.as_str());
+        assert!(welcome_title.contains("SET LOCAL lock_timeout = '5s';"));
+        assert!(welcome_title.contains("ADD COLUMN welcome_title TEXT;"));
+        assert!(!welcome_title.contains("UPDATE"));
+        assert!(desired.contains("welcome_title TEXT,"));
         assert!(migrations[70]
             .sql
             .as_str()
