@@ -206,23 +206,6 @@ class _AgentsNavigation extends HookConsumerWidget {
                   builder: (_) => UserProfileSheet(
                     pubkey: pubkey,
                     agentPresentation: true,
-                    agentSubtitleIcon:
-                        controller.agents.any(
-                          (agent) => agent['agent_pubkey'] == pubkey,
-                        )
-                        ? const Icon(BuzzIcons.cloud, size: 16)
-                        : null,
-                    agentSubtitle:
-                        controller.agents.any(
-                          (agent) => agent['agent_pubkey'] == pubkey,
-                        )
-                        ? 'Remote agent'
-                        : agentLocationUnconfirmed(
-                            ref.read(activeCommunityProvider).asData?.value,
-                            controller,
-                          )
-                        ? null
-                        : 'On another device',
                     primaryActionsSpacing: Grid.md,
                     contextualActions: (_) =>
                         BestieAgentAction(pubkey: pubkey, compact: true),
