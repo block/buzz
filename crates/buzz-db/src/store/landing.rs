@@ -563,10 +563,10 @@ mod tests {
             ("Hi all!\nIntroduce yourself here.", None),
             (" padded ", None),
             (&at_limit, None),
-            // Markdown source: headings, links, nostr: references and
+            // Markdown source: headings, `buzz://` and `nostr:npub` links and
             // tab-indented code are all just text to the relay.
             (
-                "# Welcome\n\nSee [#rules](nostr:naddr1abc) and nostr:npub1xyz.\n\n\tcode",
+                "# Welcome\n\nSee [#rules](buzz://channel/abc) and nostr:npub1xyz.\n\n\tcode",
                 None,
             ),
             ("tab\there", None),

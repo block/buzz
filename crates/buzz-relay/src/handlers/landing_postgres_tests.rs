@@ -206,9 +206,9 @@ async fn landing_designation_is_projected_advertised_and_protected() {
     let b = create_channel(&state, &tenant, &owner, &[]).await;
     let id = |channel: Uuid| Some(channel.hyphenated().to_string());
 
-    // Markdown source with a `nostr:` link and tab indentation, stored
-    // and projected byte for byte.
-    let markdown = "# Hi all!\n\nSay hello in [#intros](nostr:naddr1x).\n\n\tindented";
+    // Markdown source with a `buzz://` channel link and tab indentation,
+    // stored and projected byte for byte.
+    let markdown = "# Hi all!\n\nSay hello in [#intros](buzz://channel/x).\n\n\tindented";
     edit_channel(
         &state,
         &tenant,

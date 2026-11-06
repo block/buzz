@@ -67,7 +67,7 @@ Example kind:39000 (signing fields and unrelated tags omitted):
 | `created_at` | 39000 | Time the channel was created, in unix seconds, as a decimal string. |
 | `auto_join` | 39000 | Present (bare, no value) while the relay joins new community members into this channel: the channel's `auto_join` setting is on and it is open and unarchived. |
 | `landing` | 39000 | Present (bare, no value) on the community's landing channel. A projection of the NIP-11 `landing_channel` designation (extension `buzz-landing-channel`), which is authoritative. |
-| `welcome` | 39000 | The community's custom welcome message, on the landing channel only. Markdown source, stored as sent; the client renders it and its `nostr:` links. Absent while the client default applies. |
+| `welcome` | 39000 | The community's custom welcome message, on the landing channel only. Markdown source, stored as sent; the client renders it and may resolve its `buzz://` channel and message links and `nostr:npub` identity links. Absent while the client default applies. |
 | `welcome_title` | 39000 | The custom title of the welcome message, on the landing channel only. One line of plain text. Absent while the client default applies. |
 
 **Channel type.** Clients MUST read the channel type from the first `t` tag.
