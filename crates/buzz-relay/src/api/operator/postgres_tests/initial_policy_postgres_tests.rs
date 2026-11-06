@@ -34,7 +34,7 @@ mod postgres_tests {
                 .unwrap();
         let owners: Vec<_> = (0..4).map(|_| Keys::generate()).collect();
         let owner = &owners[3];
-        assert!(!state.config.nip_fi_upgrades_enabled);
+        assert!(!state.config.nip_fi_changes);
         for (index, policy) in [
             None,
             Some(Value::Null),

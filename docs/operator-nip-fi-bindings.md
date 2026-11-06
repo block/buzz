@@ -87,7 +87,7 @@ an operator disable or a change in issuer configuration. A different owner
 retains the existing conflict. Legacy ensure and deployment bootstrap remain
 optional and do not accept an explicit initial policy.
 
-This policy is independent of `BUZZ_NIP_FI_UPGRADES_ENABLED`. Mode `off` stores
+This policy is independent of `BUZZ_NIP_FI_CHANGES`. Mode `off` stores
 it but bypasses enforcement. The production creation paths are operator
 create-only, legacy operator ensure, and deployment bootstrap; only create-only
 accepts this choice.
