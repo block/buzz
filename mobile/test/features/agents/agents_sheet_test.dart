@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
+import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
+import 'package:buzz/shared/widgets/agent_artwork_panel.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -10,6 +12,7 @@ import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/agents/agent_card.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -19,6 +22,126 @@ import '../../helpers/remote_agents_fixture.dart';
 
 void main() {
   final existing = existingDesktopKeys.public;
+
+  testWidgets(
+    'Duo keeps agent directory beside profile and Back clears detail',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(951, 669);
+      tester.view.padding = const FakeViewPadding(right: 76, bottom: 21);
+      tester.view.viewPadding = const FakeViewPadding(right: 76, bottom: 21);
+      addTearDown(tester.view.reset);
+      try {
+        final h = await AgentsHarness.create();
+        await h.open(tester, directory: [existing]);
+        expect(find.text('Select an agent'), findsOneWidget);
+        await tester.tap(find.byKey(ValueKey(existing)));
+        await tester.pumpAndSettle();
+        expect(find.byType(BottomSheet), findsNothing);
+        final profile = find.byType(UserProfileSheet);
+        expect(profile, findsOneWidget);
+        expect(find.byType(AgentCard).hitTestable(), findsOneWidget);
+        expect(tester.getRect(profile).left, closeTo(376, .01));
+        expect(tester.getRect(profile).right, 951);
+        final artwork = find.descendant(
+          of: profile,
+          matching: find.byType(AgentArtworkPanel),
+        );
+        expect(tester.getRect(artwork).right, 951);
+        for (final card
+            in find
+                .descendant(of: profile, matching: find.byType(AppListCard))
+                .evaluate()) {
+          expect(
+            tester.getRect(find.byWidget(card.widget)).right,
+            lessThanOrEqualTo(875),
+          );
+        }
+        expect(
+          tester
+              .getSize(
+                find
+                    .descendant(
+                      of: profile,
+                      matching: find.byType(SingleChildScrollView),
+                    )
+                    .first,
+              )
+              .height,
+          greaterThan(500),
+        );
+        expect(find.byKey(const ValueKey('duo-toolbar-Back')), findsOneWidget);
+        final profileElement = tester.element(profile);
+        tester.view.physicalSize = const Size(669, 951);
+        tester.view.padding = const FakeViewPadding(top: 82, bottom: 34);
+        tester.view.viewPadding = const FakeViewPadding(top: 82, bottom: 34);
+        await tester.pumpAndSettle();
+        expect(profile, findsOneWidget);
+        expect(tester.element(profile), same(profileElement));
+        expect(find.byType(AgentCard).hitTestable(), findsNothing);
+        tester.view.physicalSize = const Size(951, 669);
+        tester.view.padding = const FakeViewPadding(right: 76, bottom: 21);
+        tester.view.viewPadding = const FakeViewPadding(right: 76, bottom: 21);
+        await tester.pumpAndSettle();
+        expect(tester.element(profile), same(profileElement));
+        expect(find.byType(AgentCard).hitTestable(), findsOneWidget);
+
+        tester.view.padding = const FakeViewPadding(left: 76, bottom: 21);
+        tester.view.viewPadding = const FakeViewPadding(left: 76, bottom: 21);
+        await tester.pumpAndSettle();
+        expect(tester.getRect(profile).left, closeTo(452, .01));
+        expect(tester.getRect(artwork).right, 951);
+        expect(tester.element(profile), same(profileElement));
+
+        Navigator.of(tester.element(profile)).pop();
+        await tester.pumpAndSettle();
+        expect(profile, findsNothing);
+        expect(find.text('Select an agent'), findsOneWidget);
+        expect(find.byType(AgentCard).hitTestable(), findsOneWidget);
+        tester.view.physicalSize = const Size(466, 678);
+        tester.view.padding = const FakeViewPadding(right: 76, bottom: 21);
+        tester.view.viewPadding = const FakeViewPadding(right: 76, bottom: 21);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(ValueKey(existing)));
+        await tester.pumpAndSettle();
+        expect(find.byType(BottomSheet), findsOneWidget);
+        final sheetArtwork = find.descendant(
+          of: find.byType(UserProfileSheet),
+          matching: find.byType(AgentArtworkPanel),
+        );
+        expect(tester.getRect(sheetArtwork).left, 0);
+        expect(tester.getRect(sheetArtwork).right, 466);
+        expect(
+          find.byKey(const ValueKey('duo-toolbar-Close agents')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('duo-toolbar-Close sheet')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('buzz-sheet-ios-glass-close')),
+          findsNothing,
+        );
+        final sheetPortal = tester
+            .widgetList<DuoToolbarPortal>(find.byType(DuoToolbarPortal))
+            .singleWhere(
+              (portal) => portal.actions.any((a) => a.label == 'Close sheet'),
+            );
+        sheetPortal.actions.single.onPressed!();
+        await tester.pumpAndSettle();
+        expect(find.byType(UserProfileSheet), findsNothing);
+        expect(
+          find.byKey(const ValueKey('duo-toolbar-Close agents')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 
   testWidgets('agent profile sheet closes back to the full-page directory', (
     tester,

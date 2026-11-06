@@ -278,6 +278,44 @@ void main() {
       'docks welcome actions and keeps pairing reachable with keyboard',
       (tester) async {
         tester.view.devicePixelRatio = 1;
+        // Folded and unfolded welcome screens keep all actions visible,
+        // centred on the display even with Duo's asymmetric system rail.
+        for (final size in [const Size(951, 669), const Size(390, 844)]) {
+          tester.view.physicalSize = size;
+          tester.view.padding = size.width > 600
+              ? const FakeViewPadding(right: 84)
+              : const FakeViewPadding(top: 59, bottom: 34);
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              child: const PairingPage(
+                connectionLanding: true,
+                showConnectionOptions: false,
+              ),
+              disableAnimations: true,
+            ),
+          );
+          await tester.pump();
+          final logo = find.byKey(const Key('pairing-buzz-wordmark'));
+          final scan = find.widgetWithText(FilledButton, 'Scan a QR code');
+          expect(tester.getCenter(logo).dx, closeTo(size.width / 2, 1));
+          expect(tester.getCenter(scan).dx, closeTo(size.width / 2, 1));
+          expect(scan.hitTestable(), findsOneWidget);
+          final email = find.text('or sign in with email');
+          if (email.evaluate().isNotEmpty) {
+            expect(email.hitTestable(), findsOneWidget);
+            expect(tester.getBottomLeft(email).dy, lessThan(size.height));
+          }
+          final scroll = tester.state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(CustomScrollView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          );
+          expect(scroll.position.maxScrollExtent, 0);
+          expect(tester.takeException(), isNull);
+        }
         tester.view.physicalSize = const Size(390, 844);
         tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
         addTearDown(tester.view.reset);

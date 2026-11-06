@@ -971,6 +971,7 @@ class ComposeBar extends HookConsumerWidget {
         iosAttachmentPopover
             .present(
               sourceContext: triggerContext,
+              composerContext: sendSurfaceKey.currentContext ?? context,
               onCapture: (image) => retainAndQueueImages([image]),
               onChoosePhotos: retainAndQueueImages,
               onAllPhotos: () => chooseAttachment(() async {

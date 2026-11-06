@@ -165,7 +165,10 @@ class PairingPage extends HookConsumerWidget {
 
     Future<void> openScanner() async {
       unawaited(HapticFeedback.selectionClick());
-      final usesDynamicIslandPortal = await usesDynamicIslandQrScannerPortal();
+      final cameraFrame = await resolveDuoQrScannerCameraFrame(context);
+      if (!context.mounted) return;
+      final usesDynamicIslandPortal =
+          cameraFrame != null || await usesDynamicIslandQrScannerPortal();
       if (!context.mounted) {
         return;
       }
@@ -179,6 +182,7 @@ class PairingPage extends HookConsumerWidget {
       try {
         code = await showDynamicIslandPairingQrScanner(
           context,
+          cameraFrame: cameraFrame,
           onProgress: (value) {
             if (context.mounted) islandScannerProgress.value = value;
           },
@@ -365,6 +369,14 @@ class PairingPage extends HookConsumerWidget {
                 backgroundColor: Colors.transparent,
                 appBar: pairingAppBar,
                 body: SafeArea(
+                  minimum: websiteWelcome
+                      ? EdgeInsets.symmetric(
+                          horizontal: math.max(
+                            MediaQuery.paddingOf(context).left,
+                            MediaQuery.paddingOf(context).right,
+                          ),
+                        )
+                      : EdgeInsets.zero,
                   child: ValueListenableBuilder<double>(
                     valueListenable: islandScannerProgress,
                     builder: (context, progress, child) => ExcludeFocus(

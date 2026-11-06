@@ -1,5 +1,6 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/me/me_sync.dart';
@@ -13,6 +14,8 @@ import 'dart:math' show max, min;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
@@ -42,6 +45,7 @@ import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/ios_message_create_button.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -174,6 +178,12 @@ class ChannelsPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
+    final nativeDuoTitle =
+        messagesFilters != null &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        (DuoToolbarScope.maybeOf(context)?.strip ??
+                FoldGeometry.of(context).strip) !=
+            null;
     final filterContentHeight = messagesFilters == null
         ? 0.0
         : max(48.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16) +
@@ -201,7 +211,9 @@ class ChannelsPage extends HookConsumerWidget {
       () {
         void updateHeaderTreatment() {
           final collapse =
-              messagesFilters == null || !channelsScrollController.hasClients
+              messagesFilters == null ||
+                  nativeDuoTitle ||
+                  !channelsScrollController.hasClients
               ? 0.0
               : channelsScrollController.offset
                     .clamp(0.0, filterContentHeight)
@@ -221,7 +233,12 @@ class ChannelsPage extends HookConsumerWidget {
         return () =>
             channelsScrollController.removeListener(updateHeaderTreatment);
       },
-      [channelsScrollController, messagesFilters != null, filterContentHeight],
+      [
+        channelsScrollController,
+        messagesFilters != null,
+        filterContentHeight,
+        nativeDuoTitle,
+      ],
     );
     useEffect(() {
       final tabReselection = this.tabReselection;
@@ -273,6 +290,17 @@ class ChannelsPage extends HookConsumerWidget {
         .toList();
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
+      final pane = ConversationPaneScope.maybeOf(context);
+      if (pane != null) {
+        pane.open(
+          channel.id,
+          (_) => ChannelDetailPage(
+            channel: channel,
+            placement: ChannelRoutePlacement.ordinary,
+          ),
+        );
+        return;
+      }
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
@@ -468,16 +496,24 @@ class ChannelsPage extends HookConsumerWidget {
       final role = ref.read(currentCommunityRoleProvider).unwrapPrevious();
       final canInvite = role.hasError || canManageCommunityInvites(role.value);
       unawaited(HapticFeedback.selectionClick());
+      Widget menu(BuildContext _) => _CommunityMenuSheet(
+        canInvite: canInvite,
+        onSwitchCommunity: openCommunityGrid,
+        invitePageBuilder: communityInvitePageBuilder,
+        appearancePageBuilder: communityAppearancePageBuilder,
+      );
+      final window = MediaQueryData.fromView(View.of(context));
+      final bounded =
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          window.size.shortestSide >= 600;
       showBuzzModalBottomSheet<void>(
         context: context,
+        useRootNavigator: true,
+        useDuoFullWidth: !bounded,
+        constraints: bounded ? const BoxConstraints(maxWidth: 480) : null,
         showCloseButton: false,
         showDragHandle: true,
-        builder: (_) => _CommunityMenuSheet(
-          canInvite: canInvite,
-          onSwitchCommunity: openCommunityGrid,
-          invitePageBuilder: communityInvitePageBuilder,
-          appearancePageBuilder: communityAppearancePageBuilder,
-        ),
+        builder: menu,
       );
     }
 
@@ -600,7 +636,7 @@ class ChannelsPage extends HookConsumerWidget {
       appBar: FrostedAppBar(
         key: headerKey,
         onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
-        nativeTitle: '',
+        nativeTitle: nativeDuoTitle ? 'Messages' : '',
         useNativeNavigation: messagesFilters == null,
         nativeLeading: messagesFilters != null
             ? null

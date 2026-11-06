@@ -59,6 +59,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -144,6 +145,7 @@ void main() {
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('an out-of-range identity shows as unavailable', (tester) async {
+    _usePhoneViewport(tester);
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
@@ -189,6 +191,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -226,6 +229,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -262,6 +266,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -304,6 +309,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -347,6 +353,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -425,5 +432,13 @@ class _PairingNotifier extends PairingNotifier {
   @override
   void reset() {
     resetCalls++;
+  }
+}
+
+void _usePhoneViewport(WidgetTester tester) {
+  if (tester.view.physicalSize.width / tester.view.devicePixelRatio >= 640) {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 1200);
+    addTearDown(tester.view.reset);
   }
 }

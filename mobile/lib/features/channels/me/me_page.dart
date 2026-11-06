@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -169,17 +170,31 @@ class MePage extends HookConsumerWidget {
                     a.lastMessageAt ?? a.createdAt,
                   ),
                 );
-          Widget row(Channel channel) => _MeChatRow(
-            channelId: channel.id,
-            name: channel.name,
-            isUnread: unreadIds.contains(channel.id),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) =>
-                    ChannelDetailPage(channel: channel, personalChat: true),
+          Widget row(Channel channel) {
+            final pane = ConversationPaneScope.maybeOf(context);
+            final selected = pane?.selectedId == channel.id;
+            return DecoratedBox(
+              decoration: BoxDecoration(
+                color: selected ? context.colors.primaryContainer : null,
+                borderRadius: BorderRadius.circular(Radii.md),
               ),
-            ),
-          );
+              child: Semantics(
+                selected: selected,
+                child: _MeChatRow(
+                  channelId: channel.id,
+                  name: channel.name,
+                  isUnread: unreadIds.contains(channel.id),
+                  onTap: () => openConversationPane(
+                    context,
+                    channel.id,
+                    (_) =>
+                        ChannelDetailPage(channel: channel, personalChat: true),
+                  ),
+                ),
+              ),
+            );
+          }
+
           final inventorySlivers = <Widget>[
             SliverPadding(
               padding: EdgeInsets.fromLTRB(
