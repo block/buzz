@@ -100,6 +100,7 @@ pub(super) fn preset_catalog_entry(
         // unavailable entries (command: null in JSON, None here) still carry
         // the cap — the harness cap is command-keyed, not availability-gated.
         max_parallelism: crate::managed_agents::harness_max_parallelism(def.command),
+        capabilities: Default::default(),
     }
 }
 
