@@ -215,7 +215,9 @@ pub(super) async fn run(
                 .unwrap();
             let result = post(state, tenant, keys, report).await;
             if shared || keys.public_key() == owner.public_key() {
-                assert!(result.is_ok(), "readable persona blob report");
+                if let Err(error) = result {
+                    panic!("readable persona blob report shared={shared}: {error:?}");
+                }
             } else {
                 assert!(
                     matches!(result,Err(crate::handlers::ingest::IngestError::Rejected(message)) if message.contains("report target blob not found"))
