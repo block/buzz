@@ -830,3 +830,39 @@ async fn an_agent_joining_a_one_person_dm_moves_its_identity() {
         dm
     );
 }
+
+/// A DM of one person and their agents never gains a person in place, even
+/// with the history tag: adding one starts a DM of everyone, and adding them
+/// again opens that DM. The original keeps its members and its identity.
+/// Mutation: let the tag grow it in place → the original gains B → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_person_added_to_an_agent_only_dm_starts_a_new_one() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agent-only-person").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&agent]).await.expect("open");
+
+    let (target, created) = add(&state, &tenant, &a, dm, &[&b], true)
+        .await
+        .expect("add person");
+
+    assert!(created);
+    assert_ne!(target, dm);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &agent]));
+    assert_eq!(
+        members(&state, &tenant, target).await,
+        set_of(&[&a, &b, &agent])
+    );
+    assert_eq!(
+        add(&state, &tenant, &a, dm, &[&b], true)
+            .await
+            .expect("add again"),
+        (target, false)
+    );
+    assert_eq!(
+        open(&state, &tenant, &a, &[&agent]).await.expect("reopen"),
+        dm
+    );
+}
