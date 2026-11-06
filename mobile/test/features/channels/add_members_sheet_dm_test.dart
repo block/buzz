@@ -13,6 +13,9 @@ const _dmId = 'dm-1';
 final _agent = 'f' * 64;
 final _person = 'e' * 64;
 
+/// The viewer and one other person.
+const _twoPeople = {'self', 'other'};
+
 Channel _dm(String id) => Channel(
   id: id,
   name: id,
@@ -46,8 +49,9 @@ class _DmAdds extends Fake implements ChannelActions {
 Future<List<Channel>> _add(
   WidgetTester tester,
   _DmAdds actions,
-  String name,
-) async {
+  String name, {
+  Set<String> existing = _twoPeople,
+}) async {
   final movedTo = <Channel>[];
   await tester.pumpWidget(
     ProviderScope(
@@ -66,7 +70,7 @@ Future<List<Channel>> _add(
         home: Scaffold(
           body: AddChannelMembersSheet(
             channelId: _dmId,
-            existingPubkeys: const {},
+            existingPubkeys: existing,
             isDm: true,
             onMovedTo: movedTo.add,
           ),
@@ -127,6 +131,18 @@ void main() {
     await tester.tap(find.text('Start new DM'));
     await tester.pumpAndSettle();
 
+    expect(actions.calls.single.includeHistory, isFalse);
+    expect(movedTo.single.id, 'dm-2');
+  });
+
+  testWidgets('a person added to a DM of one person starts a new DM', (
+    tester,
+  ) async {
+    final actions = _DmAdds('dm-2');
+    final movedTo = await _add(tester, actions, 'Robin', existing: {'self'});
+
+    expect(find.text('Include history'), findsNothing);
+    expect(actions.calls.single.pubkeys, [_person]);
     expect(actions.calls.single.includeHistory, isFalse);
     expect(movedTo.single.id, 'dm-2');
   });
