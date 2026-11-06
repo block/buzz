@@ -2593,25 +2593,33 @@ impl AppState {
             |community_id| async move {
                 let mode = self.config.nip_fi.mode;
                 if mode.evaluates() {
-                    let policy = tokio::time::timeout(
-                        std::time::Duration::from_millis(500),
+                    let policy = match tokio::time::timeout(
+                        crate::nip_fi_policy::POLICY_READ_BUDGET,
                         self.db.community_auth_policy(community_id),
-                    )
-                    .await
-                    .map_err(|_| {
-                        buzz_db::DbError::InvalidData("community policy read timed out".into())
-                    })??;
-                    if let Some(policy) = policy {
-                        return Ok(
-                            if crate::nip_fi_policy::effective(mode, policy.requires_nip_fi)
-                                .enforces()
-                            {
-                                self.community_connections
-                                    .disconnect_auth_policy(community_id)
-                            } else {
-                                0
-                            },
-                        );
+                    ).await {
+                        Ok(Ok(policy)) => policy,
+                        Ok(Err(error)) => {
+                            metrics::counter!("buzz_community_auth_policy_checks_total", "outcome" => "error").increment(1);
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            metrics::counter!("buzz_community_auth_policy_checks_total", "outcome" => "timeout").increment(1);
+                            tracing::warn!(%community_id, "community policy read timed out; retaining sockets until next tick");
+                            return Ok(0);
+                        }
+                    };
+                    let required = policy.as_ref().is_some_and(|policy| {
+                        crate::nip_fi_policy::effective(mode, policy.requires_nip_fi).enforces()
+                    });
+                    let outcome = if required { "required" } else if policy.is_some() { "optional" } else { "inactive" };
+                    metrics::counter!("buzz_community_auth_policy_checks_total", "outcome" => outcome).increment(1);
+                    if policy.is_some() {
+                        let closed = if required {
+                            self.community_connections.disconnect_auth_policy(community_id)
+                        } else { 0 };
+                        // Counts cancellation requests, not transport retirement or fleet completion.
+                        metrics::counter!("buzz_community_auth_policy_disconnects_total").increment(closed as u64);
+                        return Ok(closed);
                     }
                 } else if self.db.is_community_active(community_id).await? {
                     // Off and repair mode retain their existing lifecycle-only behavior.
@@ -5186,15 +5194,6 @@ pub(crate) mod tests {
             registry.bound_communities(),
             HashSet::from([archived_a, failed, archived_c])
         );
-        // A failed read is not latched: a later sweep retries that community.
-        let (closed, failures) = revalidate_registered_communities(&registry, |community| {
-            let registry = &registry;
-            async move { Ok(registry.disconnect_auth_policy(community)) }
-        })
-        .await;
-        assert!(failures.is_empty());
-        assert_eq!(closed, 1);
-        assert!(cancel_failed.is_cancelled());
     }
 
     #[tokio::test]

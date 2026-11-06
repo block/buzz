@@ -2793,6 +2793,9 @@ mod tests {
     }
 
     // ── F6: document fallback (postgres-only) ───────────────────────────────────
+    #[path = "policy_sweep_postgres_tests.rs"]
+    mod policy_sweep;
+
     //
     // A no-`Accept` plain GET / to a successfully mapped host must bypass the
     // NIP-FI gate, pass `bind_community`, and reach the NIP-11 document fallback
@@ -2802,9 +2805,6 @@ mod tests {
     // A lazy-pool state cannot seed the community — this test belongs in the
     // isolated postgres lane so it has a real DB. It is gated `#[ignore]` so it
     // does not run in the unit-test lane where no DB is available.
-    #[path = "policy_sweep_postgres_tests.rs"]
-    mod policy_sweep;
-
     mod postgres_tests {
         use super::*;
         use std::sync::Arc;
