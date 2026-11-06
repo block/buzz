@@ -1035,28 +1035,34 @@ hold_secs = 1
         );
     }
 
-    /// Seeds [`PRIVATE`] against a relay that answers each event's first
-    /// `throttles` submissions with the relay's HTTP 429. Returns the outcome
-    /// and how many times each write was submitted.
-    async fn seed_throttled(throttles: usize) -> (anyhow::Result<()>, HashMap<String, usize>) {
-        let tries: Arc<std::sync::Mutex<HashMap<String, usize>>> = Default::default();
+    /// When each write was submitted, keyed by what it says: a kind:9000 is
+    /// re-signed on each try, so its id changes.
+    type Tries = HashMap<String, Vec<Instant>>;
+
+    /// Seeds `scenario` against a relay that answers each write's first
+    /// `throttles` submissions with the relay's HTTP 429, naming a
+    /// `retry_secs` window. Returns the outcome and every write's submissions.
+    async fn seed_throttled(
+        scenario: &str,
+        throttles: usize,
+        retry_secs: u64,
+    ) -> (anyhow::Result<()>, Tries) {
+        let tries: Arc<std::sync::Mutex<Tries>> = Default::default();
         let seen = tries.clone();
         let addr = fake_http(move |_, _, body| {
             let event: Event = serde_json::from_slice(body).unwrap();
-            let mut seen = seen.lock().unwrap();
-            // A kind:9000 is re-signed on each try, so key writes by what they
-            // say rather than their id.
             let write = format!("{} {} {:?}", event.pubkey, event.content, event.tags);
-            let n = seen.entry(write).or_default();
-            *n += 1;
-            if *n <= throttles {
-                let error = "rate-limited: quota exceeded; retry in 0s";
+            let mut seen = seen.lock().unwrap();
+            let at = seen.entry(write).or_default();
+            at.push(Instant::now());
+            if at.len() <= throttles {
+                let error = format!("rate-limited: quota exceeded; retry in {retry_secs}s");
                 return (429, json!({ "error": error }).to_string());
             }
             (200, json!({"accepted": true, "message": ""}).to_string())
         })
         .await;
-        let scenario = Scenario::parse(&PRIVATE.replace("{addr}", &addr)).unwrap();
+        let scenario = Scenario::parse(&scenario.replace("{addr}", &addr)).unwrap();
         let net = Net::new(&scenario).await.unwrap();
         let outcome = seed(&scenario, &net, &Arc::new(Stats::default())).await;
         let tries = tries.lock().unwrap().clone();
@@ -1065,17 +1071,44 @@ hold_secs = 1
 
     #[tokio::test]
     async fn throttled_writes_wait_out_the_quota_and_a_lasting_quota_fails_the_seed() {
-        let (outcome, tries) = seed_throttled(2).await;
+        let (outcome, tries) = seed_throttled(PRIVATE, 2, 0).await;
         outcome.expect("throttled writes are retried");
-        assert!(tries.values().all(|n| *n == 3), "{tries:?}");
+        assert!(tries.values().all(|at| at.len() == 3), "{tries:?}");
 
-        let (outcome, tries) = seed_throttled(usize::MAX).await;
+        let (outcome, tries) = seed_throttled(PRIVATE, usize::MAX, 0).await;
         let err = outcome.expect_err("a quota that never clears fails the seed");
         assert!(err.to_string().contains("quota exceeded"), "{err}");
-        assert!(
-            tries.values().all(|n| *n == MAX_THROTTLED_RETRIES + 1),
-            "{tries:?}"
-        );
+        let most = MAX_THROTTLED_RETRIES + 1;
+        assert!(tries.values().all(|at| at.len() == most), "{tries:?}");
+
+        // A retry waits out the window the relay names; one channel and one
+        // post keep the wait short.
+        let one = r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+history_messages_per_channel = 1
+[population]
+humans = 1
+agents = 0
+channels_per_member = 1
+[[ramp]]
+users = 1.0
+hold_secs = 1
+"#;
+        let (outcome, tries) = seed_throttled(one, 1, 1).await;
+        outcome.expect("throttled writes are retried");
+        assert_eq!(tries.len(), 2, "{tries:?}");
+        for at in tries.values() {
+            let [first, retry] = at[..] else {
+                panic!("{at:?}");
+            };
+            assert!(retry - first >= Duration::from_secs(1), "{at:?}");
+        }
     }
 
     #[test]
