@@ -182,8 +182,16 @@ class ActivityPage extends HookConsumerWidget {
                 (filter.value != InboxFilter.thread || isThreadReply(e.tags)) &&
                 includesSender(e),
           ),
-      isDmChannel: (id) => channelById[id]?.isDm ?? false,
+      isDmChannel: (id) =>
+          (channelById[id]?.isDm ?? false) ||
+          ref.read(channelsProvider.notifier).hiddenDmIds.contains(id),
     );
+    // A filtered DM row holds only part of its conversation, so the DM
+    // channel marker would also read events this view hides.
+    final rowsArePartial =
+        filter.value == InboxFilter.thread ||
+        filter.value == InboxFilter.mention ||
+        sender.value != 'Anyone';
     final visibleItems = [
       for (final item in candidates)
         if (matchesInboxFilter(item, filter.value) &&
@@ -191,8 +199,12 @@ class ActivityPage extends HookConsumerWidget {
           item,
     ];
 
-    // Preload sender profiles for visible rows.
+    // Preload sender profiles for visible rows, and for every author while a
+    // sender filter needs their agent ownership.
     final preloadPubkeys = {
+      if (sender.value != 'Anyone')
+        for (final item in allItems)
+          for (final e in item.groupItems) e.pubkey.toLowerCase(),
       for (final item in visibleItems) item.item.pubkey.toLowerCase(),
       for (final item in visibleItems)
         ...mentionedPubkeysFromTags(item.item.tags),
@@ -208,11 +220,16 @@ class ActivityPage extends HookConsumerWidget {
       ref
           .read(inboxLocalStateProvider.notifier)
           .clearUnread(groupedInboxItemIds(item));
+      final isDmRow = item.conversationId.startsWith('dm:');
+      if (isDmRow && rowsArePartial) {
+        for (final e in {item.item, ...item.groupItems}) {
+          notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+        }
+        return;
+      }
       // A DM row can group replies under several thread roots; its channel
       // marker reads all of them.
-      final threadRootId = item.conversationId.startsWith('dm:')
-          ? null
-          : item.threadRootId;
+      final threadRootId = isDmRow ? null : item.threadRootId;
       if (threadRootId != null) {
         notifier.markContextRead(
           threadContextKey(threadRootId),

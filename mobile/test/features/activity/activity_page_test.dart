@@ -136,6 +136,7 @@ void main() {
     List<Reminder> reminders = const [],
     Set<String> knownAgentPubkeys = const {},
     List<Override> overrides = const [],
+    UserCacheNotifier Function()? userCache,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -149,7 +150,7 @@ void main() {
           () => _FakeChannelsNotifier(channels ?? testChannels),
         ),
         userCacheProvider.overrideWith(
-          () => _FakeUserCacheNotifier(users ?? testUsers),
+          userCache ?? () => _FakeUserCacheNotifier(users ?? testUsers),
         ),
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
         readStateProvider.overrideWith(
@@ -813,6 +814,115 @@ void main() {
     expect(find.textContaining('later top level'), findsNothing);
   });
 
+  testWidgets(
+    'reading a DM reply under Threads leaves other DM messages unread',
+    (tester) async {
+      final dmChannel = Channel(
+        id: 'dm1',
+        name: 'dm',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'x',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+        participants: const ['Alice'],
+      );
+      FeedItem dmEvent(String id, int age, List<List<String>> tags) => FeedItem(
+        id: id,
+        kind: 9,
+        pubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+        content: 'dm body $id',
+        createdAt: now - age,
+        channelId: 'dm1',
+        channelName: '',
+        tags: tags,
+        category: 'activity',
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          feed: HomeFeedResponse(
+            mentions: const [],
+            needsAction: const [],
+            activity: [
+              dmEvent('dm-top', 300, const []),
+              dmEvent('dm-reply', 200, const [
+                ['e', threadIdRoot1, '', 'root'],
+                ['e', threadIdRoot1, '', 'reply'],
+              ]),
+            ],
+            agentActivity: const [],
+          ),
+          channels: [...testChannels, dmChannel],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _chooseActivityType(tester, 'Threads');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-dm-reply')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('inbox-unread-dot-dm-reply')),
+        findsNothing,
+      );
+
+      await _chooseActivityType(tester, 'All');
+      expect(
+        find.byKey(const ValueKey('inbox-unread-dot-dm-reply')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('sender filter preloads authors hidden under newer rows', (
+    tester,
+  ) async {
+    final cache = _RecordingUserCacheNotifier(testUsers);
+    FeedItem threadEvent(String id, String pubkey, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey: pubkey,
+      content: 'body $id',
+      createdAt: now - age,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [
+        ['e', threadIdRoot1, '', 'root'],
+        ['e', threadIdRoot1, '', 'reply'],
+      ],
+      category: 'mention',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: [
+            threadEvent('g1', 'owned_agent_pk', 300),
+            threadEvent('p1', 'bob_pk', 200),
+          ],
+          needsAction: const [],
+          activity: const [],
+          agentActivity: const [],
+        ),
+        userCache: () => cache,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(cache.preloaded, isNot(contains('owned_agent_pk')));
+
+    await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agents').last);
+    await tester.pumpAndSettle();
+
+    expect(cache.preloaded, contains('owned_agent_pk'));
+  });
+
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
@@ -1180,6 +1290,17 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   Map<String, UserProfile> build() => _users;
+}
+
+class _RecordingUserCacheNotifier extends _FakeUserCacheNotifier {
+  _RecordingUserCacheNotifier(super._users);
+  final preloaded = <String>{};
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async {
+    preloaded.addAll(pubkeys);
+    return true;
+  }
 }
 
 class _FakeReadStateNotifier extends ReadStateNotifier {
