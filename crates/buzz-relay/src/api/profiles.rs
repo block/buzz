@@ -114,10 +114,13 @@ async fn search_inner(
     if hits.is_empty() {
         return Ok(Json(Value::Array(Vec::new())));
     }
-    let ids: Vec<&[u8]> = hits.iter().map(|hit| hit.event_id.as_slice()).collect();
+    let hit_keys: Vec<_> = hits
+        .iter()
+        .map(|hit| (hit.event_id, hit.created_at))
+        .collect();
     let stored = state
         .db
-        .get_events_by_ids_routed("profile_search_hydrate", tenant.community(), &ids)
+        .get_events_by_ids_at_routed("profile_search_hydrate", tenant.community(), &hit_keys)
         .await
         .map_err(|e| db_read_error("profile search fetch error", &e).into_response())?;
     let mut by_id: HashMap<[u8; 32], &buzz_core::StoredEvent> = stored

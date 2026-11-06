@@ -24,6 +24,36 @@ class _CachedHostedRelayAuth extends HostedRelayAuth {
   };
 }
 
+/// A hosted relay whose cached assertion has expired: only a fresh request
+/// gets one, and [fail] makes that request fail.
+class _ExpiredHostedRelayAuth extends HostedRelayAuth {
+  _ExpiredHostedRelayAuth({this.fail = false})
+    : super(BuilderlabAccountClient(), enabled: false);
+
+  final bool fail;
+  final requested = <Uri>[];
+
+  @override
+  Map<String, String>? cachedHeaders(RelayConfig config) => null;
+
+  @override
+  Future<Map<String, String>> headersForUrl(RelayConfig config, Uri url) async {
+    requested.add(url);
+    if (fail) throw AccountFailure.unavailable;
+    return {'Nostr-Federated-Identity': 'Bearer fresh-token'};
+  }
+}
+
+ProviderContainer _container(HostedRelayAuth hosted) => ProviderContainer(
+  overrides: [
+    relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+    mediaGetAuthServiceProvider.overrideWithValue(
+      MediaGetAuthService(baseUrl: 'https://relay.example', nsec: _nsec),
+    ),
+    hostedRelayAuthProvider.overrideWithValue(hosted),
+  ],
+);
+
 void main() {
   test('native media headers add the relay assertion only for relay media', () {
     final hosted = _CachedHostedRelayAuth();
@@ -54,5 +84,35 @@ void main() {
     ]) {
       expect(headersFor(other), isNot(contains('Nostr-Federated-Identity')));
     }
+  });
+
+  test('fresh native media headers renew an expired assertion', () async {
+    const url = 'https://relay.example/media/voice.m4a';
+    final hosted = _ExpiredHostedRelayAuth();
+    addTearDown(hosted.dispose);
+    final container = _container(hosted);
+    addTearDown(container.dispose);
+
+    // The synchronous form can only offer what is cached.
+    expect(
+      container.read(nativeMediaHeadersProvider)(url),
+      isNot(contains('Nostr-Federated-Identity')),
+    );
+
+    final headers = await container.read(freshNativeMediaHeadersProvider)(url);
+    expect(headers['Authorization'], startsWith('Nostr '));
+    expect(headers['Nostr-Federated-Identity'], 'Bearer fresh-token');
+    expect(hosted.requested, [Uri.parse(url)]);
+
+    // A failed renewal still sends the media proof, and the relay decides.
+    final failing = _ExpiredHostedRelayAuth(fail: true);
+    addTearDown(failing.dispose);
+    final failingContainer = _container(failing);
+    addTearDown(failingContainer.dispose);
+    final fallback = await failingContainer.read(
+      freshNativeMediaHeadersProvider,
+    )(url);
+    expect(fallback['Authorization'], startsWith('Nostr '));
+    expect(fallback, isNot(contains('Nostr-Federated-Identity')));
   });
 }

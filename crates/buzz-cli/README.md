@@ -32,6 +32,7 @@ export BUZZ_RELAY_URL="https://relay.example.com"
 buzz messages send --channel <uuid> --content "Hello"
 buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
+buzz messages send --channel <uuid> --content "Decision: ship" --from-thread <root-event-id>   # desktop "Send to channel"
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
@@ -39,12 +40,15 @@ buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
+buzz messages report --event <event-id> --reason spam --note "why"   # to moderators only
+buzz messages report --pubkey <pubkey> --reason impersonation
 
 # Diffs
 buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
 
 # Channels
 buzz channels list
+buzz channels unread                      # unread counts from your synced read state (read-only)
 buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
@@ -52,6 +56,10 @@ buzz channels topic --channel <uuid> --topic "New topic"
 # Reactions
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
+
+# Huddles (read-only)
+buzz huddles list --channel <uuid> --active   # huddles with state and start/end times
+buzz huddles participants --channel <uuid> --huddle <huddle-id>
 
 # GIFs (requires relay to advertise buzz-gif / KLIPY)
 buzz gifs search                              # trending GIFs
@@ -71,7 +79,10 @@ buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
 buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
+buzz users set-status --text "lunch" --emoji "🥪" --expires 1h  # clears itself; also a unix time
 buzz users set-status --clear                 # remove your status
+buzz users status                       # your visible status: [{pubkey, text, emoji, expires_at, updated_at}]
+buzz users status --pubkey <hex|npub|name>  # repeatable, max 100; expired or cleared users are omitted
 
 # DMs
 buzz dms open --pubkey <hex>
@@ -124,12 +135,14 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
 | | `delete` | Delete a message |
+| | `report` | Report a message or user to community moderators (NIP-56); reasons: `illegal`, `nudity`, `malware`, `spam`, `impersonation`, `profanity`, `other` |
 | | `get` | List messages in a channel |
 | | `thread` | Get a message thread |
 | | `search` | Full-text search, filterable by author |
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
+| | `unread` | Unread counts per channel (read-only) |
 | | `create` | Create a channel |
 | | `update` | Update channel name/description |
 | | `topic` | Set channel topic |
@@ -147,6 +160,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
+| `huddles` | `list` | List a channel's huddles (read-only) |
+| | `participants` | Show who is in a huddle (read-only) |
 | `gifs` | `search` | Search or browse trending GIFs (requires relay buzz-gif support) |
 | | `share` | Report a selected GIF to the provider's Recents |
 | `dms` | `list` | List DM conversations |
@@ -156,7 +171,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
-| | `set-status` | Set or clear your NIP-38 profile status |
+| | `set-status` | Set or clear your NIP-38 profile status; `--expires` takes a unix time or `30m`/`2h`/`1d`/`1w` |
+| | `status` | Read NIP-38 statuses (default: yours); expired or cleared are omitted |
 | `workflows` | `list` | List workflows |
 | | `get` | Get workflow definition |
 | | `create` | Create a workflow |
@@ -187,6 +203,17 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+## Huddles
+
+`huddles list` and `huddles participants` rebuild huddle state from the relay-signed lifecycle
+events (kinds 48100–48103) with the same rules as the desktop app. They never join, start, or end
+a huddle. Each scans at most 5000 newest events of the channel. If older events may be missing,
+`complete` is `false` and `truncated` is `true`. A huddle with no end event is `active`, then
+`stale` once its start is over an hour old; desktop shows `stale` as ended. The relay's liveness
+snapshots are not served over HTTP, so `liveness_checked` is always `false`.
+Rosters come from the relay's join and leave events only. Desktop's roster view also lists the
+creator from the start event; the CLI lists the creator once the relay records their join.
 
 ## Architecture
 

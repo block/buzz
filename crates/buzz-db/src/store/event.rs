@@ -525,6 +525,7 @@ async fn insert_event_on(
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
+            created_at,
             kind_i32,
             channel_id,
         )
@@ -689,6 +690,7 @@ fn build_query_events_sql(
     // every community row against the id set; the fence keeps it on the GIN
     // tags index.
     let e_tag_fence = q.e_tags.is_some();
+    let per_channel = per_channel_scope(q);
     let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
         // Join against event_mentions for #p-filtered queries (indexed).
         let mut b = QueryBuilder::new(if e_tag_fence {
@@ -710,6 +712,11 @@ fn build_query_events_sql(
         } else {
             ""
         });
+        if let Some(ids) = per_channel {
+            b.push("SELECT e.* FROM (SELECT DISTINCT unnest(")
+                .push_bind(ids.to_vec())
+                .push("::uuid[]) AS ch) c CROSS JOIN LATERAL (");
+        }
         b.push(
             "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
              FROM events WHERE community_id = ",
@@ -722,6 +729,12 @@ fn build_query_events_sql(
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
     push_event_filters(&mut qb, col_prefix, q);
+    // A per-channel read scopes each lateral to one channel of the set.
+    if per_channel.is_some() {
+        qb.push(" AND channel_id = c.ch");
+    } else {
+        push_channel_scope(&mut qb, col_prefix, q);
+    }
     if let Some(bound) = range.predicate(&format!("{col_prefix}created_at")) {
         qb.push(bound);
     }
@@ -734,6 +747,10 @@ fn build_query_events_sql(
     // degrades, add a composite index like `(pubkey, kind, created_at DESC, id ASC)`.
     if e_tag_fence {
         qb.push(") SELECT * FROM m ORDER BY created_at DESC, id ASC LIMIT ");
+    } else if per_channel.is_some() {
+        qb.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+            .push_bind(limit_val)
+            .push(") e ORDER BY e.created_at DESC, e.id ASC LIMIT ");
     } else {
         qb.push(format!(
             " ORDER BY {col_prefix}created_at DESC, {col_prefix}id ASC LIMIT "
@@ -745,8 +762,8 @@ fn build_query_events_sql(
 }
 
 /// AND every [`EventQuery`] predicate except the community, the `deleted_at`
-/// test and the `#p` join, on columns qualified by `col_prefix` (`""` or
-/// `"e."`).
+/// test, the channel scope (`push_channel_scope`) and the `#p` join, on
+/// columns qualified by `col_prefix` (`""` or `"e."`).
 fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
@@ -762,8 +779,6 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
     } else if q.global_only {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
-
-    push_channel_scope(qb, col_prefix, q);
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
@@ -1000,10 +1015,51 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
     }
     qb.push(" AND e.deleted_at IS NULL");
     push_event_filters(&mut qb, "e.", q);
+    push_channel_scope(&mut qb, "e.", q);
     qb.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ");
     qb.push_bind(page_limit(q));
     qb.push(" OFFSET ").push_bind(q.offset.unwrap_or(0));
     qb
+}
+
+/// Most candidate rows a per-channel read ([`per_channel_scope`]) may fetch:
+/// channels in the set × page limit.
+///
+/// A per-channel read fetches up to `n` rows from every channel, where the set
+/// read stops once the page fills. 128 busy channels at `limit 500` fetched
+/// 64,000 rows (114 ms) where the set read fetched 500 (2.3 ms), and the
+/// larger plan cost turned on JIT (about 0.9 s). At 7,500 candidates the
+/// per-channel read was still faster than the set read and stayed under the
+/// JIT threshold. Above the budget the set read runs as before.
+const PER_CHANNEL_CANDIDATE_BUDGET: usize = 8_192;
+
+/// The channels of a read that takes them one at a time: an explicit `#h` set
+/// (no global events), without a `#p` join, e-tag fence or offset, whose
+/// channels × page limit fit [`PER_CHANNEL_CANDIDATE_BUDGET`].
+///
+/// `channel_id = ANY($set) ORDER BY created_at DESC LIMIT n` leaves the
+/// planner to guess how many rows the set matches. With the ids as literals
+/// (the custom plans a prepared statement runs first) it overestimates a quiet
+/// set, walks each partition's pkey backward and tests every community row
+/// until the page fills or the partition ends; the inflated cost adds JIT too.
+/// The cold unread repair (every joined channel, no `since`) is that read.
+/// Reading each channel through `idx_events_community_channel_created` up to
+/// `n` rows, then keeping the newest `n` of those, returns the same page,
+/// since every row of the overall top `n` is in its own channel's top `n`.
+/// At most distinct channels × `n` candidates reach the outer sort, whatever
+/// the statistics say; how many index entries each channel scans for them
+/// still depends on the other predicates.
+fn per_channel_scope(q: &EventQuery) -> Option<&[Uuid]> {
+    let ids = q.channel_ids.as_deref().filter(|ids| !ids.is_empty())?;
+    let eligible = !q.channel_ids_include_global
+        && q.channel_id.is_none()
+        && !q.global_only
+        && q.p_tag_hex.is_none()
+        && q.e_tags.is_none()
+        && q.offset.unwrap_or(0) == 0
+        && usize::try_from(page_limit(q))
+            .is_ok_and(|n| ids.len().saturating_mul(n) <= PER_CHANNEL_CANDIDATE_BUDGET);
+    eligible.then_some(ids)
 }
 
 /// `#p` reads join `event_mentions` by the full event key, including
@@ -1591,344 +1647,11 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     qb
 }
 
-/// SQL predicate over an `events` row for coordinates that carry no
-/// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
-/// deletion is physical, including the mention index, so soft-deleted payloads
-/// never accumulate. This is exactly the classification used by the migration
-/// 0011 / 0019 purge triggers this path replaces.
-macro_rules! retention_free_event_predicate {
-    () => {
-        "((kind = 30078 \
-           AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
-           AND (SELECT count(*) \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
-           AND EXISTS (SELECT 1 \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE jsonb_typeof(tag) = 'array' AND jsonb_array_length(tag) >= 2 \
-                  AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
-           AND (SELECT count(*) \
-                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1) \
-          OR (kind = 30003 \
-              AND d_tag LIKE 'buzz-mesh-member-status:%' \
-              AND tags @> '[[\"k\", \"buzz-mesh-status\"]]'::jsonb))"
-    };
-}
-
-/// Kinds that can hold a retention-free coordinate. Cheap Rust gate so
-/// ordinary deletions skip the purge statement entirely.
-fn may_be_retention_free(kind: i32) -> bool {
-    kind == 30078 || kind == 30003
-}
-
-/// Soft-delete the live row for an addressable coordinate
-/// `(kind, pubkey, d_tag)` — the NIP-33 replacement key — provided it is not
-/// newer than the deletion request.
-///
-/// Used by `handle_a_tag_deletion` to honour NIP-09 a-tag deletions for any
-/// parameterized-replaceable kind. The WHERE clause mirrors
-/// `replace_parameterized_event` so the coordinate semantics stay consistent:
-/// `channel_id` is intentionally NOT in the key (NIP-33 replacement is global
-/// per the spec — `channel_id` is stored for query scoping, not identity).
-///
-/// `deletion_created_at_secs` is the deletion event's own `created_at`. NIP-09
-/// scopes an `a`-tag deletion to versions at or before that instant, so a
-/// delayed or replayed tombstone signed between two versions must not erase the
-/// newer replacement. `events.created_at` is immutable per row, so the predicate
-/// guarantees a tombstone can never erase a version newer than itself — the UPDATE
-/// re-evaluates its WHERE clause after any lock wait, so a replacement that races
-/// the deletion and lands with a later `created_at` is always spared.
-///
-/// This does NOT guarantee deletion completeness when a same-coordinate
-/// replacement races the deletion: the deletion may evaluate its predicate before
-/// the replacement arrives, miss the incoming head, and return `Ok(false)`. That
-/// outcome is state-identical to the deletion having arrived first (old head
-/// gone, new head present), which is a valid Nostr ordering — Nostr never fixes
-/// the order of concurrent writes from different signers, and even same-signer
-/// ordering is advisory. The return value feeds only a debug log, not a
-/// correctness gate.
-///
-/// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
-/// (already deleted, never existed, or strictly newer than the deletion).
-pub async fn soft_delete_by_coordinate(
-    pool: &PgPool,
-    community_id: CommunityId,
-    kind: i32,
-    pubkey: &[u8],
-    d_tag: &str,
-    deletion_created_at_secs: i64,
-) -> Result<bool> {
-    let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
-        .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
-    let mut tx = crate::begin_community_event_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    let purged = if may_be_retention_free(kind) {
-        purge_retention_free_events(
-            &mut tx,
-            RetentionFreeTarget::Coordinate {
-                kind,
-                pubkey,
-                d_tag,
-                created_at_or_before: deletion_created_at,
-            },
-        )
-        .await?
-    } else {
-        0
-    };
-    // `AND NOT COALESCE(<predicate>, false)` holds the invariant in SQL rather than through
-    // statement order: under READ COMMITTED this UPDATE takes a fresh snapshot,
-    // so a retention-free head committed by a racing replacement after the
-    // purge ran is spared instead of soft-deleted (the "deletion arrived
-    // first" outcome documented above). COALESCE keeps a NULL predicate
-    // (e.g. NULL `d_tag`) on the ordinary soft-delete path, as the triggers do.
-    let result = sqlx::query(concat!(
-        "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-         AND created_at <= $5 AND NOT COALESCE(",
-        retention_free_event_predicate!(),
-        ", false)"
-    ))
-    .bind(community_id.as_uuid())
-    .bind(kind)
-    .bind(pubkey)
-    .bind(d_tag)
-    .bind(deletion_created_at)
-    .execute(tx.conn())
-    .await?;
-
-    tx.commit().await?;
-
-    Ok(purged > 0 || result.rows_affected() > 0)
-}
-
-/// Purge live retention-free rows matching `$target`, plus their mention rows,
-/// and return the number of events removed.
-macro_rules! purge_retention_free_sql {
-    ($target:literal) => {
-        concat!(
-            "WITH purged AS ( \
-                 DELETE FROM events \
-                 WHERE community_id = $1 AND ",
-            $target,
-            " AND deleted_at IS NULL AND ",
-            retention_free_event_predicate!(),
-            " RETURNING id \
-             ), purged_mentions AS ( \
-                 DELETE FROM event_mentions mention USING purged \
-                 WHERE mention.community_id = $1 AND mention.event_id = purged.id \
-             ) \
-             SELECT count(*) FROM purged"
-        )
-    };
-}
-
-/// Which live rows a deletion targets.
-enum RetentionFreeTarget<'a> {
-    Id(&'a [u8]),
-    Coordinate {
-        kind: i32,
-        pubkey: &'a [u8],
-        d_tag: &'a str,
-        created_at_or_before: DateTime<Utc>,
-    },
-}
-
-/// Physically delete live retention-free rows matched by `target`, plus their
-/// mention rows, in the caller's transaction. The generic soft delete that
-/// follows excludes the same predicate, so a retention-free row is either
-/// purged here or left live, never soft-deleted. Returns the number of events
-/// removed.
-async fn purge_retention_free_events(
-    tx: &mut AdmittedTx,
-    target: RetentionFreeTarget<'_>,
-) -> Result<u64> {
-    let community_id = tx.community();
-    // Migration 0011 fences NIP-RS hard deletes behind a transaction-local
-    // opt-in. The fence and this opt-in are removed together once the
-    // migration-only triggers are dropped.
-    sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
-        .execute(tx.conn())
-        .await?;
-
-    let purged: i64 = match target {
-        RetentionFreeTarget::Id(event_id) => {
-            sqlx::query_scalar(purge_retention_free_sql!("id = $2"))
-                .bind(community_id.as_uuid())
-                .bind(event_id)
-                .fetch_one(tx.conn())
-                .await?
-        }
-        RetentionFreeTarget::Coordinate {
-            kind,
-            pubkey,
-            d_tag,
-            created_at_or_before,
-        } => {
-            sqlx::query_scalar(purge_retention_free_sql!(
-                "kind = $2 AND pubkey = $3 AND d_tag = $4 AND created_at <= $5"
-            ))
-            .bind(community_id.as_uuid())
-            .bind(kind)
-            .bind(pubkey)
-            .bind(d_tag)
-            .bind(created_at_or_before)
-            .fetch_one(tx.conn())
-            .await?
-        }
-    };
-
-    Ok(purged as u64)
-}
-
-/// An event a NIP-09 (kind 5) or NIP-29 (kind 9005) deletion soft-deletes in
-/// the deletion's own insert transaction, with the thread it belongs to.
-#[derive(Clone, Copy, Debug)]
-pub struct DeletionTarget<'a> {
-    /// The event to soft-delete.
-    pub event_id: &'a [u8],
-    /// Its direct parent, whose `reply_count` drops when it is deleted.
-    pub parent_event_id: Option<&'a [u8]>,
-    /// Its thread root, whose `descendant_count` drops when it is deleted.
-    pub root_event_id: Option<&'a [u8]>,
-}
-
-/// Atomically soft-delete an event and decrement thread reply counters.
-///
-/// Wraps the delete + counter update in a single transaction so a crash between
-/// them cannot leave counters permanently inflated. Returns `Ok(true)` if the
-/// event was deleted this call.
-///
-/// When the target event is a kind-40100 (canvas) event, this function derives
-/// the target's `kind` and `channel_id` from the database inside the same
-/// transaction and acquires the same `(community, kind, channel)` advisory lock
-/// used by [`insert_canvas_head_checked`] before the UPDATE. This prevents a
-/// concurrent tagged write from observing a head that is simultaneously being
-/// removed. The serialization invariant is owned entirely by this function;
-/// callers do not classify the target kind.
-pub async fn soft_delete_event_and_update_thread(
-    pool: &PgPool,
-    community_id: CommunityId,
-    event_id: &[u8],
-    parent_event_id: Option<&[u8]>,
-    root_event_id: Option<&[u8]>,
-) -> Result<bool> {
-    let mut tx = crate::begin_community_event_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    let deleted = soft_delete_event_and_update_thread_in_tx(
-        &mut tx,
-        event_id,
-        parent_event_id,
-        root_event_id,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(deleted)
-}
-
-/// Transaction-scoped body of [`soft_delete_event_and_update_thread`].
-///
-/// Callers that must fence the delete with their own writes (e.g. the admin
-/// action lease/marker) run this inside their transaction; the caller commits.
-pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
-    tx: &mut AdmittedTx,
-    event_id: &[u8],
-    parent_event_id: Option<&[u8]>,
-    root_event_id: Option<&[u8]>,
-) -> Result<bool> {
-    let community_id = tx.community();
-    use crate::store::replaceable::event_replacement_lock_key;
-
-    // Derive the target event's kind and channel_id inside the transaction so
-    // that the serialization decision cannot be bypassed by any caller.
-    let target: Option<(i32, Option<Uuid>)> = sqlx::query_as(
-        "SELECT kind, channel_id FROM events \
-         WHERE community_id = $1 AND id = $2",
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .fetch_optional(tx.conn())
-    .await?;
-
-    // Relay-signed move removals are the source channel's only replay record.
-    if target.is_some_and(|(kind, _)| kind == 45011) {
-        return Err(DbError::InvalidData(
-            "artifact removal markers cannot be deleted".into(),
-        ));
-    }
-
-    if let Some((kind, Some(channel_id))) = target {
-        if kind == KIND_CANVAS as i32 {
-            let lock_key = event_replacement_lock_key(
-                community_id,
-                kind,
-                &[],
-                Some(channel_id.as_bytes().as_slice()),
-            );
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(lock_key)
-                .execute(tx.conn())
-                .await?;
-        }
-    }
-
-    let purged = if target.is_some_and(|(kind, _)| may_be_retention_free(kind)) {
-        purge_retention_free_events(tx, RetentionFreeTarget::Id(event_id)).await?
-    } else {
-        0
-    };
-    let result = sqlx::query(concat!(
-        "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND NOT COALESCE(",
-        retention_free_event_predicate!(),
-        ", false)"
-    ))
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .execute(tx.conn())
-    .await?;
-
-    let deleted = purged > 0 || result.rows_affected() > 0;
-
-    if deleted {
-        sqlx::query("UPDATE artifact_heads SET modified_at=clock_timestamp() WHERE community_id=$1 AND artifact_id=(SELECT artifact_id FROM artifact_revisions WHERE community_id=$1 AND event_id=$2) AND event_id=$2")
-            .bind(community_id.as_uuid()).bind(event_id).execute(tx.conn()).await?;
-        if let Some(pid) = parent_event_id {
-            sqlx::query(
-                "UPDATE thread_metadata \
-                 SET reply_count = GREATEST(reply_count - 1, 0) \
-                 WHERE community_id = $1 AND event_id = $2",
-            )
-            .bind(community_id.as_uuid())
-            .bind(pid)
-            .execute(tx.conn())
-            .await?;
-
-            if let Some(root_id) = root_event_id {
-                sqlx::query(
-                    "UPDATE thread_metadata \
-                     SET descendant_count = GREATEST(descendant_count - 1, 0) \
-                     WHERE community_id = $1 AND event_id = $2",
-                )
-                .bind(community_id.as_uuid())
-                .bind(root_id)
-                .execute(tx.conn())
-                .await?;
-            }
-        }
-    }
-
-    Ok(deleted)
-}
+// Preserve the public event-store deletion API after the focused extraction.
+pub(crate) use super::event_deletion::soft_delete_event_and_update_thread_in_tx;
+pub use super::event_deletion::{
+    soft_delete_by_coordinate, soft_delete_event_and_update_thread, DeletionTarget,
+};
 
 /// Returns the `created_at` timestamp of the most recent non-deleted event in a channel.
 pub async fn get_last_message_at(
@@ -2147,9 +1870,7 @@ pub(crate) async fn get_events_by_ids_with_operation(
     get_events_by_ids_on(&mut conn, community_id, ids).await
 }
 
-/// [`get_events_by_ids`] on a specific session — the replica-routing path
-/// runs the query on the exact reader connection whose heartbeat
-/// observation proved its predicate.
+/// [`get_events_by_ids`] on a specific session.
 pub(crate) async fn get_events_by_ids_on(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
@@ -2266,6 +1987,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         crate::store::event_follow_up::after_admitted_insert(
             tx,
             id_bytes.as_slice(),
+            created_at,
             kind_i32,
             channel_id,
         )
@@ -2702,7 +2424,8 @@ impl Db {
     /// unset, even covered-eligible queries stay on the writer, so merging
     /// this seam is a true no-op until the budget is configured. Every
     /// failure fails closed to the writer, except a statement-timeout cancel
-    /// (57014), which is surfaced rather than re-run.
+    /// (57014), which is surfaced rather than re-run, and a busy reader,
+    /// which rejects the read as retryable (see [`Db::route_read`]).
     #[datastore_span(name = "query_events_routed", system = "postgresql")]
     pub async fn query_events_routed(
         &self,
@@ -2719,7 +2442,7 @@ impl Db {
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2740,6 +2463,9 @@ impl Db {
                         // writer rather than surfacing a routed error.
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::query_events_with_operation(
                             &self.pool,
                             q,
@@ -2783,7 +2509,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::query_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2802,6 +2528,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::query_events_with_operation(
                             &self.pool,
                             q,
@@ -2849,7 +2578,7 @@ impl Db {
                 crate::RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::event::count_events_on(&mut tx, q, crate::event::ReadDeadline::Session)
@@ -2868,6 +2597,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica count failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::event::count_events(&self.pool, q).await
                     }
                 }
@@ -3090,65 +2822,6 @@ impl Db {
         .await
     }
 
-    /// [`Db::get_events_by_ids`] with replica routing — same contract and
-    /// classification-table requirement as [`Db::query_events_routed`].
-    ///
-    /// By-id fetches route on the BOUNDED arm only: an id list carries no
-    /// channel pin, so no fence floor can prove insert-completeness — the
-    /// covered arm is structurally unavailable. Used for FTS hit hydration,
-    /// where a missing row degrades to a skipped search hit downstream.
-    #[datastore_span(name = "get_events_by_ids_routed", system = "postgresql")]
-    pub async fn get_events_by_ids_routed(
-        &self,
-        path: &'static str,
-        community_id: CommunityId,
-        ids: &[&[u8]],
-    ) -> Result<Vec<StoredEvent>> {
-        match self
-            .route_read(
-                path,
-                crate::RoutePredicate::Bounded,
-                crate::observability::ReaderOperation::SubscriptionHistory,
-            )
-            .await
-        {
-            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
-                    Ok(events) => {
-                        Self::record_route(path, "replica", reason);
-                        Ok(events)
-                    }
-                    // Surface a cancel instead of re-running it on the writer; see
-                    // `DbError::is_statement_cancelled` for the trade-off.
-                    Err(e) if e.is_statement_cancelled() => {
-                        Self::record_route(path, "replica", "statement_cancelled");
-                        Err(e)
-                    }
-                    Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
-                        Self::record_route(path, "writer", "replica_error");
-                        crate::event::get_events_by_ids_with_operation(
-                            &self.pool,
-                            community_id,
-                            ids,
-                            crate::observability::WriterOperation::SubscriptionHistory,
-                        )
-                        .await
-                    }
-                }
-            }
-            crate::RouteDecision::Writer => {
-                crate::event::get_events_by_ids_with_operation(
-                    &self.pool,
-                    community_id,
-                    ids,
-                    crate::observability::WriterOperation::SubscriptionHistory,
-                )
-                .await
-            }
-        }
-    }
-
     /// Atomically insert an event AND its thread metadata in a single transaction.
     #[datastore_span(name = "insert_event_with_thread_metadata", system = "postgresql")]
     pub async fn insert_event_with_thread_metadata(
@@ -3221,6 +2894,7 @@ impl Db {
                 crate::event::soft_delete_event_and_update_thread_in_tx(
                     &mut tx,
                     target.event_id,
+                    Some(target.created_at),
                     target.parent_event_id,
                     target.root_event_id,
                 )
@@ -3482,6 +3156,8 @@ mod e_tag_filter_shape_tests {
     /// change the SQL text, or each count is its own statement that is planned
     /// again on every call. Holds for the `#p` join and plain reads, for
     /// access scope and explicit `#h`, in both the page SELECT and the COUNT.
+    /// A plain explicit `#h` page within the candidate budget unnests the
+    /// bind and reads each channel; over it, the page is the set read.
     #[test]
     fn channel_scope_sql_does_not_depend_on_channel_count() {
         let sql = |p_tag: bool, include_global: bool, n: usize| {
@@ -3502,7 +3178,19 @@ mod e_tag_filter_shape_tests {
             for include_global in [true, false] {
                 let one = sql(p_tag, include_global, 1);
                 assert_eq!(one, sql(p_tag, include_global, 40));
-                for text in [&one.0, &one.1] {
+                let per_channel = !p_tag && !include_global;
+                assert_eq!(
+                    one.0.contains("unnest($") && one.0.contains("channel_id = c.ch"),
+                    per_channel,
+                    "{}",
+                    one.0
+                );
+                let set_reads = if per_channel {
+                    vec![&one.1]
+                } else {
+                    vec![&one.0, &one.1]
+                };
+                for text in set_reads {
                     assert!(text.contains("channel_id = ANY($"), "{text}");
                     assert!(!text.contains("channel_id IN ("), "{text}");
                     assert_eq!(
@@ -3512,6 +3200,46 @@ mod e_tag_filter_shape_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Only a plain explicit `#h` page within the candidate budget reads
+    /// channel by channel: global events, a `#p` join, an e-tag fence, an
+    /// offset, an empty set or a set × limit over the budget keep their own
+    /// SQL.
+    #[test]
+    fn per_channel_scope_eligibility() {
+        let base = || EventQuery {
+            channel_ids: Some(vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()]),
+            channel_ids_include_global: false,
+            ..EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()))
+        };
+        assert!(per_channel_scope(&base()).is_some());
+        let mut offset_zero = base();
+        offset_zero.offset = Some(0);
+        assert!(per_channel_scope(&offset_zero).is_some());
+        let at_budget = |channels: usize, limit: i64| EventQuery {
+            channel_ids: Some((0..channels).map(|_| uuid::Uuid::new_v4()).collect()),
+            limit: Some(limit),
+            ..base()
+        };
+        assert!(per_channel_scope(&at_budget(16, 512)).is_some());
+        assert!(per_channel_scope(&at_budget(17, 512)).is_none());
+        assert!(per_channel_scope(&at_budget(128, 500)).is_none());
+        // The clamped page limit counts, not the requested one.
+        assert!(per_channel_scope(&at_budget(8, 5_000)).is_some());
+        type Edit = fn(&mut EventQuery);
+        let others: [(&str, Edit); 5] = [
+            ("global", |q| q.channel_ids_include_global = true),
+            ("#p", |q| q.p_tag_hex = Some("ab".repeat(32))),
+            ("#e", |q| q.e_tags = Some(vec!["cd".repeat(32)])),
+            ("offset", |q| q.offset = Some(1)),
+            ("empty", |q| q.channel_ids = Some(Vec::new())),
+        ];
+        for (label, set) in others {
+            let mut q = base();
+            set(&mut q);
+            assert!(per_channel_scope(&q).is_none(), "{label}");
         }
     }
 }
@@ -3717,6 +3445,117 @@ mod postgres_tests {
                 );
             }
         }
+    }
+
+    /// An explicit channel set is read one channel at a time and returns the
+    /// set read's page: newest first across channels with id ties broken
+    /// ascending, one channel holding the whole page, other kinds and other
+    /// channels taking no slot, a repeated id read once, keyset cursors and
+    /// `since`, and older rows the recent pass leaves missing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn per_channel_reads_match_the_set_read() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let mut channels = Vec::new();
+        for _ in 0..4 {
+            channels.push(make_test_channel(&pool, community_uuid, None).await);
+        }
+        let (busy, quiet, empty, outside) = (channels[0], channels[1], channels[2], channels[3]);
+        let db = crate::Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let now = Utc::now().timestamp() as u64;
+        let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
+        let mut matching = Vec::new();
+        let mut insert = |channel: Uuid, kind: u16, at: u64, matches: bool| {
+            let event =
+                EventBuilder::new(Kind::Custom(kind), format!("{kind} at {at} in {channel}"))
+                    .custom_created_at(nostr::Timestamp::from(at))
+                    .sign_with_keys(&author)
+                    .expect("sign");
+            if matches {
+                matching.push((at, event.id));
+            }
+            (channel, event)
+        };
+        let mut events = Vec::new();
+        // The busy channel alone holds the newest five rows.
+        for i in 0..5 {
+            events.push(insert(busy, 9, now - 10 - i, true));
+        }
+        // Newer rows of another kind or another channel take no slot.
+        events.push(insert(busy, 7, now - 1, false));
+        events.push(insert(outside, 9, now - 2, false));
+        // A tie across channels, then older rows on both sides of the floor.
+        events.push(insert(busy, 9, now - 100, true));
+        events.push(insert(quiet, 9, now - 100, true));
+        events.push(insert(quiet, 9, now - 200, true));
+        events.push(insert(busy, 9, floor - 86_400, true));
+        events.push(insert(quiet, 9, floor - 2 * 86_400, true));
+        for (channel, event) in &events {
+            db.insert_event(community, event, Some(*channel))
+                .await
+                .expect("insert");
+        }
+        matching.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+        });
+        let expected: Vec<_> = matching.iter().map(|(_, id)| *id).collect();
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let read = |limit: i64| EventQuery {
+            kinds: Some(vec![9]),
+            channel_ids: Some(vec![busy, quiet, empty, busy]),
+            channel_ids_include_global: false,
+            limit: Some(limit),
+            ..EventQuery::for_community(community)
+        };
+        let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
+
+        for limit in 1..=expected.len() as i64 + 1 {
+            let page = query_events_on(&mut conn, &read(limit), ReadDeadline::PerRead)
+                .await
+                .expect("page");
+            let want = &expected[..expected.len().min(limit as usize)];
+            assert_eq!(ids(page), want, "limit {limit}");
+        }
+        assert!(
+            prepared_like(&mut conn, "%CROSS JOIN LATERAL%channel_id = c.ch%").await >= 1,
+            "the set was read per channel"
+        );
+        assert_eq!(
+            prepared_like(&mut conn, "%channel_id = ANY(%").await,
+            0,
+            "no set read ran"
+        );
+
+        // Keyset pages walk the same order, across the tie and the floor.
+        let first = query_events_on(&mut conn, &read(6), ReadDeadline::PerRead)
+            .await
+            .expect("first page");
+        let last = first.last().expect("full first page").clone();
+        let mut next = read(6);
+        next.until = Some(
+            DateTime::from_timestamp(last.event.created_at.as_secs() as i64, 0).expect("until"),
+        );
+        next.before_id = Some(last.event.id.as_bytes().to_vec());
+        let page = query_events_on(&mut conn, &next, ReadDeadline::PerRead)
+            .await
+            .expect("next page");
+        assert_eq!(ids(first), expected[..6]);
+        assert_eq!(ids(page), expected[6..]);
+
+        let mut since = read(10);
+        since.since = Some(DateTime::from_timestamp((now - 100) as i64, 0).expect("since"));
+        let page = query_events_on(&mut conn, &since, ReadDeadline::PerRead)
+            .await
+            .expect("since page");
+        assert_eq!(ids(page), expected[..7]);
     }
 
     /// A newest-first page read split at the floor returns the rows the
@@ -6749,6 +6588,8 @@ mod postgres_tests {
         let deletion = deletion_of(&reaction);
         let targets = [DeletionTarget {
             event_id: reaction.id.as_bytes(),
+            created_at: DateTime::from_timestamp(reaction.created_at.as_secs() as i64, 0)
+                .expect("target timestamp"),
             parent_event_id: None,
             root_event_id: None,
         }];
@@ -6827,6 +6668,8 @@ mod postgres_tests {
             .expect("insert torn deletion");
         let targets = [DeletionTarget {
             event_id: reaction.id.as_bytes(),
+            created_at: DateTime::from_timestamp(reaction.created_at.as_secs() as i64, 0)
+                .expect("target timestamp"),
             parent_event_id: None,
             root_event_id: None,
         }];

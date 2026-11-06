@@ -98,6 +98,11 @@ run_unit_tests() {
   run_test_step "buzz-pubsub conn_control tests" \
     cargo test -p buzz-pubsub --lib conn_control::tests:: -- --nocapture
 
+  # Shared Redis connection timeout bounds (loopback fake peers; infra-free).
+  # Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub connection tests" \
+    cargo test -p buzz-pubsub --lib connection::tests:: -- --nocapture
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -400,6 +405,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay API query parsing tests" \
     cargo test -p buzz-relay --lib api::parse_query_tests:: -- --nocapture
+
+  run_test_step "buzz-relay API database error mapping tests" \
+    cargo test -p buzz-relay --lib api::db_read_error_tests:: -- --nocapture
 
   run_test_step "buzz-relay profile search request tests" \
     cargo test -p buzz-relay --lib api::profiles:: -- --nocapture

@@ -6,6 +6,10 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+
+import '../../shared/verified_profiles/verified_profile_fixture.dart';
+
 /// Tests for [channelDetailsFromEvent].
 ///
 /// The function maps a kind:39000 metadata event to [ChannelDetails], and is
@@ -141,47 +145,59 @@ void main() {
   });
 
   test('builds an alphabetized directory from the latest profile events', () {
-    final users = directoryUsersFromProfileEvents([
-      NostrEvent(
-        id: 'alice-old',
-        pubkey: 'alice',
-        createdAt: 10,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Zoe"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'bob',
-        pubkey: 'bob',
-        createdAt: 20,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Bob"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'alice-new',
-        pubkey: 'ALICE',
-        createdAt: 30,
-        kind: 0,
-        tags: const [],
-        content:
-            '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'not-a-profile',
-        pubkey: 'charlie',
-        createdAt: 40,
-        kind: 1,
-        tags: const [],
-        content: '{}',
-        sig: 'sig',
-      ),
-    ]);
+    final users = directoryUsersFromSearch(
+      searchedPeople([
+        NostrEvent(
+          id: 'alice-old',
+          pubkey: 'alice',
+          createdAt: 10,
+          kind: 0,
+          tags: const [],
+          content: '{"display_name":"Zoe"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'bob',
+          pubkey: 'bob',
+          createdAt: 20,
+          kind: 0,
+          tags: const [],
+          content: '{"display_name":"Bob"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'alice-new',
+          pubkey: 'ALICE',
+          createdAt: 30,
+          kind: 0,
+          tags: const [],
+          content:
+              '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'not-a-profile',
+          pubkey: 'charlie',
+          createdAt: 40,
+          kind: 1,
+          tags: const [],
+          content: '{}',
+          sig: 'sig',
+        ),
+        // Someone with no kind:0 is listed by the relay's verified head.
+        signedProjection(profileTags(subjectA, name: 'Gabi Lilienfeld')),
+        signedProjection(
+          profileTags(subjectB, name: 'Forged'),
+          author: relayKeysOther(),
+        ),
+      ], authority),
+    );
 
-    expect(users.map((user) => user.label), ['Alice', 'Bob']);
+    expect(users.map((user) => user.label), [
+      'Alice',
+      'Bob',
+      'Gabi Lilienfeld',
+    ]);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });

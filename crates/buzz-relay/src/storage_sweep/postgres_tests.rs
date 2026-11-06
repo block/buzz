@@ -145,7 +145,9 @@ async fn worker_publication_activates_reader_without_restart_or_mode_change() {
             values["buzz_total_storage_bytes"], 0.0,
             "a real empty snapshot may report zero"
         );
-        drop(worker);
+        // A dropped worker keeps the lease until its backend exits, which can
+        // outlast the next iteration's lock attempt.
+        worker.release().await.expect("release worker lease");
     }
     pool.close().await;
 }
