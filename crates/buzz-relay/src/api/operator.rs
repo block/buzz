@@ -423,6 +423,18 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
+        Err(msg) if msg.starts_with("nip_fi_binding_required:") => Err(coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "nip_fi_binding_required",
+            &msg,
+        )),
+        Err(msg) if msg.starts_with("initial_policy_requires_create_only:") => {
+            Err(coded_api_error(
+                StatusCode::BAD_REQUEST,
+                "initial_policy_requires_create_only",
+                &msg,
+            ))
+        }
         Err(msg) if msg.starts_with("limit_reached:") => {
             Err(coded_api_error(StatusCode::CONFLICT, "limit_reached", &msg))
         }
@@ -1387,6 +1399,7 @@ pub async fn no_store_upgrade_response(
 
 #[cfg(test)]
 mod postgres_tests {
+    mod initial_policy;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
