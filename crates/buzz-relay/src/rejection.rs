@@ -145,10 +145,13 @@ async fn send_admission_result(
             crate::handlers::close::refuse(sub_id, &reason, conn, state).await;
         }
         _ => {
-            conn.send(request_rejection_message(
+            let queued = conn.send(request_rejection_message(
                 rejection_target_for(msg),
                 &reason,
             ));
+            if let ClientMessage::Event(event) = msg {
+                crate::access::WriteLog::refused(conn, event, logged, queued);
+            }
         }
     }
     Err(logged)
@@ -261,6 +264,58 @@ mod tests {
         assert_eq!(frame[0], "OK");
         assert_eq!(frame[1], event_id);
         assert_eq!(frame[2], false);
+    }
+
+    /// The write line's `ok_queued` for an over-quota EVENT, with the outbound
+    /// channel `open`, full or closed: absent when the OK was queued, `false`
+    /// when it was not. Mutation: pass `true` instead of the send result at
+    /// the refusal site → RED.
+    #[tokio::test]
+    async fn admission_write_line_records_whether_its_ok_was_queued() {
+        let state = crate::state::tests::test_state().await;
+        let mut got = Vec::new();
+        for channel in ["open", "full", "closed"] {
+            let (conn, rx) = test_conn();
+            let _rx = match channel {
+                "full" => {
+                    while conn.send(String::new()) {}
+                    Some(rx)
+                }
+                "closed" => {
+                    drop(rx);
+                    None
+                }
+                _ => Some(rx),
+            };
+            let (msg, _) = parsed_event_message();
+            let (guard, out) = crate::access::tests::capture_access_only(tracing::Level::INFO);
+            let _ = send_admission_result(
+                &conn,
+                &state,
+                Err(AdmissionError::Unavailable),
+                &msg,
+                "ws_operations",
+            )
+            .await;
+            drop(guard);
+            let line = out
+                .lines()
+                .into_iter()
+                .find(|l| l["event"] == "write")
+                .expect("write line");
+            got.push(format!(
+                "{channel}:{}/{}",
+                line["outcome"], line["ok_queued"]
+            ));
+        }
+        assert_eq!(
+            got,
+            [
+                r#"open:"rejected"/null"#,
+                r#"full:"rejected"/false"#,
+                r#"closed:"rejected"/false"#
+            ]
+        );
     }
 
     /// A REQ still settles on CLOSED, which carries the subscription id. This

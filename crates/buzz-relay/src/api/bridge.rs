@@ -3,6 +3,7 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod membership_snapshot;
 mod read_state_snapshot;
 pub(crate) mod search_slots;
 
@@ -1619,6 +1620,11 @@ pub async fn query_events(
         .await
         .enforces();
 
+    // This authority surface always needs payload-bound NIP-98, including dev.
+    // Detect before admission, and before Filter can drop the extension key.
+    let compact_membership = serde_json::from_slice::<Vec<Value>>(&body)
+        .is_ok_and(|filters| membership_snapshot::requested(&filters));
+
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
     crate::nip_fi_shadow::observe_strict_proof(&state, &headers, "bridge", || {
@@ -1633,8 +1639,8 @@ pub async fn query_events(
                 "POST",
                 &url,
                 Some(&body),
-                state.config.require_auth_token || nip_fi_active,
-                nip_fi_enforce,
+                state.config.require_auth_token || nip_fi_active || compact_membership,
+                nip_fi_enforce || compact_membership,
             ))
             .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
             .map_err(|e| e.into_response())
@@ -1713,6 +1719,17 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if membership_snapshot::requested(&raw_filters) {
+        caller.read_artifact(&raw_filters);
+        return membership_snapshot::query(
+            state,
+            tenant,
+            &pubkey,
+            caller.event_id_bytes,
+            &raw_filters,
+        )
+        .await;
+    }
     let routed = || caller.read_artifact(&raw_filters);
     if let Some(result) =
         super::artifact::query(state, tenant, &pubkey, &raw_filters, false, routed).await
@@ -10556,10 +10573,14 @@ pub(crate) mod postgres_tests {
 
     /// A shed history read answers 503 `database unavailable` on every
     /// bridge `/query` branch that serves one: channel window, the three
-    /// feeds and legacy thread replies. A saturated reader (every connection
-    /// checked out, none idle) rejects history reads instead of moving them
-    /// to the writer, the same `PoolTimedOut` as a full history gate.
-    /// Mutation: map any of these branches through `internal_error` → RED.
+    /// feeds, legacy thread replies and search hydration. A WS search whose
+    /// hydration is shed closes with the retryable `error: database error`
+    /// instead of an EOSE that would read as "no matches". A saturated reader
+    /// (every connection checked out, none idle) rejects history reads
+    /// instead of moving them to the writer, the same `PoolTimedOut` as a
+    /// full history gate. Mutations: map any of these branches through
+    /// `internal_error`, or let a failed WS hydration fall through to EOSE
+    /// → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn shed_history_read_maps_to_503_on_every_bridge_branch() {
@@ -10586,11 +10607,14 @@ pub(crate) mod postgres_tests {
                 "thread replies",
                 serde_json::json!({"kinds": [9], "#e": [&fx.root], "depth_limit": 1}),
             ),
+            ("search hydrate", fx.search_filter()),
         ];
         for (branch, filter) in &cases {
             let (status, body) = fx.http("/query", filter).await;
             assert_eq!(status, StatusCode::OK, "healthy {branch}: {body}");
         }
+        let frame = fx.ws_search().await;
+        assert!(frame.contains("root needle"), "healthy WS search: {frame}");
 
         let mut held = Vec::new();
         for _ in 0..fx.replica.options().get_max_connections() {
@@ -10607,6 +10631,14 @@ pub(crate) mod postgres_tests {
                 "shed {branch}: {body}"
             );
         }
+        assert_eq!(
+            fx.ws_search().await,
+            format!(
+                r#"["CLOSED","s","{}"]"#,
+                crate::handlers::req::DATABASE_ERROR_CLOSED
+            ),
+            "shed WS search hydration"
+        );
 
         drop(held);
         fx.drop().await;

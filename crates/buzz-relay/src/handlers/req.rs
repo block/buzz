@@ -835,7 +835,6 @@ async fn handle_search_req(
     }
 
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
-    let mut failure = None;
 
     for filter in filters {
         let search_text = match &filter.search {
@@ -981,13 +980,25 @@ async fn handle_search_req(
                         return;
                     }
                     Err(e) => {
+                        // CLOSED, not EOSE: an EOSE after a failed hydration
+                        // would mark the hits never fetched as "no matches".
+                        // That includes a history read shed while the reader
+                        // is saturated, which the client should retry.
                         warn!(
                             sub_id = %sub_id,
                             error_kind = %e.kind(),
                             "NIP-50 batch fetch failed"
                         );
-                        failure = Some("database_error");
-                        break;
+                        access.error("database_error");
+                        super::close::close_if_owner(
+                            sub_id,
+                            owner,
+                            Some(DATABASE_ERROR_CLOSED),
+                            conn,
+                            state,
+                        )
+                        .await;
+                        return;
                     }
                 };
 
@@ -1080,11 +1091,8 @@ async fn handle_search_req(
         }
     }
 
-    let queued = super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await;
-    match failure {
-        Some(reason) => access.error(reason),
-        None if queued => access.served(),
-        None => {}
+    if super::close::send_if_owner(sub_id, owner, RelayMessage::eose(sub_id), conn).await {
+        access.served();
     }
 }
 

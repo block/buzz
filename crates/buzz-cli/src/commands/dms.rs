@@ -6,7 +6,7 @@ use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
 /// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
 pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
-    let my_pk = client.keys().public_key().to_hex();
+    let my_pk = client.public_key().to_hex();
     let limit = limit.unwrap_or(50).min(200);
     let filter = serde_json::json!({
         "kinds": [41001],
@@ -67,7 +67,7 @@ pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), 
         .collect::<Result<Vec<_>, _>>()?;
     tags.push(Tag::parse(["d", &dm_id]).map_err(|e| CliError::Other(format!("tag error: {e}")))?);
     let builder = EventBuilder::new(Kind::Custom(41010), "").tags(tags);
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     // Try to extract relay-assigned channel_id from response message.
@@ -101,7 +101,7 @@ pub async fn cmd_hide_dm(client: &BuzzClient, channel_id: &str) -> Result<(), Cl
         .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
     let builder =
         EventBuilder::new(Kind::Custom(buzz_sdk::kind::KIND_DM_HIDE as u16), "").tags(tags);
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -118,7 +118,7 @@ pub async fn cmd_add_dm_member(
     validate_hex64(pubkey)?;
 
     let builder = buzz_sdk::build_dm_add_member(channel_uuid, pubkey).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
