@@ -366,7 +366,8 @@ mod tests {
         let long = "a".repeat(WELCOME_MAX_CHARS + 1);
         let at_limit = "a".repeat(WELCOME_MAX_CHARS);
         let long_title = "a".repeat(WELCOME_TITLE_MAX_CHARS + 1);
-        let markdown = "# Hi!\n\n- read [#rules](nostr:naddr1x)\n\tindented code";
+        let markdown =
+            "# Hi!\n\n- read [#rules](buzz://channel/x) with nostr:npub1x\n\tindented code";
         let duplicate =
             "kind:9002 may include at most one landing, one welcome and one welcome_title tag";
         let cases: &[(&[&[&str]], Result<bool, &str>)] = &[

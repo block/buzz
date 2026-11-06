@@ -312,9 +312,10 @@ is never more than one. Clients read it from NIP-11:
   any other channel's 39000.
 - The welcome message is Markdown source. The relay stores and projects it
   exactly as received and interprets none of it: rendering the Markdown,
-  and turning `nostr:` links (NIP-21) to channels, messages and people into
-  navigation, is a client concern, as is treating the text as untrusted
-  input. The title is one line of plain text. With no custom message or
+  and resolving whatever links clients agree on (`buzz://channel/<id>` and
+  `buzz://message?channel=<id>&id=<hex>` links to channels and messages,
+  `nostr:npub…` links to people), is a client concern, as is treating the
+  text as untrusted input. The title is one line of plain text. With no custom message or
   title, clients show their own default for that part, so a client can
   customize either alone.
 
