@@ -906,10 +906,18 @@ void main() {
   test(
     'existing v1 relay cleanup JSON remains readable without gateway fields',
     () async {
-      final record = _record(keys: keys, clock: clock);
-      final legacy = record.toJson();
-      expect(legacy.containsKey('gatewayOnly'), isFalse);
-      expect(legacy.containsKey('gatewayRevocation'), isFalse);
+      final legacy = {
+        'version': 1,
+        'relayUrl': 'https://relay.example',
+        'relayOrigin': 'wss://relay.example',
+        'memberPubkey': keys.public,
+        'nsec': keys.nsec,
+        'installationId': '00000000000000000000000000000000',
+        'generation': 7,
+        'expiresAt': clock.seconds + 3600,
+        'attemptCount': 0,
+        'nextAttemptAt': clock.seconds,
+      };
       final decoded = BuzzPushLeaseRevocationRecord.fromJson(
         Map<String, dynamic>.from(jsonDecode(jsonEncode(legacy)) as Map),
       );
