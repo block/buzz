@@ -5,41 +5,6 @@ const _inboxSwipeActionLabelMinWidth = Grid.xxl;
 const _inboxSwipeLabelRevealWidth =
     _inboxSwipeActionLabelMinWidth + (_inboxSwipeActionInset * 2);
 
-/// "New" boundary between unread and previously read rows.
-class _NewBoundaryDivider extends StatelessWidget {
-  const _NewBoundaryDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.gutter,
-        vertical: Grid.half,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-            child: Text(
-              'New',
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.error,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// One conversation row, matching desktop's inbox item hierarchy:
 /// avatar | sender + unread dot + time | contextual label | preview.
 ///
@@ -72,6 +37,7 @@ class _InboxRow extends HookConsumerWidget {
     final revealAmount = useState(0.0);
     final isDragging = useState(false);
     final labelHapticFired = useRef(false);
+    final isReaction = item.item.reactionTarget != null;
     final senderPubkey = item.item.pubkey.toLowerCase();
     final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
     final relevantPubkeys = {senderPubkey, ...mentionPubkeys};
@@ -98,10 +64,14 @@ class _InboxRow extends HookConsumerWidget {
         relevantPubkeys,
       );
     }
-    final senderLabel =
+    final primarySenderLabel =
         contextualLabels[senderPubkey] ??
         profile?.label ??
         shortPubkey(item.item.pubkey);
+    final reactorCount = item.groupItems.map((e) => e.pubkey).toSet().length;
+    final senderLabel = isReaction && reactorCount > 1
+        ? '$primarySenderLabel and ${reactorCount - 1} others'
+        : primarySenderLabel;
     final profileMentionNames = {
       for (final pubkey in mentionPubkeys)
         if (profiles[pubkey]?.displayName?.trim().isNotEmpty == true)
@@ -149,6 +119,7 @@ class _InboxRow extends HookConsumerWidget {
         : -1.0;
     void closeActions() => revealAmount.value = 0;
     void toggleReadState() {
+      if (isReaction) return;
       closeActions();
       isDone ? onMarkUnread() : onMarkRead();
     }
@@ -195,47 +166,56 @@ class _InboxRow extends HookConsumerWidget {
                 curve: Curves.easeOutCubic,
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onHorizontalDragStart: (_) {
-                    isDragging.value = true;
-                    labelHapticFired.value = false;
-                  },
-                  onHorizontalDragUpdate: (details) {
-                    isDragging.value = true;
-                    final previous = revealAmount.value;
-                    final next =
-                        (previous - (details.delta.dx * swipeDirection))
-                            .clamp(0, actionExtent)
-                            .toDouble();
-                    if (!labelHapticFired.value &&
-                        previous < _inboxSwipeLabelRevealWidth &&
-                        next >= _inboxSwipeLabelRevealWidth) {
-                      labelHapticFired.value = true;
-                      unawaited(HapticFeedback.selectionClick());
-                    }
-                    revealAmount.value = next;
-                  },
-                  onHorizontalDragEnd: (details) {
-                    isDragging.value = false;
-                    final velocity = details.primaryVelocity ?? 0;
-                    final shouldCommit =
-                        (velocity * swipeDirection) < -900 ||
-                        revealAmount.value >= actionExtent * commitThreshold;
-                    if (shouldCommit) {
-                      toggleReadState();
-                    } else {
-                      revealAmount.value =
-                          (velocity * swipeDirection) < -200 ||
-                              revealAmount.value >= restingRevealWidth / 2
-                          ? restingRevealWidth
-                          : 0;
-                    }
-                  },
+                  onHorizontalDragStart: isReaction
+                      ? null
+                      : (_) {
+                          isDragging.value = true;
+                          labelHapticFired.value = false;
+                        },
+                  onHorizontalDragUpdate: isReaction
+                      ? null
+                      : (details) {
+                          isDragging.value = true;
+                          final previous = revealAmount.value;
+                          final next =
+                              (previous - (details.delta.dx * swipeDirection))
+                                  .clamp(0, actionExtent)
+                                  .toDouble();
+                          if (!labelHapticFired.value &&
+                              previous < _inboxSwipeLabelRevealWidth &&
+                              next >= _inboxSwipeLabelRevealWidth) {
+                            labelHapticFired.value = true;
+                            unawaited(HapticFeedback.selectionClick());
+                          }
+                          revealAmount.value = next;
+                        },
+                  onHorizontalDragEnd: isReaction
+                      ? null
+                      : (details) {
+                          isDragging.value = false;
+                          final velocity = details.primaryVelocity ?? 0;
+                          final shouldCommit =
+                              (velocity * swipeDirection) < -900 ||
+                              revealAmount.value >=
+                                  actionExtent * commitThreshold;
+                          if (shouldCommit) {
+                            toggleReadState();
+                          } else {
+                            revealAmount.value =
+                                (velocity * swipeDirection) < -200 ||
+                                    revealAmount.value >= restingRevealWidth / 2
+                                ? restingRevealWidth
+                                : 0;
+                          }
+                        },
                   child: Material(
                     color: context.colors.surface,
                     child: InkWell(
                       key: ValueKey('inbox-row-${item.id}'),
                       onTap: onTap,
-                      onLongPress: () => _showRowActions(context),
+                      onLongPress: isReaction
+                          ? null
+                          : () => _showRowActions(context),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
                           horizontal: Grid.gutter,

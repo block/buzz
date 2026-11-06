@@ -7,9 +7,8 @@ import 'inbox_item.dart';
 /// event's own `msg:` mark, and for a thread reply `thread:<root>` and
 /// `thread-activity:<root>`. Returns null for an event with no channel.
 ///
-/// `activity:<channel>` never counts here. Activity rows hold only mentions,
-/// needs-action and agent events addressed to the reader, and DM messages,
-/// and that catch-up mark reads none of those.
+/// `activity:<channel>` also reads ordinary Solo timeline entries. It never
+/// reads a mention, broadcast, DM, or thread reply.
 int? inboxEventReadAt(
   FeedItem event, {
   required int? Function(String contextId) markerOf,
@@ -22,6 +21,7 @@ int? inboxEventReadAt(
   return maxReadAt([
     markerOf(channelId),
     markerOf(msgContextKey(event.id)),
+    if (event.channelCatchUp) markerOf(activityContextKey(channelId)),
     if (rootId != null) ...[
       markerOf(threadContextKey(rootId)),
       markerOf(threadActivityContextKey(rootId)),
@@ -49,6 +49,7 @@ bool isInboxItemDone(
   required Set<String> localUnreadOverrides,
   required Set<String> localDoneSet,
 }) {
+  if (item.item.reactionTarget != null) return true;
   final ids = groupedInboxItemIds(item);
   if (ids.any(localUnreadOverrides.contains)) return false;
 

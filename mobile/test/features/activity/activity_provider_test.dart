@@ -180,6 +180,10 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
 
   bool _matches(NostrFilter filter, NostrEvent event) {
     if (!filter.kinds.contains(event.kind)) return false;
+    if (filter.ids != null && !filter.ids!.contains(event.id)) return false;
+    if (filter.authors != null && !filter.authors!.contains(event.pubkey)) {
+      return false;
+    }
     final until = filter.until;
     if (until != null && event.createdAt > until) return false;
     final beforeId = filter.extensions['before_id'] as String?;
@@ -218,6 +222,18 @@ class _FixedRelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() =>
       const RelayConfig(baseUrl: 'https://relay.example', nsec: null);
 }
+
+Channel _teamChannel() => Channel(
+  id: 'channel-1',
+  name: 'general',
+  channelType: 'stream',
+  visibility: 'open',
+  description: '',
+  createdBy: 'me_pk',
+  createdAt: DateTime(2025),
+  memberCount: 2,
+  isMember: true,
+);
 
 Channel _dmChannel(String id) => Channel(
   id: id,
@@ -279,9 +295,8 @@ void main() {
     await container.read(channelsProvider.future);
     await container.read(activityProvider.future);
 
-    expect(session.dmQueries, hasLength(1));
-    expect(session.dmQueries.single, ['dm1']);
-    expect(session.queryFilterCounts, [3, 4]);
+    expect(session.dmQueries, everyElement(['dm1']));
+    expect(session.queryFilterCounts, [3, 3, 2]);
   });
 
   test('does not query DMs when the resolved channel list has none', () async {
@@ -315,7 +330,7 @@ void main() {
         myPubkeyProvider.overrideWithValue('me_pk'),
         relaySessionProvider.overrideWith(() => session),
         channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
+          () => _FixedChannelsNotifier([_teamChannel()]),
         ),
       ],
     );
@@ -324,7 +339,7 @@ void main() {
     await container.read(channelsProvider.future);
     final feed = await container.read(activityProvider.future);
 
-    expect(session.queryFilterCounts, [3]);
+    expect(session.queryFilterCounts.first, 3);
     expect(session.mentionFetchCount, 1);
     expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
   });
@@ -363,7 +378,7 @@ void main() {
         myPubkeyProvider.overrideWithValue('me_pk'),
         relaySessionProvider.overrideWith(() => session),
         channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
+          () => _FixedChannelsNotifier([_teamChannel()]),
         ),
       ],
     );
@@ -409,7 +424,7 @@ void main() {
         myPubkeyProvider.overrideWithValue('me_pk'),
         relaySessionProvider.overrideWith(() => session),
         channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
+          () => _FixedChannelsNotifier([_teamChannel()]),
         ),
       ],
     );
@@ -424,49 +439,53 @@ void main() {
     ]);
   });
 
-  test('paging past quiet mentions refills only up to the limit', () async {
-    NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
-      id: id,
-      pubkey: 'agent_pk',
-      createdAt: 1_700_000_000 + at,
-      kind: 9,
-      tags: [
-        ['p', 'me_pk'],
-        ['h', 'channel-1'],
-        if (quiet) ['audience', 'agents'],
-      ],
-      content: 'hi',
-      sig: '',
-    );
-    // The newest window holds one quiet mention and 49 real ones; a full
-    // window of older real mentions sits behind it.
-    final session = _RecordingSessionNotifier()
-      ..seed(mention('quiet', 1000, quiet: true));
-    for (var i = 0; i < 49; i++) {
-      session.seed(mention('new-$i', 900 + i));
-    }
-    for (var i = 0; i < 50; i++) {
-      session.seed(mention('old-$i', 100 + i));
-    }
-    final container = ProviderContainer(
-      overrides: [
-        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
-        myPubkeyProvider.overrideWithValue('me_pk'),
-        relaySessionProvider.overrideWith(() => session),
-        channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
+  test(
+    'channel history augments addressed mentions without quiet rows',
+    () async {
+      NostrEvent mention(String id, int at, {bool quiet = false}) => NostrEvent(
+        id: id,
+        pubkey: 'agent_pk',
+        createdAt: 1_700_000_000 + at,
+        kind: 9,
+        tags: [
+          ['p', 'me_pk'],
+          ['h', 'channel-1'],
+          if (quiet) ['audience', 'agents'],
+        ],
+        content: 'hi',
+        sig: '',
+      );
+      // The newest window holds one quiet mention and 49 real ones; a full
+      // window of older real mentions sits behind it.
+      final session = _RecordingSessionNotifier()
+        ..seed(mention('quiet', 1000, quiet: true));
+      for (var i = 0; i < 49; i++) {
+        session.seed(mention('new-$i', 900 + i));
+      }
+      for (var i = 0; i < 50; i++) {
+        session.seed(mention('old-$i', 100 + i));
+      }
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier([_teamChannel()]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    await container.read(channelsProvider.future);
-    final feed = await container.read(activityProvider.future);
+      await container.read(channelsProvider.future);
+      final feed = await container.read(activityProvider.future);
 
-    expect(feed.mentions, hasLength(50));
-    expect(feed.mentions.map((item) => item.id), contains('old-49'));
-    expect(feed.mentions.map((item) => item.id), isNot(contains('old-48')));
-  });
+      expect(feed.mentions, hasLength(99));
+      expect(feed.mentions.map((item) => item.id), contains('old-49'));
+      expect(feed.mentions.map((item) => item.id), contains('old-48'));
+      expect(feed.mentions.map((item) => item.id), isNot(contains('quiet')));
+    },
+  );
 
   test(
     'an addressed DM mention counts once toward the mention window',
@@ -497,7 +516,7 @@ void main() {
           myPubkeyProvider.overrideWithValue('me_pk'),
           relaySessionProvider.overrideWith(() => session),
           channelsProvider.overrideWith(
-            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+            () => _FixedChannelsNotifier([_teamChannel(), _dmChannel('dm-1')]),
           ),
         ],
       );
@@ -506,8 +525,12 @@ void main() {
       await container.read(channelsProvider.future);
       final feed = await container.read(activityProvider.future);
 
-      expect(feed.mentions, hasLength(50));
-      expect(feed.mentions.map((item) => item.id), contains('older'));
+      expect(feed.all, hasLength(50));
+      expect(feed.all.map((item) => item.id), contains('older'));
+      expect(
+        feed.activity.where((item) => item.channelId == 'dm-1'),
+        isNotEmpty,
+      );
     },
   );
 
@@ -538,7 +561,7 @@ void main() {
           myPubkeyProvider.overrideWithValue('me_pk'),
           relaySessionProvider.overrideWith(() => session),
           channelsProvider.overrideWith(
-            () => _FixedChannelsNotifier([_dmChannel('dm-1')]),
+            () => _FixedChannelsNotifier([_teamChannel(), _dmChannel('dm-1')]),
           ),
         ],
       );
@@ -610,7 +633,7 @@ void main() {
           myPubkeyProvider.overrideWithValue('me_pk'),
           relaySessionProvider.overrideWith(() => session),
           channelsProvider.overrideWith(
-            () => _FixedChannelsNotifier(const <Channel>[]),
+            () => _FixedChannelsNotifier([_teamChannel()]),
           ),
         ],
       );
@@ -635,7 +658,11 @@ void main() {
           sig: '',
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await _waitFor(
+        () => container
+            .read(inboxItemsProvider)
+            .any((item) => item.id == 'live-mention'),
+      );
 
       expect(container.read(inboxItemsProvider).single.id, 'live-mention');
     },
@@ -1063,7 +1090,7 @@ void main() {
           myPubkeyProvider.overrideWithValue('me_pk'),
           relaySessionProvider.overrideWith(() => session),
           channelsProvider.overrideWith(
-            () => _FixedChannelsNotifier(const <Channel>[]),
+            () => _FixedChannelsNotifier([_teamChannel()]),
           ),
         ],
       );
@@ -1101,7 +1128,7 @@ void main() {
         myPubkeyProvider.overrideWithValue('me_pk'),
         relaySessionProvider.overrideWith(() => session),
         channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
+          () => _FixedChannelsNotifier([_teamChannel()]),
         ),
       ],
     );
@@ -1139,7 +1166,7 @@ void main() {
         myPubkeyProvider.overrideWithValue('me_pk'),
         relaySessionProvider.overrideWith(() => session),
         channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
+          () => _FixedChannelsNotifier([_teamChannel()]),
         ),
       ],
     );

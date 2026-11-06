@@ -4,6 +4,9 @@ import '../../shared/relay/thread_reference.dart';
 
 @immutable
 class FeedItem {
+  final FeedItem? reactionTarget;
+  final String? reactionEmoji;
+  final bool channelCatchUp;
   final String id;
   final int kind;
   final String pubkey;
@@ -16,6 +19,9 @@ class FeedItem {
   category; // "mention", "needs_action", "activity", "agent_activity"
 
   const FeedItem({
+    this.reactionTarget,
+    this.reactionEmoji,
+    this.channelCatchUp = false,
     required this.id,
     required this.kind,
     required this.pubkey,

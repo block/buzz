@@ -11,6 +11,8 @@ import '../channels/channels_provider.dart';
 import '../../shared/agents/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
+import 'activity_history.dart';
+import '../channels/thread_follows/thread_follows_provider.dart';
 import 'inbox_item.dart';
 
 typedef DmResurfaceAction = Future<String> Function(List<String> pubkeys);
@@ -24,17 +26,13 @@ final dmResurfaceActionProvider = Provider<DmResurfaceAction>(
   },
 );
 
-/// Builds the Activity inbox feed over the relay websocket.
-///
-/// Sources mirror desktop's Home inbox (`useHomeFeedQuery` + `get_feed`):
-/// - mentions of me on user-visible channel kinds (also yields thread
-///   replies, which the thread filter classifies from NIP-10 tags)
-/// - workflow approvals / needs-action events addressed to me
-/// - agent job lifecycle events addressed to me (kinds 43001-43006)
-/// - recent DM messages from others (desktop surfaces DMs through p-tags;
-///   mobile queries DM channels directly so untagged DM sends still appear)
+/// Activity combines addressed history with conversation evidence matching
+/// `buzz-app`'s inbox/unread projection: DMs, mentions, participating/followed
+/// threads, Solo timeline updates, and reactions to the viewer's messages.
+/// Legacy workflow/job filters remain available through More activity views.
 class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   static const _addressedKinds = [
+    7,
     1,
     9,
     40002,
@@ -54,6 +52,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   void Function()? _unsubscribeAddressed;
   final List<void Function()> _unsubscribeDms = [];
   final List<void Function()> _unsubscribeHiddenDms = [];
+  final List<void Function()> _unsubscribeActivity = [];
   Timer? _liveRefreshTimer;
   Future<void>? _refreshInFlight;
   int? _refreshGeneration;
@@ -67,6 +66,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   // coalescing into a suspended old-generation attempt that will never resume.
   final Map<String, _PendingResurface> _pendingDmResurfaceRetry = {};
   String? _dmResurfaceScope;
+  ActivityHistoryCache _history = ActivityHistoryCache();
 
   @override
   Future<HomeFeedResponse> build() async {
@@ -75,7 +75,8 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     // React to the DM channel set (loading → data, membership changes) so a
     // cold start where channels resolve after the first fetch still surfaces
     // DMs without a manual refresh.
-    ref.watch(channelsProvider.select(_dmChannelKey));
+    ref.watch(channelsProvider.select(_activityChannelKey));
+    ref.watch(threadFollowsProvider);
 
     final generation = ++_subscriptionGeneration;
     final currentPubkey = ref.read(myPubkeyProvider)?.toLowerCase();
@@ -83,6 +84,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         '${ref.read(relayConfigProvider).baseUrl}\u0000$currentPubkey';
     if (_dmResurfaceScope != currentScope) {
       _dmResurfaceScope = currentScope;
+      _history = ActivityHistoryCache();
       _pendingDmResurfaceRetry.clear();
     }
     _clearLiveSubscriptions();
@@ -91,20 +93,20 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       _clearLiveSubscriptions();
     });
 
+    final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5;
     final response = await _fetch();
     if (sessionState.status == SessionStatus.connected &&
         generation == _subscriptionGeneration) {
-      unawaited(_subscribeLive(generation));
+      unawaited(_subscribeLive(generation, since));
     }
     return response;
   }
 
-  Future<void> _subscribeLive(int generation) async {
+  Future<void> _subscribeLive(int generation, int since) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null || generation != _subscriptionGeneration) return;
 
     final session = ref.read(relaySessionProvider.notifier);
-    final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5;
     try {
       final unsubscribeAddressed = await session.subscribe(
         NostrFilter(
@@ -146,6 +148,19 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       );
       if (visibleUnsubscribers == null) return;
       _unsubscribeDms.addAll(visibleUnsubscribers);
+      final activityUnsubscribers = await _subscribeChannelBatches(
+        session,
+        generation,
+        channelIds: [
+          for (final c in channels)
+            if (c.isMember && !c.isArchived) c.id,
+        ],
+        kinds: const [9, 40002, 40008, 40003, 5, 9005, 7],
+        since: since,
+        onEvent: (_) => _scheduleLiveRefresh(generation),
+      );
+      if (activityUnsubscribers == null) return;
+      _unsubscribeActivity.addAll(activityUnsubscribers);
 
       // Resurface trigger: hidden DMs are dropped from the visible-DM sub above,
       // so subscribe to them separately. Channel messages carry a channel_id and
@@ -366,11 +381,10 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
   void _scheduleLiveRefresh(int generation) {
     if (generation != _subscriptionGeneration) return;
-    _liveRefreshTimer?.cancel();
-    _liveRefreshTimer = Timer(
-      const Duration(milliseconds: 50),
-      () => unawaited(_queueRefresh(generation)),
-    );
+    _liveRefreshTimer ??= Timer(const Duration(milliseconds: 250), () {
+      _liveRefreshTimer = null;
+      unawaited(_queueRefresh(generation));
+    });
   }
 
   Future<void> _queueRefresh(int generation) {
@@ -423,26 +437,32 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       unsubscribe();
     }
     _unsubscribeDms.clear();
+    for (final unsubscribe in _unsubscribeActivity) {
+      unsubscribe();
+    }
+    _unsubscribeActivity.clear();
     for (final unsubscribe in _unsubscribeHiddenDms) {
       unsubscribe();
     }
     _unsubscribeHiddenDms.clear();
   }
 
-  /// Stable identity for the joined DM channel set: null while channels are
-  /// loading, otherwise the sorted member-DM ids. Keeps unrelated channel
-  /// updates from refetching the feed.
-  static String? _dmChannelKey(AsyncValue<List<Channel>> channels) {
+  /// Membership and presentation identity; message timestamps and names do
+  /// not rebuild the source subscriptions.
+  static String? _activityChannelKey(AsyncValue<List<Channel>> channels) {
     final value = channels.asData?.value;
     if (value == null) return null;
     final ids = [
       for (final channel in value)
-        if (channel.isDm && channel.isMember) channel.id,
+        if (channel.isMember)
+          '${channel.id}:${channel.isArchived}:${channel.isSolo}',
     ]..sort();
     return ids.join(',');
   }
 
   Future<HomeFeedResponse> _fetch() async {
+    final generation = _subscriptionGeneration;
+    final history = _history;
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) {
       return HomeFeedResponse(
@@ -454,15 +474,9 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     }
 
     final session = ref.read(relaySessionProvider.notifier);
-
-    // DM channels come from the channel list; while it is still loading the
-    // DM source is skipped, and build() rebuilds when it resolves (see the
-    // channelsProvider watch above).
-    final dmChannelIds = [
-      for (final channel
-          in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
-        if (channel.isDm && channel.isMember) channel.id,
-    ];
+    final activityChannels =
+        ref.read(channelsProvider).asData?.value ?? const <Channel>[];
+    final followedRoots = ref.read(threadFollowsProvider).followedRootIds;
 
     final filters = <NostrFilter>[
       // Mentions of me on user-visible channel content.
@@ -489,9 +503,6 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         },
         limit: 20,
       ),
-      // Recent DM traffic (filtered to other senders below).
-      if (dmChannelIds.isNotEmpty)
-        NostrFilter(kinds: const [9], tags: {'#h': dmChannelIds}, limit: 30),
     ];
 
     // The HTTP bridge keeps each NIP-01 filter's independent limit while
@@ -514,7 +525,6 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     const mentionKinds = {9, 40002, 1, 45001, 45003};
     const needsActionKinds = {46010, 46011, 46012};
     const agentActivityKinds = {43001, 43002, 43003, 43004, 43005, 43006};
-    final dmChannelIdSet = dmChannelIds.toSet();
 
     // Dedupe across sources by event id, keeping the higher-priority
     // category (needs_action > mention > agent_activity > activity).
@@ -553,16 +563,26 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       ),
       'agent_activity',
     );
-    add(
-      events.where(
-        (event) =>
-            event.kind == 9 &&
-            dmChannelIdSet.contains(event.channelId) &&
-            isFromOther(event),
-      ),
-      'activity',
+    final conversationItems = await loadActivityHistory(
+      query: (filters) {
+        if (generation != _subscriptionGeneration) {
+          throw StateError('Activity scope changed');
+        }
+        return _queryWithWebSocketFallback(session, filters);
+      },
+      channels: activityChannels,
+      viewer: myPk,
+      followedRoots: followedRoots,
+      seedEvents: events,
+      cache: history,
+      isCurrent: () => generation == _subscriptionGeneration,
     );
-
+    // The current desktop Activity owns chat evidence. Replace legacy chat
+    // rows so deleted/edited or no-longer-admitted messages cannot survive.
+    byId.removeWhere((_, item) => const [9, 40002, 40008].contains(item.kind));
+    for (final item in conversationItems) {
+      byId[item.id] = item;
+    }
     final items = byId.values.toList()
       ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
@@ -577,7 +597,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       ],
       activity: [
         for (final i in items)
-          if (i.category == 'activity') i,
+          if (i.category == 'activity' || i.category == 'reaction') i,
       ],
       agentActivity: [
         for (final i in items)
@@ -685,13 +705,9 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           ? start + fallbackConcurrency
           : filters.length;
       final results = await Future.wait(
-        filters.sublist(start, end).map((filter) async {
-          try {
-            return await session.fetchHistory(filter);
-          } catch (_) {
-            return const <NostrEvent>[];
-          }
-        }),
+        filters
+            .sublist(start, end)
+            .map((filter) => session.fetchHistory(filter)),
       );
       for (final result in results) {
         events.addAll(result);
@@ -715,6 +731,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   }
 
   Future<void> refresh() async {
+    _history = ActivityHistoryCache();
     await _queueRefresh(_subscriptionGeneration);
   }
 }
@@ -745,5 +762,14 @@ final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
         in ref.watch(channelsProvider).asData?.value ?? const <Channel>[])
       if (channel.isDm) channel.id,
   };
-  return buildInboxItems(feed.all, isDmChannel: dmChannelIds.contains);
+  final soloIds = {
+    for (final channel
+        in ref.watch(channelsProvider).asData?.value ?? const <Channel>[])
+      if (channel.isSolo) channel.id,
+  };
+  return buildInboxItems(
+    feed.all,
+    isDmChannel: dmChannelIds.contains,
+    isSoloChannel: soloIds.contains,
+  );
 });

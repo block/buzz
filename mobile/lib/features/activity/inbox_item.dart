@@ -8,6 +8,8 @@ import 'feed_item.dart';
 enum InboxFilter {
   all,
   mention,
+  dm,
+  reactions,
   thread,
   needsAction,
   activity,
@@ -56,8 +58,8 @@ String inboxConversationId(
 }) {
   final thread = threadReferenceOf(tags);
   final threadId = thread.rootId ?? thread.parentId;
-  if (threadId != null) return threadId;
   if (dmChannelId != null) return 'dm:$dmChannelId';
+  if (threadId != null) return threadId;
   return eventId;
 }
 
@@ -94,6 +96,7 @@ class InboxItem {
 
   /// Root id if any grouped event carries thread-reply tags.
   String? get threadRootId {
+    if (item.reactionTarget != null) return null;
     for (final candidate in [item, ...groupItems]) {
       if (isThreadReply(candidate.tags)) {
         return threadReferenceOf(candidate.tags).rootId;
@@ -126,6 +129,14 @@ class InboxItem {
   required bool isDm,
   required String senderLabel,
 }) {
+  if (item.item.reactionTarget != null) {
+    return (
+      text:
+          'Reacted ${item.groupItems.map((e) => e.reactionEmoji).whereType<String>().toSet().join(' ')} to your message',
+      channelLabel: channelName,
+    );
+  }
+
   if (isDm) {
     return (
       text: senderLabel.isNotEmpty ? 'DM from $senderLabel' : 'DM',
@@ -164,11 +175,13 @@ class InboxItem {
 /// `reminders` and `drafts` are separate surfaces and never match here.
 bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
   return switch (filter) {
-    InboxFilter.all => true,
-    InboxFilter.thread => [
-      item.item,
-      ...item.groupItems,
-    ].any((i) => isThreadReply(i.tags)),
+    InboxFilter.all =>
+      !item.isActionRequired && !item.categories.contains('agent_activity'),
+    InboxFilter.dm => item.conversationId.startsWith('dm:'),
+    InboxFilter.reactions => item.item.reactionTarget != null,
+    InboxFilter.thread =>
+      item.item.reactionTarget == null &&
+          [item.item, ...item.groupItems].any((i) => isThreadReply(i.tags)),
     InboxFilter.mention => item.categories.contains('mention'),
     InboxFilter.needsAction => item.categories.contains('needs_action'),
     InboxFilter.activity => item.categories.contains('activity'),
@@ -184,19 +197,44 @@ bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
 List<InboxItem> buildInboxItems(
   Iterable<FeedItem> feedItems, {
   bool Function(String channelId)? isDmChannel,
+  bool Function(String channelId)? isSoloChannel,
 }) {
-  final groups = <String, List<FeedItem>>{};
-  for (final item in feedItems) {
+  final itemsToGroup = feedItems.toList();
+  final threadedRoots = {
+    for (final item in itemsToGroup)
+      if (item.reactionTarget == null && isThreadReply(item.tags))
+        '${item.channelId}:${threadReferenceOf(item.tags).rootId}',
+  };
+  final reactionAuthors = <String, Set<String>>{};
+  for (final item in itemsToGroup.where((i) => i.reactionTarget != null)) {
+    reactionAuthors
+        .putIfAbsent(
+          '${item.reactionTarget!.id}:${item.reactionEmoji}',
+          () => {},
+        )
+        .add(item.pubkey);
+  }
+  String conversation(FeedItem item) {
     final channelId = item.channelId;
-    final dmChannelId =
-        channelId != null && (isDmChannel?.call(channelId) ?? false)
-        ? channelId
-        : null;
-    final key = inboxConversationId(
-      item.tags,
-      item.id,
-      dmChannelId: dmChannelId,
-    );
+    if (item.reactionTarget != null) {
+      final emoji = '${item.reactionTarget!.id}:${item.reactionEmoji}';
+      return 'reaction:${item.reactionTarget!.id}:${reactionAuthors[emoji]!.length > 1 ? 'emoji:${item.reactionEmoji}' : 'person:${item.pubkey}'}';
+    }
+    if (channelId != null && (isDmChannel?.call(channelId) ?? false)) {
+      return 'dm:$channelId';
+    }
+    if (channelId != null &&
+        (isSoloChannel?.call(channelId) ?? false) &&
+        !isThreadReply(item.tags) &&
+        !threadedRoots.contains('$channelId:${item.id}')) {
+      return 'solo:$channelId';
+    }
+    return inboxConversationId(item.tags, item.id);
+  }
+
+  final groups = <String, List<FeedItem>>{};
+  for (final item in itemsToGroup) {
+    final key = '${item.channelId}:${conversation(item)}';
     groups.putIfAbsent(key, () => []).add(item);
   }
 
@@ -214,7 +252,7 @@ List<InboxItem> buildInboxItems(
 
     rows.add(
       InboxItem(
-        conversationId: entry.key,
+        conversationId: conversation(latest),
         id: latest.id,
         item: latest,
         groupItems: List.unmodifiable(items),

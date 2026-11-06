@@ -161,7 +161,7 @@ void main() {
       expect(dmRow.latestActivityAt, 30);
     });
 
-    test('thread replies inside a DM still group by thread root', () {
+    test('thread replies inside a DM stay in the DM conversation', () {
       bool isDm(String channelId) => channelId == 'dm1';
       final rows = buildInboxItems([
         item(id: threadIdInboxTop, createdAt: 10, channelId: 'dm1'),
@@ -173,11 +173,9 @@ void main() {
         ),
       ], isDmChannel: isDm);
 
-      expect(rows, hasLength(2));
-      expect(rows.map((r) => r.conversationId).toSet(), {
-        'dm:dm1',
-        threadIdInboxTop,
-      });
+      expect(rows, hasLength(1));
+      expect(rows.single.conversationId, 'dm:dm1');
+      expect(rows.single.groupItems, hasLength(2));
     });
 
     test('categories are priority sorted and set isActionRequired', () {

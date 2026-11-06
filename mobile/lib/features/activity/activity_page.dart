@@ -1,5 +1,12 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
+import 'dart:math' show max;
+
+import '../../shared/widgets/ios_message_create_button.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../shared/widgets/ios_scroll_to_top.dart';
+import '../../shared/widgets/top_edge_fade.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -19,8 +26,6 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../../shared/widgets/frosted_app_bar.dart';
-import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
@@ -79,6 +84,9 @@ class ActivityPage extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(InboxFilter.all);
     final unreadOnly = useState(false);
+    final sender = useState('Anyone');
+    final agents = ref.watch(knownAgentPubkeysProvider);
+    final profiles = ref.watch(userCacheProvider);
     final scrollController = useScrollController();
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     useEffect(() {
@@ -110,12 +118,9 @@ class ActivityPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
-    final topSectionHeight = frostedAppBarHeight(
-      context,
-      nativeLargeTitle: true,
-      titleStyle: headerTitleStyle,
-      bottomHeight: Grid.xxs,
-    );
+    final filterHeight =
+        max(48.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16) +
+        Grid.xxs;
 
     final readState = ref.watch(readStateProvider);
     final localState = ref.watch(inboxLocalStateProvider);
@@ -138,9 +143,31 @@ class ActivityPage extends HookConsumerWidget {
       localDoneSet: localState.doneIds,
     );
 
+    bool includesSender(String pubkey) {
+      final pk = pubkey.toLowerCase();
+      final isAgent = agents.contains(pk) || profiles[pk]?.ownerPubkey != null;
+      return sender.value == 'Anyone' ||
+          (sender.value == 'Agents' ? isAgent : !isAgent);
+    }
+
+    // Mentions shows the actual mention, not a later unmentioned reply from
+    // the same conversation. Filtering happens before sender/read filtering.
+    final candidates = buildInboxItems(
+      allItems
+          .expand((i) => i.groupItems)
+          .where(
+            (e) =>
+                (filter.value != InboxFilter.mention ||
+                    e.category == 'mention') &&
+                (e.reactionTarget == null || includesSender(e.pubkey)),
+          ),
+      isDmChannel: (id) => channelById[id]?.isDm ?? false,
+      isSoloChannel: (id) => channelById[id]?.isSolo ?? false,
+    );
     final visibleItems = [
-      for (final item in allItems)
-        if (matchesInboxFilter(item, filter.value) &&
+      for (final item in candidates)
+        if (includesSender(item.item.pubkey) &&
+            matchesInboxFilter(item, filter.value) &&
             (!unreadOnly.value || !isDone(item)))
           item,
     ];
@@ -157,37 +184,34 @@ class ActivityPage extends HookConsumerWidget {
       return null;
     }, [preloadPubkeysKey]);
 
-    final unreadVisibleCount = visibleItems.where((i) => !isDone(i)).length;
-
     void markItemRead(InboxItem item) {
+      if (item.item.reactionTarget != null) return;
       final notifier = ref.read(readStateProvider.notifier);
       ref
           .read(inboxLocalStateProvider.notifier)
           .clearUnread(groupedInboxItemIds(item));
-      final threadRootId = item.threadRootId;
-      if (threadRootId != null) {
-        notifier.markContextRead(
-          threadContextKey(threadRootId),
-          item.latestActivityAt,
-        );
-        final channelRead = groupedChannelReadTimestamp(item);
-        if (channelRead != null) {
-          notifier.markContextRead(
-            channelRead.channelId,
-            channelRead.timestamp,
-          );
-        }
-        return;
-      }
       final channelId = item.item.channelId;
-      if (channelId != null) {
+      if (channelId != null && channelById[channelId]?.isDm == true) {
         notifier.markContextRead(channelId, item.latestActivityAt);
         ref
             .read(channelsProvider.notifier)
             .clearObservedUnreadCoveredByRead(channelId, item.latestActivityAt);
-        return;
+      } else if (channelId != null) {
+        final root = item.threadRootId;
+        if (root != null) {
+          notifier.markContextRead(
+            threadContextKey(root),
+            item.latestActivityAt,
+          );
+        }
+        for (final event in item.groupItems) {
+          if (!isThreadReply(event.tags)) {
+            notifier.markContextRead(msgContextKey(event.id), event.createdAt);
+          }
+        }
+      } else {
+        ref.read(inboxLocalStateProvider.notifier).markDone(item.id);
       }
-      ref.read(inboxLocalStateProvider.notifier).markDone(item.id);
     }
 
     void markItemUnread(InboxItem item) {
@@ -257,11 +281,13 @@ class ActivityPage extends HookConsumerWidget {
 
       // Deep-link to the represented message: oldest unread in the group,
       // falling back to the latest event.
-      final target = item.deepLinkTarget(
-        (event) => isInboxEventRead(event, markerOf: markerOf),
-      );
+      final target =
+          item.item.reactionTarget ??
+          item.deepLinkTarget(
+            (event) => isInboxEventRead(event, markerOf: markerOf),
+          );
       final thread = threadReferenceOf(target.tags);
-      final threadRootId = isBroadcastReply(target.tags)
+      final threadRootId = resolvedChannel.isDm || isBroadcastReply(target.tags)
           ? null
           : thread.parentId;
 
@@ -335,7 +361,6 @@ class ActivityPage extends HookConsumerWidget {
     }
 
     late final Widget body;
-    var bodyRidesOverTopSection = false;
     if (filter.value == InboxFilter.reminders) {
       body = _RemindersList(
         scrollController: scrollController,
@@ -362,22 +387,11 @@ class ActivityPage extends HookConsumerWidget {
         unreadOnly: unreadOnly.value,
       );
     } else {
-      // Compute the "New" boundary: index of the first unread row when the
-      // rows above it are read (list is newest-first, so unread rows sit on
-      // top; the divider marks where the unread block ends).
-      final firstReadIndex = visibleItems.indexWhere(isDone);
-      final newBoundaryIndex = !unreadOnly.value && firstReadIndex > 0
-          ? firstReadIndex
-          : -1;
-
-      bodyRidesOverTopSection = true;
       body = BeeRefreshIndicator(
-        edgeOffset: topSectionHeight,
         onRefresh: refresh,
         child: CustomScrollView(
           controller: scrollController,
           slivers: [
-            SliverToBoxAdapter(child: SizedBox(height: topSectionHeight)),
             DecoratedSliver(
               decoration: BoxDecoration(
                 color: context.colors.surface,
@@ -397,8 +411,6 @@ class ActivityPage extends HookConsumerWidget {
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (index == newBoundaryIndex)
-                          const _NewBoundaryDivider(),
                         _InboxRow(
                           key: ValueKey(item.id),
                           item: item,
@@ -420,88 +432,103 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
-    return FrostedScaffold(
-      backgroundColor: context.colors.surface,
-      appBar: FrostedAppBar(
-        nativeTitle: 'Inbox',
-        nativeLeading: IosNavigationAction(
-          label: 'Close inbox',
-          symbol: 'xmark',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        leading: IconButton(
-          tooltip: 'Close inbox',
-          icon: const Icon(BuzzIcons.x),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        nativeLargeTitle: true,
-        nativeActions: [
-          IosNavigationAction(
-            label: 'Filter inbox',
-            icon: BuzzIcons.filter2,
+    return IosScrollToTop(
+      child: Scaffold(
+        backgroundColor: context.colors.surface,
+        body: SafeArea(
+          bottom: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              for (final entry in _filterLabels.entries)
-                IosNavigationAction(
-                  label: entry.value,
-                  selected: filter.value == entry.key,
-                  onPressed: () => filter.value = entry.key,
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Grid.gutter,
+                  vertical: Grid.xxs,
                 ),
+                child: Row(
+                  children: [
+                    defaultTargetPlatform == TargetPlatform.iOS
+                        ? Padding(
+                            padding: const EdgeInsets.only(right: Grid.twelve),
+                            child: IosGlassNavigationButton(
+                              icon: IosGlassNavigationIcon.close,
+                              semanticLabel: 'Close activity',
+                              width: 44,
+                              height: 44,
+                              controlSize: 44,
+                              foregroundColor: navigationPrimaryForeground(
+                                context,
+                              ),
+                              onPressed: () => Navigator.of(context).pop(),
+                            ),
+                          )
+                        : IconButton(
+                            tooltip: 'Close activity',
+                            icon: const Icon(BuzzIcons.x),
+                            onPressed: () => Navigator.of(context).pop(),
+                          ),
+                    Expanded(child: Text('Activity', style: headerTitleStyle)),
+                  ],
+                ),
+              ),
+              SizedBox(
+                height: filterHeight,
+                child: SingleChildScrollView(
+                  key: const ValueKey('activity-filters'),
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.gutter,
+                    vertical: Grid.half,
+                  ),
+                  child: Row(
+                    children: [
+                      _ActivityMenuButton<InboxFilter>(
+                        controlKey: 'activity-type-menu',
+                        popoverKey: 'activity-type-popover',
+                        semanticLabel: 'Activity type',
+                        value: filter.value,
+                        active: filter.value != InboxFilter.all,
+                        options: const {
+                          InboxFilter.all: 'All',
+                          InboxFilter.thread: 'Threads',
+                          InboxFilter.mention: 'Mentions',
+                          InboxFilter.dm: 'DMs',
+                          InboxFilter.reactions: 'Reactions',
+                        },
+                        onChanged: (value) => filter.value = value,
+                      ),
+                      const SizedBox(width: Grid.xxs),
+                      _ActivityMenuButton<String>(
+                        controlKey: 'activity-sender-menu',
+                        popoverKey: 'activity-sender-popover',
+                        semanticLabel: 'From ${sender.value}',
+                        value: sender.value,
+                        active: sender.value != 'Anyone',
+                        options: const {
+                          'Anyone': 'Anyone',
+                          'People': 'People',
+                          'Agents': 'Agents',
+                        },
+                        onChanged: (value) => sender.value = value,
+                      ),
+                      const SizedBox(width: Grid.xxs),
+                      _UnreadFilterButton(
+                        selected: unreadOnly.value,
+                        onPressed: () => unreadOnly.value = !unreadOnly.value,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Expanded(
+                child: TopEdgeFade(
+                  key: const ValueKey('activity-content-viewport'),
+                  child: body,
+                ),
+              ),
             ],
           ),
-          IosNavigationAction(
-            label: 'Inbox options',
-            symbol: 'ellipsis',
-            children: [
-              IosNavigationAction(
-                label: 'Unread only',
-                selected: unreadOnly.value,
-                onPressed: () => unreadOnly.value = !unreadOnly.value,
-              ),
-              IosNavigationAction(
-                label: 'Mark all as read',
-                onPressed: unreadVisibleCount == 0
-                    ? null
-                    : () {
-                        for (final item in visibleItems) {
-                          if (!isDone(item)) markItemRead(item);
-                        }
-                      },
-              ),
-            ],
-          ),
-        ],
-        automaticallyImplyLeading: false,
-        horizontalInset: Grid.gutter,
-
-        title: Text('Inbox', style: headerTitleStyle),
-        titleStyle: headerTitleStyle,
-        actions: [
-          _ActivityActionsPill(
-            filter: filter.value,
-            unreadOnly: unreadOnly.value,
-            unreadCount: unreadVisibleCount,
-            onFilterChanged: (f) => filter.value = f,
-            onUnreadOnlyChanged: (v) => unreadOnly.value = v,
-            onMarkAllRead: () {
-              for (final item in visibleItems) {
-                if (!isDone(item)) markItemRead(item);
-              }
-            },
-          ),
-        ],
-        bottomHeight: Grid.xxs,
-        bottom: const SizedBox.expand(),
-      ),
-      body: SafeArea(
-        key: const ValueKey('activity-content-safe-area'),
-        top: false,
-        bottom: false,
-        child: bodyRidesOverTopSection
-            ? body
-            : Padding(
-                padding: EdgeInsets.only(top: topSectionHeight),
-                child: body,
-              ),
+        ),
       ),
     );
   }
