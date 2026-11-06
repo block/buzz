@@ -133,6 +133,11 @@ void main() {
           matching: find.byType(FilterChip),
         );
         expect(tester.getSize(chip).height, 48);
+        final paintedChip = find.descendant(
+          of: chip,
+          matching: find.byType(Material),
+        );
+        expect(tester.getSize(paintedChip).height, 48);
       }
 
       await tester.tap(

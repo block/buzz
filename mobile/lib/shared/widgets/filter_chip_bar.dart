@@ -217,11 +217,22 @@ class FilterChipBar<T> extends StatelessWidget {
             textAlign: fillWidth ? TextAlign.center : TextAlign.start,
             style: labelStyle,
           );
+    final sizedLabel = minControlHeight > 0
+        ? ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: math.max(
+                0,
+                minControlHeight - chipVerticalPadding * 2,
+              ),
+            ),
+            child: Center(widthFactor: 1, heightFactor: 1, child: label),
+          )
+        : label;
     final centeredLabel = Align(
       alignment: Alignment.center,
       widthFactor: fillWidth ? null : 1,
       heightFactor: 1,
-      child: label,
+      child: sizedLabel,
     );
     final chip = FilterChip(
       selected: isSelected,
@@ -241,7 +252,9 @@ class FilterChipBar<T> extends StatelessWidget {
         horizontal: fillWidth ? Grid.quarter : Grid.twelve,
         vertical: chipVerticalPadding,
       ),
-      visualDensity: visualDensity,
+      visualDensity: minControlHeight > 0
+          ? VisualDensity.standard
+          : visualDensity,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
 
