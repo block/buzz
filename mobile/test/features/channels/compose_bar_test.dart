@@ -4326,6 +4326,38 @@ void main() {
           reason: before,
         );
       }
+
+      // Selection updates can arrive before a frame draws a pasted link as a
+      // chip. They still snap to the whole chip.
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: plain,
+          selection: TextSelection.collapsed(offset: plain.length),
+        ),
+      );
+      final pastedText = '$plain ';
+      for (final extent in [plain.length, plain.length - 1]) {
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: pastedText,
+            selection: TextSelection(
+              baseOffset: pastedText.length,
+              extentOffset: extent,
+            ),
+          ),
+        );
+      }
+      await tester.pump();
+      final pasteController = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(pasteController.text, pastedText);
+      expect(
+        pasteController.selection,
+        TextSelection(baseOffset: pastedText.length, extentOffset: 0),
+      );
     });
 
     testWidgets('uses the primary color for formatting actions', (

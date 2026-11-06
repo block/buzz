@@ -82,6 +82,7 @@ class _MarkdownEditingController extends TextEditingController {
       (value.text.length, value.text.hashCode, value.selection.hashCode);
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
+    _refreshChipRanges(next.text);
     final selection = next.selection;
     if ((_chipRanges.isEmpty && _revealedChip == null) ||
         next.text != _chipRangesText ||
@@ -424,8 +425,9 @@ class _MarkdownEditingController extends TextEditingController {
   }
 
   /// Rebuilds the span for [text], recording its chip ranges, when an edit
-  /// arrives before a frame has drawn the previous one. IME batches can
-  /// send two backspaces in a row.
+  /// or selection change arrives before a frame has drawn the previous
+  /// edit. IME batches can send two backspaces or Shift+Left presses in a
+  /// row.
   void _refreshChipRanges(String text) {
     final context = _lastBuildContext;
     if (_chipRangesText == text ||
