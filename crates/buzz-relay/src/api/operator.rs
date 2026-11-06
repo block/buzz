@@ -1399,7 +1399,7 @@ pub async fn no_store_upgrade_response(
 
 #[cfg(test)]
 mod postgres_tests {
-    mod initial_policy;
+    mod initial_policy_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
