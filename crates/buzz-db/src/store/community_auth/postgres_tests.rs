@@ -748,7 +748,7 @@ async fn policy_same_state_barrier_and_retained_legacy_receipt_identity() {
     assert_eq!(apply(&db, &barrier).await, record);
     let enable = intent(&tuple, true, 1, false);
     apply(&db, &enable).await;
-    // Emulate an acceptance written before migration 0084, without restoring
+    // Emulate an acceptance written before migration 0085, without restoring
     // an unfenced writer just to create test data. Old INSERTs remain valid.
     let legacy_id = Uuid::new_v4();
     sqlx::query(

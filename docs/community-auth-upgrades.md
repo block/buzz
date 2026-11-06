@@ -83,7 +83,7 @@ return 409 with corresponding `*_conflict` codes; generation exhaustion returns
 
 ## Schema and rollout
 
-Migration 0084 adds desired action and nullable CAS preconditions to existing
+Migration 0085 adds desired action and nullable CAS preconditions to existing
 receipts. True/default and null preconditions preserve old receipt meaning and
 old INSERT compatibility. No data backfill, trigger, function or foreign key is
 added. Historical rows with null CAS preconditions remain readable through

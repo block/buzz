@@ -61,6 +61,7 @@ enum NativeTabler {
     "arrow.down": 0xea16, // arrow-down
     "xmark": 0xeb55, // x
     "xmark.circle.fill": 0xea6a, // circle-x
+    "chevron.down": 0xea5f, // chevron-down
     "chevron.backward": 0xea60, // chevron-left
     "chevron.left": 0xea60, // chevron-left
     "chevron.right": 0xea61, // chevron-right

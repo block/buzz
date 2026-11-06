@@ -898,7 +898,15 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 84);
+        assert_eq!(migrations.len(), 85);
+        assert!(migrations[83]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN auto_join_pending UUID"));
+        assert!(migrations[84]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN requested_requires_nip_fi BOOLEAN NOT NULL DEFAULT true"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3026,6 +3034,7 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "relay_members",
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
@@ -3239,7 +3248,7 @@ mod postgres_tests {
     async fn policy_receipt_expand_preserves_populated_rows_and_legacy_inserts() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        run_migrations_through(&pool, 83).await.unwrap();
+        run_migrations_through(&pool, 84).await.unwrap();
         let insert = "INSERT INTO community_auth_upgrades
             (operation_id,target_community_id,expected_host,actor_pubkey,expected_owner_pubkey,
              expected_issuer,operator_pubkey,policy_generation)
