@@ -149,8 +149,8 @@ class StickyDateHeader extends StatelessWidget {
               child: AnimatedOpacity(
                 duration: reducedMotion || visible
                     ? Duration.zero
-                    : const Duration(milliseconds: 120),
-                curve: Curves.easeOutCubic,
+                    : const Duration(milliseconds: 250),
+                curve: Curves.easeInOut,
                 opacity: visible ? 1 : 0,
                 child: ValueListenableBuilder<bool>(
                   valueListenable: messageActionBackdropActive,

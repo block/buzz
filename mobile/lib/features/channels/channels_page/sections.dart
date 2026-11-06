@@ -518,25 +518,28 @@ class _SectionLabel extends StatelessWidget {
   final Color color;
 
   @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      Flexible(
-        child: Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: navigationSectionTextStyle.copyWith(
-            color: color,
-            fontWeight: FontWeight.w500,
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: Grid.xxs),
+    child: Row(
+      children: [
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: navigationSectionTextStyle.copyWith(
+              color: color,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
-      ),
-      const SizedBox(width: Grid.quarter),
-      _SectionChevron(
-        expanded: expanded,
-        color: navigationAccessoryForeground(context),
-      ),
-    ],
+        const SizedBox(width: Grid.quarter),
+        _SectionChevron(
+          expanded: expanded,
+          color: navigationAccessoryForeground(context),
+        ),
+      ],
+    ),
   );
 }
 

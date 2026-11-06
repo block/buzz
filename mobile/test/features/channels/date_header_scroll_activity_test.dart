@@ -83,19 +83,26 @@ void main() {
     expect(opacity(), 0);
     expect(
       tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).duration,
-      const Duration(milliseconds: 120),
+      const Duration(milliseconds: 250),
     );
     expect(
       find.text('Yesterday'),
       findsOneWidget,
     ); // Keep the label during fade.
-    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pump(const Duration(milliseconds: 125));
+    final fade = tester.widget<FadeTransition>(
+      find.descendant(
+        of: find.byType(AnimatedOpacity),
+        matching: find.byType(FadeTransition),
+      ),
+    );
+    expect(fade.opacity.value, closeTo(0.5, 0.05));
     start(); // Interrupt the fade without waiting for it to finish.
     await tester.pump();
     expect(opacity(), 1);
     end();
     await tester.pump(const Duration(seconds: 1));
-    await tester.pump(const Duration(milliseconds: 120));
+    await tester.pump(const Duration(milliseconds: 250));
     update();
     await tester.pump();
     expect(opacity(), 0);
