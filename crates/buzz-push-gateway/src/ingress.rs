@@ -8,6 +8,7 @@ use axum::{
 };
 use std::{
     collections::HashMap,
+    hash::BuildHasher,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::Instant,
@@ -16,7 +17,18 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 struct Sources {
     last_sweep: Instant,
-    entries: HashMap<IpAddr, (Instant, u32, Arc<Semaphore>)>,
+    entries: HashMap<u16, (Instant, u32, Arc<Semaphore>)>,
+}
+impl Sources {
+    fn bucket(&self, source: IpAddr) -> u16 {
+        let source = match source.to_canonical() {
+            IpAddr::V6(ip) => IpAddr::V6((ip.to_bits() & (u128::MAX << 64)).into()),
+            ip => ip,
+        };
+        // Randomized, fixed buckets bound memory without rejecting every new
+        // source when full. Collisions share limits; IPv6 hosts share a /64.
+        (self.entries.hasher().hash_one(source) % 4096) as u16
+    }
 }
 
 // Shared with the handler so committed delivery work can outlive its request.
@@ -107,6 +119,7 @@ impl Lane {
     }
     fn admit_source(&self, source: IpAddr) -> Result<OwnedSemaphorePermit, i64> {
         let mut sources = self.sources.lock().map_err(|_| 60)?;
+        let source = sources.bucket(source);
         let now = Instant::now();
         if now.duration_since(sources.last_sweep).as_secs() >= 60 {
             sources.entries.retain(|_, (start, _, work)| {
@@ -114,9 +127,6 @@ impl Lane {
                     || work.available_permits() < self.per_source_concurrent
             });
             sources.last_sweep = now;
-        }
-        if sources.entries.len() >= 4096 && !sources.entries.contains_key(&source) {
-            return Err(60);
         }
         let (start, used, work) = sources
             .entries
@@ -169,9 +179,21 @@ mod tests {
         request
     }
 
+    // Pick distinct buckets explicitly so randomized hashing cannot flake tests.
+    fn unused_source(lane: &Lane, source: IpAddr) -> IpAddr {
+        let sources = lane.sources.lock().unwrap();
+        (0..65536u128)
+            .map(|offset| match source {
+                IpAddr::V4(ip) => IpAddr::V4((ip.to_bits() + offset as u32).into()),
+                IpAddr::V6(ip) => IpAddr::V6((ip.to_bits() + (offset << 64)).into()),
+            })
+            .find(|source| !sources.entries.contains_key(&sources.bucket(*source)))
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn trusted_proxy_clients_have_separate_source_budgets() {
-        let app = app(Lane::new(
+        let lane = Lane::new(
             4,
             2,
             1,
@@ -179,7 +201,8 @@ mod tests {
                 ("10.0.0.0".parse().unwrap(), 24),
                 ("2001:db8::".parse().unwrap(), 64),
             ],
-        ));
+        );
+        let app = app(lane.clone());
         for (peer, client) in [
             ("10.0.0.2:123", "192.0.2.1"),
             ("10.0.0.2:123", "192.0.2.2"),
@@ -187,9 +210,10 @@ mod tests {
             ("[::ffff:10.0.0.2]:123", "192.0.2.4"),
             ("[2001:db8::1]:123", "2001:db8:1::1"),
         ] {
+            let client = unused_source(&lane, client.parse().unwrap()).to_string();
             assert_eq!(
                 app.clone()
-                    .oneshot(request(peer, &[("x-buzz-client-ip", client)]))
+                    .oneshot(request(peer, &[("x-buzz-client-ip", &client)]))
                     .await
                     .unwrap()
                     .status(),
@@ -197,7 +221,7 @@ mod tests {
             );
             let response = app
                 .clone()
-                .oneshot(request(peer, &[("x-buzz-client-ip", client)]))
+                .oneshot(request(peer, &[("x-buzz-client-ip", &client)]))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -229,6 +253,52 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ipv6_hosts_share_a_prefix_budget_directly_and_through_a_proxy() {
+        for proxied in [false, true] {
+            let app = app(Lane::new(4, 2, 1, vec![("10.0.0.2".parse().unwrap(), 32)]));
+            for (client, expected) in [
+                ("2001:db8:1::1", StatusCode::NO_CONTENT),
+                ("2001:db8:1::2", StatusCode::TOO_MANY_REQUESTS),
+            ] {
+                let request = if proxied {
+                    request("10.0.0.2:123", &[("x-buzz-client-ip", client)])
+                } else {
+                    request(&format!("[{client}]:123"), &[])
+                };
+                assert_eq!(
+                    app.clone().oneshot(request).await.unwrap().status(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_churn_does_not_fill_the_table_and_block_new_clients() {
+        let lane = Lane::new(4, 2, u32::MAX, Vec::new());
+        let app = app(lane.clone());
+        for n in 0..4097 {
+            let peer = format!("198.18.{}.{}:123", n >> 8, n & 255);
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(&peer, &[]))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert_eq!(
+            app.oneshot(request("203.0.113.1:123", &[]))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(lane.sources.lock().unwrap().entries.len() <= 4096);
     }
 
     #[tokio::test]
@@ -271,45 +341,54 @@ mod tests {
     }
 
     #[test]
-    fn bookkeeping_and_sources_are_bounded_and_lanes_are_independent() {
+    fn source_budgets_are_independent_between_lanes() {
         let delivery = Lane::new(8, 8, 1, Vec::new());
         let revocation = Lane::new(4, 2, 1, Vec::new());
-        for n in 0..4096u32 {
-            assert!(delivery.admit_source(IpAddr::V4(n.into())).is_ok());
-        }
-        let other = IpAddr::V4(5000u32.into());
-        assert!(delivery.admit_source(other).is_err());
-        assert!(revocation.admit_source(other).is_ok());
-        assert!(revocation.admit_source(other).is_err());
-        assert_eq!(delivery.sources.lock().unwrap().entries.len(), 4096);
+        let source = "192.0.2.1".parse().unwrap();
+        assert!(delivery.admit_source(source).is_ok());
+        assert!(delivery.admit_source(source).is_err());
+        assert!(revocation.admit_source(source).is_ok());
+        assert!(revocation.admit_source(source).is_err());
     }
     #[test]
     fn active_source_capacity_survives_rate_reset_and_sweep() {
         let lane = Lane::new(4, 2, 120, Vec::new());
         let source = "192.0.2.1".parse().unwrap();
-        let other = "192.0.2.2".parse().unwrap();
+        let collision = {
+            let sources = lane.sources.lock().unwrap();
+            (1..1_000_000u32)
+                .map(|n| IpAddr::V4(n.into()))
+                .find(|ip| *ip != source && sources.bucket(*ip) == sources.bucket(source))
+                .unwrap()
+        };
         let a = lane.admit_source(source).unwrap();
-        let b = lane.admit_source(source).unwrap();
+        let b = lane.admit_source(collision).unwrap();
+        let other = unused_source(&lane, "192.0.2.2".parse().unwrap());
         assert_eq!(lane.admit_source(source).unwrap_err(), 1);
         // Expire the rate window while work is still active. Neither a reset
         // nor a sweep may replace the semaphore owned by those requests.
         let age_source = || {
             let mut sources = lane.sources.lock().unwrap();
+            let bucket = sources.bucket(source);
             sources.last_sweep = Instant::now() - std::time::Duration::from_secs(61);
-            sources.entries.get_mut(&source).unwrap().0 = sources.last_sweep;
+            sources.entries.get_mut(&bucket).unwrap().0 = sources.last_sweep;
         };
         age_source();
         drop(lane.admit_source(other).unwrap()); // Sweep from a different source.
         assert_eq!(lane.admit_source(source).unwrap_err(), 1); // Rate reset.
+        assert_eq!(lane.admit_source(collision).unwrap_err(), 1);
         drop(a);
         let c = lane.admit_source(source).unwrap();
         assert_eq!(lane.admit_source(source).unwrap_err(), 1);
         drop((b, c));
         age_source();
         drop(lane.admit_source(other).unwrap());
-        assert!(!lane.sources.lock().unwrap().entries.contains_key(&source));
+        {
+            let sources = lane.sources.lock().unwrap();
+            assert!(!sources.entries.contains_key(&sources.bucket(source)));
+        }
         let _a = lane.admit_source(source).unwrap();
-        let _b = lane.admit_source(source).unwrap();
+        let _b = lane.admit_source(collision).unwrap();
         assert_eq!(lane.admit_source(source).unwrap_err(), 1);
     }
 
