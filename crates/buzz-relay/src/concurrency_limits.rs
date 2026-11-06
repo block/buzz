@@ -282,6 +282,7 @@ mod tests {
         assert_eq!(gate.limit(), 4, "the next tick applies the flag");
 
         cancel.cancel();
-        task.await.expect("the loop survives the panic and stops on cancel");
+        task.await
+            .expect("the loop survives the panic and stops on cancel");
     }
 }
