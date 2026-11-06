@@ -193,9 +193,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     }
 
     // Agents join a DM with its history, as on desktop; adding a person asks.
-    // The relay joins anyone to this DM only with the history tag.
+    // The relay joins anyone to this DM only with the history tag. A DM of at
+    // most one person and their agents never gains a person: adding one
+    // starts a new DM without asking.
     Future<bool?> askIncludeHistory(List<MentionCandidate> users) async {
       if (users.every((user) => user.isAgent)) return true;
+      final people = existingPubkeys
+          .where((pubkey) => userCache[pubkey]?.isAgent != true)
+          .length;
+      if (people < 2) return false;
       return showDmHistoryChoice(
         context: context,
         title: users.length == 1
