@@ -3822,7 +3822,8 @@ mod postgres_tests {
         assert!(!split.older, "rows below `since` cannot match");
         assert_eq!(next(Range::Recent(split), recent.len(), 10), None);
 
-        // The production read: every matching row, from one statement.
+        // The production read: every matching row, from exactly the recent
+        // pass's statement, so the lock checks below bind what it prepared.
         let mut conn = pool.acquire().await.expect("acquire");
         sqlx::Connection::clear_cached_statements(&mut *conn)
             .await
@@ -3832,11 +3833,18 @@ mod postgres_tests {
             .expect("mention page");
         let ids: Vec<_> = page.into_iter().map(|r| r.event.id).collect();
         assert_eq!(ids, recent);
-        assert_eq!(
-            prepared_like(&mut conn, "%JOIN event_mentions%").await,
-            1,
-            "one pass"
-        );
+        let prepared: Vec<String> = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements \
+             WHERE statement LIKE '%JOIN event_mentions%'",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("read prepared statements");
+        let recent_pass = build_query_events_sql(&q, Range::Recent(split), 10)
+            .sql()
+            .as_str()
+            .to_owned();
+        assert_eq!(prepared, [recent_pass], "one pass, bounded by literals");
 
         sqlx::query("SET plan_cache_mode = force_generic_plan")
             .execute(&mut *conn)
