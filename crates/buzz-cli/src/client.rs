@@ -796,8 +796,19 @@ impl BuzzClient {
 
     async fn query_pages(
         &self,
+        filter: serde_json::Value,
+        limit: Option<u32>,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages_keeping(filter, limit, |_| true).await
+    }
+
+    /// Like `query_pages`, but only events `keep` accepts count toward
+    /// `limit`, so paging continues past the ones it drops.
+    async fn query_pages_keeping(
+        &self,
         mut filter: serde_json::Value,
         limit: Option<u32>,
+        keep: impl Fn(&serde_json::Value) -> bool,
     ) -> Result<Vec<serde_json::Value>, CliError> {
         let mut events = Vec::new();
 
@@ -815,13 +826,24 @@ impl BuzzClient {
             if !done {
                 advance_query_cursor(&mut filter, &page)?;
             }
-            events.extend(page);
+            events.extend(page.into_iter().filter(|e| keep(e)));
             if done {
                 break;
             }
         }
 
         Ok(events)
+    }
+
+    /// Query up to `limit` historical events that `keep` accepts, paging past
+    /// the rest until the limit is met or the history runs out.
+    pub async fn query_paginated_keeping(
+        &self,
+        filter: serde_json::Value,
+        limit: u32,
+        keep: impl Fn(&serde_json::Value) -> bool,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        self.query_pages_keeping(filter, Some(limit), keep).await
     }
 
     /// Query up to `limit` historical events, following the relay bridge's
@@ -1384,7 +1406,7 @@ impl BuzzClient {
         }
 
         let bytes = std::fs::read(file_path)
-            .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
+            .map_err(|e| CliError::Usage(format!("failed to read {file_path}: {e}")))?;
 
         // 2. Detect MIME from magic bytes
         let mime = infer::get(&bytes)
@@ -2586,6 +2608,27 @@ mod retry_policy_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_file_is_bad_input() {
+        use std::os::unix::fs::PermissionsExt;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:9".into(),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let err = client
+            .upload_file(file.path().to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::CliError::Usage(ref m) if m.contains("failed to read")),
+            "{err:?}"
+        );
+    }
+
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
         normalize_events, BuzzClient, Credentials, Proof,

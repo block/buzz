@@ -128,8 +128,8 @@ fn env_output_format(value: Option<&std::ffi::OsStr>) -> OutputFormat {
 Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
-  BUZZ_RELAY_URL     Relay base URL        [default: the one relay the Buzz desktop's
-                     credential acts on, else http://localhost:3000]
+  BUZZ_RELAY_URL     Relay base URL        [default: the relay an agent's inherited
+                     Buzz desktop credential acts on, else http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
   BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
@@ -146,8 +146,8 @@ Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"
 )]
 struct Cli {
     /// Relay URL (http:// or https://). Overrides BUZZ_RELAY_URL env var.
-    /// Without either, the one relay the Buzz desktop's credential acts on;
-    /// without a desktop, http://localhost:3000.
+    /// Without either, the relay an agent's inherited Buzz desktop credential
+    /// acts on; otherwise http://localhost:3000.
     #[arg(long, env = "BUZZ_RELAY_URL")]
     relay: Option<String>,
 
@@ -373,6 +373,24 @@ enum DesktopAuthCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+}
+
+/// The relay for a command given none: the one an agent's inherited Buzz
+/// desktop credential acts on, else `http://localhost:3000`. Local-only
+/// unpairing never asks the desktop.
+async fn default_relay(command: &Cmd) -> Result<String, CliError> {
+    #[cfg(unix)]
+    if !matches!(
+        command,
+        Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Unpair { .. }))
+    ) {
+        if let Some(relay) = desktop_provider::inherited_relay().await? {
+            return Ok(relay);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+    Ok("http://localhost:3000".to_owned())
 }
 
 #[cfg(unix)]
@@ -2397,9 +2415,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     .with_env_evidence();
     let relay = match cli.relay {
         Some(relay) => relay,
-        None => desktop_provider::default_relay()
-            .await?
-            .unwrap_or_else(|| "http://localhost:3000".to_owned()),
+        None => default_relay(&cli.command).await?,
     };
     let Some((command, client)) = connect(&relay, cli.command, run_auth, async |relay| {
         credentials::resolve(settings, relay).await

@@ -1121,8 +1121,8 @@ pub async fn dispatch(
     }
 }
 
-/// A file's name as relay filename metadata takes it: its basename without
-/// control characters, capped at 255 UTF-8 bytes.
+/// A file's name as relay filename metadata takes it: its basename with
+/// control characters and path separators as spaces, capped at 255 UTF-8 bytes.
 fn attachment_name(file_path: &str) -> String {
     let base = std::path::Path::new(file_path)
         .file_name()
@@ -1130,7 +1130,11 @@ fn attachment_name(file_path: &str) -> String {
         .unwrap_or_default();
     let mut name = String::new();
     for c in base.chars() {
-        let c = if c.is_control() { ' ' } else { c };
+        let c = if c.is_control() || c == '/' || c == '\\' {
+            ' '
+        } else {
+            c
+        };
         if name.len() + c.len_utf8() > 255 {
             break;
         }
@@ -1205,6 +1209,7 @@ mod tests {
         assert_eq!(attachment_name("/tmp/dir/report.pdf"), "report.pdf");
         assert_eq!(attachment_name("/tmp/a\nb.txt"), "a b.txt");
         assert_eq!(attachment_name("/"), "File");
+        assert_eq!(attachment_name("/tmp/a\\b.txt"), "a b.txt");
     }
 
     use super::{

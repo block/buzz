@@ -1049,22 +1049,19 @@ pub async fn discover(relay_url: &str) -> Result<Option<Arc<Provider>>, CliError
     discover_with(inherited()?, &Keychain, advertisements, relay_url).await
 }
 
-/// The relay for a command given none: the one the inherited token acts on,
-/// else the ones the paired tokens of running desktops act on. `None` without
-/// a desktop link; bad input when the link acts on several relays.
-pub async fn default_relay() -> Result<Option<String>, CliError> {
-    let relays = match inherited()? {
-        Some((endpoint, token)) => {
-            // A failed `describe` is reported by the credential chain.
-            match call(&endpoint, Some(&token), true, "describe", &[]).await {
-                Ok(raw) => serde_json::from_str::<Describe>(&raw)
-                    .map(|d| d.relays)
-                    .unwrap_or_default(),
-                Err(_) => return Ok(None),
-            }
-        }
-        None => paired_relays(&Keychain, advertisements()),
+/// The relay an agent's inherited credential acts on, for a command given
+/// none. `None` without an inherited token, or when `describe` fails (the
+/// credential chain reports that); bad input when it acts on several relays.
+pub async fn inherited_relay() -> Result<Option<String>, CliError> {
+    let Some((endpoint, token)) = inherited()? else {
+        return Ok(None);
     };
+    let Ok(raw) = call(&endpoint, Some(&token), true, "describe", &[]).await else {
+        return Ok(None);
+    };
+    let relays = serde_json::from_str::<Describe>(&raw)
+        .map(|d| d.relays)
+        .unwrap_or_default();
     let mut distinct: Vec<String> = Vec::new();
     for relay in relays {
         if !distinct.iter().any(|known| same_relay(known, &relay)) {
@@ -1075,22 +1072,11 @@ pub async fn default_relay() -> Result<Option<String>, CliError> {
         0 => Ok(None),
         1 => Ok(distinct.pop()),
         _ => Err(CliError::Usage(format!(
-            "the Buzz desktop acts on several relays ({}); pass --relay or set BUZZ_RELAY_URL",
+            "this agent's Buzz credential acts on several relays ({}); pass --relay or set \
+             BUZZ_RELAY_URL",
             distinct.join(", ")
         ))),
     }
-}
-
-/// Every relay a paired token of an advertised desktop acts on.
-fn paired_relays(store: &dyn PairingStore, advertised: Vec<(String, Endpoint)>) -> Vec<String> {
-    let Ok(Ok(pairings)) = store.read().map(parse_pairings) else {
-        return Vec::new();
-    };
-    advertised
-        .iter()
-        .filter_map(|(instance, _)| pairings.0.get(instance))
-        .flat_map(|pairing| pairing.relays.iter().cloned())
-        .collect()
 }
 
 async fn discover_with(
