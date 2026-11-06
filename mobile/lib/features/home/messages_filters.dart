@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/theme/theme.dart';
@@ -20,6 +21,7 @@ class MessagesFilters extends StatelessWidget {
     width: double.infinity,
     child: FilterChipBar<String>(
       useNativeGlass: true,
+      minControlHeight: defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48,
       horizontalPadding: Grid.gutter,
       selected: selected,
       onSelected: (value) {

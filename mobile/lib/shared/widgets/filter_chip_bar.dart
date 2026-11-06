@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'ios_glass_navigation_button.dart';
@@ -46,6 +48,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
+  /// Minimum visible capsule height; the hit target may be larger.
+  final double minControlHeight;
+
   /// Material density applied to each chip.
   final VisualDensity visualDensity;
 
@@ -65,6 +70,7 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
+    this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
     this.barVerticalPadding = Grid.xxs,
@@ -77,8 +83,10 @@ class FilterChipBar<T> extends StatelessWidget {
       final textStyle = filterChipTextStyle.copyWith(
         fontWeight: FontWeight.w600,
       );
-      final height = (MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16)
-          .clamp(48.0, double.infinity);
+      final height = math.max(
+        MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16,
+        math.max(48.0, minControlHeight),
+      );
       final widths = [
         for (final item in items)
           (TextPainter(
@@ -122,7 +130,9 @@ class FilterChipBar<T> extends StatelessWidget {
                       isSelected: selected == items[index].id,
                       width: widths[index] + extra,
                       height: height,
-                      controlSize: height - 8,
+                      controlSize: math
+                          .max(height - 8, minControlHeight)
+                          .toDouble(),
                       fillWidth: true,
                       foregroundColor: context.colors.primary,
                     ),
@@ -235,9 +245,15 @@ class FilterChipBar<T> extends StatelessWidget {
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
 
-    final control = fillWidth
-        ? SizedBox(width: double.infinity, child: chip)
+    final sizedChip = minControlHeight > 0
+        ? ConstrainedBox(
+            constraints: BoxConstraints(minHeight: minControlHeight),
+            child: chip,
+          )
         : chip;
+    final control = fillWidth
+        ? SizedBox(width: double.infinity, child: sizedChip)
+        : sizedChip;
     if (!item.hasUnread) return control;
     return Semantics(
       label: '$text, unread',

@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 import 'package:buzz/features/channels/me/me_section.dart';
 import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/activity/inbox_unread_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -10,6 +11,7 @@ import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
@@ -21,6 +23,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   Future<Widget> buildHome({
     bool longSolo = false,
+    bool inboxUnread = false,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
     ValueChanged<ValueNotifier<VoidCallback?>>? onNewChatAction,
@@ -30,6 +33,7 @@ void main() {
     return ProviderScope(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
+        inboxHasUnreadProvider.overrideWithValue(inboxUnread),
         defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
         channelsProvider.overrideWith(_Channels.new),
       ],
@@ -120,6 +124,16 @@ void main() {
       expect(header.alwaysFrosted, isTrue);
       expect(header.titleStyle?.fontSize, 22);
       expect(header.centerTitle, isFalse);
+      for (final label in ['All', 'Solo', 'Team']) {
+        final chip = find.ancestor(
+          of: find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.text(label),
+          ),
+          matching: find.byType(FilterChip),
+        );
+        expect(tester.getSize(chip).height, 48);
+      }
 
       await tester.tap(
         find.descendant(
@@ -161,7 +175,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
       expect(find.text('General').hitTestable(), findsOneWidget);
-      await tester.tap(find.text('Inbox'));
+      expect(find.text('Inbox'), findsNothing);
+      await tester.tap(find.byTooltip('Inbox'));
       await tester.pumpAndSettle();
       expect(find.byType(ActivityPage), findsOneWidget);
       Navigator.of(tester.element(find.byType(ActivityPage))).pop();
@@ -293,6 +308,26 @@ void main() {
     });
   }
 
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('$platform bell follows unread inbox state', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      for (final unread in [false, true, false]) {
+        await tester.pumpWidget(await buildHome(inboxUnread: unread));
+        await tester.pumpAndSettle();
+        final badge = tester.widget<Badge>(
+          find.byKey(const Key('home-inbox-badge')),
+        );
+        expect(badge.isLabelVisible, unread);
+        expect(
+          find.byTooltip(unread ? 'Inbox, unread items' : 'Inbox'),
+          findsOneWidget,
+        );
+      }
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   testWidgets(
     'iOS shows Messages above filters with the native creation menu',
     (tester) async {
@@ -348,6 +383,46 @@ void main() {
         closeTo(initialWidth, .01),
       );
       expect(search.hitTestable(), findsOneWidget);
+      final inbox = find.byWidgetPredicate(
+        (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Inbox',
+      );
+      expect(inbox, findsOneWidget);
+      expect(find.text('Inbox'), findsNothing);
+      final inboxButton = tester.widget<IosGlassNavigationButton>(inbox);
+      expect(inboxButton.icon, IosGlassNavigationIcon.bell);
+      for (final label in ['All', 'Solo', 'Team']) {
+        final chip = tester.widget<IosGlassNavigationButton>(
+          find.descendant(
+            of: find.byType(MessagesFilters),
+            matching: find.byWidgetPredicate(
+              (w) => w is IosGlassNavigationButton && w.label == label,
+            ),
+          ),
+        );
+        expect(chip.controlSize, inboxButton.controlSize);
+      }
+      expect(tester.getSize(inbox), const Size(44, 44));
+      final communityTrigger = find.byWidgetPredicate(
+        (w) =>
+            w is IosMessageCreateButton &&
+            w.accessibilityLabel == 'Community menu',
+      );
+      expect(
+        tester.getRect(inbox).right,
+        lessThan(tester.getRect(communityTrigger).left),
+      );
+      inboxButton.onPressed!();
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityPage), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Inbox',
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
+      Navigator.of(tester.element(find.byType(ActivityPage))).pop();
+      await tester.pumpAndSettle();
       final communityMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
           (w) =>
