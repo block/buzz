@@ -1,3 +1,5 @@
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/bestie_welcome.dart';
 import 'package:buzz/features/channels/bestie_welcome_storage.dart';
@@ -608,11 +610,136 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  testWidgets('chat Back follows visibility of the conversation list', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(951, 669);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    addTearDown(tester.view.reset);
+    final controller = ConversationPaneController()
+      ..open(
+        'chat',
+        (_) => ChannelDetailPage(channel: _testChannel),
+        animate: false,
+      );
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: const [],
+        home: AdaptiveConversationDestination(
+          controller: controller,
+          child: const Text('Conversation list'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    FrostedAppBar header() =>
+        tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    expect(find.text('Conversation list'), findsOneWidget);
+    expect(header().automaticallyImplyLeading, isFalse);
+    expect(header().nativeLargeTitle, isFalse);
+    final openNav = find.byWidgetPredicate(
+      (w) => w is IosNavigationBar && !w.standaloneControl,
+    );
+    expect(tester.getRect(openNav).right, 951);
+    expect(
+      tester.getRect(openNav).left,
+      tester.getRect(find.byType(FrostedScaffold)).left,
+    );
+    expect(
+      tester.widget<IosNavigationBar>(openNav).titleInsets,
+      const EdgeInsets.only(right: 76),
+    );
+    for (final left in [false, true]) {
+      tester.view.physicalSize = const Size(466, 678);
+      tester.view.viewPadding = FakeViewPadding(
+        left: left ? 76 : 0,
+        right: left ? 0 : 76,
+      );
+      tester.view.padding = tester.view.viewPadding;
+      await tester.pumpAndSettle();
+      expect(header().nativeLargeTitle, isFalse);
+      expect(header().automaticallyImplyLeading, isTrue);
+      final nav = find.byWidgetPredicate(
+        (w) => w is IosNavigationBar && !w.standaloneControl,
+      );
+      expect(tester.getRect(nav).left, 0);
+      expect(tester.getRect(nav).right, 466);
+      expect(tester.widget<IosNavigationBar>(nav).centerTitleInPane, isTrue);
+      expect(
+        tester.widget<IosNavigationBar>(nav).titleInsets,
+        EdgeInsets.only(left: left ? 76 : 0, right: left ? 0 : 76),
+      );
+    }
+    tester.view.physicalSize = const Size(390, 800);
+    tester.view.viewPadding = const FakeViewPadding(bottom: 34);
+    tester.view.padding = const FakeViewPadding(bottom: 34);
+    await tester.pumpAndSettle();
+    expect(find.text('Conversation list'), findsNothing);
+    expect(header().automaticallyImplyLeading, isTrue);
+    expect(header().nativeLargeTitle, isFalse);
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    expect(header().automaticallyImplyLeading, isFalse);
+    final head = formatTimeline([
+      _textMsg(
+        id: threadIdRoot,
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      ),
+    ]).first;
+    unawaited(
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: head,
+            allMessages: [head],
+            channelId: _channelId,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(ThreadDetailPage), findsOneWidget);
+    expect(header().automaticallyImplyLeading, isTrue);
+    expect(
+      Navigator.of(tester.element(find.byType(ThreadDetailPage))).canPop(),
+      isTrue,
+    );
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(header().automaticallyImplyLeading, isFalse);
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    tester.view.padding = tester.view.viewPadding;
+    await tester.pumpWidget(_buildTestable(messages: const []));
+    await tester.pumpAndSettle();
+    expect(header().automaticallyImplyLeading, isTrue);
+    expect(header().nativeTitleInsets, const EdgeInsets.only(right: 76));
+    expect(
+      tester.getRect(find.byType(ComposeBar)).right,
+      lessThanOrEqualTo(390),
+    );
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   for (final fromLauncher in [false, true]) {
     testWidgets(
       'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',
       (tester) async {
         final sender = _RecordingOrdinarySender();
+        final pane = ConversationPaneController();
+        addTearDown(pane.dispose);
+        if (fromLauncher) {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(1100, 800);
+          addTearDown(tester.view.reset);
+        }
         final dm = Channel(
           id: _channelId,
           name: 'Bestie',
@@ -663,7 +790,12 @@ void main() {
               ),
             ],
             home: fromLauncher
-                ? Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {}))
+                ? AdaptiveConversationPane(
+                    controller: pane,
+                    list: Scaffold(
+                      body: DefaultAgentLauncher(onChooseAgent: () {}),
+                    ),
+                  )
                 : ChannelDetailPage(
                     channel: dm,
                     initialMessageId: threadIdA,
@@ -677,6 +809,12 @@ void main() {
           await tester.pumpAndSettle();
         }
         if (fromLauncher) {
+          expect(pane.selectedId, dm.id);
+          expect(find.byType(DefaultAgentLauncher), findsOneWidget);
+          expect(
+            tester.getRect(find.byType(ChannelDetailPage)).left,
+            greaterThan(0),
+          );
           expect(find.byType(ThreadDetailPage), findsNothing);
           final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
           await tester.tap(row);
