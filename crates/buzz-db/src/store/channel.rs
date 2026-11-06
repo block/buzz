@@ -2178,8 +2178,7 @@ impl Db {
             .await?
         {
             crate::RouteDecision::Replica(mut tx, _entry, reason) => {
-                match list_never_joined_auto_join_channels_on(&mut tx, community_id, pubkey).await
-                {
+                match list_never_joined_auto_join_channels_on(&mut tx, community_id, pubkey).await {
                     Ok(ids) => {
                         Self::record_route(path, "replica", reason);
                         Ok(ids)
@@ -2191,8 +2190,7 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
-                        list_never_joined_auto_join_channels(&self.pool, community_id, pubkey)
-                            .await
+                        list_never_joined_auto_join_channels(&self.pool, community_id, pubkey).await
                     }
                 }
             }
