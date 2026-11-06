@@ -28,6 +28,7 @@ pub(crate) mod sent_from_thread;
 pub mod sidebar;
 mod sidebar_doc;
 mod sidebar_flags;
+mod sidebar_sort;
 mod sidebar_sync;
 pub mod social;
 pub mod upload;
