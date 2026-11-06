@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::client::BuzzClient;
+use crate::commands::git_thread::{fetch_root, fetch_thread_notes, next_created_at};
 use crate::commands::with_git_provenance;
 use crate::commands::GIT_ORIGIN_CHANNEL_ENV;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
-use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
+use buzz_core::kind::KIND_GIT_ISSUE;
+use buzz_sdk::{GitCommentMeta, GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
 
@@ -43,6 +45,11 @@ fn assignment_note_label(assignees: &[String], label: Option<&str>) -> Result<St
     Err(CliError::Usage(
         "Unable to generate an assignee label between 1 and 128 characters".into(),
     ))
+}
+
+/// Short note label naming `pubkeys` by their first eight characters.
+pub(crate) fn pubkey_prefix_label(pubkeys: &[String]) -> Result<String, CliError> {
+    assignment_note_label(pubkeys, None)
 }
 
 #[derive(Clone, Copy)]
@@ -477,6 +484,35 @@ async fn issue_assignment_context(
     Ok(IssueAssignmentContext { created_at, prior })
 }
 
+/// `buzz issues comment`: a comment on an issue, in the shape Desktop posts.
+pub async fn cmd_issue_comment(
+    client: &BuzzClient,
+    issue: &str,
+    content: &str,
+    mentions: &[String],
+) -> Result<(), CliError> {
+    validate_hex64(issue)?;
+    let body = read_or_stdin(content)?.trim().to_string();
+    if body.is_empty() {
+        return Err(CliError::Usage("--content must not be empty".into()));
+    }
+    let mentions = crate::commands::messages::normalize_explicit_mentions(mentions)?;
+    let root = fetch_root(client, KIND_GIT_ISSUE as u16, issue, "issue").await?;
+    let signer = client.keys().public_key().to_hex();
+    let notes = fetch_thread_notes(client, &root.event.id).await?;
+    let meta = GitCommentMeta {
+        recipients: root.comment_recipients(&mentions),
+        anchor: None,
+    };
+    let builder = buzz_sdk::build_git_comment(&root.repo, &root.event.id, &body, &meta)
+        .map_err(sdk_err)?
+        .custom_created_at(Timestamp::from_secs(next_created_at(&notes, &signer)?));
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{resp}");
+    Ok(())
+}
+
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
     let filter = serde_json::json!({
@@ -610,6 +646,11 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             .await?;
             cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await
         }
+        IssuesCmd::Comment {
+            issue,
+            content,
+            mention,
+        } => cmd_issue_comment(client, &issue, &content, &mention).await,
         IssuesCmd::Get { event } => cmd_get_issue(client, &event).await,
         IssuesCmd::List {
             repo_owner,
