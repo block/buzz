@@ -945,7 +945,9 @@ mod postgres_tests {
     /// each of many channels, plus one channel-less head, with fresh
     /// statistics. On an empty table the planner prefers the newest-first
     /// `(pubkey, kind)` index for `LIMIT 1` and filters the channel, which is
-    /// exactly the walk this guards against once the rows exist.
+    /// exactly the walk this guards against once the rows exist. `events` is
+    /// partitioned, so the check reads the JSON plan and holds every populated
+    /// partition's scan to it, not just one node.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn replacement_channel_predicate_is_an_index_condition() {
@@ -980,6 +982,17 @@ mod postgres_tests {
         .fetch_one(&pool)
         .await
         .expect("pick a channel");
+        // Seeded rows span a partition boundary only near a month's start, so
+        // this is one partition or two.
+        let mut populated: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT c.relname::text FROM events e \
+             JOIN pg_class c ON c.oid = e.tableoid WHERE e.community_id = $1",
+        )
+        .bind(community)
+        .fetch_all(&pool)
+        .await
+        .expect("populated partitions");
+        populated.sort();
 
         let statements = [
             (
@@ -1001,23 +1014,63 @@ mod postgres_tests {
         ];
         for (in_channel, head_sql, supersede_sql) in statements {
             for sql in [head_sql, supersede_sql] {
-                let explain = format!("EXPLAIN {sql}");
-                let mut query = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(explain))
-                    .bind(community)
-                    .bind(39_000_i32)
-                    .bind(relay.as_slice());
+                let explain = format!("EXPLAIN (FORMAT JSON) {sql}");
+                let mut query =
+                    sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(explain))
+                        .bind(community)
+                        .bind(39_000_i32)
+                        .bind(relay.as_slice());
                 if in_channel {
                     query = query.bind(channel);
                 }
-                let plan = query.fetch_all(&pool).await.expect("explain").join("\n");
-                let seeks_channel = plan
-                    .lines()
-                    .any(|line| line.contains("Index Cond:") && line.contains("channel_id"));
-                assert!(
-                    seeks_channel,
-                    "in_channel={in_channel}: channel_id must be an index condition:\n{plan}"
+                let plan = query.fetch_one(&pool).await.expect("explain");
+                let mut scanned = Vec::new();
+                partition_scans_seeking_channel(
+                    &plan[0]["Plan"],
+                    &populated,
+                    &mut scanned,
+                    &format!("in_channel={in_channel}"),
+                );
+                scanned.sort();
+                assert_eq!(
+                    scanned, populated,
+                    "in_channel={in_channel}: every populated partition is scanned once:\n{plan:#}"
                 );
             }
+        }
+    }
+
+    /// Walk `node` and assert that each scan of a `populated` partition seeks
+    /// by `channel_id`: an index scan's own `Index Cond`, or a bitmap heap
+    /// scan's index child. Records each partition scan it checked.
+    fn partition_scans_seeking_channel(
+        node: &serde_json::Value,
+        populated: &[String],
+        scanned: &mut Vec<String>,
+        context: &str,
+    ) {
+        fn index_cond_names_channel(node: &serde_json::Value) -> bool {
+            node["Index Cond"]
+                .as_str()
+                .is_some_and(|cond| cond.contains("channel_id"))
+                || node["Plans"]
+                    .as_array()
+                    .is_some_and(|plans| plans.iter().any(index_cond_names_channel))
+        }
+
+        if let Some(relation) = node["Relation Name"]
+            .as_str()
+            .filter(|relation| populated.iter().any(|p| p == relation))
+        {
+            assert!(
+                index_cond_names_channel(node),
+                "{context}: the {} on {relation} must seek by channel_id:\n{node:#}",
+                node["Node Type"]
+            );
+            scanned.push(relation.to_owned());
+        }
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            partition_scans_seeking_channel(child, populated, scanned, context);
         }
     }
 
