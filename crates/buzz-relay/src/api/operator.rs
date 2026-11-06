@@ -3243,7 +3243,7 @@ mod postgres_tests {
         assert_eq!(record["state"], "pending");
         assert_eq!(
             record["pending_reasons"],
-            serde_json::json!(["registry_baseline_unverified"])
+            serde_json::json!(["connection_closure_unverified"])
         );
         // A fresh signed retry recovers the same tuple despite the lost response.
         let retry =

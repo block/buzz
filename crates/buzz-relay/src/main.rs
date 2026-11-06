@@ -1962,7 +1962,7 @@ async fn run_community_revalidator(
         if closed > 0 {
             tracing::info!(
                 closed,
-                "closed sockets for inactive communities during lifecycle revalidation"
+                "closed sockets for inactive communities or required authentication policy"
             );
         }
     })

@@ -1,10 +1,10 @@
 # Community NIP-FI upgrade operator contract
 
-The acceptance layer records durable policy. The per-request enforcement layer
-adds community checks and discovery; the activation layer updates existing sessions.
-Do not expose upgrade calls in a deployment until those releases and the serving
-fleet baseline have been verified. This change alone cannot establish enforcement.
-It never reports `active` and never substitutes a timer for activation evidence.
+The acceptance layer records durable policy. Admission enforces the effective
+requirement, and the periodic community revalidator eventually closes existing
+legacy root and audio WebSockets. Deploy and verify these behaviors on every
+serving relay before enabling upgrade calls. The receipt proves acceptance; it
+never reports `active` or certifies that all old work has finished.
 
 The operator HTTP plane is separate from tenant event ingest. These management
 operations extend the existing provisioning API; community clients cannot invoke
@@ -19,8 +19,8 @@ Responses use `Cache-Control: no-store`.
 acceptances return 503 `upgrades_disabled` with no policy mutation or
 receipt. Authorized GET and identical POST receipt recovery remain available;
 principal checks and payload conflicts are unchanged. Enabling this deployment
-switch is an explicit operator action after the enforcement and activation fleet
-baseline is verified; caller release discipline alone cannot enable acceptance.
+switch is an explicit operator action after admission and eventual socket closure
+are verified on every serving relay; caller release discipline alone cannot enable acceptance.
 
 ## Generation storage
 
@@ -29,8 +29,8 @@ nonnegative database CHECK. Supported writers retain the current generation
 when the community already requires FI, or increment it by one on acceptance.
 Starting from zero, those writes preserve the nonnegative invariant. Direct SQL
 can insert a negative community generation and is outside that writer contract.
-Positive-generation CHECKs on acceptance receipts remain in place; activation
-and receipt matching still require the exact accepted generation.
+Positive-generation CHECKs on acceptance receipts remain in place; receipt
+matching still requires the exact accepted generation.
 
 The community CHECK is omitted to avoid validating existing rows while adding
 the column. The current schema planner folds a column and its CHECK together,
@@ -96,12 +96,12 @@ Enable and readback return HTTP 200 for an accepted receipt:
   "policy_generation": 1,
   "requires_nip_fi": true,
   "state": "pending",
-  "pending_reasons": ["registry_baseline_unverified"]
+  "pending_reasons": ["connection_closure_unverified"]
 }
 ```
 
 `requires_nip_fi: true` records durable acceptance. `state` reports availability
-and activation separately. The acceptance layer returns `pending` while the target's policy,
+and connection closure separately. The acceptance layer returns `pending` while the target's policy,
 lifecycle and issuer binding still match, and `unavailable` if they do not or
 trusted issuer configuration is no longer applicable. A missing database response
 is HTTP 503, never a fabricated receipt. A receipt is not proof of current service
@@ -110,10 +110,11 @@ health. No response in this version reports `active`.
 `pending_reasons` applies only while `state` is `pending`; clients must ignore
 those obligations when state is `unavailable`, which always takes precedence.
 `pending_reasons` is extensible. Clients must preserve pending on unknown values.
-`registry_baseline_unverified` prevents completion until the activation layer verifies fleet
-membership. That layer may add `boot_application_pending`, `boot_drain_pending`
-and `boot_unreachable`, and must bind activation evidence to the exact operation
-and generation. Baseline invalidation must prevent `active`.
+`connection_closure_unverified` means that this version does not certify socket
+closure. It remains present after successful sweeps: neither a timer nor local
+socket counts prove fleet-wide completion. Clients must treat `pending` as
+accepted policy whose connection closure is unverified, rather than wait for an
+activation ACK that this version does not produce.
 
 The UUID binds the normalized community/host/actor/owner/issuer/operator tuple.
 Identical retries recover that tuple and generation before rechecking mutable
@@ -257,8 +258,8 @@ community row, preserving the deletion-shared → row → host-lock ordering.
 Policy resolutions that start after acceptance commits therefore cannot use an
 optional lease for that community, even on a pod that missed invalidation.
 Admissions that resolved policy before commit can still be in flight, exactly
-as with primary reads; their completion and cancellation belong to BUZZ-512's
-generation-registration and drain fence. Cache expiry is not activation evidence.
+as with primary reads; existing sockets are caught by a later community sweep, and already-running
+requests may finish. Cache expiry does not certify socket closure.
 The acceptance drain blocks new policy fills and other acceptances for the
 host. Its community row lock also blocks archive/unarchive, deletion admission
 and fences, ownership transfer/convergence and issuer-binding writers for that
@@ -318,9 +319,47 @@ provider address is added to discovery. Existing clients can keep reading their
 current fields; new clients must use the requirement field to distinguish optional
 capability from mandatory evidence.
 
-This is admission enforcement only. Existing requests and sockets may predate the
-new policy. Only BUZZ-512's application and drain evidence may establish completed
-activation; the operator receipt remains pending until that evidence is recorded.
+### Existing connections
+
+The existing community revalidator also reads durable authentication policy from
+the writer by immutable community ID for communities with local sockets. Each
+policy read has a 500 ms budget. A failed read retains that community's sockets,
+continues the sweep, and retries on a later pass. No Redis notification or client
+request is needed. An upgrade callback that registers after a scan is caught on
+the next pass.
+
+When effective mode requires FI, legacy and optional-shadow sockets receive
+Close 1008 (`community authentication upgraded`) through the existing transport
+cleanup paths. Only the enforced FI admission marker preserves a socket; later
+NIP-42 AUTH does not turn a legacy socket into an FI admission. Valid FI sessions
+retain their normal expiry and revocation rules. Other communities stay open.
+Off and repair mode retain their existing behavior; Off suspends FI enforcement.
+
+`BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS` defaults to 30 seconds, clamped to 1–300 seconds.
+This interval is not a deadline through database failure, sweep duration,
+overload or a paused relay. Closure requires a successful sweep on each running
+compatible relay. Already-running HTTP requests and descendant work may finish.
+There is no boot inventory, drain ACK, or durable fleet-completion certification.
+The operator receipt remains `pending` even after successful local closure.
+
+For each serving relay, observe
+`buzz_community_auth_policy_checks_total{outcome="required"}` advancing after a
+required policy change, with no sustained `error` or `timeout` outcomes.
+Other bounded outcomes are `optional` and `inactive`; no community labels are
+emitted. `buzz_community_auth_policy_disconnects_total` counts legacy socket
+cancellation requests. Verify actual Close 1008 on idle root/audio probes and
+successful FI reconnects on that relay; the counters alone do not certify
+transport retirement or fleet completion. A relay without local sockets has no
+policy checks to report. Account for that when probing each serving relay.
+
+There is no new feature flag. The first successful sweep after deployment can
+close existing legacy sockets in already-required communities. Count required rows and assess concurrent
+reconnect load before rollout; this change does not spread those reconnects.
+Keep new upgrades disabled throughout mixed-version deployment. A binary rollback
+needs no migration and restores the old receipt reason; clients must tolerate
+unknown pending reasons. An older binary cannot provide this eventual-closure
+behavior, so retain a compatible binary or contain affected communities instead
+of assuming rollback undoes accepted policy.
 
 ### Staging and containment
 
@@ -330,7 +369,7 @@ return a generic document; it now returns 404. Policy failures return 503.
 Database-source startup loads its FI binding snapshot only in evaluating modes;
 Off does not load it. A failed load still fails startup in Shadow or Enforce. The local dependency gauge
 `buzz_nip_fi_required_admission_ready` must be 1 before accepting any upgrade;
-it covers verifier, deny map and finite lifetime, not fleet baseline verification.
+it covers verifier, deny map and finite lifetime, not verification of socket closure.
 Binding and JWKS readiness must also be verified through a signed request.
 
 Keep `BUZZ_NIP_FI_UPGRADES_ENABLED=false` throughout a mixed-version rollout
@@ -340,7 +379,7 @@ writer cannot safely coexist with cached optional leases. Before rolling an
 acceptance writer back or removing this protocol, disable new acceptance on
 every writer and verify that disablement; keep the lease-aware writers until
 in-flight acceptance has finished. Disabling new calls does not undo existing
-requirements. Existing required-community enforcement and BUZZ-512 activation
+requirements. Existing required-community admission, eventual socket closure
 and revocation prerequisites still apply. Never enable an older acceptance path
 while any caching pod serves optional communities.
 Older pods may log an unknown `CommunityHost` cache-invalidation message during
@@ -369,9 +408,9 @@ dependency-failure 503 with no-store explicitly.
 Then test a disposable required community with complete FI dependencies, in both
 Shadow and Enforce: unsigned/missing evidence denies, signed valid FI succeeds,
 root/audio upgrades agree, discovery agrees, and a pending deletion request does
-not weaken the requirement. Before production acceptance, complete BUZZ-512's
-session application/drain and the production baseline-verifier gate. No such
-production verification is established by this PR.
+not weaken the requirement. Before production acceptance, verify idle legacy root/audio closure after a
+durable policy change, FI reconnects and isolation on every serving relay. No
+production verification is established by local tests.
 
 Before any required row exists, an operator may stop the rollout and restore the
 previous binary after verifying the primary contains zero required rows. Once a
@@ -387,9 +426,9 @@ while new acceptances are disabled.
 
 Required sessions admitted under global Shadow are real enforced FI sessions.
 The existing global-Shadow admin disconnect path still only observes would-close;
-BUZZ-512 must close these enforced sessions independently of global rollout mode,
+A separate revocation change must close these enforced sessions independently of global rollout mode,
 while preserving the separate optional-shadow registry. Before enabling upgrade
-acceptance for any serving community in Shadow, deploy and verify BUZZ-512's local
+acceptance for any serving community in Shadow, deploy and verify that local
 and cross-pod disconnect behavior, including real Redis propagation. Keep upgrade
 acceptance disabled until that prerequisite is met; admission tests alone do not
-establish it. Production also requires the baseline-verifier gate above.
+establish it. This socket sweep does not change that independent revocation prerequisite.
