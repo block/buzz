@@ -23,7 +23,6 @@ mod communities;
 mod deletions;
 mod nip_fi;
 mod nip_fi_policy;
-mod nip_fi_upgrade;
 mod user_deletions;
 
 use std::future::Future;
@@ -126,8 +125,6 @@ enum Command {
         #[command(subcommand)]
         command: nip_fi::NipFiCommand,
     },
-    /// Require NIP-FI through the relay's existing signed operator API.
-    NipFiUpgrade(nip_fi_upgrade::Args),
     /// Change or inspect a community stored NIP-FI requirement.
     NipFiPolicy(nip_fi_policy::Args),
     /// Durable CLI-only whole-community deletion control plane.
@@ -224,9 +221,6 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::NipFiPolicy(args) => nip_fi_policy::run(args)
             .await
             .map_err(|e| anyhow::anyhow!("{e:#}")),
-        Command::NipFiUpgrade(args) => nip_fi_upgrade::run(args)
-            .await
-            .map_err(|error| anyhow::anyhow!("{error:#}")),
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
