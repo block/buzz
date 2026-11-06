@@ -525,8 +525,7 @@ pub async fn handle_admitted_req(
             )
         })
         .collect();
-    let Some(owner) = claim_admitted_live(&sub_id, owner, live_filters, &conn, &state).await
-    else {
+    let Some(owner) = claim_admitted_live(&sub_id, owner, live_filters, &conn, &state).await else {
         return;
     };
 
@@ -1762,9 +1761,9 @@ pub(crate) async fn claim_live_subscription(
 /// lock: register for fan-out (replacing any same-ID entry), retain its
 /// topics, and release the replaced scope's. Each filter carries its own
 /// server-resolved live scope; the subscription retains each topic in their
-/// union once. Returns `owner`, or `None` once
-/// the connection is closing or a newer same-ID REQ or a `CLOSE` superseded
-/// this request — the caller then exits silently.
+/// union once. Returns `owner`, or `None` once the connection is closing or a
+/// newer same-ID REQ or a `CLOSE` superseded this request — the caller then
+/// exits silently.
 pub(crate) async fn claim_admitted_live(
     sub_id: &str,
     owner: u64,
@@ -2824,8 +2823,14 @@ mod tests {
         assert_eq!(token(&conn, "x").await, Some(pending));
         assert!(closed_frames(&mut send_rx).is_empty());
 
-        let claimed =
-            claim_admitted_live("x", pending, scoped(&text_filters(), Some(&[b])), &conn, &state).await;
+        let claimed = claim_admitted_live(
+            "x",
+            pending,
+            scoped(&text_filters(), Some(&[b])),
+            &conn,
+            &state,
+        )
+        .await;
         assert_eq!(claimed, Some(pending));
         assert!(subscribed(&state, &conn, b));
         assert_eq!(refcount(b).await, 1);
@@ -2851,11 +2856,23 @@ mod tests {
 
         let older = super::super::close::admit("x", &conn).await.expect("admit");
         let newer = super::super::close::admit("x", &conn).await.expect("admit");
-        claim_admitted_live("x", newer, scoped(&text_filters(), Some(&[b])), &conn, &state)
-            .await
-            .expect("the newest request claims");
-        let stale =
-            claim_admitted_live("x", older, scoped(&text_filters(), Some(&[a])), &conn, &state).await;
+        claim_admitted_live(
+            "x",
+            newer,
+            scoped(&text_filters(), Some(&[b])),
+            &conn,
+            &state,
+        )
+        .await
+        .expect("the newest request claims");
+        let stale = claim_admitted_live(
+            "x",
+            older,
+            scoped(&text_filters(), Some(&[a])),
+            &conn,
+            &state,
+        )
+        .await;
         assert_eq!(stale, None);
         assert_eq!(token(&conn, "x").await, Some(newer));
         assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
@@ -2863,8 +2880,14 @@ mod tests {
 
         let pending = super::super::close::admit("y", &conn).await.expect("admit");
         super::super::close::handle_close("y".into(), Arc::clone(&conn), Arc::clone(&state)).await;
-        let late =
-            claim_admitted_live("y", pending, scoped(&text_filters(), Some(&[a])), &conn, &state).await;
+        let late = claim_admitted_live(
+            "y",
+            pending,
+            scoped(&text_filters(), Some(&[a])),
+            &conn,
+            &state,
+        )
+        .await;
         let late_search = claim_admitted_search("y", pending, &conn, &state).await;
         assert_eq!((late, late_search), (None, None));
         assert!(!registered(&state, &conn, "y"));
