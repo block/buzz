@@ -1523,20 +1523,21 @@ struct CountReply {
     _count: u64,
 }
 
-/// Ends a turn: a timed reply in the answered message's thread (or the
-/// channel), then each reaction's removal, which reads the agent's
-/// reactions on the target and deletes them, as the harness does.
+/// Ends a turn: a timed reply in the answered message's thread, then each
+/// reaction's removal, which reads the agent's reactions on the target and
+/// deletes them, as the harness does.
 async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Tag, turn: Turn) {
     let me = keys.public_key().to_hex();
     let mut tags = vec![tag(["h", &turn.channel])];
     if let Some(target) = &turn.target {
-        // A threaded target is answered in its thread; a top-level one
-        // becomes the root of a new thread.
-        let id = target.id.to_hex();
+        // As a harness answers a person: a threaded target is answered at
+        // its thread's first level, under the root, and a top-level one
+        // becomes the root of a new thread. Replies never nest deeper, so
+        // agents answering agents can't climb to the relay's depth limit.
         let root = buzz_core::nip10::parse_thread_markers(&target.tags)
             .resolve()
-            .map_or_else(|| id.clone(), |(root, _)| root);
-        tags.extend(reply_tags(&root, &id));
+            .map_or_else(|| target.id.to_hex(), |(root, _)| root);
+        tags.extend(reply_tags(&root, &root));
     }
     let reply = EventBuilder::new(
         kind(KIND_STREAM_MESSAGE),
@@ -2724,15 +2725,15 @@ hold_secs = 3
             let e = reaction.tags.iter().find(|t| t.kind().as_str() == "e");
             assert_eq!(e.and_then(|t| t.content()), Some(target_id.as_str()));
         }
-        // Every finished turn replied in the target's thread, under the
-        // target's own root, and deleted both of its reactions; only a turn
-        // cut by the stop leaves any.
+        // Every finished turn replied at the first level of the target's
+        // thread, under its root, and deleted both of its reactions; only a
+        // turn cut by the stop leaves any.
         let replies: Vec<&Event> = of(KIND_STREAM_MESSAGE).collect();
         assert!(!replies.is_empty(), "{posted:?}");
         for reply in &replies {
             let markers = buzz_core::nip10::parse_thread_markers(&reply.tags);
             assert_eq!(markers.root.as_deref(), Some(root_id.as_str()));
-            assert_eq!(markers.reply.as_deref(), Some(target_id.as_str()));
+            assert_eq!(markers.reply.as_deref(), Some(root_id.as_str()));
         }
         let deleted: Vec<String> = of(KIND_DELETION)
             .flat_map(|e| {

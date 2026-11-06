@@ -122,8 +122,10 @@ does around a prompt:
    observer frame of `frame_bytes` plaintext every `frame_secs` over the
    socket, plus `reads` HTTP `/query` reads of the channel's newest 50
    messages at random points in the turn, as tool calls.
-3. **End**: a timed reply in the message's thread through HTTP `/events`,
-   then each reaction's removal: a `/query` for the agent's reactions on
+3. **End**: a timed reply through HTTP `/events`, at the first level of the
+   message's thread (under its root), as a harness answers a person; a
+   top-level message becomes the root of a new thread. Then each
+   reaction's removal: a `/query` for the agent's reactions on
    the message and a kind:5 deletion of each one found.
 
 An agent makes one HTTP request sequence at a time, and the socket keeps
