@@ -4167,6 +4167,16 @@ void main() {
       );
       await tester.pump();
       expect(controller.text, '`${urls[2]}`');
+      // So does a link the composer can't show as a chip.
+      await setValue('', 0);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'buzz://repo?x=1',
+          selection: TextSelection.collapsed(offset: 15),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'buzz://repo?x=1');
       await setValue('see ${urls[2]} ', 5 + urls[2].length);
 
       // Undo after typing at the end of a revealed link restores it rather

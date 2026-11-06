@@ -231,7 +231,8 @@ class _MarkdownEditingController extends TextEditingController {
   ) => _spaceAfterPastedLink(oldValue, expandChipDeletion(oldValue, newValue));
 
   /// Adds a space after a link pasted on its own, so it becomes a chip
-  /// straight away. Pasted text with anything besides one link, a link that
+  /// straight away. Pasted text with anything besides one link that renders
+  /// as a chip, a link that
   /// already has a boundary after it, and Undo or Redo back to an earlier
   /// value are unchanged.
   TextEditingValue _spaceAfterPastedLink(
@@ -257,6 +258,7 @@ class _MarkdownEditingController extends TextEditingController {
     final inserted = newText.substring(start, insertedEnd);
     final match = _linkPattern.matchAsPrefix(inserted);
     if (match == null ||
+        _composerLinkPresentation(inserted) == null ||
         _isInCode(newText, start, insertedEnd) ||
         match.end != inserted.length ||
         _linkTrailingPunctuation.hasMatch(inserted) ||
