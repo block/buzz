@@ -533,15 +533,8 @@ async fn slow_enrollment_bodies_are_bounded_without_occupying_revocation_capacit
             .status(),
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        client
-            .post(format!("http://{address}/v1/installations"))
-            .body(vec![0; 1024 * 1024])
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::PAYLOAD_TOO_LARGE
-    );
+    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    socket.write_all(b"POST /v1/installations HTTP/1.1\r\nHost: push.example\r\nContent-Length: 1048576\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+    assert!(headers(&mut socket).await.starts_with("HTTP/1.1 413"));
     server.abort();
 }
