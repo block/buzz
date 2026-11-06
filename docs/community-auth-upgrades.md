@@ -86,7 +86,7 @@ Migration 0084 adds desired action and nullable CAS preconditions to existing
 receipts. True/default and null preconditions preserve old receipt meaning and
 old INSERT compatibility. No data backfill, trigger, function or foreign key is
 added. Apply schema first, then compatible management writers across the **whole
-fleet** with `BUZZ_NIP_FI_UPGRADES_ENABLED=false`, then explicitly enable mutations.
+fleet** with `BUZZ_NIP_FI_CHANGES=false`, then explicitly enable mutations.
 The gate controls both directions; reads and committed replay remain available.
 Do not roll back to an unfenced management writer after the first general operation.
 

@@ -112,7 +112,7 @@ pub async fn set_community_nip_fi_policy(
         expected_issuer: request.expected_issuer.unwrap_or_default(),
         operator_pubkey: operator.to_hex(),
     };
-    let preflight = if !state.config.nip_fi_upgrades_enabled {
+    let preflight = if !state.config.nip_fi_changes {
         Err("upgrades_disabled")
     } else if request.requires_nip_fi {
         upgrade_configured_trust(&state, &tuple.expected_host, &tuple.expected_issuer)

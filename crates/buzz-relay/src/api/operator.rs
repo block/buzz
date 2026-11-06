@@ -1284,7 +1284,7 @@ pub async fn enable_community_nip_fi(
     let host = normalize_candidate_host(&request.expected_host).map_err(|_| invalid())?;
     let actor = validate_pubkey_hex(&request.actor_pubkey).ok_or_else(invalid)?;
     let owner = validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(invalid)?;
-    let trust = if state.config.nip_fi_upgrades_enabled {
+    let trust = if state.config.nip_fi_changes {
         upgrade_configured_trust(&state, &host, &request.expected_issuer)
     } else {
         Err("upgrades_disabled")
@@ -3164,9 +3164,8 @@ mod postgres_tests {
             .nip_fi
             .registry
             .insert(issuer_policy);
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
-            false;
-        assert!(!state.config.nip_fi_upgrades_enabled);
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = false;
+        assert!(!state.config.nip_fi_changes);
 
         assert_eq!(
             provision_community(state.clone(), &operator, &host, &owner)
@@ -3237,7 +3236,7 @@ mod postgres_tests {
             .await
             .unwrap()
             .is_none());
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = true;
         let response =
             fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -3313,8 +3312,7 @@ mod postgres_tests {
                 .policy_generation,
             1
         );
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
-            false;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = false;
         let while_off =
             fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
         assert_eq!(while_off.status(), StatusCode::OK);
@@ -3358,7 +3356,7 @@ mod postgres_tests {
             .await
             .unwrap()
             .is_none());
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = true;
 
         // Exercise the real HTTP-to-config-to-transaction seam: no raw trust
         // precondition can bypass the deployment's configured issuer selection.

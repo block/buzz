@@ -6,7 +6,7 @@ configured `RELAY_OPERATOR_API_ORIGIN` and an allowlisted operator signing key
 in a protected file. It sends one signed request and never retries automatically.
 
 Before changing policy, apply the schema and roll compatible management writers
-across the whole fleet with `BUZZ_NIP_FI_UPGRADES_ENABLED=false`. Then explicitly
+across the whole fleet with `BUZZ_NIP_FI_CHANGES=false`. Then explicitly
 enable that gate, which controls both enable and disable. Enable additionally
 requires the deployment-selected issuer to be trusted and already bound to the
 community. The active community must have exactly one owner; the authenticated

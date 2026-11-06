@@ -29,7 +29,7 @@ mod postgres_tests {
         let config = Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config);
         config.nip_fi.registry.insert(issuer_policy);
         config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
-        config.nip_fi_upgrades_enabled = false;
+        config.nip_fi_changes = false;
         assert_eq!(
             provision_community(state.clone(), &operator, &host, &owner)
                 .await
@@ -66,7 +66,7 @@ mod postgres_tests {
         .await;
         assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(read_json(disabled).await["code"], "upgrades_disabled");
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = true;
         let mut history = Vec::new();
         for (generation, desired) in [(1, true), (2, false), (3, true)] {
             body["operation_id"] = Uuid::new_v4().to_string().into();
@@ -175,8 +175,7 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(read_json(response).await["code"], "idempotency_conflict");
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
-            false;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = false;
         let response = fresh_upgrade_request(
             state.clone(),
             &operator,
@@ -197,7 +196,7 @@ mod postgres_tests {
             assert_eq!(current["effective_required"], mode.restricts());
         }
         // Enforce remains a global floor even after a stored disable.
-        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_changes = true;
         body["operation_id"] = Uuid::new_v4().to_string().into();
         body["requires_nip_fi"] = false.into();
         body["expected_policy_generation"] = 3.into();

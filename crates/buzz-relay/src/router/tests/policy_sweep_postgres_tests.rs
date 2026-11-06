@@ -121,7 +121,7 @@ mod postgres_tests {
         let mut configured = (*base).clone();
         let config = Arc::make_mut(&mut configured.config);
         config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
-        config.nip_fi_upgrades_enabled = false;
+        config.nip_fi_changes = false;
         config.nip_fi.max_connection_lifetime_secs = 3600;
         config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test_any_host(
             TEST_COMMUNITY_URI,
