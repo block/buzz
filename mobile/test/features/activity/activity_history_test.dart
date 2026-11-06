@@ -278,18 +278,75 @@ void main() {
     );
     expect(items, isEmpty);
   });
-  test('aggregate DM history retains sparse conversations', () async {
-    final items = await loadActivityHistory(
-      query: reader([
+  test(
+    'cold aggregate pages retain quiet DMs, Solo and followed replies',
+    () async {
+      final data = [
+        event(1, channel: 'quiet-dm'),
+        event(2, channel: 'quiet-solo'),
+        event(3, channel: 'quiet-team'),
+        event(
+          4,
+          channel: 'quiet-team',
+          tags: [
+            ['e', id(3), '', 'reply'],
+          ],
+        ),
+        for (var n = 10; n < 1010; n++) ...[
+          event(n, channel: 'busy-dm'),
+          event(n + 2000, channel: 'busy-team'),
+        ],
+      ];
+      final calls = <List<NostrFilter>>[];
+      final items = await loadActivityHistory(
+        query: (filters) async {
+          calls.add(filters);
+          return reader(data)(filters);
+        },
+        channels: [
+          channel('quiet-dm', dm: true),
+          channel('busy-dm', dm: true),
+          channel('quiet-solo', solo: true),
+          channel('quiet-team'),
+          channel('busy-team'),
+        ],
+        viewer: 'me',
+        followedRoots: {id(3)},
+      );
+      expect(items.map((e) => e.id), containsAll([id(1), id(2), id(4)]));
+      final cold = calls
+          .expand((f) => f)
+          .where((f) => f.tags.containsKey('#h'));
+      expect(cold, hasLength(4));
+      expect(
+        cold
+            .where((f) => f.until != null)
+            .every((f) => !f.tags['#h']!.any((id) => id.startsWith('busy'))),
+        isTrue,
+      );
+    },
+  );
+  test(
+    'cold history reaches quiet channels beyond 32 saturated pages',
+    () async {
+      final data = [
         event(1, channel: 'quiet'),
-        for (var n = 2; n < 152; n++) event(n, channel: 'busy'),
-      ]),
-      channels: [channel('quiet', dm: true), channel('busy', dm: true)],
-      viewer: 'me',
-      followedRoots: {},
-    );
-    expect(items.any((e) => e.channelId == 'quiet'), isTrue);
-  });
+        for (var c = 0; c < 34; c++)
+          for (var n = 0; n < 500; n++)
+            event(10 + c * 500 + n, channel: 'busy-$c'),
+      ];
+      final items = await loadActivityHistory(
+        query: reader(data),
+        channels: [
+          channel('quiet', dm: true),
+          for (var c = 0; c < 34; c++) channel('busy-$c', dm: true),
+        ],
+        viewer: 'me',
+        followedRoots: {},
+      );
+      expect(items.map((e) => e.id), contains(id(1)));
+    },
+  );
   test(
     'aggregate participation pages before caching absent interests',
     () async {

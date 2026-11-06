@@ -109,6 +109,17 @@ Future<List<FeedItem>> loadActivityHistory({
       start++;
     }
     final received = await query(batch);
+    for (final filter in batch.where(
+      (f) => f.since == null && f.tags.containsKey('#h'),
+    )) {
+      received.addAll(
+        await completeActivityColdWindow(
+          query,
+          filter,
+          received.where((e) => _matches(filter, e)).toList(),
+        ),
+      );
+    }
     // Page a full delta before advancing its cursor; otherwise an offline
     // burst can permanently skip the oldest events in that burst.
     for (final filter in batch.where((f) => f.since != null)) {

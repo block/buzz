@@ -89,6 +89,12 @@ void _activityTabJourneys(
     await _chooseActivityType(tester, 'Mentions');
     await tester.pumpAndSettle();
     expect(find.text('No mentions yet'), findsOneWidget);
+    await _chooseActivityType(tester, 'Reminders');
+    await tester.pumpAndSettle();
+    expect(find.text('No reminders'), findsOneWidget);
+    await _chooseActivityType(tester, 'Drafts');
+    await tester.pumpAndSettle();
+    expect(find.text('No drafts'), findsOneWidget);
   });
 
   testWidgets('iOS renders both Activity menus as glass controls', (
@@ -132,6 +138,8 @@ void _activityTabJourneys(
       'Mentions',
       'DMs',
       'Reactions',
+      'Reminders',
+      'Drafts',
     ]);
     type.actions[1].onPressed!();
     await tester.pumpAndSettle();

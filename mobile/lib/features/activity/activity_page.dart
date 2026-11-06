@@ -494,6 +494,8 @@ class ActivityPage extends HookConsumerWidget {
                           InboxFilter.mention: 'Mentions',
                           InboxFilter.dm: 'DMs',
                           InboxFilter.reactions: 'Reactions',
+                          InboxFilter.reminders: 'Reminders',
+                          InboxFilter.drafts: 'Drafts',
                         },
                         onChanged: (value) => filter.value = value,
                       ),
