@@ -780,47 +780,64 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('opens a thread mention at the referenced message', (
-    tester,
-  ) async {
-    final threadMention = FeedItem(
-      id: 'reply-event',
-      kind: 9,
-      pubkey:
-          'a11ce00000000000000000000000000000000000000000000000000000000000',
-      content: 'Reply in a thread',
-      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      channelId: 'ch1',
-      channelName: 'general',
-      tags: const [
-        ['e', threadIdThreadDashRoot, '', 'root'],
-        ['e', threadIdParentDashReply, '', 'reply'],
-      ],
-      category: 'mention',
+  testWidgets('opens a thread reply at the referenced message', (tester) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
     );
-    final feed = HomeFeedResponse(
-      mentions: [threadMention],
-      needsAction: const [],
-      activity: const [],
-      agentActivity: const [],
-    );
+    // A DM reply must still open its thread: the DM timeline hides replies.
+    for (final channelId in ['ch1', 'dm1']) {
+      final threadMention = FeedItem(
+        id: 'reply-event',
+        kind: 9,
+        pubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+        content: 'Reply in a thread',
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        channelId: channelId,
+        channelName: 'general',
+        tags: const [
+          ['e', threadIdThreadDashRoot, '', 'root'],
+          ['e', threadIdParentDashReply, '', 'reply'],
+        ],
+        category: 'mention',
+      );
+      final feed = HomeFeedResponse(
+        mentions: [threadMention],
+        needsAction: const [],
+        activity: const [],
+        agentActivity: const [],
+      );
 
-    await tester.pumpWidget(await buildTestable(feed: feed));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        await buildTestable(feed: feed, channels: [...testChannels, dmChannel]),
+      );
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
+      await tester.pumpAndSettle();
 
-    final page = tester.widget<ChannelDetailPage>(
-      find.byType(ChannelDetailPage),
-    );
-    expect(page.channel.id, 'ch1');
-    expect(page.initialThreadRootId, threadIdParentDashReply);
-    expect(page.initialMessageId, 'reply-event');
-    expect(
-      page.initialThreadRouteBehavior,
-      InitialThreadRouteBehavior.replaceCurrentRoute,
-    );
+      final page = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(page.channel.id, channelId);
+      expect(page.initialThreadRootId, threadIdParentDashReply);
+      expect(page.initialMessageId, 'reply-event');
+      expect(
+        page.initialThreadRouteBehavior,
+        InitialThreadRouteBehavior.replaceCurrentRoute,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    }
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {

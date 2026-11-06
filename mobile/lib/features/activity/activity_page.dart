@@ -289,7 +289,7 @@ class ActivityPage extends HookConsumerWidget {
         (event) => isInboxEventRead(event, markerOf: markerOf),
       );
       final thread = threadReferenceOf(target.tags);
-      final threadRootId = resolvedChannel.isDm || isBroadcastReply(target.tags)
+      final threadRootId = isBroadcastReply(target.tags)
           ? null
           : thread.parentId;
 
