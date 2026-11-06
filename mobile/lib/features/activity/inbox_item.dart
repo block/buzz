@@ -175,8 +175,7 @@ class InboxItem {
 /// `reminders` and `drafts` are separate surfaces and never match here.
 bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
   return switch (filter) {
-    InboxFilter.all =>
-      !item.isActionRequired && !item.categories.contains('agent_activity'),
+    InboxFilter.all => true,
     InboxFilter.dm => item.conversationId.startsWith('dm:'),
     InboxFilter.reactions => item.item.reactionTarget != null,
     InboxFilter.thread =>

@@ -1,8 +1,9 @@
 import '../../shared/agents/is_quiet_agent_message.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
-import '../channels/channel.dart';
-import '../channels/timeline_message.dart';
+import '../../shared/relay/conversation_scope.dart';
+import 'activity_messages.dart';
+import 'activity_queries.dart';
 import 'feed_item.dart';
 
 typedef ActivityQuery = Future<List<NostrEvent>> Function(List<NostrFilter>);
@@ -16,11 +17,11 @@ class ActivityHistoryCache {
 }
 
 /// Conversation evidence for Activity, including replies without a p-tag.
-/// Each channel has its own window so a busy DM cannot starve other channels.
-/// Queries use the existing relay bridge and are bounded to four at a time.
+/// Cold reads aggregate channel scopes under the relay cap. Retained evidence
+/// and delta cursors keep reconnects from rebuilding channel history.
 Future<List<FeedItem>> loadActivityHistory({
   required ActivityQuery query,
-  required List<Channel> channels,
+  required List<ConversationScope> channels,
   required String viewer,
   required Set<String> followedRoots,
   List<NostrEvent> seedEvents = const [],
@@ -41,18 +42,15 @@ Future<List<FeedItem>> loadActivityHistory({
   final existingChannels = allowed.keys
       .where(retained.channels.contains)
       .toList();
-  const kinds = [9, 40002, 40008];
+  const kinds = activityMessageKinds;
   final filters = [
-    // Independent cold windows ensure a busy conversation cannot starve a DM.
-    for (final id in allowed.keys.where(
-      (id) => !retained.channels.contains(id),
-    ))
-      NostrFilter(
-        kinds: kinds,
-        tags: {
-          '#h': [id],
-        },
-        limit: 100,
+    // Aggregate cold windows: 300 memberships require three reads, not 300.
+    for (final dm in [true, false])
+      ..._coldFilters(
+        allowed.values
+            .where((c) => c.isDm == dm && !retained.channels.contains(c.id))
+            .map((c) => c.id)
+            .toList(),
       ),
     // Reconnect/live catch-up batches the known roster under the relay cap.
     for (
@@ -61,7 +59,7 @@ Future<List<FeedItem>> loadActivityHistory({
       start += kMaxExplicitChannelValues
     )
       NostrFilter(
-        kinds: const [9, 40002, 40008, 40003, 5, 9005, 7],
+        kinds: const [...activityMessageKinds, 40003, 5, 9005, 7],
         tags: {
           '#h': existingChannels
               .skip(start)
@@ -192,22 +190,23 @@ Future<List<FeedItem>> loadActivityHistory({
       if (thread.rootId != null) thread.rootId!,
     ]);
   }
-  final interestFilters = [
+  final newTargets = {
     for (final entry in interests.entries)
       for (final target in entry.value)
-        if (!retained.interests.contains('${entry.key}:$target'))
-          NostrFilter(
-            kinds: kinds,
-            authors: [viewer],
-            tags: {
-              '#h': [entry.key],
-              '#e': [target],
-            },
-            limit: 50,
-          ),
+        if (!retained.interests.contains('${entry.key}:$target')) target,
+  }.toList();
+  final interestFilters = [
+    for (var start = 0; start < newTargets.length; start += 500)
+      NostrFilter(
+        kinds: kinds,
+        authors: [viewer],
+        tags: {'#e': newTargets.skip(start).take(500).toList()},
+        limit: 500,
+      ),
   ];
   for (var start = 0; start < interestFilters.length; start += 4) {
-    for (final event in await query(
+    for (final event in await queryActivityEvidence(
+      query,
       interestFilters.skip(start).take(4).toList(),
     )) {
       if (allowed.containsKey(event.channelId) &&
@@ -248,7 +247,7 @@ Future<List<FeedItem>> loadActivityHistory({
           if (tag.length > 1 && tag[0] == 'e') tag[1],
   };
   final messages = {
-    for (final message in formatTimeline([...events.values, ...validUpdates]))
+    for (final message in activityMessages(events.values, validUpdates))
       message.id: message,
   };
   final ownThreads = <String>{};
@@ -323,8 +322,7 @@ Future<List<FeedItem>> loadActivityHistory({
   for (final reaction in events.values) {
     if (reaction.kind != 7 ||
         deleted.contains(reaction.id) ||
-        reaction.pubkey.toLowerCase() == viewer.toLowerCase() ||
-        !tagsAddress(reaction.tags, viewer)) {
+        reaction.pubkey.toLowerCase() == viewer.toLowerCase()) {
       continue;
     }
     final target = events[_reactionTarget(reaction)];
@@ -485,3 +483,12 @@ void _trimEvidence(Map<String, NostrEvent> events) {
     ..clear()
     ..addAll(kept);
 }
+
+List<NostrFilter> _coldFilters(List<String> ids) => [
+  for (var start = 0; start < ids.length; start += kMaxExplicitChannelValues)
+    NostrFilter(
+      kinds: const [...activityMessageKinds, 7],
+      tags: {'#h': ids.skip(start).take(kMaxExplicitChannelValues).toList()},
+      limit: 500,
+    ),
+];

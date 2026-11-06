@@ -1154,6 +1154,40 @@ void main() {
           container.read(inboxItemsProvider).single.id == 'live-during-manual',
     );
 
+    final root = 'a' * 64;
+    session.seed(
+      NostrEvent(
+        id: root,
+        pubkey: 'me_pk',
+        createdAt: 1_700_000_004,
+        kind: 45001,
+        tags: [
+          ['h', 'channel-1'],
+        ],
+        content: 'forum post',
+        sig: '',
+      ),
+    );
+    session.emit(
+      NostrEvent(
+        id: 'forum-live-reply',
+        pubkey: 'other',
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        kind: 45003,
+        tags: [
+          ['h', 'channel-1'],
+          ['e', root, '', 'reply'],
+        ],
+        content: 'unmentioned forum reply',
+        sig: '',
+      ),
+    );
+    await _waitFor(
+      () => container
+          .read(inboxItemsProvider)
+          .any((item) => item.id == 'forum-live-reply'),
+    );
+
     expect(session.maxActiveMentionFetches, 1);
   });
 

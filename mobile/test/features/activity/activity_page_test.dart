@@ -384,12 +384,15 @@ void main() {
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('alice@example.com'), findsOneWidget);
     expect(find.text('Bob'), findsOneWidget);
-    expect(find.text('Scout'), findsNothing);
+    expect(find.text('Scout'), findsOneWidget);
 
     // Contextual labels + channel chips.
     expect(find.text('Mentioned in'), findsOneWidget);
     expect(find.text('Thread in'), findsOneWidget);
-    expect(find.text('#general'), findsOneWidget); // mention
+    expect(
+      find.text('#general'),
+      findsNWidgets(2),
+    ); // mention and agent activity
     expect(find.text('#engineering'), findsOneWidget);
 
     // Context labels and channel pills share the compact Activity style.

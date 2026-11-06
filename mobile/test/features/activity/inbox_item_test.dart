@@ -246,11 +246,16 @@ void main() {
   group('matchesInboxFilter', () {
     InboxItem rowOf(FeedItem feedItem) => buildInboxItems([feedItem]).single;
 
-    test('all matches everything', () {
-      expect(
-        matchesInboxFilter(rowOf(item(id: threadIdInboxA)), InboxFilter.all),
-        isTrue,
-      );
+    test('all includes approvals and agent lifecycle updates', () {
+      for (final category in ['activity', 'needs_action', 'agent_activity']) {
+        expect(
+          matchesInboxFilter(
+            rowOf(item(id: threadIdInboxA, category: category)),
+            InboxFilter.all,
+          ),
+          isTrue,
+        );
+      }
     });
 
     test('thread filter needs a thread reply in the group', () {

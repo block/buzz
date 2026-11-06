@@ -91,6 +91,22 @@ void main() {
             ['e', id(3), '', 'reply'],
           ],
         ),
+        event(12, kind: 45001, author: 'me'),
+        event(
+          13,
+          kind: 45003,
+          tags: [
+            ['e', id(12), '', 'reply'],
+          ],
+        ),
+        event(14, kind: 45001),
+        event(
+          15,
+          kind: 45003,
+          tags: [
+            ['e', id(14), '', 'reply'],
+          ],
+        ),
         event(5),
         event(
           6,
@@ -137,11 +153,11 @@ void main() {
           channel('archived', archived: true),
         ],
         viewer: 'me',
-        followedRoots: {id(3)},
+        followedRoots: {id(3), id(14)},
       );
       expect(
         items.map((e) => e.id),
-        unorderedEquals([id(2), id(4), id(7), id(8), id(9)]),
+        unorderedEquals([id(2), id(4), id(7), id(8), id(9), id(13), id(15)]),
       );
       expect(items.singleWhere((e) => e.id == id(8)).category, 'activity');
       expect(items.singleWhere((e) => e.id == id(9)).category, 'mention');
@@ -156,7 +172,6 @@ void main() {
           2,
           kind: 7,
           tags: [
-            ['p', 'me'],
             ['e', id(1)],
           ],
           content: '👍',
@@ -263,7 +278,7 @@ void main() {
     );
     expect(items, isEmpty);
   });
-  test('each DM has its own history window', () async {
+  test('aggregate DM history retains sparse conversations', () async {
     final items = await loadActivityHistory(
       query: reader([
         event(1, channel: 'quiet'),
@@ -275,6 +290,69 @@ void main() {
     );
     expect(items.any((e) => e.channelId == 'quiet'), isTrue);
   });
+  test(
+    'aggregate participation pages before caching absent interests',
+    () async {
+      final items = await loadActivityHistory(
+        query: reader([
+          event(
+            1,
+            author: 'me',
+            tags: [
+              ['e', id(2), '', 'reply'],
+            ],
+          ),
+          event(2),
+          event(3),
+          for (var n = 100; n < 601; n++)
+            event(
+              n,
+              author: 'me',
+              tags: [
+                ['e', id(3), '', 'reply'],
+              ],
+            ),
+          event(
+            700,
+            tags: [
+              ['e', id(2), '', 'reply'],
+            ],
+          ),
+        ]),
+        channels: [channel('team')],
+        viewer: 'me',
+        followedRoots: {},
+      );
+      expect(items.map((e) => e.id), contains(id(700)));
+    },
+  );
+  test(
+    'cold membership reads batch 300 channels under the relay cap',
+    () async {
+      final calls = <List<NostrFilter>>[];
+      await loadActivityHistory(
+        query: (filters) async {
+          calls.add(filters);
+          return [];
+        },
+        channels: [for (var n = 0; n < 300; n++) channel('channel-$n')],
+        viewer: 'me',
+        followedRoots: {},
+      );
+      final scoped = calls
+          .expand((f) => f)
+          .where((f) => f.tags.containsKey('#h'));
+      expect(scoped, hasLength(3));
+      expect(calls.length, lessThanOrEqualTo(4));
+      expect(scoped.expand((f) => f.tags['#h']!), hasLength(300));
+      for (final call in calls) {
+        expect(
+          call.fold<int>(0, (n, f) => n + (f.tags['#h']?.length ?? 0)),
+          lessThanOrEqualTo(kMaxExplicitChannelValues),
+        );
+      }
+    },
+  );
   test(
     'incremental catch-up retains older conversations and fences failed or retired reads',
     () async {

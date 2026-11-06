@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../../shared/relay/conversation_scope.dart';
+
 const Object _sentinel = Object();
 
 /// Shown when a private-channel add is refused, so a missing Invite action
@@ -8,12 +10,15 @@ const privateChannelAddDeniedMessage =
     'Only channel members can add people to a private channel.';
 
 @immutable
-class Channel {
+class Channel implements ConversationScope {
+  @override
   final String id;
+  @override
   final String name;
 
   /// NIP-CL labels from metadata; presentation hints, never access grants.
   final List<String> labels;
+  @override
   final String channelType; // "stream", "forum", "dm"
   final String visibility; // "open", "private"
   final String description;
@@ -26,6 +31,7 @@ class Channel {
   final DateTime? archivedAt;
   final List<String> participants;
   final List<String> participantPubkeys;
+  @override
   final bool isMember;
   final int? ttlSeconds;
   final DateTime? ttlDeadline;
@@ -113,6 +119,7 @@ class Channel {
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
   /// Solo presentation is carried by NIP-CL metadata, not project filing.
+  @override
   bool get isSolo => isStream && isPrivate && labels.contains('buzz.solo');
 
   /// Keep old mobile-created chats visible while older clients migrate.
@@ -128,6 +135,7 @@ class Channel {
   /// Streams and forums ask on send. Nobody can be added to a DM, so a DM
   /// does not ask.
   bool get mentionsOutsidePeople => isStream || isForum || isDm;
+  @override
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
   bool get canJoin => visibility == 'open' && !isArchived && !isMember && !isDm;
@@ -143,6 +151,7 @@ class Channel {
     return false;
   }
 
+  @override
   bool get isArchived => archivedAt != null;
 
   String displayLabel({String? currentPubkey}) {

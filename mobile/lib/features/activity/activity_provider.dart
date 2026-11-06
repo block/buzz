@@ -12,6 +12,7 @@ import '../../shared/agents/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'activity_history.dart';
+import 'activity_messages.dart';
 import '../channels/thread_follows/thread_follows_provider.dart';
 import 'inbox_item.dart';
 
@@ -29,7 +30,7 @@ final dmResurfaceActionProvider = Provider<DmResurfaceAction>(
 /// Activity combines addressed history with conversation evidence matching
 /// `buzz-app`'s inbox/unread projection: DMs, mentions, participating/followed
 /// threads, Solo timeline updates, and reactions to the viewer's messages.
-/// Legacy workflow/job filters remain available through More activity views.
+/// Workflow approvals and agent lifecycle updates remain reachable in All.
 class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   static const _addressedKinds = [
     7,
@@ -155,7 +156,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           for (final c in channels)
             if (c.isMember && !c.isArchived) c.id,
         ],
-        kinds: const [9, 40002, 40008, 40003, 5, 9005, 7],
+        kinds: const [...activityMessageKinds, 40003, 5, 9005, 7],
         since: since,
         onEvent: (_) => _scheduleLiveRefresh(generation),
       );
@@ -579,7 +580,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     );
     // The current desktop Activity owns chat evidence. Replace legacy chat
     // rows so deleted/edited or no-longer-admitted messages cannot survive.
-    byId.removeWhere((_, item) => const [9, 40002, 40008].contains(item.kind));
+    byId.removeWhere((_, item) => activityMessageKinds.contains(item.kind));
     for (final item in conversationItems) {
       byId[item.id] = item;
     }
