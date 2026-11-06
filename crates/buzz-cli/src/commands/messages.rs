@@ -769,7 +769,7 @@ pub async fn cmd_send_message(
         }
     };
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let emitted_mentions = event_mention_pubkeys(&event);
     let resp = client.submit_event(event).await?;
     let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
@@ -865,7 +865,7 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
         buzz_sdk::build_diff_message(channel_uuid, &diff, &diff_meta, thread_ref.as_ref())
             .map_err(|e| CliError::Other(format!("build_diff_message failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -896,7 +896,7 @@ pub async fn cmd_delete_message(
     )
     .map_err(|e| CliError::Other(format!("build_delete_message failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -919,7 +919,7 @@ pub async fn cmd_edit_message(
     let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -950,7 +950,7 @@ pub async fn cmd_vote_on_post(
     let builder = buzz_sdk::build_vote(channel_uuid, target_eid, vote_dir)
         .map_err(|e| CliError::Other(format!("build_vote failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -1156,8 +1156,11 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_channel_is_rejected_before_thread_fetch() {
-        let client =
-            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
         let error = cmd_get_thread(
             &client,
             "not-a-uuid",
@@ -1773,7 +1776,11 @@ mod tests {
         // Content contains `:wave:` which resolves in the palette.
         // The submitted event must carry an `emoji` tag for `wave`.
         let (url, query_count, captured_event) = fake_send_relay(send_palette_response()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         cmd_send_message(&client, send_params("hello :wave: everyone"))
             .await
@@ -1825,7 +1832,11 @@ mod tests {
         // Content has no `:` at all — the palette query must be skipped
         // entirely (zero RTTs), and the submitted event must have no emoji tags.
         let (url, query_count, captured_event) = fake_send_relay(send_palette_response()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         cmd_send_message(&client, send_params("plain message no colons"))
             .await
@@ -1904,7 +1915,11 @@ mod tests {
         let addr: StdSocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let url = format!("http://{addr}");
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         // Must not return Err — a palette failure is a soft warning.
         cmd_send_message(&client, send_params(":wave: message with emoji candidate"))
@@ -2025,7 +2040,11 @@ mod tests {
             stored_message(&"c".repeat(64), other_channel, "elsewhere", &[]),
         ])
         .await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         let send = |from_thread: &str, kind: Option<u16>| {
             let mut params = send_params("decision: ship it");
