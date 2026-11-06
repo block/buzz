@@ -1287,37 +1287,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         &state,
     )));
 
-    // Multi-node fan-out consumer: receive events from Redis pub/sub
-    // (published by other relay instances) and fan out to local WS subscribers.
-    {
-        let state_for_sub = Arc::clone(&state);
-        let mut rx = state_for_sub.pubsub.subscribe_local();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(channel_event) => {
-                        buzz_relay::handlers::event::fan_out_pubsub_event(
-                            &state_for_sub,
-                            channel_event,
-                        )
-                        .await;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
-                        tracing::warn!("Multi-node fan-out lagged by {n} messages");
-                        // Skipped messages are not replayed (NIP-AR Sync rule 5).
-                        state_for_sub
-                            .artifact_syncs
-                            .resync_all("resync: live delivery lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Multi-node fan-out broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-    }
+    // Multi-node fan-out: deliver events other relay instances published to
+    // Redis to local WS subscribers (see `handlers::multinode_fanout`).
+    buzz_relay::handlers::multinode_fanout::spawn(
+        Arc::clone(&state),
+        state.pubsub.subscribe_local(),
+    );
 
     // Cross-pod cache-invalidation consumer: receive cache-key drops from Redis
     // pub/sub (published by other relay instances when membership/visibility
