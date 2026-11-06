@@ -1279,11 +1279,7 @@ async fn list_with(
 pub fn paired_relays() -> Vec<String> {
     // Tests never read the real keychain.
     #[cfg(test)]
-    return tests::PAIRED_RELAYS.with(|stored| {
-        let mut stored = stored.borrow_mut();
-        stored.1 += 1;
-        stored.0.clone()
-    });
+    return Vec::new();
     #[cfg(not(test))]
     paired_relays_in(&Keychain)
 }
@@ -1397,7 +1393,24 @@ pub async fn pair(
     client_name: &str,
     instance: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
-    let mut found = advertisements();
+    pair_among(
+        &Keychain,
+        advertisements(),
+        relay_url,
+        client_name,
+        instance,
+    )
+    .await
+}
+
+/// [`pair`] among the `found` desktops, storing in `store`.
+async fn pair_among(
+    store: &dyn PairingStore,
+    mut found: Vec<(String, Endpoint)>,
+    relay_url: &str,
+    client_name: &str,
+    instance: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
     if let Some(want) = instance {
         found.retain(|(i, _)| i == want);
     }
@@ -1416,7 +1429,7 @@ pub async fn pair(
             )));
         }
     };
-    pair_with(&Keychain, instance, endpoint, relay_url, client_name).await
+    pair_with(store, instance, endpoint, relay_url, client_name).await
 }
 
 async fn pair_with(
@@ -1513,11 +1526,6 @@ pub(crate) mod tests {
         pub(crate) static SAME_USER_HANGS: ();
     }
 
-    thread_local! {
-        /// What [`paired_relays`] answers in tests, and how often it was read.
-        pub(crate) static PAIRED_RELAYS: std::cell::RefCell<(Vec<String>, usize)> =
-            Default::default();
-    }
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -2545,8 +2553,9 @@ pub(crate) mod tests {
         assert_eq!(relay, "wss://community.example/");
     }
 
-    /// `auth desktop pair --instance b` with no `--relay`: desktop A's
-    /// refusal is never asked for, and B gets exactly one pair request.
+    /// `auth desktop pair --instance b` with no `--relay`, through relay
+    /// selection and command dispatch: desktop A, which would refuse, is
+    /// never asked, and B gets exactly one pair request.
     #[tokio::test]
     async fn pairing_a_chosen_desktop_ignores_another_desktops_refusal() {
         use clap::Parser;
@@ -2558,26 +2567,49 @@ pub(crate) mod tests {
             |_, _| serde_json::json!({"result": "", "error": "denied", "message": "locked"}),
         )
         .await;
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let answer = serde_json::json!({
+            "token": "tok", "instance": "b", "pubkey": pubkey, "relays": [RELAY],
+        });
+        let reply = answer.to_string();
+        let (b, seen) = provider(move |_, _| serde_json::json!({ "result": reply })).await;
+        let found = vec![("a".to_owned(), refusing.clone()), ("b".to_owned(), b)];
+
         let paired = accepted_relay(&store, vec![("a".into(), refusing)]);
         let relay = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
             .await
             .unwrap();
-        assert!(refused.lock().unwrap().is_empty(), "A was asked");
+        let result = std::cell::RefCell::new(None);
+        let connected = crate::connect(
+            &relay,
+            cli.command,
+            async |sub, relay| {
+                let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, instance }) = sub
+                else {
+                    unreachable!()
+                };
+                let out = pair_among(&store, found, relay, &name, instance.as_deref()).await?;
+                *result.borrow_mut() = Some(out);
+                Ok(())
+            },
+            async |_| unreachable!(),
+        )
+        .await
+        .unwrap();
+        assert!(connected.is_none());
 
-        let (b, seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
-        let crate::Cmd::Auth(crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, .. })) =
-            cli.command
-        else {
-            unreachable!()
-        };
-        let _ = pair_with(&store, "b".into(), b, &relay, &name).await;
-        let pairs = seen
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, _, r)| r["method"] == "pair")
-            .count();
-        assert_eq!(pairs, 1);
+        assert!(refused.lock().unwrap().is_empty(), "A was asked");
+        let asked = seen.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].2["method"], "pair");
+        assert_eq!(
+            asked[0].2["params"],
+            serde_json::json!(["buzz CLI", "ws://localhost:3000/"])
+        );
+        assert_eq!(
+            result.into_inner().unwrap(),
+            serde_json::json!({"instance": "b", "pubkey": pubkey, "relays": [RELAY]})
+        );
     }
 
     /// A crashed desktop's leftover advertisement reads as not running, and

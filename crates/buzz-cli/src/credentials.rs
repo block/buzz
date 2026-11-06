@@ -433,12 +433,6 @@ impl Credentials {
         false
     }
 
-    /// Whether the identity is an explicit key (`--private-key` /
-    /// `BUZZ_PRIVATE_KEY`), held locally.
-    pub fn is_explicit_key(&self) -> bool {
-        self.local_keys.is_some()
-    }
-
     /// Whether a NIP-FI evidence source is configured.
     pub fn has_evidence_source(&self) -> bool {
         #[cfg(unix)]

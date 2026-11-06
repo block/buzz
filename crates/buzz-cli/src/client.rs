@@ -740,17 +740,6 @@ impl BuzzClient {
             .assertion_sent
             .load(std::sync::atomic::Ordering::Relaxed);
         let desktop = self.credentials.is_desktop();
-        // Only a refused explicit key reads the stored pairings, and never
-        // an agent's: its delegation tag marks a key that must not be
-        // swapped for the paired person's identity.
-        let hint = if status == 401
-            && self.credentials.is_explicit_key()
-            && self.credentials.auth_tag().is_none()
-        {
-            self.key_overrode_pairing()
-        } else {
-            ""
-        };
         if status == 401 && !sent && desktop {
             return CliError::Auth(format!(
                 "relay requires authentication ({message}); if it enforces federated identity \
@@ -763,26 +752,13 @@ impl BuzzClient {
                 "relay requires authentication ({message}); if it enforces federated identity \
                  (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} to your own NIP-FA sign-in session \
                  (a human session for this key, not an agent grant) and \
-                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion{hint}"
+                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion"
             ));
         }
         CliError::Relay {
             status,
-            body: format!("{message}{hint}"),
+            body: message,
         }
-    }
-
-    /// A note for a refused explicit key when this CLI also has a Buzz desktop
-    /// pairing for the relay: the key took precedence over it.
-    fn key_overrode_pairing(&self) -> &'static str {
-        #[cfg(unix)]
-        if key_overrode_pairing(&self.ws_url, &crate::desktop_provider::paired_relays()) {
-            return "; BUZZ_PRIVATE_KEY (or --private-key) took precedence over this CLI's \
-                    Buzz desktop pairing for this relay. Running without it (for example \
-                    `env -u BUZZ_PRIVATE_KEY -u BUZZ_AUTH_TAG buzz …`) switches to the \
-                    paired person's identity";
-        }
-        ""
     }
 
     /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures
@@ -1623,12 +1599,6 @@ impl BuzzClient {
         }
         Ok(resp.text().await?)
     }
-}
-
-/// Whether `paired` (relays in bound form) holds the relay at `ws_url`.
-#[cfg(unix)]
-fn key_overrode_pairing(ws_url: &str, paired: &[String]) -> bool {
-    crate::desktop_provider::provider_relay_url(ws_url).is_ok_and(|relay| paired.contains(&relay))
 }
 
 /// Normalize a relay URL: ws:// → http://, wss:// → https://, strip trailing slash.
@@ -2809,7 +2779,7 @@ mod tests {
 
     // --- (a) auth-suppression regression pair ---
 
-    pub(super) fn make_auth_tag() -> (Tag, String) {
+    fn make_auth_tag() -> (Tag, String) {
         let owner_hex = "a".repeat(64);
         let sig_hex = "b".repeat(128);
         let tag_vec = vec![
@@ -3268,8 +3238,6 @@ mod federated_identity_route_tests {
 
         // With a source configured, a 401 is the relay's verdict, not a hint.
         let (base, _) = origin(Some(StatusCode::UNAUTHORIZED)).await;
-        #[cfg(unix)]
-        let reads = paired_for(&base);
         let err = client(&base, true)
             .query(&serde_json::json!({}))
             .await
@@ -3278,31 +3246,6 @@ mod federated_identity_route_tests {
             matches!(err, CliError::Relay { status: 401, .. }),
             "{err:?}"
         );
-        // A key with evidence configured still notes the pairing it overrode.
-        #[cfg(unix)]
-        {
-            assert!(err.to_string().contains(OVERRODE), "{err}");
-            assert_eq!(reads(), 1);
-            let (base, _) = origin(None).await;
-            let reads = paired_for(&base);
-            client(&base, true)
-                .query(&serde_json::json!({}))
-                .await
-                .unwrap();
-            assert_eq!(reads(), 0, "a success never reads the pairings");
-        }
-    }
-
-    #[cfg(unix)]
-    const OVERRODE: &str = "took precedence over this CLI's Buzz desktop pairing";
-
-    /// Store a pairing for `base` for this thread, returning its read count.
-    #[cfg(unix)]
-    fn paired_for(base: &str) -> impl Fn() -> usize {
-        use crate::desktop_provider::tests::PAIRED_RELAYS;
-        let relay = crate::desktop_provider::provider_relay_url(base).unwrap();
-        PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec![relay], 0));
-        || PAIRED_RELAYS.with(|p| p.borrow().1)
     }
 
     /// The paths a failed mint must stop before anything reaches the relay:
@@ -4320,110 +4263,6 @@ mod ws_deadline_tests {
             named.lock().unwrap().as_deref(),
             Some(format!("ws://{addr}/team/").as_str())
         );
-    }
-
-    /// The note that a key overrode a pairing depends only on a 401, an
-    /// explicit key and a stored pairing for the relay; nothing else reads
-    /// the stored pairings.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn only_a_refused_explicit_key_notes_an_overridden_pairing() {
-        use crate::desktop_provider::tests::PAIRED_RELAYS;
-        const NOTE: &str = "took precedence over this CLI's Buzz desktop pairing";
-        let relay = "https://team.example/x/";
-        PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec!["wss://team.example/x/".into()], 0));
-        let reads = || PAIRED_RELAYS.with(|p| p.borrow().1);
-        let keys = Keys::generate();
-
-        let plain = BuzzClient::new(relay.into(), Credentials::from_keys(keys.clone())).unwrap();
-        assert!(plain
-            .relay_error(401, "no".into())
-            .to_string()
-            .contains(NOTE));
-        let session =
-            crate::federated_identity::AdapterSession::new("https://adapter.example", "t", relay)
-                .unwrap();
-        let with_evidence = BuzzClient::new(
-            relay.into(),
-            Credentials::from_keys(keys).with_evidence(session),
-        )
-        .unwrap();
-        with_evidence.assertion_sent.store(true, Ordering::Relaxed);
-        assert!(with_evidence
-            .relay_error(401, "no".into())
-            .to_string()
-            .contains(NOTE));
-        assert_eq!(reads(), 2);
-
-        assert!(!plain
-            .relay_error(500, "no".into())
-            .to_string()
-            .contains(NOTE));
-        assert!(!plain
-            .relay_error(403, "no".into())
-            .to_string()
-            .contains(NOTE));
-        assert_eq!(reads(), 2, "only a 401 reads the pairings");
-
-        let (endpoint, _) = crate::desktop_provider::tests::desktop(
-            Keys::generate(),
-            vec!["wss://team.example/x/".into()],
-        )
-        .await;
-        let provider = crate::desktop_provider::Provider::open(
-            endpoint,
-            "t".into(),
-            false,
-            "wss://team.example/x/",
-        )
-        .await
-        .unwrap()
-        .ok()
-        .unwrap();
-        let desktop = BuzzClient::new(
-            relay.into(),
-            Credentials::from_desktop(provider).await.unwrap(),
-        )
-        .unwrap();
-        assert!(!desktop
-            .relay_error(401, "no".into())
-            .to_string()
-            .contains(NOTE));
-        assert_eq!(reads(), 2, "desktop credentials never read them");
-    }
-
-    /// An agent's key carries a delegation tag: its 401 never suggests the
-    /// paired person's identity, and reads no pairings.
-    #[cfg(unix)]
-    #[test]
-    fn a_refused_agent_key_gets_no_pairing_hint() {
-        use crate::desktop_provider::tests::PAIRED_RELAYS;
-        let relay = "https://team.example/x/";
-        PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec!["wss://team.example/x/".into()], 0));
-        let (auth_tag, auth_json) = super::tests::make_auth_tag();
-        let agent = BuzzClient::new(
-            relay.into(),
-            Credentials::from_keys(Keys::generate()).with_auth_tag(auth_tag, auth_json),
-        )
-        .unwrap();
-        let err = agent.relay_error(401, "no".into()).to_string();
-        assert!(!err.contains("pairing"), "{err}");
-        assert_eq!(PAIRED_RELAYS.with(|p| p.borrow().1), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_refused_key_notes_a_pairing_for_the_same_relay() {
-        let paired = ["wss://team.example/x/".to_owned()];
-        assert!(super::key_overrode_pairing(
-            "wss://team.example/x/",
-            &paired
-        ));
-        assert!(!super::key_overrode_pairing(
-            "wss://team.example/y/",
-            &paired
-        ));
-        assert!(!super::key_overrode_pairing("wss://team.example/x/", &[]));
     }
 
     #[test]
