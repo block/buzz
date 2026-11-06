@@ -32,7 +32,7 @@ void main() {
     },
   );
 
-  testWidgets('a failed first listing never claims an agent is local', (
+  testWidgets('a failed listing never claims an agent is local', (
     tester,
   ) async {
     final h = await AgentsHarness.create();
@@ -72,5 +72,13 @@ void main() {
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(local, findsOneWidget);
+
+    // A failed refresh after that success leaves a stale snapshot, which
+    // can't rule out a remote agent created since.
+    h.registry.failListing = true;
+    await h.controller.run(h.controller.refresh);
+    await tester.pumpAndSettle();
+    expect(h.controller.listingFailed, isTrue);
+    expect(local, findsNothing);
   });
 }
