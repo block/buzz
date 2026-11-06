@@ -100,7 +100,7 @@ General status can read legacy receipts, with null CAS preconditions.
 ## Request enforcement and discovery
 
 `off` ignores stored requirements; `shadow` enforces stored true; `enforce` is a
-global requirement floor; `deny-protected` denies protected traffic. Report
+global requirement floor; `deny_protected` denies protected traffic. Report
 `effective_required` alongside stored state so disable under enforce and enable
 under off cannot be mistaken for effective changes. Evaluating policy lookups
 fail closed on errors; off does not require an FI policy read.

@@ -49,14 +49,8 @@ fn unavailable(error: buzz_db::DbError) -> Error {
 }
 
 fn mode_fields(state: &AppState, required: Option<bool>) -> Value {
-    use buzz_auth::NipFiMode;
     let mode = state.config.nip_fi.mode;
-    let name = match mode {
-        NipFiMode::Off => "off",
-        NipFiMode::Shadow => "shadow",
-        NipFiMode::Enforce => "enforce",
-        NipFiMode::DenyProtected => "deny-protected",
-    };
+    let name = crate::nip_fi_config::mode_name(mode);
     serde_json::json!({
         "mode": name,
         "effective_required": required.map(|r| mode.with_requirement(r).restricts()),
