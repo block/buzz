@@ -1955,6 +1955,13 @@ pub fn build_workflow_approval(
 /// Build a DM open event (kind 41010).
 ///
 /// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
+/// The relay finds or makes the DM of exactly these members. With a
+/// `["history", "include"]` tag, it instead finds the DM of the named people
+/// and adds any named agents it lacks.
+///
+/// The relay answers kind 41010 and kind 41011 with
+/// `response:{"channel_id":"<uuid>","created":<bool>}`, where `created` is
+/// true only when a new DM was made.
 pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(SdkError::InvalidInput(
