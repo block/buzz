@@ -1209,6 +1209,8 @@ mod tests {
         assert_eq!(attachment_name("/tmp/dir/report.pdf"), "report.pdf");
         assert_eq!(attachment_name("/tmp/a\nb.txt"), "a b.txt");
         assert_eq!(attachment_name("/"), "File");
+        // On Windows a backslash is a path separator, not part of the name.
+        #[cfg(unix)]
         assert_eq!(attachment_name("/tmp/a\\b.txt"), "a b.txt");
     }
 

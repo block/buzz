@@ -452,6 +452,19 @@ mod media_download_tests {
 
 const QUERY_PAGE_SIZE: u32 = 500;
 
+/// The most pages one limited query reads before failing, so a relay that
+/// never runs out of events to skip cannot keep a command running forever.
+pub(crate) const MAX_QUERY_PAGES: usize = 100;
+
+fn stalled_query(detail: &str) -> CliError {
+    CliError::Relay {
+        status: 200,
+        body: format!("query pagination stopped: {detail}"),
+    }
+}
+
+/// Move the composite cursor to the page's last event, failing unless it
+/// lands strictly older than the current cursor.
 fn advance_query_cursor(
     filter: &mut serde_json::Value,
     page: &[serde_json::Value],
@@ -468,6 +481,16 @@ fn advance_query_cursor(
         .and_then(serde_json::Value::as_str)
         .filter(|id| id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()))
         .ok_or_else(|| CliError::Other("query event missing valid id".into()))?;
+    if let (Some(until), Some(before_id)) = (
+        filter.get("until").and_then(serde_json::Value::as_u64),
+        filter.get("before_id").and_then(serde_json::Value::as_str),
+    ) {
+        if (created_at, id) >= (until, before_id) {
+            return Err(stalled_query(
+                "the relay did not move the cursor to older events",
+            ));
+        }
+    }
     filter["until"] = serde_json::json!(created_at);
     filter["before_id"] = serde_json::json!(id);
     Ok(())
@@ -811,8 +834,15 @@ impl BuzzClient {
         keep: impl Fn(&serde_json::Value) -> bool,
     ) -> Result<Vec<serde_json::Value>, CliError> {
         let mut events = Vec::new();
+        let mut pages = 0;
 
         while limit.is_none_or(|limit| events.len() < limit as usize) {
+            if limit.is_some() && pages == MAX_QUERY_PAGES {
+                return Err(stalled_query(&format!(
+                    "read {MAX_QUERY_PAGES} pages without reaching the end of the results"
+                )));
+            }
+            pages += 1;
             let page_limit = limit
                 .map(|limit| (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize))
                 .unwrap_or(QUERY_PAGE_SIZE as usize);

@@ -242,4 +242,79 @@ mod tests {
             .iter()
             .any(|f| f["before_id"].is_string()));
     }
+
+    /// A relay that answers every DM-metadata query with `page(filter)`.
+    async fn fixed_relay(
+        page: fn(&serde_json::Value) -> Vec<serde_json::Value>,
+    ) -> (String, Arc<Mutex<usize>>) {
+        use axum::{routing::post, Json, Router};
+        let count = Arc::new(Mutex::new(0));
+        let seen = count.clone();
+        let app = Router::new().route(
+            "/query",
+            post(move |Json(filters): Json<Vec<serde_json::Value>>| {
+                let seen = seen.clone();
+                async move {
+                    let f = &filters[0];
+                    if f["kinds"][0].as_u64() != Some(39000) {
+                        return Json(Vec::new());
+                    }
+                    *seen.lock().unwrap() += 1;
+                    Json(page(f))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, count)
+    }
+
+    /// A full page of DMs with no `d` tag, which `list_dms` drops, older
+    /// than the filter's cursor.
+    fn dropped_page(f: &serde_json::Value) -> Vec<serde_json::Value> {
+        let top = f["until"].as_u64().unwrap_or(1_000_000);
+        (1..=f["limit"].as_u64().unwrap())
+            .map(|n| {
+                serde_json::json!({
+                    "id": "a".repeat(64), "kind": 39000, "created_at": top - n, "tags": [],
+                })
+            })
+            .collect()
+    }
+
+    fn client(base: String) -> BuzzClient {
+        BuzzClient::new(
+            base,
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_relay_repeating_the_same_page_fails() {
+        let (base, count) = fixed_relay(|f| {
+            let mut f = f.clone();
+            f["until"] = serde_json::Value::Null;
+            dropped_page(&f)
+        })
+        .await;
+
+        let err = list_dms(&client(base), 10).await.unwrap_err();
+
+        assert_eq!(crate::error::exit_code(&err), 2, "{err}");
+        assert!(err.to_string().contains("cursor"), "{err}");
+        assert_eq!(*count.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_never_runs_out_fails_at_the_page_cap() {
+        let (base, count) = fixed_relay(dropped_page).await;
+
+        let err = list_dms(&client(base), 10).await.unwrap_err();
+
+        assert_eq!(crate::error::exit_code(&err), 2, "{err}");
+        assert!(err.to_string().contains("pages"), "{err}");
+        assert_eq!(*count.lock().unwrap(), crate::client::MAX_QUERY_PAGES);
+    }
 }
