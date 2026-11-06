@@ -6,41 +6,75 @@
 //! `(community, topic)` goes to the same worker, so each channel's events keep
 //! their order while different channels are delivered concurrently.
 //!
-//! Live delivery never loses an event silently. When a worker's queue is full,
-//! the dispatcher drops that event, ends the syncs it would have reached with
-//! `CLOSED "resync: ..."` (NIP-AR Sync rule 5), and closes the connections it
-//! would have reached so their clients catch up from their cursor. When the
-//! dispatcher itself lags the broadcast, it cannot tell which events it
-//! skipped, so it does the same for every subscribed connection.
+//! Live delivery never loses an event silently. An event is lost when its
+//! worker's queue is full, or when it waited longer than [`MAX_QUEUE_DELAY`]
+//! there. Either way the syncs it would have reached get `CLOSED "resync: ..."`
+//! (NIP-AR Sync rule 5), and the connections it would have reached are fenced
+//! and closed so their clients catch up from their cursor. When the dispatcher
+//! itself lags the broadcast, it cannot tell which events it skipped, so it does
+//! the same for every subscribed connection.
 //!
-//! An affected connection is fenced at once: it gets no live EVENT frame from
-//! then on, so its client's resume cursor stays before the loss. The socket
-//! close itself goes through one paced closer so a hot channel cannot turn
-//! into a reconnect storm (Review-Proven Rule 9).
+//! A client resumes from the newest `created_at` it received, minus a few
+//! seconds of slack. Recovery depends on that cursor never getting further
+//! ahead of a lost event than the slack:
+//! - A fence is immediate and atomic with the live send path, so after it no
+//!   newer frame is queued to the connection. Frames queued before it were
+//!   produced no later than the fence.
+//! - Every event a worker withholds or drops is at most [`MAX_QUEUE_DELAY`] old
+//!   when the fence lands, even when other workers or local fan-out are ahead.
+//!
+//! So the cursor ends at most [`MAX_QUEUE_DELAY`] (plus clock skew) past any
+//! event the connection missed. The socket close itself goes through one paced
+//! closer so a hot channel cannot turn into a reconnect storm (Review-Proven
+//! Rule 9).
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use buzz_core::CommunityId;
 use buzz_pubsub::ChannelEvent;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::time::Instant;
 use tracing::warn;
 
 use super::event::{deliver_pubsub_event, pubsub_stored_event, take_local_echo};
 use crate::state::AppState;
 use crate::subscription::ConnId;
+use buzz_core::event::StoredEvent;
 
 /// Delivery workers per node.
 pub const WORKERS: usize = 16;
 /// Events each worker may hold before the dispatcher drops new ones.
 pub const WORKER_QUEUE: usize = 1024;
+/// The longest an event may wait in a worker queue before it counts as lost.
+/// It must stay well under the clients' replay slack (5 s), so a client whose
+/// cursor moved on through faster paths still replays what it missed.
+pub const MAX_QUEUE_DELAY: Duration = Duration::from_secs(2);
 /// Connections the closer closes per tick.
 const CLOSE_BATCH: usize = 50;
 /// The closer's tick: with [`CLOSE_BATCH`], at most 5,000 closes per second.
 const CLOSE_TICK: Duration = Duration::from_millis(10);
 /// The resync reason for a sync whose live entry was lost here.
 const LAG_RESYNC: &str = "resync: live delivery lagged";
+
+/// An event waiting for its worker, and when it counts as lost.
+struct Queued {
+    community_id: CommunityId,
+    stored: StoredEvent,
+    deadline: Instant,
+}
+
+impl Queued {
+    fn new(channel_event: ChannelEvent) -> Self {
+        Self {
+            community_id: channel_event.community_id,
+            stored: pubsub_stored_event(channel_event),
+            deadline: Instant::now() + MAX_QUEUE_DELAY,
+        }
+    }
+}
 
 /// Start multi-node fan-out for `rx`: the dispatcher, its workers, and the
 /// closer. The returned handle ends when the broadcast closes.
@@ -50,29 +84,71 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     let (dispatcher, queues) = Dispatcher::new(WORKERS, WORKER_QUEUE);
     for queue in queues {
-        tokio::spawn(run_worker(Arc::clone(&state), queue));
+        tokio::spawn(run_worker(
+            Arc::clone(&state),
+            Arc::clone(&dispatcher.closer),
+            queue,
+        ));
     }
     tokio::spawn(Arc::clone(&dispatcher.closer).run(Arc::clone(&state)));
     tokio::spawn(dispatcher.run(state, rx))
 }
 
 /// Delivers one worker's queue in order.
-async fn run_worker(state: Arc<AppState>, mut queue: mpsc::Receiver<ChannelEvent>) {
-    while let Some(channel_event) = queue.recv().await {
-        deliver_pubsub_event(&state, channel_event).await;
+async fn run_worker(
+    state: Arc<AppState>,
+    closer: Arc<LagCloser>,
+    mut queue: mpsc::Receiver<Queued>,
+) {
+    while let Some(queued) = queue.recv().await {
+        deliver_or_lose(&state, &closer, queued).await;
     }
+}
+
+/// Deliver a queued event by its deadline, or handle it as lost. A delivery
+/// cut off at the deadline may have reached some recipients; they close too.
+async fn deliver_or_lose(state: &Arc<AppState>, closer: &LagCloser, queued: Queued) {
+    let Queued {
+        community_id,
+        stored,
+        deadline,
+    } = queued;
+    let delivered = Instant::now() < deadline
+        && tokio::time::timeout_at(deadline, deliver_pubsub_event(state, community_id, &stored))
+            .await
+            .is_ok();
+    if !delivered {
+        lose(state, closer, community_id, &stored, "stale");
+    }
+}
+
+/// One known event will not be delivered: resync the syncs and fence and
+/// close the connections it would have reached. Matching skips the access
+/// gate, so a recipient that would have been filtered out may be closed too;
+/// that costs a reconnect, never a leak.
+fn lose(
+    state: &AppState,
+    closer: &LagCloser,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+    reason: &'static str,
+) {
+    metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => reason).increment(1);
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    state.artifact_syncs.resync_matches(&matches, LAG_RESYNC);
+    closer.queue(state, matches.into_iter().map(|(conn_id, _)| conn_id));
 }
 
 /// Routes broadcast events to worker queues and handles every loss.
 struct Dispatcher {
-    queues: Vec<mpsc::Sender<ChannelEvent>>,
+    queues: Vec<mpsc::Sender<Queued>>,
     closer: Arc<LagCloser>,
 }
 
 impl Dispatcher {
     /// A dispatcher over `workers` queues of `capacity` events, and the
     /// receiving ends for the workers.
-    fn new(workers: usize, capacity: usize) -> (Self, Vec<mpsc::Receiver<ChannelEvent>>) {
+    fn new(workers: usize, capacity: usize) -> (Self, Vec<mpsc::Receiver<Queued>>) {
         let (queues, receivers) = (0..workers.max(1))
             .map(|_| mpsc::channel(capacity.max(1)))
             .unzip();
@@ -103,10 +179,16 @@ impl Dispatcher {
             return;
         }
         let queue = &self.queues[self.worker_for(&channel_event)];
-        match queue.try_send(channel_event) {
+        match queue.try_send(Queued::new(channel_event)) {
             Ok(()) => {}
-            Err(TrySendError::Full(channel_event) | TrySendError::Closed(channel_event)) => {
-                self.dropped(state, channel_event);
+            Err(TrySendError::Full(lost) | TrySendError::Closed(lost)) => {
+                lose(
+                    state,
+                    &self.closer,
+                    lost.community_id,
+                    &lost.stored,
+                    "queue_full",
+                );
             }
         }
     }
@@ -117,23 +199,9 @@ impl Dispatcher {
         (hasher.finish() % self.queues.len() as u64) as usize
     }
 
-    /// One known event was not delivered: resync and close what it would
-    /// have reached. Matching skips the access gate, so a recipient that would
-    /// have been filtered out may be closed too; that costs a reconnect, never
-    /// a leak.
-    fn dropped(&self, state: &AppState, channel_event: ChannelEvent) {
-        metrics::counter!("buzz_multinode_fanout_dropped_total").increment(1);
-        let community_id = channel_event.community_id;
-        let stored = pubsub_stored_event(channel_event);
-        let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-        state.artifact_syncs.resync_matches(&matches, LAG_RESYNC);
-        self.closer
-            .queue(state, matches.into_iter().map(|(conn_id, _)| conn_id));
-    }
-
     /// The dispatcher skipped `skipped` events it never saw. Any subscription
     /// may have missed one, so every sync resyncs and every subscribed
-    /// connection closes.
+    /// connection is fenced and closes.
     fn lagged(&self, state: &AppState, skipped: u64) {
         metrics::counter!("buzz_multinode_fanout_lag_total").increment(skipped);
         warn!("Multi-node fan-out lagged by {skipped} messages");
@@ -374,10 +442,11 @@ mod tests {
     /// subscriber got a frame.
     async fn worker_delivers(
         state: &Arc<AppState>,
+        closer: &LagCloser,
         frames: &mut mpsc::Receiver<Message>,
         event: ChannelEvent,
     ) -> bool {
-        deliver_pubsub_event(state, event).await;
+        deliver_or_lose(state, closer, Queued::new(event)).await;
         frames.try_recv().is_ok()
     }
 
@@ -387,16 +456,16 @@ mod tests {
     async fn dropped_event_fences_its_recipients_before_their_close() {
         let state = crate::state::tests::test_state().await;
         let (_conn, mut frames, cancel) = presence_subscriber(&state);
+        let (dispatcher, _queues) = Dispatcher::new(1, 1);
         assert!(
-            worker_delivers(&state, &mut frames, presence(0)).await,
+            worker_delivers(&state, &dispatcher.closer, &mut frames, presence(0)).await,
             "delivers before any loss"
         );
-        let (dispatcher, _queues) = Dispatcher::new(1, 1);
         dispatcher.dispatch(&state, presence(1));
         dispatcher.dispatch(&state, presence(2)); // dropped
 
         assert!(
-            !worker_delivers(&state, &mut frames, presence(3)).await,
+            !worker_delivers(&state, &dispatcher.closer, &mut frames, presence(3)).await,
             "an event after the loss must not reach the fenced connection"
         );
         assert!(
@@ -413,8 +482,83 @@ mod tests {
         let (dispatcher, _queues) = Dispatcher::new(1, 1);
         dispatcher.lagged(&state, 3);
 
-        assert!(!worker_delivers(&state, &mut frames, presence(0)).await);
+        assert!(!worker_delivers(&state, &dispatcher.closer, &mut frames, presence(0)).await);
         assert!(!cancel.is_cancelled());
+    }
+
+    /// Gandalf's backlog case: R waits behind a backlog on its worker while
+    /// local fan-out and other workers keep moving its recipient's cursor. R
+    /// must reach the recipient by its deadline, or the recipient must be
+    /// fenced and closed so its client replays R. It is never delivered late.
+    #[tokio::test(start_paused = true)]
+    async fn backlogged_event_is_delivered_by_its_deadline_or_lost() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut frames, cancel) = presence_subscriber(&state);
+        let (dispatcher, mut queues) = Dispatcher::new(1, 4);
+        let queue = &mut queues[0];
+
+        dispatcher.dispatch(&state, presence(0));
+        tokio::time::advance(MAX_QUEUE_DELAY - Duration::from_millis(1)).await;
+        let in_time = queue.try_recv().expect("queued");
+        deliver_or_lose(&state, &dispatcher.closer, in_time).await;
+        assert!(frames.try_recv().is_ok(), "delivered inside its deadline");
+
+        dispatcher.dispatch(&state, presence(1)); // R
+        tokio::time::advance(MAX_QUEUE_DELAY).await;
+        let late = queue.try_recv().expect("queued");
+        deliver_or_lose(&state, &dispatcher.closer, late).await;
+        assert!(frames.try_recv().is_err(), "R is not delivered late");
+        assert_eq!(pending(&dispatcher), HashSet::from([conn]));
+        assert!(
+            !worker_delivers(&state, &dispatcher.closer, &mut frames, presence(2)).await,
+            "R's recipient is fenced until it closes"
+        );
+        assert!(!cancel.is_cancelled(), "the close waits for the closer");
+    }
+
+    /// A delivery that stalls (here on a database that accepts connections
+    /// but never answers) is cut off at its deadline and handled as lost.
+    #[tokio::test(start_paused = true)]
+    async fn delivery_stalled_past_its_deadline_is_lost() {
+        let silent_db = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "postgres://buzz@{}/buzz",
+            silent_db.local_addr().expect("addr")
+        );
+        let state = crate::state::tests::test_state_with_database_url_and_pool_options(
+            &url,
+            sqlx::postgres::PgPoolOptions::new().acquire_timeout(Duration::from_secs(3600)),
+        )
+        .await;
+        let channel_id = Uuid::new_v4();
+        let (conn, mut frames, _cancel) = presence_subscriber(&state);
+        state.sub_registry.register(
+            conn,
+            "channel".to_string(),
+            vec![Filter::new().kind(Kind::Custom(9))],
+            Some(channel_id),
+        );
+        let event = ChannelEvent {
+            community_id: community(),
+            topic: EventTopic::Channel(channel_id),
+            event: EventBuilder::new(Kind::Custom(9), "stalls")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign"),
+        };
+        let closer = LagCloser::default();
+
+        let started = Instant::now();
+        deliver_or_lose(&state, &closer, Queued::new(event)).await;
+        assert_eq!(
+            started.elapsed(),
+            MAX_QUEUE_DELAY,
+            "cut off at the deadline"
+        );
+        assert!(frames.try_recv().is_err());
+        assert_eq!(
+            closer.pending.lock().expect("pending").clone(),
+            HashSet::from([conn])
+        );
     }
 
     /// Each batch is counted when it closes, not when the backlog drains.

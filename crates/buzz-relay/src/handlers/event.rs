@@ -370,7 +370,8 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     if take_local_echo(state, &channel_event) {
         return;
     }
-    deliver_pubsub_event(state, channel_event).await;
+    let community_id = channel_event.community_id;
+    deliver_pubsub_event(state, community_id, &pubsub_stored_event(channel_event)).await;
 }
 
 /// Report whether `channel_event` is the Redis echo of an event this relay
@@ -410,13 +411,11 @@ pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> S
 /// subscribers, through the access gate.
 pub(crate) async fn deliver_pubsub_event(
     state: &Arc<AppState>,
-    channel_event: buzz_pubsub::ChannelEvent,
+    community_id: CommunityId,
+    stored: &StoredEvent,
 ) {
-    let community_id = channel_event.community_id;
-    let stored = pubsub_stored_event(channel_event);
-
-    let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-    let matches = route_fanout_matches(state, community_id, &stored, matches, None).await;
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
