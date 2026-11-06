@@ -170,6 +170,11 @@ class ReadStateManager {
   // lands while they run (the cold-start connect) then has nothing to redo.
   bool _initialSyncSucceeded = false;
 
+  // The current live subscription has reported ready. A connect while it
+  // is not yet live is the connection it was waiting for; a connect after
+  // it went live is a reconnect.
+  bool _liveReady = false;
+
   bool _disposed = false;
   bool _isPublishing = false;
   // Set when a publish is asked for while one is running. The running
@@ -300,6 +305,7 @@ class ReadStateManager {
     if (queued != null) return queued;
     final running = _runningResync;
     final initializing = _initializing;
+    final reconnected = _liveReady;
     final pass = Completer<void>();
     _queuedResync = pass.future;
     unawaited(() async {
@@ -308,9 +314,9 @@ class ReadStateManager {
           await running;
         } else if (initializing != null) {
           await initializing;
-          // Connected while the first sync ran: it already used this
-          // connection.
-          if (_initialSyncSucceeded) return;
+          // Connected while the first sync waited for its connection: it
+          // already used this one.
+          if (_initialSyncSucceeded && !reconnected) return;
         }
         if (_disposed) return;
         if (identical(_queuedResync, pass.future)) _queuedResync = null;
@@ -464,7 +470,7 @@ class ReadStateManager {
     try {
       final generation = ++_liveGeneration;
       var returned = false;
-      var live = false;
+      _liveReady = false;
       final unsub = await _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
@@ -484,13 +490,14 @@ class ReadStateManager {
         // A repeated ready while already live (a reconnect can send the
         // same REQ twice) leaves no gap, so it reads nothing.
         onStatusChanged: (status) {
+          if (generation != _liveGeneration) return;
           if (status == RelaySubscriptionStatus.ready) {
-            if (!live && returned) {
+            if (!_liveReady && returned) {
               unawaited(_catchUpAfterLateReady(generation));
             }
-            live = true;
+            _liveReady = true;
           } else {
-            live = false;
+            _liveReady = false;
           }
         },
       );

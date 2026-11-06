@@ -959,6 +959,45 @@ void main() {
     },
   );
 
+  test('a reconnect during the first snapshot syncs again', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    // The live subscription goes live at once, then the socket drops and
+    // reconnects while the first snapshot is still downloading.
+    final gate = Completer<void>();
+    final relay = _FakeRelaySession()
+      ..readyOnSubscribe = true
+      ..fetchGate = gate.future;
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    final initializing = manager.initialize();
+    await pumpEventQueue();
+    final reconnecting = manager.reinitializeRemote();
+    relay.fetchGate = null;
+    gate.complete();
+    await Future.wait([initializing, reconnecting]);
+
+    // The snapshot may predate marks published while the socket was down,
+    // and limit 0 replays none, so the reconnect reads it again.
+    expect(relay.fetchCount, 2);
+    expect(relay.liveSubscriptions, 1);
+    manager.dispose();
+  });
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
