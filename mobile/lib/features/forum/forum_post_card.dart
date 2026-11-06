@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/text/truncate.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -95,9 +96,7 @@ class ForumPostCard extends HookConsumerWidget {
       post.channelId,
       post.mentionPubkeys,
     );
-    final preview = post.content.length > 200
-        ? '${post.content.substring(0, 200)}...'
-        : post.content;
+    final preview = truncateWithEllipsis(post.content, 200, '...');
     final summary = post.threadSummary;
 
     return GestureDetector(
