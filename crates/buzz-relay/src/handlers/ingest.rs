@@ -3892,7 +3892,7 @@ mod postgres_tests {
         let tenant = TenantContext::resolved(community, "archive.test");
         let keys = nostr::Keys::generate();
         let channel_id = Uuid::new_v4();
-        state.membership_cache.insert(
+        state.membership_cache.seed_member(
             (community, channel_id, keys.public_key().to_bytes().to_vec()),
             true,
         );
@@ -7106,12 +7106,14 @@ mod postgres_tests {
             );
 
             // Control: a working lookup reaches the archive gate.
-            healthy.membership_cache.insert(member_key.clone(), true);
+            healthy
+                .membership_cache
+                .seed_member(member_key.clone(), true);
             let control =
                 ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
 
             // Only the channel lookup fails: the post must be denied and not stored.
-            failing.membership_cache.insert(member_key, true);
+            failing.membership_cache.seed_member(member_key, true);
             let event = post("lookup fails");
             let event_id = event.id.to_bytes().to_vec();
             let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
@@ -7228,7 +7230,7 @@ mod postgres_tests {
                 scopes: vec![Scope::MessagesWrite],
                 auth_method: HttpAuthMethod::Nip98,
             };
-            failing.membership_cache.insert(
+            failing.membership_cache.seed_member(
                 (community, source, author.public_key().to_bytes().to_vec()),
                 true,
             );

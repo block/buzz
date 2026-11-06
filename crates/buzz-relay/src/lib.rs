@@ -44,6 +44,7 @@ pub mod handlers;
 pub mod invite_token;
 /// Fixed-schema evidence for the relay's earliest startup steps.
 pub mod lifecycle;
+mod membership_cache;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
 /// Prometheus metrics: recorder, upkeep, HTTP middleware.
