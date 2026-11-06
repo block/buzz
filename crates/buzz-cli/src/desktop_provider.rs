@@ -2545,6 +2545,41 @@ pub(crate) mod tests {
         assert_eq!(relay, "wss://community.example/");
     }
 
+    /// `auth desktop pair --instance b` with no `--relay`: desktop A's
+    /// refusal is never asked for, and B gets exactly one pair request.
+    #[tokio::test]
+    async fn pairing_a_chosen_desktop_ignores_another_desktops_refusal() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["buzz", "auth", "desktop", "pair", "--instance", "b"])
+                .unwrap();
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let (refusing, refused) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "denied", "message": "locked"}),
+        )
+        .await;
+        let paired = accepted_relay(&store, vec![("a".into(), refusing)]);
+        let relay = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
+            .await
+            .unwrap();
+        assert!(refused.lock().unwrap().is_empty(), "A was asked");
+
+        let (b, seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let crate::Cmd::Auth(crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, .. })) =
+            cli.command
+        else {
+            unreachable!()
+        };
+        let _ = pair_with(&store, "b".into(), b, &relay, &name).await;
+        let pairs = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, r)| r["method"] == "pair")
+            .count();
+        assert_eq!(pairs, 1);
+    }
+
     /// A crashed desktop's leftover advertisement reads as not running, and
     /// a throttled one is reported at once, not waited out.
     #[tokio::test]

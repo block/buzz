@@ -386,7 +386,8 @@ enum DesktopAuthCmd {
 /// The relay for a command given none: the one an agent's inherited Buzz
 /// desktop credential acts on; else, without an explicit key, the one relay
 /// a running Buzz desktop still accepts this CLI's pairing for; else
-/// `http://localhost:3000`. Local-only unpairing never asks the desktop.
+/// `http://localhost:3000`. Local-only unpairing never asks the desktop,
+/// and pairing never asks for other pairings.
 async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<String, CliError> {
     #[cfg(unix)]
     let (inherited, paired) = (
@@ -415,7 +416,12 @@ pub(crate) async fn default_relay_with(
         if let Some(relay) = inherited.await? {
             return Ok(relay);
         }
-        if !explicit_key {
+        // Pairing asks its own desktop; another desktop's answer is moot.
+        let pairing = matches!(
+            command,
+            Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Pair { .. }))
+        );
+        if !explicit_key && !pairing {
             if let Some(relay) = paired.await? {
                 return Ok(relay);
             }

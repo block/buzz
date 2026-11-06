@@ -740,8 +740,13 @@ impl BuzzClient {
             .assertion_sent
             .load(std::sync::atomic::Ordering::Relaxed);
         let desktop = self.credentials.is_desktop();
-        // Only a refused explicit key reads the stored pairings.
-        let hint = if status == 401 && self.credentials.is_explicit_key() {
+        // Only a refused explicit key reads the stored pairings, and never
+        // an agent's: its delegation tag marks a key that must not be
+        // swapped for the paired person's identity.
+        let hint = if status == 401
+            && self.credentials.is_explicit_key()
+            && self.credentials.auth_tag().is_none()
+        {
             self.key_overrode_pairing()
         } else {
             ""
@@ -773,8 +778,9 @@ impl BuzzClient {
         #[cfg(unix)]
         if key_overrode_pairing(&self.ws_url, &crate::desktop_provider::paired_relays()) {
             return "; BUZZ_PRIVATE_KEY (or --private-key) took precedence over this CLI's \
-                    Buzz desktop pairing for this relay: run without it (for example \
-                    `env -u BUZZ_PRIVATE_KEY -u BUZZ_AUTH_TAG buzz …`) to use the pairing";
+                    Buzz desktop pairing for this relay. Running without it (for example \
+                    `env -u BUZZ_PRIVATE_KEY -u BUZZ_AUTH_TAG buzz …`) switches to the \
+                    paired person's identity";
         }
         ""
     }
@@ -4384,6 +4390,25 @@ mod ws_deadline_tests {
             .to_string()
             .contains(NOTE));
         assert_eq!(reads(), 2, "desktop credentials never read them");
+    }
+
+    /// An agent's key carries a delegation tag: its 401 never suggests the
+    /// paired person's identity, and reads no pairings.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_agent_key_gets_no_pairing_hint() {
+        use crate::desktop_provider::tests::PAIRED_RELAYS;
+        let relay = "https://team.example/x/";
+        PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec!["wss://team.example/x/".into()], 0));
+        let (auth_tag, auth_json) = make_auth_tag();
+        let agent = BuzzClient::new(
+            relay.into(),
+            Credentials::from_keys(Keys::generate()).with_auth_tag(auth_tag, auth_json),
+        )
+        .unwrap();
+        let err = agent.relay_error(401, "no".into()).to_string();
+        assert!(!err.contains("pairing"), "{err}");
+        assert_eq!(PAIRED_RELAYS.with(|p| p.borrow().1), 0);
     }
 
     #[cfg(unix)]
