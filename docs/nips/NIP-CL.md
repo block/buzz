@@ -85,6 +85,27 @@ would mix creators with members.
 **Creation time.** The `created_at` tag does not change when the channel is
 edited. Use it, not the event's `created_at`, to compare the age of channels.
 
+**Welcome text.** The relay accepts a `welcome` or `welcome_title` value
+only when it is not blank and contains no bidirectional control character.
+The length and control-character limits are in NOSTR.md. A client that
+validates before sending SHOULD apply these two rules exactly:
+
+- A value is *blank* when every character is Unicode `White_Space` (what
+  `str::trim` strips) or one of these invisible characters: U+00AD, U+034F,
+  U+061C, U+115F, U+1160, U+17B4, U+17B5, U+180B–U+180F, U+200B–U+200F,
+  U+202A–U+202E, U+2060–U+206F, U+2800, U+3164, U+FE00–U+FE0F, U+FEFF,
+  U+FFA0, U+FFF9–U+FFFB, U+1D173–U+1D17A and U+E0000–U+E007F. A blank value
+  would render as an empty heading or card. Invisible characters beside
+  visible text are allowed, for example a zero-width joiner in an emoji
+  sequence.
+- The bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and
+  U+2066–U+2069 are refused anywhere in the value, because they can reorder
+  how the text around them is displayed. Each is also invisible, so a value
+  made only of them is refused as blank.
+
+On kind:9002 an empty value restores the client default; it is not refused
+as blank. kind:39000 then omits the tag.
+
 **Older events.** A relay adds these tags only when it publishes a
 channel-state event. An event that a relay version without this NIP published
 can lack them, including one published during an upgrade. Such an event stays

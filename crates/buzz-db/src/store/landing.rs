@@ -80,13 +80,75 @@ impl CommunityLanding {
     }
 }
 
+/// Whether `c` renders as nothing on its own: format characters, fillers and
+/// blank glyphs that are not Unicode `White_Space`. A welcome message or
+/// title made only of these and whitespace is blank ([`is_blank`]); among
+/// visible text they are allowed, like the zero-width joiner in an emoji
+/// sequence.
+///
+/// The set is U+00AD, U+034F, U+061C, U+115F, U+1160, U+17B4, U+17B5,
+/// U+180B–U+180F, U+200B–U+200F, U+202A–U+202E, U+2060–U+206F, U+2800,
+/// U+3164, U+FE00–U+FE0F, U+FEFF, U+FFA0, U+FFF9–U+FFFB, U+1D173–U+1D17A
+/// and U+E0000–U+E007F. NIP-CL publishes it and clients mirror it character
+/// for character, so change all of them together.
+pub fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{2800}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// Whether `c` is a bidirectional formatting control, which can reorder how
+/// the text around it is displayed. Welcome messages and titles refuse them
+/// anywhere.
+///
+/// The set is U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069. Every
+/// one is also [`is_invisible`], so a value of bidi controls alone is
+/// refused as blank. NIP-CL publishes the set and clients mirror it character
+/// for character, so change all of them together.
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Whether every character of `text` is Unicode `White_Space` (what
+/// [`str::trim`] strips) or [`is_invisible`], so it would render as an empty
+/// heading or card. The empty string is blank.
+pub fn is_blank(text: &str) -> bool {
+    text.chars().all(|c| c.is_whitespace() || is_invisible(c))
+}
+
 /// Why `text` cannot be a custom welcome message, or `None` when it can.
-/// The message is Markdown source, so line breaks and tabs are allowed; no
-/// other control character is. The caller handles the empty string, which
-/// restores the default.
+/// The rules apply in order: not [`is_blank`], no [`is_bidi_control`], at
+/// most [`WELCOME_MAX_CHARS`], then no control characters. The message is
+/// Markdown source, so line breaks and tabs are allowed; no other control
+/// character is. The caller handles the empty string, which restores the
+/// default.
 pub fn welcome_message_error(text: &str) -> Option<&'static str> {
-    if text.trim().is_empty() {
+    if is_blank(text) {
         Some("welcome message must not be blank")
+    } else if text.chars().any(is_bidi_control) {
+        Some("welcome message must not contain bidirectional control characters")
     } else if text.chars().count() > WELCOME_MAX_CHARS {
         Some("welcome message is too long (max 4000 characters)")
     } else if text
@@ -101,11 +163,15 @@ pub fn welcome_message_error(text: &str) -> Option<&'static str> {
 
 /// Why `text` cannot be a custom welcome title, or `None` when it can: one
 /// line of text, with no control character and no Unicode line or paragraph
-/// separator (U+2028, U+2029). The caller handles the empty string, which
-/// restores the default.
+/// separator (U+2028, U+2029). The rules apply in order: not [`is_blank`],
+/// no [`is_bidi_control`], at most [`WELCOME_TITLE_MAX_CHARS`], then the
+/// single-line rule. The caller handles the empty string, which restores the
+/// default.
 pub fn welcome_title_error(text: &str) -> Option<&'static str> {
-    if text.trim().is_empty() {
+    if is_blank(text) {
         Some("welcome title must not be blank")
+    } else if text.chars().any(is_bidi_control) {
+        Some("welcome title must not contain bidirectional control characters")
     } else if text.chars().count() > WELCOME_TITLE_MAX_CHARS {
         Some("welcome title is too long (max 120 characters)")
     } else if text
@@ -559,6 +625,9 @@ mod tests {
     fn welcome_message_rules() {
         let at_limit = "a".repeat(WELCOME_MAX_CHARS);
         let over_limit = "é".repeat(WELCOME_MAX_CHARS + 1);
+        let over_limit_bidi = format!("{over_limit}\u{202E}");
+        let blank = Some("welcome message must not be blank");
+        let bidi = Some("welcome message must not contain bidirectional control characters");
         let control = Some(
             "welcome message must not contain control characters other than line breaks and tabs",
         );
@@ -574,9 +643,26 @@ mod tests {
                 None,
             ),
             ("tab\there", None),
-            ("   ", Some("welcome message must not be blank")),
-            ("\n\n", Some("welcome message must not be blank")),
-            ("\t\n", Some("welcome message must not be blank")),
+            // Invisible characters are fine beside visible text.
+            ("Hello\u{200B}world", None),
+            ("\u{200B}Hi\n\tthere\u{FEFF}", None),
+            ("Family: 👨\u{200D}👩\u{200D}👧", None),
+            ("   ", blank),
+            ("\n\n", blank),
+            ("\t\n", blank),
+            ("\u{200B}", blank),
+            ("\u{2800}", blank),
+            (" \u{200B} ", blank),
+            ("\n\t\u{FEFF}\u{3164}\n", blank),
+            ("\u{E0020}\u{1D173}\u{FE0F}", blank),
+            // Bidi controls are invisible too: alone they are blank.
+            ("\u{202E}", blank),
+            ("Hello \u{202E}dlrow", bidi),
+            ("Hi\n\u{2066}there\u{2069}", bidi),
+            ("mark\u{200F}", bidi),
+            // Bidi is checked before length and control characters.
+            (&over_limit_bidi, bidi),
+            ("\u{202A}bell\u{7}", bidi),
             (
                 &over_limit,
                 Some("welcome message is too long (max 4000 characters)"),
@@ -597,15 +683,37 @@ mod tests {
     fn welcome_title_rules() {
         let at_limit = "é".repeat(WELCOME_TITLE_MAX_CHARS);
         let over_limit = "a".repeat(WELCOME_TITLE_MAX_CHARS + 1);
+        let over_limit_bidi = format!("{over_limit}\u{202E}");
+        let blank = Some("welcome title must not be blank");
+        let bidi = Some("welcome title must not contain bidirectional control characters");
         let control = Some("welcome title must be a single line without control characters");
         let cases: &[(&str, Option<&str>)] = &[
             ("Welcome to Acme", None),
             ("👋 Hi, team!", None),
             (" padded ", None),
             (&at_limit, None),
-            ("", Some("welcome title must not be blank")),
-            ("   ", Some("welcome title must not be blank")),
-            ("\n", Some("welcome title must not be blank")),
+            // Invisible characters are fine beside visible text.
+            ("Hello\u{200B}world", None),
+            ("\u{FEFF}Welcome", None),
+            ("👨\u{200D}👩\u{200D}👧 Welcome", None),
+            ("", blank),
+            ("   ", blank),
+            ("\n", blank),
+            ("\u{200B}", blank),
+            ("\u{2800}", blank),
+            (" \u{200B} ", blank),
+            ("\u{FEFF}", blank),
+            ("\u{3164}\u{115F}\u{FFA0}", blank),
+            ("\u{00AD}\u{034F}\u{180E}\u{2060}", blank),
+            // Bidi controls are invisible too: alone they are blank.
+            ("\u{202E}", blank),
+            ("\u{2066}\u{2069}", blank),
+            ("Hello \u{202E}dlrow", bidi),
+            ("\u{2067}Acme\u{2069}", bidi),
+            ("mark\u{061C}", bidi),
+            // Bidi is checked before length and the single-line rule.
+            (&over_limit_bidi, bidi),
+            ("Two\u{200E}\nlines", bidi),
             (
                 &over_limit,
                 Some("welcome title is too long (max 120 characters)"),
@@ -619,6 +727,86 @@ mod tests {
         ];
         for (text, expected) in cases {
             assert_eq!(welcome_title_error(text), *expected, "{text:?}");
+        }
+    }
+
+    /// Both ends of every range in the invisible and bidi sets, and the
+    /// neighbours just outside them. Clients mirror these sets character for
+    /// character, so this pins the exact boundaries.
+    #[test]
+    fn invisible_and_bidi_sets() {
+        // (character, is_invisible, is_bidi_control)
+        let cases: &[(char, bool, bool)] = &[
+            ('a', false, false),
+            (' ', false, false),
+            ('\u{00AC}', false, false),
+            ('\u{00AD}', true, false),
+            ('\u{00AE}', false, false),
+            ('\u{034F}', true, false),
+            ('\u{061B}', false, false),
+            ('\u{061C}', true, true),
+            ('\u{061D}', false, false),
+            ('\u{115E}', false, false),
+            ('\u{115F}', true, false),
+            ('\u{1160}', true, false),
+            ('\u{1161}', false, false),
+            ('\u{17B3}', false, false),
+            ('\u{17B4}', true, false),
+            ('\u{17B5}', true, false),
+            ('\u{17B6}', false, false),
+            ('\u{180A}', false, false),
+            ('\u{180B}', true, false),
+            ('\u{180F}', true, false),
+            ('\u{1810}', false, false),
+            // U+200A HAIR SPACE is whitespace, not invisible.
+            ('\u{200A}', false, false),
+            ('\u{200B}', true, false),
+            ('\u{200D}', true, false),
+            ('\u{200E}', true, true),
+            ('\u{200F}', true, true),
+            ('\u{2010}', false, false),
+            ('\u{2029}', false, false),
+            ('\u{202A}', true, true),
+            ('\u{202E}', true, true),
+            ('\u{202F}', false, false),
+            ('\u{205F}', false, false),
+            ('\u{2060}', true, false),
+            ('\u{2065}', true, false),
+            ('\u{2066}', true, true),
+            ('\u{2069}', true, true),
+            ('\u{206A}', true, false),
+            ('\u{206F}', true, false),
+            ('\u{2070}', false, false),
+            ('\u{27FF}', false, false),
+            ('\u{2800}', true, false),
+            ('\u{2801}', false, false),
+            ('\u{3164}', true, false),
+            ('\u{FDFF}', false, false),
+            ('\u{FE00}', true, false),
+            ('\u{FE0F}', true, false),
+            ('\u{FE10}', false, false),
+            ('\u{FEFF}', true, false),
+            ('\u{FFA0}', true, false),
+            ('\u{FFF8}', false, false),
+            ('\u{FFF9}', true, false),
+            ('\u{FFFB}', true, false),
+            ('\u{FFFC}', false, false),
+            ('\u{1D172}', false, false),
+            ('\u{1D173}', true, false),
+            ('\u{1D17A}', true, false),
+            ('\u{1D17B}', false, false),
+            ('\u{DFFFF}', false, false),
+            ('\u{E0000}', true, false),
+            ('\u{E007F}', true, false),
+            ('\u{E0080}', false, false),
+        ];
+        for &(c, invisible, bidi) in cases {
+            assert_eq!(
+                (is_invisible(c), is_bidi_control(c)),
+                (invisible, bidi),
+                "U+{:04X}",
+                u32::from(c)
+            );
         }
     }
 }
