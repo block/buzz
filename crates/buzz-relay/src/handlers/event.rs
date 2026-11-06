@@ -3957,15 +3957,15 @@ mod tests {
             assert_eq!(
                 state
                     .community_active
-                    .entry(tenant.community())
+                    .entry(&tenant.community())
                     .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
-                    .map(|cached| cached.state),
+                    .entry(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|(state, _)| state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -4003,14 +4003,12 @@ mod tests {
                 "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            state.restriction_cache.insert(
+            state.restriction_cache.seed_read_at(
                 key,
-                crate::state::CachedRestriction {
-                    state: banned,
-                    read_at: std::time::Instant::now()
-                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
-                        .expect("instant past max age"),
-                },
+                banned,
+                std::time::Instant::now()
+                    .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
+                    .expect("instant past max age"),
             );
             let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
             assert!(
