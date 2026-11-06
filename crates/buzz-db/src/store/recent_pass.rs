@@ -157,14 +157,14 @@ pub(crate) fn split_for(
     let kinds = kinds.filter(|ks| !ks.is_empty());
     let latest_state_only = kinds.is_some_and(|ks| ks.iter().all(|&k| latest_state(k)));
     let regular_only = kinds.is_some_and(|ks| !ks.iter().any(|&k| latest_state(k)));
-    let since_prunes = since.is_some_and(|s| s >= floor);
+    let since_above_floor = since.is_some_and(|s| s >= floor);
     let until_before_floor = until.is_some_and(|u| u < floor);
     let split = |older| Split {
         floor,
         ceiling: regular_only.then(|| ceiling_at(now)),
         older,
     };
-    if since_prunes {
+    if since_above_floor {
         return (!until_before_floor).then(|| split(false));
     }
     (!latest_state_only && !until_before_floor).then(|| split(true))
