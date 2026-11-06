@@ -509,6 +509,7 @@ class _AssertingRelayAuth extends HostedRelayAuth {
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
+    bool fresh = false,
   }) async {
     configs.add(config);
     backgrounds.add(background);
