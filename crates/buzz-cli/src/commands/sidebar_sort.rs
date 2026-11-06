@@ -389,7 +389,11 @@ mod tests {
         assert_eq!(doc["meta"]["g"]["dms"][0], json!(far_v + 1));
 
         // Another author's head is never read as ours.
-        let other = BuzzClient::new(String::new(), nostr::Keys::generate(), None, None).unwrap();
+        let other = BuzzClient::new(
+            String::new(),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
         seed_sort(
             &other,
             &relay,

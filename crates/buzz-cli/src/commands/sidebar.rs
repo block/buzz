@@ -204,6 +204,7 @@ mod tests {
     use super::super::sidebar_sync::now;
     use super::super::sidebar_sync::test_support::{self, Shared};
     use super::*;
+    use crate::credentials::Credentials;
     use nostr::Keys;
 
     async fn setup() -> (BuzzClient, Shared) {
@@ -387,7 +388,8 @@ mod tests {
         assert_eq!(list["sections"][0]["name"], json!(winner));
 
         // Another author's head is never read as ours.
-        let other = BuzzClient::new(String::new(), Keys::generate(), None, None).unwrap();
+        let other =
+            BuzzClient::new(String::new(), Credentials::from_keys(Keys::generate())).unwrap();
         seed_at(&other, &relay, &doc_with_sections(&["Theirs"]), future + 5);
 
         // An uppercase channel id is stored in desktop's canonical form.
