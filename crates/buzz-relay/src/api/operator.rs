@@ -4,6 +4,9 @@
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
+mod community_policy;
+pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
+
 use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
 
@@ -1374,7 +1377,10 @@ pub async fn no_store_upgrade_response(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let upgrade = request.uri().path() == "/operator/communities/nip-fi-upgrade";
+    let upgrade = matches!(
+        request.uri().path(),
+        "/operator/communities/nip-fi-upgrade" | "/operator/communities/nip-fi-policy"
+    );
     let mut response = next.run(request).await;
     if upgrade {
         response.headers_mut().insert(
@@ -4981,4 +4987,5 @@ mod postgres_tests {
         let body = read_json(response).await;
         assert_eq!(body["error"], "internal server error");
     }
+    mod policy_tests;
 }

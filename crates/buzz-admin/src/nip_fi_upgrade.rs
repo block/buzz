@@ -47,17 +47,17 @@ enum Command {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct UpgradeRequest {
-    operation_id: Uuid,
-    community_id: Uuid,
-    expected_host: String,
-    actor_pubkey: String,
-    expected_owner_pubkey: String,
-    expected_issuer: String,
+pub(super) struct UpgradeRequest {
+    pub(super) operation_id: Uuid,
+    pub(super) community_id: Uuid,
+    pub(super) expected_host: String,
+    pub(super) actor_pubkey: String,
+    pub(super) expected_owner_pubkey: String,
+    pub(super) expected_issuer: String,
 }
 
 impl UpgradeRequest {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         ensure!(
             !self.operation_id.is_nil() && !self.community_id.is_nil(),
             "UUIDs must not be nil"
@@ -81,7 +81,7 @@ impl UpgradeRequest {
     }
 }
 
-fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
+pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .with_context(|| format!("cannot open {}", path.display()))?
@@ -92,7 +92,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn endpoint(origin: &str, operation: Option<Uuid>) -> Result<Url> {
+pub(super) fn endpoint(origin: &str, operation: Option<Uuid>) -> Result<Url> {
     let base = Url::parse(origin).context("invalid operator origin")?;
     ensure!(
         matches!(base.scheme(), "http" | "https")
@@ -190,12 +190,25 @@ pub async fn run(args: Args) -> Result<i32> {
         .and_then(|s| Keys::parse(s.trim()).ok())
         .context("invalid operator key file")?;
     let body = request.as_ref().map(serde_json::to_vec).transpose()?;
+    let receipt = signed_call(&keys, url, body).await?;
+    let code = receipt_exit_code(
+        &receipt,
+        operation_id,
+        &keys.public_key().to_hex(),
+        request.as_ref(),
+    )?;
+    println!("{}", serde_json::to_string(&receipt)?);
+    Ok(code)
+}
+
+/// Bounded, signed single call shared by the operator policy commands.
+pub(super) async fn signed_call(keys: &Keys, url: Url, body: Option<Vec<u8>>) -> Result<Value> {
     let method = if body.is_some() {
         Method::POST
     } else {
         Method::GET
     };
-    let auth = authorization(&keys, &method, &url, body.as_deref())?;
+    let auth = authorization(keys, &method, &url, body.as_deref())?;
     let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .retry(reqwest::retry::never())
@@ -232,6 +245,8 @@ pub async fn run(args: Args) -> Result<i32> {
                 | "community_not_found"
                 | "operation_not_found"
                 | "idempotency_conflict"
+                | "policy_conflict"
+                | "policy_generation_exhausted"
                 | "host_conflict"
                 | "owner_conflict"
                 | "lifecycle_conflict"
@@ -242,7 +257,7 @@ pub async fn run(args: Args) -> Result<i32> {
             _ if error.is_none() => "non-JSON error response",
             _ => "unrecognized error code",
         };
-        anyhow::bail!("operator API returned HTTP {} ({detail}); recover the same operation_id after an uncertain enable", status.as_u16());
+        anyhow::bail!("operator API returned HTTP {} ({detail}); on policy_conflict re-read policy and use a new UUID; after response loss recover the same saved request and UUID", status.as_u16());
     }
     // Print only structured relay output, never transport headers or signing material.
     let receipt: Value = serde_json::from_slice(&bytes).with_context(|| {
@@ -251,14 +266,7 @@ pub async fn run(args: Args) -> Result<i32> {
             status.as_u16()
         )
     })?;
-    let code = receipt_exit_code(
-        &receipt,
-        operation_id,
-        &keys.public_key().to_hex(),
-        request.as_ref(),
-    )?;
-    println!("{}", serde_json::to_string(&receipt)?);
-    Ok(code)
+    Ok(receipt)
 }
 
 #[cfg(test)]

@@ -468,7 +468,7 @@ test-unit:
         # parser, validation, and propagation-evidence tests, and the partition
         # audit outcome contract, NIP-FI policy/backfill, and user-deletion intake.
         cargo nextest run -p buzz-admin \
-            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/) + test(=tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes) + test(/^nip_fi::tests::/) + test(/^nip_fi_upgrade::tests::/) + test(/^user_deletions::tests::/)'
+            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/) + test(=tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes) + test(/^nip_fi::tests::/) + test(/^nip_fi_upgrade::tests::/) + test(/^nip_fi_policy::tests::/) + test(/^user_deletions::tests::/)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the

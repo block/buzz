@@ -898,7 +898,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 83);
+        assert_eq!(migrations.len(), 84);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3240,6 +3240,45 @@ mod postgres_tests {
     /// bounded inline build cannot take its lock it must fail closed without
     /// recording that migration, keeping earlier migrations and each index
     /// already built in its own transaction.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn policy_receipt_expand_preserves_populated_rows_and_legacy_inserts() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 83).await.unwrap();
+        let insert = "INSERT INTO community_auth_upgrades
+            (operation_id,target_community_id,expected_host,actor_pubkey,expected_owner_pubkey,
+             expected_issuer,operator_pubkey,policy_generation)
+            VALUES ($1,$2,'team.example.org','actor','owner','https://issuer.example.org','operator',1)";
+        let first = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(first)
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+        let second = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(second)
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in [first, second] {
+            let row: (bool, Option<i64>, Option<bool>, i64) = sqlx::query_as(
+                "SELECT requested_requires_nip_fi, expected_policy_generation,
+                    expected_requires_nip_fi, policy_generation
+                 FROM community_auth_upgrades WHERE operation_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row, (true, None, None, 1));
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn populated_artifact_tables_auto_migrate_through_every_migration() {

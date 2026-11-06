@@ -22,6 +22,7 @@
 mod communities;
 mod deletions;
 mod nip_fi;
+mod nip_fi_policy;
 mod nip_fi_upgrade;
 mod user_deletions;
 
@@ -127,6 +128,8 @@ enum Command {
     },
     /// Require NIP-FI through the relay's existing signed operator API.
     NipFiUpgrade(nip_fi_upgrade::Args),
+    /// Change or inspect a community stored NIP-FI requirement.
+    NipFiPolicy(nip_fi_policy::Args),
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
         #[command(subcommand)]
@@ -218,6 +221,9 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::NipFi { command } => nip_fi::run(command).await,
         // Retain transport/file causes for this operator command without changing
         // the diagnostics of other admin commands. Key parse errors are redacted.
+        Command::NipFiPolicy(args) => nip_fi_policy::run(args)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}")),
         Command::NipFiUpgrade(args) => nip_fi_upgrade::run(args)
             .await
             .map_err(|error| anyhow::anyhow!("{error:#}")),

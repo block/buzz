@@ -6,7 +6,7 @@ each community in `community_nip_fi_issuers`. The relay writes these rows when
 it creates a community; `buzz-admin nip-fi` backfills and edits them.
 
 To make an existing community require federated sign-in, use the separate
-[community upgrade command and manual test](operator-nip-fi-upgrade.md).
+[community policy management command](operator-nip-fi-upgrade.md).
 An issuer binding alone does not change that community's required policy.
 
 A host may hold a binding only when it is exactly one DNS label under the
