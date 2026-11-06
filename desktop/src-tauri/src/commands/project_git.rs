@@ -1,6 +1,6 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
-    GitAuthConfig,
+    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_local_clone_url,
+    validate_workspace_clone_url, GitAuthConfig,
 };
 use super::project_git_file_content::{checkout_project_repo, read_preview_content};
 use super::project_git_push::push_project_local_repository_blocking;
@@ -626,7 +626,12 @@ pub async fn get_project_repo_snapshot(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
+    // Public GitHub is a first-class *read* remote. Buzz-hosted git still
+    // has to live on this workspace's relay.
+    validate_local_clone_url(&clone_url)?;
+    if !clone_url.to_ascii_lowercase().contains("://github.com/") {
+        validate_workspace_clone_url(&clone_url, &state)?;
+    }
     let auth = build_git_auth_config(&state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
