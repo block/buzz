@@ -1180,20 +1180,28 @@ const MAX_UNACKED: usize = 128;
 /// An agent's socket publishes awaiting their `OK`, oldest first. An agent
 /// sends a frame and moves on, as a harness does, so a slow `OK` holds up
 /// neither its HTTP action nor its next frame. Each `OK` is matched as it
-/// arrives; one not back within [`PUBLISH_OK_TIMEOUT_SECS`] is an error.
+/// arrives. A publish gets `timeout` from the start of its send: one not
+/// written by then fails and drops the socket, and one not answered by then
+/// is an error.
 struct Unacked<'a> {
     stats: &'a Stats,
+    timeout: Duration,
     /// Event id, the publish's timing and its deadline. Identical frames sent
     /// within a second share an id; each `OK` settles the oldest.
     waiting: VecDeque<(String, Pending<'a>, Instant)>,
 }
 
 impl<'a> Unacked<'a> {
-    fn new(stats: &'a Stats) -> Self {
+    fn new(stats: &'a Stats, timeout: Duration) -> Self {
         Self {
             stats,
+            timeout,
             waiting: VecDeque::new(),
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.waiting.is_empty()
     }
 
     /// Sends `event` as `op` without waiting for its `OK`.
@@ -1215,12 +1223,21 @@ impl<'a> Unacked<'a> {
             return Ok(());
         }
         let pending = self.stats.begin(op);
-        if let Err(e) = conn.send_raw(&json!(["EVENT", event])).await {
-            // The caller records the broken socket.
-            pending.forget();
-            return Err(e);
+        let deadline = Instant::now() + self.timeout;
+        let frame = json!(["EVENT", event]);
+        match tokio::time::timeout(self.timeout, conn.send_raw(&frame)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                // The caller records the broken socket.
+                pending.forget();
+                return Err(e);
+            }
+            Err(_) => {
+                // The relay stopped reading; the caller drops the socket.
+                pending.err("send timeout");
+                return Err(WsClientError::Timeout);
+            }
         }
-        let deadline = Instant::now() + Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS);
         self.waiting
             .push_back((event.id.to_hex(), pending, deadline));
         Ok(())
@@ -1257,9 +1274,8 @@ impl<'a> Unacked<'a> {
         }
     }
 
-    /// Leaves every publish unjudged once its socket is gone: a broken
-    /// socket is recorded as such, and an `OK` cut off by the stop is not
-    /// judged, as a read abandoned at the stop is not.
+    /// Leaves every publish unjudged once its socket is gone, which is
+    /// recorded as such.
     fn forget(&mut self) {
         for (_, pending, _) in self.waiting.drain(..) {
             pending.forget();
@@ -1345,7 +1361,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         // connects together does not heartbeat together.
         let mut next_presence = every(profile.presence_interval_secs * rng.unit(), Instant::now())
             .or_else(|| every(profile.presence_interval_secs, Instant::now()));
-        let mut unacked = Unacked::new(&shared.stats);
+        let mut unacked = Unacked::new(&shared.stats, Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS));
 
         while ok && !stopped(&shared) {
             // While an HTTP action runs, only socket work is waited for.
@@ -1486,6 +1502,30 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     .err(Op::WsConnect, &format!("disconnected: {e}"));
                 ok = false;
             }
+        }
+        // At the stop, publishes still awaiting their `OK` settle within
+        // their deadlines while the HTTP action finishes, as a human's
+        // publish in flight does. One never answered outlasts the shutdown
+        // grace and fails the run.
+        while ok && stopped(&shared) && !unacked.is_empty() {
+            let wait = unacked
+                .deadline()
+                .map_or(MAX_IDLE, |d| d.saturating_duration_since(Instant::now()))
+                .min(MAX_IDLE);
+            let received = tokio::select! {
+                received = conn.next_event(wait) => Some(received),
+                outcome = settle(&mut busy), if busy.is_some() => {
+                    busy = None;
+                    land(outcome, &mut turn, &mut next_turn, &profile.turn, &mut rng);
+                    None
+                }
+            };
+            match received {
+                Some(Ok(RelayMessage::Ok(answer))) => unacked.answer(&answer),
+                Some(Ok(_)) | Some(Err(WsClientError::Timeout)) | None => {}
+                Some(Err(_)) => break,
+            }
+            unacked.expire(Instant::now());
         }
         unacked.forget();
         let _ = conn.disconnect().await;
@@ -2737,6 +2777,111 @@ hold_secs = 3
         assert_eq!(acked["errors"], 0, "{report}");
         let p50 = acked["p50_ms"].as_f64().unwrap();
         assert!(p50 >= lag.as_millis() as f64, "{report}");
+        // The OKs still due at the stop settle during the shutdown.
+        let closing = &report["shutdown"]["ops"]["publish_ephemeral_ok"];
+        assert!(closing["count"].as_u64() > Some(0), "{report}");
+        assert_eq!(closing["errors"], 0, "{report}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_publish_that_never_gets_its_ok_fails_the_run() {
+        let (addr, _) = fake_ws_relay(FakeRelay {
+            ok_delay: None,
+            ..FakeRelay::PROMPT
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{addr}"
+http_url = "http://{addr}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 0
+agents = 1
+channels_per_member = 1
+[agent]
+query_interval_secs = 0.0
+events_per_hour = 0.0
+observer_frames_per_hour = 0.0
+presence_interval_secs = 0.5
+[[ramp]]
+users = 1.0
+hold_secs = 2
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let report = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with(
+                scenario,
+                net,
+                Shard { index: 0, count: 1 },
+                Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("the run returns")
+        .expect_err("a relay that never acknowledges a publish fails the run");
+        assert_eq!(report["clients_cancelled"], 1, "{report}");
+        let closing = &report["shutdown"];
+        assert!(
+            closing["ops"]["publish_ephemeral_ok"]["errors"].as_u64() > Some(0),
+            "{report}"
+        );
+        assert!(
+            closing["failures"]
+                .to_string()
+                .contains("unfinished at stop"),
+            "{report}"
+        );
+    }
+
+    /// A relay that completes the handshake and then never reads: a publish
+    /// that cannot be written within its timeout fails and drops the socket.
+    #[tokio::test]
+    async fn a_publish_the_relay_never_reads_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            std::future::pending::<()>().await;
+            drop(ws);
+        });
+        let mut conn = NostrWsConnection::connect(&format!("ws://{addr}"))
+            .await
+            .unwrap();
+        let stats = Stats::default();
+        let before = stats.snapshot();
+        let mut unacked = Unacked::new(&stats, Duration::from_millis(200));
+        let keys = Keys::generate();
+        let big = "x".repeat(1 << 20);
+        let mut result = Ok(());
+        for _ in 0..MAX_UNACKED {
+            let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), big.as_str())
+                .sign_with_keys(&keys)
+                .map_err(|e| e.to_string());
+            result = unacked.send(&mut conn, Op::PublishEphemeral, event).await;
+            if result.is_err() {
+                break;
+            }
+        }
+        assert!(
+            matches!(result, Err(WsClientError::Timeout)),
+            "every write went through: {result:?}"
+        );
+        let reasons = stats.snapshot().reasons_since(&before, 10);
+        assert!(
+            reasons.iter().any(|(r, _)| r.contains("send timeout")),
+            "{reasons:?}"
+        );
+        unacked.forget();
+        held.abort();
     }
 
     /// Runs one agent's turns against `relay` and checks what they sent.

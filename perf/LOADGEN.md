@@ -131,9 +131,12 @@ does around a prompt:
 An agent makes one HTTP request sequence at a time, and the socket keeps
 running beside it: presence, typing and frames are sent without waiting for
 their `OK`, so they stay on schedule while a request or an `OK` is slow, as a
-harness's do. An `OK` not back within 30 seconds is an error. A read counts
-as an error when its response is not valid JSON of the expected shape.
-Requests do not start after the stop; one under way finishes.
+harness's do. A publish has 30 seconds from the start of its send: one the
+socket cannot write by then fails and drops the connection, and an `OK` not
+back by then is an error. A read counts as an error when its response is not
+valid JSON of the expected shape. Requests and publishes do not start after
+the stop; one under way finishes, and publishes awaiting their `OK` settle
+within the shutdown grace or fail the run.
 
 The request mix is an approximation of sustained turns, not a replay of the
 harness. Every turn reads as a first prompt does. A harness that keeps
