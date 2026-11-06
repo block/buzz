@@ -23,6 +23,23 @@ pub fn is_workflow_owner_attribution(event: &nostr::Event, tag: &nostr::Tag) -> 
             .any(|tag| tag.as_slice() == ["buzz:workflow", "true"])
 }
 
+/// Why a read filter with a NUL byte is refused, without the `invalid:` prefix.
+/// Postgres `text` and `jsonb` cannot hold U+0000, so a bound value with one
+/// fails the whole statement instead of matching nothing.
+pub const NUL_BYTE_REJECTION: &str = "filter contains a NUL byte";
+
+/// Whether any free-form string in `filters` (tag values, `search`) holds a
+/// NUL byte. Ids, authors and tag names are parsed into types that cannot.
+pub fn filters_contain_nul(filters: &[Filter]) -> bool {
+    filters.iter().any(|f| {
+        f.search.as_deref().is_some_and(|s| s.contains('\0'))
+            || f.generic_tags
+                .values()
+                .flatten()
+                .any(|value| value.contains('\0'))
+    })
+}
+
 /// Returns `true` if the event matches any of the provided NIP-01 filters.
 pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
@@ -519,5 +536,22 @@ mod tests {
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
         );
+    }
+
+    #[test]
+    fn filters_contain_nul_checks_tag_values_and_search() {
+        let parse = |v: serde_json::Value| -> Vec<Filter> {
+            serde_json::from_value(serde_json::json!([{"kinds": [9]}, v])).unwrap()
+        };
+        for nul in [
+            serde_json::json!({"#t": ["ok", "a\u{0}b"]}),
+            serde_json::json!({"#d": ["\u{0}"]}),
+            serde_json::json!({"search": "a\u{0}"}),
+        ] {
+            assert!(filters_contain_nul(&parse(nul.clone())), "{nul}");
+        }
+        assert!(!filters_contain_nul(&parse(
+            serde_json::json!({"#t": ["ab"], "search": "ab"})
+        )));
     }
 }

@@ -265,6 +265,20 @@ mod tests {
         }
     }
     #[test]
+    fn predicates_refuse_nul_bytes() {
+        use serde_json::json;
+        for invalid in [
+            json!({"artifact":"current","#type":["a\u{0}b"]}),
+            json!({"artifact":"current","#ty\u{0}pe":["a"]}),
+        ] {
+            assert_eq!(
+                parse_query(&invalid).err(),
+                Some(crate::filter::NUL_BYTE_REJECTION),
+                "{invalid}"
+            );
+        }
+    }
+    #[test]
     fn canonical_identifiers() {
         assert!(canonical_uuid("00000000-0000-0000-0000-000000000000").is_err());
         assert!(canonical_uuid(&Uuid::new_v4().simple().to_string()).is_err());
@@ -392,6 +406,9 @@ pub(crate) fn parse_predicates(
                 let value = value.as_str().ok_or("predicate values must be strings")?;
                 if value.len() > MAX_TAG_VALUE_BYTES {
                     return Err("predicate value too large");
+                }
+                if name.contains('\0') || value.contains('\0') {
+                    return Err(crate::filter::NUL_BYTE_REJECTION);
                 }
                 bytes += name.len() + value.len();
                 total += 1;
