@@ -319,6 +319,7 @@ mod tests {
         published, published_count, seed_at, setup, Shared,
     };
     use super::*;
+    use crate::credentials::Credentials;
     use nostr::Keys;
 
     const C1: &str = "11111111-1111-4111-8111-111111111111";
@@ -468,7 +469,8 @@ mod tests {
             "{refused}"
         );
         let (client, relay) = setup().await;
-        let other = BuzzClient::new(String::new(), Keys::generate(), None, None).unwrap();
+        let other =
+            BuzzClient::new(String::new(), Credentials::from_keys(Keys::generate())).unwrap();
         seed(&other, &relay, &MUTES, json!({"version": 1}), 10);
         relay.lock().unwrap().leaky = true;
         let refused = run(&MUTES, set(&[C1], true), &client).await.unwrap_err();
@@ -480,7 +482,8 @@ mod tests {
 
         // Another author's head is never read as ours.
         let (client, relay) = setup().await;
-        let other = BuzzClient::new(String::new(), Keys::generate(), None, None).unwrap();
+        let other =
+            BuzzClient::new(String::new(), Credentials::from_keys(Keys::generate())).unwrap();
         seed(
             &other,
             &relay,

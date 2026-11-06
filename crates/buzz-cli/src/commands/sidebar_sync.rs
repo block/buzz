@@ -4,7 +4,6 @@
 use std::time::SystemTime;
 
 use buzz_core::kind::KIND_READ_STATE;
-use nostr::nips::nip44;
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde_json::{json, Value};
 
@@ -58,7 +57,7 @@ pub(crate) async fn fetch_head<T>(
     lane: Lane,
     decode: impl FnOnce(&Value, u64) -> Option<T>,
 ) -> Result<Head<T>, CliError> {
-    let me = client.keys().public_key();
+    let me = client.public_key();
     let filter = json!({
         "kinds": [KIND_READ_STATE],
         "authors": [me.to_hex()],
@@ -103,8 +102,11 @@ pub(crate) async fn fetch_head<T>(
             event.id.to_hex()
         ))
     };
-    let plaintext = nip44::decrypt(client.keys().secret_key(), &me, &event.content)
-        .map_err(|e| unreadable(e.to_string()))?;
+    let plaintext = client
+        .credentials()
+        .nip44_decrypt(&me, &event.content)
+        .await?
+        .ok_or_else(|| unreadable("not valid ciphertext for this key".into()))?;
     let json: Value = serde_json::from_str(&plaintext).map_err(|e| unreadable(e.to_string()))?;
     let created_at = event.created_at.as_secs();
     let doc = decode(&json, created_at).ok_or_else(|| {
@@ -125,7 +127,7 @@ pub(crate) async fn publish(
     plaintext: String,
     head_created_at: u64,
 ) -> Result<Value, CliError> {
-    let keys = client.keys();
+    let me = client.public_key();
     let too_large = || {
         CliError::Usage(format!(
             "{} would exceed the relay's event size limit",
@@ -136,13 +138,11 @@ pub(crate) async fn publish(
     if plaintext.len() > u16::MAX as usize {
         return Err(too_large());
     }
-    let content = nip44::encrypt(
-        keys.secret_key(),
-        &keys.public_key(),
-        plaintext,
-        nip44::Version::V2,
-    )
-    .map_err(|e| CliError::Other(format!("failed to encrypt {}: {e}", lane.label)))?;
+    let content = client
+        .credentials()
+        .nip44_encrypt(&me, &plaintext)
+        .await
+        .map_err(|e| CliError::Other(format!("failed to encrypt {}: {e}", lane.label)))?;
     if content.len() > MAX_CIPHERTEXT_BYTES {
         return Err(too_large());
     }
@@ -150,7 +150,9 @@ pub(crate) async fn publish(
     let builder = EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), content)
         .tags([Tag::identifier(lane.d_tag), Tag::hashtag(lane.d_tag)])
         .custom_created_at(Timestamp::from(created_at));
-    let raw = client.submit_event(client.sign_event(builder)?).await?;
+    let raw = client
+        .submit_event(client.sign_event(builder).await?)
+        .await?;
     let normalized = parse_write_response(
         &raw,
         &format!("a newer {} update won; run the command again", lane.label),
@@ -210,7 +212,9 @@ pub(crate) fn unchanged() -> Value {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use crate::credentials::Credentials;
     use axum::{body::Bytes, extract::State, routing::post, Json, Router};
+    use nostr::nips::nip44;
     use nostr::Keys;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
@@ -279,7 +283,7 @@ pub(crate) mod test_support {
     pub async fn setup() -> (BuzzClient, Shared) {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
         (client, relay)
     }
 
@@ -290,7 +294,7 @@ pub(crate) mod test_support {
         plaintext: &str,
         created_at: u64,
     ) -> Value {
-        let keys = client.keys();
+        let keys = client.credentials().test_keys();
         let content = nip44::encrypt(
             keys.secret_key(),
             &keys.public_key(),
@@ -301,7 +305,7 @@ pub(crate) mod test_support {
         let event = EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), content)
             .tags([Tag::identifier(lane.d_tag)])
             .custom_created_at(Timestamp::from(created_at))
-            .sign_with_keys(keys)
+            .sign_with_keys(&keys)
             .unwrap();
         let event = serde_json::to_value(event).unwrap();
         relay.lock().unwrap().events.push(event.clone());
@@ -312,7 +316,7 @@ pub(crate) mod test_support {
     pub fn published(client: &BuzzClient, relay: &Shared) -> (nostr::Event, Value) {
         let raw = relay.lock().unwrap().events.last().cloned().unwrap();
         let event: nostr::Event = serde_json::from_value(raw).unwrap();
-        let keys = client.keys();
+        let keys = client.credentials().test_keys();
         let plaintext =
             nip44::decrypt(keys.secret_key(), &keys.public_key(), &event.content).unwrap();
         (event, serde_json::from_str(&plaintext).unwrap())
