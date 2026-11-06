@@ -80,6 +80,24 @@ void main() {
       expect(find.byKey(ValueKey(existingDesktopKeys.public)), findsOneWidget);
       expect(find.text('Manage on desktop'), findsNothing);
 
+      // The capsule scrolls with the cards rather than pinning over them.
+      tester.view.physicalSize = const Size(390, 400);
+      await tester.pumpAndSettle();
+      final promptBefore = tester.getTopLeft(find.text(prompt)).dy;
+      final card = find.byKey(ValueKey(existingDesktopKeys.public));
+      final cardBefore = tester.getTopLeft(card).dy;
+      await tester.drag(
+        find.byType(CustomScrollView).first,
+        const Offset(0, -120),
+      );
+      await tester.pumpAndSettle();
+      final promptDelta =
+          tester.getTopLeft(find.text(prompt)).dy - promptBefore;
+      expect(promptDelta, lessThan(-20));
+      expect(tester.getTopLeft(card).dy - cardBefore, closeTo(promptDelta, 1));
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.pumpAndSettle();
+
       // The Management section cannot claim the agent runs on the desktop.
       await tester.tap(find.byKey(ValueKey(existingDesktopKeys.public)));
       await tester.pumpAndSettle();
