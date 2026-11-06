@@ -104,6 +104,8 @@ pub enum AuthorityError {
     Rejected,
     #[error("installation authority is already live")]
     Conflict,
+    #[error("delivery quota exceeded; retry after {0} seconds")]
+    DeliveryRateLimited(i64),
     #[error("authority request rate exceeded")]
     RateLimited,
     #[error("authority store unavailable")]
@@ -118,7 +120,11 @@ pub struct AssertionCounter {
     pub request_expires_at: i64,
     pub now: i64,
     pub expected_generation: Option<i64>,
+    pub quota_window_seconds: i64,
 }
+
+/// Four non-overlapping destination shares bound approved relay allocations.
+pub const MAX_APPROVED_RELAYS: i64 = 4;
 
 /// Every mutating method is an atomic store operation. Implementations must
 /// serialize installation assertion counters and delegation generations.
@@ -224,6 +230,7 @@ struct MemoryState {
     delivery_auth_replays: HashMap<(String, String), i64>,
     delivery_request_replays: HashMap<(String, Uuid), i64>,
     endpoint_quotas: HashMap<[u8; 32], (i64, i64)>,
+    relay_quotas: HashMap<([u8; 32], String), (i64, i64)>,
 }
 
 /// Executable reference store used by conformance tests. Production uses the
@@ -434,6 +441,48 @@ impl AuthorityStore for MemoryAuthorityStore {
         {
             return Err(AuthorityError::Rejected);
         }
+        let fingerprint = installation.token_fingerprint;
+        let now = assertion.now;
+        let window = assertion.quota_window_seconds;
+        let device = match s.endpoint_quotas.get(&fingerprint) {
+            Some(&(start, count)) if now.saturating_sub(start) < window => (start, count),
+            _ => (now, 0),
+        };
+        let live: std::collections::HashSet<String> = s
+            .delegations
+            .values()
+            .filter(|old| {
+                s.installations.get(&old.installation_id).is_some_and(|i| {
+                    i.token_fingerprint == fingerprint
+                        && !i.revoked
+                        && i.expires_at >= now
+                        && i.endpoint_epoch == old.endpoint_epoch
+                }) && !old.revoked
+                    && old.expires_at >= now
+            })
+            .map(|old| old.relay_pubkey.clone())
+            .collect();
+        s.relay_quotas.retain(|(fp, key), (started, _)| {
+            *fp != fingerprint || *started >= device.0 || live.contains(key)
+        });
+        let slots: std::collections::HashSet<String> = live
+            .into_iter()
+            .chain(
+                s.relay_quotas
+                    .keys()
+                    .filter(|(fp, _)| *fp == fingerprint)
+                    .map(|(_, key)| key.clone()),
+            )
+            .collect();
+        if !slots.contains(&d.relay_pubkey) && slots.len() >= MAX_APPROVED_RELAYS as usize {
+            return Err(AuthorityError::DeliveryRateLimited(
+                device.0.saturating_add(window).saturating_sub(now).max(1),
+            ));
+        }
+        s.endpoint_quotas.entry(fingerprint).or_insert(device);
+        s.relay_quotas
+            .entry((fingerprint, d.relay_pubkey.clone()))
+            .or_insert((device.0, 0));
         let installation = s
             .installations
             .get_mut(&d.installation_id)
@@ -618,14 +667,40 @@ impl AuthorityStore for MemoryAuthorityStore {
         {
             return Err(AuthorityError::Rejected);
         }
-        let quota = s.endpoint_quotas.entry(fingerprint).or_insert((now, 0));
-        if now.saturating_sub(quota.0) >= quota_window_seconds {
-            *quota = (now, 0);
+        if quota_window_seconds < 1 || quota_max_deliveries < MAX_APPROVED_RELAYS {
+            return Err(AuthorityError::Unavailable);
         }
-        if quota.1 >= quota_max_deliveries {
-            return Err(AuthorityError::Rejected);
+        let relay_key = (fingerprint, relay.to_owned());
+        let current = |quota: Option<&(i64, i64)>| match quota {
+            Some(&(start, count)) if now.saturating_sub(start) < quota_window_seconds => {
+                (start, count)
+            }
+            _ => (now, 0),
+        };
+        let device = current(s.endpoint_quotas.get(&fingerprint));
+        let per_relay = match s.relay_quotas.get(&relay_key) {
+            Some(&(start, count)) if start == device.0 => (start, count),
+            _ => (device.0, 0),
+        };
+        if device.1 >= quota_max_deliveries
+            || per_relay.1 >= quota_max_deliveries / MAX_APPROVED_RELAYS
+        {
+            let started = if device.1 >= quota_max_deliveries {
+                device.0
+            } else {
+                per_relay.0
+            };
+            return Err(AuthorityError::DeliveryRateLimited(
+                started
+                    .saturating_add(quota_window_seconds)
+                    .saturating_sub(now)
+                    .max(1),
+            ));
         }
-        quota.1 += 1;
+        s.endpoint_quotas
+            .insert(fingerprint, (device.0, device.1 + 1));
+        s.relay_quotas
+            .insert(relay_key, (per_relay.0, per_relay.1 + 1));
         s.delivery_auth_replays.insert(auth_key, request_expires_at);
         s.delivery_request_replays
             .insert(request_key, request_expires_at);
@@ -657,6 +732,8 @@ impl AuthorityStore for MemoryAuthorityStore {
             .retain(|_, expires_at| *expires_at >= now);
         s.endpoint_quotas
             .retain(|_, (started_at, _)| now.saturating_sub(*started_at) < 86_400);
+        s.relay_quotas
+            .retain(|_, (started_at, _)| now.saturating_sub(*started_at) < 86_400);
         Ok(())
     }
 }
@@ -678,6 +755,7 @@ pub(crate) async fn test_assertion(
         request_expires_at: i64::MAX,
         now: 0,
         expected_generation,
+        quota_window_seconds: 60,
     }
 }
 

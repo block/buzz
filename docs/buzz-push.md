@@ -34,6 +34,11 @@ Do not change the relay advertisement until mobile builds that only parse
 renewal, opt-out and revocation, so a new grammar would leave their existing
 leases active until expiry.
 
+The gateway reserves four relay shares within each destination delivery budget.
+Each approved relay can admit at most one quarter of the configured cap per window;
+renewing a grant does not reset usage. Quota exhaustion returns 429 and Retry-After,
+and the relay keeps its durable request ID when rescheduling.
+
 ## Workflow owner attribution
 
 The relay signs workflow messages. Their first `p` tag,

@@ -15,7 +15,7 @@ migration:
   existingSecret: buzz-push-gateway-migrations
   databaseUrlKey: DATABASE_URL
   # Existing LOGIN role used by runtime DATABASE_URL. Migrations grant it only
-  # CONNECT plus DML on the six gateway tables in this dedicated database.
+  # CONNECT plus DML on the seven gateway tables in this dedicated database.
   runtimeDatabaseRole: buzz_push_gateway_runtime
   resources:
     requests: {cpu: 50m, memory: 64Mi}
