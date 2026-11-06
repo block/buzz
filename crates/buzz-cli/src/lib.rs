@@ -284,6 +284,9 @@ enum Cmd {
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
+    /// Organize your own sidebar: sections, sort modes, stars, mutes, and project pins
+    #[command(subcommand)]
+    Sidebar(SidebarCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -1019,6 +1022,156 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarCmd {
+    /// List, create, and arrange your channel sections (synced with Buzz desktop)
+    ///
+    /// Each edit reads your current sections and publishes the full result.
+    /// Concurrent edits from another CLI run or another client can overwrite
+    /// each other, and the last publish wins.
+    #[command(subcommand)]
+    Sections(SidebarSectionsCmd),
+    /// List and set how each sidebar group is sorted (synced with Buzz desktop)
+    #[command(subcommand)]
+    Sort(SidebarSortCmd),
+    /// List, star, and unstar your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Stars(SidebarChannelFlagCmd),
+    /// List, mute, and unmute your channels (synced with Buzz desktop)
+    #[command(subcommand)]
+    Mutes(SidebarChannelFlagCmd),
+    /// List, pin, and unpin your sidebar projects (synced with Buzz desktop)
+    #[command(subcommand)]
+    Projects(SidebarProjectsCmd),
+}
+
+/// How a sidebar group orders its channels.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum SidebarSortMode {
+    /// By name, A to Z
+    Alpha,
+    /// By last message, newest first
+    Recent,
+}
+
+/// `--group` takes `starred`, `channels`, `forums`, `dms`, `section:<id>`, or
+/// the name of a section.
+#[derive(Subcommand)]
+pub enum SidebarSortCmd {
+    /// List the groups that have a sort mode set
+    List,
+    /// Sort a group by name or by recent activity
+    Set {
+        /// Group to sort
+        #[arg(long)]
+        group: String,
+        /// Sort mode
+        #[arg(long, value_enum)]
+        mode: SidebarSortMode,
+    },
+    /// Return a group to the default sort (alpha)
+    Reset {
+        /// Group to reset
+        #[arg(long)]
+        group: String,
+    },
+}
+
+/// Shared by `sidebar stars` and `sidebar mutes`.
+#[derive(Subcommand)]
+pub enum SidebarChannelFlagCmd {
+    /// List the channels that are set
+    List,
+    /// Set one or more channels
+    Add {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+    /// Clear one or more channels
+    Remove {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SidebarProjectsCmd {
+    /// List the projects pinned to your sidebar
+    List,
+    /// Pin one or more projects
+    Add {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+    /// Unpin one or more projects
+    Remove {
+        /// Project address `30621:<owner-pubkey>:<d-tag>` (repeatable)
+        #[arg(long = "project", required = true)]
+        projects: Vec<String>,
+    },
+}
+
+/// `--section` takes a section id, or a section name that is unique.
+#[derive(Subcommand)]
+pub enum SidebarSectionsCmd {
+    /// List your sections and the channels assigned to each one
+    List,
+    /// Create a section at the end of your sidebar
+    Create {
+        /// Section name
+        #[arg(long)]
+        name: String,
+        /// Emoji shown next to the section name
+        #[arg(long)]
+        icon: Option<String>,
+    },
+    /// Rename a section or change its icon
+    Update {
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+        /// New section name
+        #[arg(long)]
+        name: Option<String>,
+        /// New emoji icon
+        #[arg(long, conflicts_with = "clear_icon")]
+        icon: Option<String>,
+        /// Remove the section icon
+        #[arg(long, default_value_t = false)]
+        clear_icon: bool,
+    },
+    /// Delete a section; its channels return to the default channel list
+    Delete {
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+    },
+    /// Put sections in order; unlisted sections keep their order after them
+    Reorder {
+        /// Section id or unique name, in the new order (repeatable)
+        #[arg(long = "section", required = true)]
+        sections: Vec<String>,
+    },
+    /// Move one or more channels into a section
+    Move {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
+        /// Section id or unique name
+        #[arg(long)]
+        section: String,
+    },
+    /// Return one or more channels to the default channel list
+    Unassign {
+        /// Channel UUID (repeatable)
+        #[arg(long = "channel", required = true)]
+        channels: Vec<String>,
     },
 }
 
@@ -2430,6 +2583,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Sidebar(sub) => commands::sidebar::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
@@ -2662,6 +2816,7 @@ mod tests {
             "projects",
             "reactions",
             "repos",
+            "sidebar",
             "social",
             "upload",
             "users",
