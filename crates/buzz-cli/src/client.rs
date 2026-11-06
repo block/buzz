@@ -752,13 +752,26 @@ impl BuzzClient {
                 "relay requires authentication ({message}); if it enforces federated identity \
                  (NIP-FI), set {FEDERATED_IDENTITY_TOKEN_ENV} to your own NIP-FA sign-in session \
                  (a human session for this key, not an agent grant) and \
-                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion"
+                 {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion{}",
+                self.key_overrode_pairing()
             ));
         }
         CliError::Relay {
             status,
             body: message,
         }
+    }
+
+    /// A note for a refused explicit key when this CLI also has a Buzz desktop
+    /// pairing for the relay: the key took precedence over it.
+    fn key_overrode_pairing(&self) -> &'static str {
+        #[cfg(unix)]
+        if key_overrode_pairing(&self.ws_url, &crate::desktop_provider::paired_relays()) {
+            return "; BUZZ_PRIVATE_KEY (or --private-key) took precedence over this CLI's \
+                    Buzz desktop pairing for this relay: run without it (for example \
+                    `env -u BUZZ_PRIVATE_KEY -u BUZZ_AUTH_TAG buzz …`) to use the pairing";
+        }
+        ""
     }
 
     /// Execute `op` up to `RETRY_MAX_ATTEMPTS` times, including body-transfer failures
@@ -1599,6 +1612,12 @@ impl BuzzClient {
         }
         Ok(resp.text().await?)
     }
+}
+
+/// Whether `paired` (relays in bound form) holds the relay at `ws_url`.
+#[cfg(unix)]
+fn key_overrode_pairing(ws_url: &str, paired: &[String]) -> bool {
+    crate::desktop_provider::provider_relay_url(ws_url).is_ok_and(|relay| paired.contains(&relay))
 }
 
 /// Normalize a relay URL: ws:// → http://, wss:// → https://, strip trailing slash.
@@ -4218,6 +4237,66 @@ mod ws_deadline_tests {
             "{err:?}"
         );
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    /// The NIP-42 AUTH event names the configured community URL, path and
+    /// trailing slash kept, as the relay checks it.
+    #[tokio::test]
+    async fn the_auth_event_names_the_relay_with_its_trailing_slash() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let named = Arc::new(std::sync::Mutex::new(None::<String>));
+        let log = named.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws
+                .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if frame[0] == "AUTH" {
+                    let relay = frame[1]["tags"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t[0] == "relay")
+                        .map(|t| t[1].as_str().unwrap().to_owned());
+                    *log.lock().unwrap() = relay;
+                }
+                let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                let _ = ws.send(Message::Text(ok.to_string().into())).await;
+            }
+        });
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            format!("http://{addr}/team/"),
+            Credentials::from_keys(keys.clone()),
+        )
+        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(
+            named.lock().unwrap().as_deref(),
+            Some(format!("ws://{addr}/team/").as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_key_notes_a_pairing_for_the_same_relay() {
+        let paired = ["wss://team.example/x/".to_owned()];
+        assert!(super::key_overrode_pairing(
+            "wss://team.example/x/",
+            &paired
+        ));
+        assert!(!super::key_overrode_pairing(
+            "wss://team.example/y/",
+            &paired
+        ));
+        assert!(!super::key_overrode_pairing("wss://team.example/x/", &[]));
     }
 
     #[test]
