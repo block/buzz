@@ -28,6 +28,10 @@ use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind};
 pub struct RefStateInputs<'a> {
     /// The kind:30617 d-tag identifier. == repo_id, NOT `<repo>.git`.
     pub repo_id: &'a str,
+    /// Hex pubkey of the kind:30617 author (repo owner). Emitted as an `a`
+    /// tag `30617:<owner>:<repo_id>` so the state is bound to one
+    /// announcement coordinate; `d` alone is not unique across owners.
+    pub owner_pubkey_hex: &'a str,
     /// Symbolic HEAD ref, e.g. "refs/heads/main". NO "ref: " prefix here —
     /// the prefix is added when emitting the tag. Storing it unprefixed in
     /// the manifest keeps Git-protocol formatting out of the storage schema.
@@ -47,6 +51,9 @@ pub enum BuildError {
     /// `actor_pubkey_hex` did not parse as a valid 64-char hex pubkey.
     #[error("invalid actor_pubkey_hex: {0}")]
     InvalidActor(String),
+    /// `owner_pubkey_hex` did not parse as a valid 64-char hex pubkey.
+    #[error("invalid owner_pubkey_hex: {0}")]
+    InvalidOwner(String),
     /// `nostr` event signing returned an error.
     #[error("nostr event signing failed: {0}")]
     Sign(String),
@@ -74,11 +81,19 @@ pub fn build_ref_state_event(
     // Validate actor pubkey first so we error before any tag construction.
     let actor = PublicKey::from_hex(inputs.actor_pubkey_hex)
         .map_err(|e| BuildError::InvalidActor(e.to_string()))?;
+    let owner = PublicKey::from_hex(inputs.owner_pubkey_hex)
+        .map_err(|e| BuildError::InvalidOwner(e.to_string()))?;
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(inputs.refs.len() + 3);
+    let mut tags: Vec<Tag> = Vec::with_capacity(inputs.refs.len() + 4);
 
     // d-tag: kind:30617 identifier.
     tags.push(Tag::custom(TagKind::custom("d"), [inputs.repo_id]));
+
+    // a-tag: the owning announcement coordinate (NIP-01 addressable ref).
+    tags.push(Tag::custom(
+        TagKind::custom("a"),
+        [format!("30617:{}:{}", owner.to_hex(), inputs.repo_id)],
+    ));
 
     // ref tags: refs/heads/* and refs/tags/* only.
     for (ref_name, oid) in inputs.refs {
@@ -143,6 +158,8 @@ mod tests {
         )
     }
 
+    const OWNER_HEX: &str = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+
     fn owner_hex() -> String {
         // 64-hex pubkey for the test "actor".
         "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68".to_string()
@@ -180,6 +197,7 @@ mod tests {
         let refs = refs_with(&[]);
         let inputs = RefStateInputs {
             repo_id: "myrepo",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner,
@@ -211,6 +229,7 @@ mod tests {
         let refs = refs_with(&[]);
         let inputs = RefStateInputs {
             repo_id: "x",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/dev",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -231,6 +250,7 @@ mod tests {
         ]);
         let inputs = RefStateInputs {
             repo_id: "r",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -274,6 +294,7 @@ mod tests {
         ]);
         let inputs = RefStateInputs {
             repo_id: "r",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -297,6 +318,7 @@ mod tests {
         ]);
         let inputs = RefStateInputs {
             repo_id: "r",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/sha1-branch",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -322,6 +344,7 @@ mod tests {
         ]);
         let inputs = RefStateInputs {
             repo_id: "r",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/ok",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -355,6 +378,7 @@ mod tests {
         ]);
         let inputs = RefStateInputs {
             repo_id: "r",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/legit",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -370,6 +394,7 @@ mod tests {
         let refs = refs_with(&[]);
         let inputs = RefStateInputs {
             repo_id: "r",
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: "not-a-pubkey",
@@ -383,6 +408,7 @@ mod tests {
         let refs = refs_with(&[]);
         let inputs = RefStateInputs {
             repo_id: "myrepo", // caller MUST strip .git before passing
+            owner_pubkey_hex: OWNER_HEX,
             head: "refs/heads/main",
             refs: &refs,
             actor_pubkey_hex: &owner_hex(),
@@ -391,5 +417,30 @@ mod tests {
         assert_eq!(first_tag(&ev, "d").unwrap()[1], "myrepo");
         // Pin: caller responsibility — if they pass "myrepo.git", that's what
         // ends up in the d-tag and won't match the kind:30617 announcement.
+    }
+
+    #[test]
+    fn a_tag_binds_state_to_owner_coordinate() {
+        let refs = refs_with(&[("refs/heads/main", &"a".repeat(40))]);
+        let inputs = RefStateInputs {
+            repo_id: "myrepo",
+            owner_pubkey_hex: OWNER_HEX,
+            head: "refs/heads/main",
+            refs: &refs,
+            actor_pubkey_hex: &owner_hex(),
+        };
+        let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
+        assert_eq!(
+            first_tag(&ev, "a").unwrap()[1],
+            format!("30617:{OWNER_HEX}:myrepo")
+        );
+        let bad = RefStateInputs {
+            owner_pubkey_hex: "nothex",
+            ..inputs
+        };
+        assert!(matches!(
+            build_ref_state_event(&bad, &relay_keys()),
+            Err(BuildError::InvalidOwner(_))
+        ));
     }
 }

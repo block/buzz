@@ -4299,6 +4299,7 @@ async fn emit_initial_ref_state(
     let empty_refs: BTreeMap<String, String> = BTreeMap::new();
     let inputs = RefStateInputs {
         repo_id,
+        owner_pubkey_hex: owner_hex,
         head: DEFAULT_HEAD,
         refs: &empty_refs,
         actor_pubkey_hex: owner_hex,
