@@ -399,15 +399,78 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TestPolicy {
+        origin: String,
+        response: Value,
+        expected_body: Value,
+        host: String,
+        community_id: Uuid,
+        operation_id: Uuid,
+        desired: bool,
+    }
+
+    async fn policy_test_handler(
+        axum::extract::State(policy): axum::extract::State<TestPolicy>,
+        method: Method,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+        body: axum::body::Bytes,
+    ) -> Json<Value> {
+        let encoded = headers["authorization"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("Nostr ")
+            .unwrap();
+        let event = String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap();
+        let url = format!("{}{uri}", policy.origin);
+        buzz_auth::verify_nip98_event(
+            &event,
+            &url,
+            method.as_str(),
+            (method == Method::POST).then_some(body.as_ref()),
+        )
+        .unwrap();
+        if method == Method::POST {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                policy.expected_body
+            );
+            assert!(buzz_auth::verify_nip98_event(&event, &url, "POST", Some(b"changed")).is_err());
+        } else if uri.query().unwrap().starts_with("community_id=") {
+            assert_eq!(
+                uri.query(),
+                Some(
+                    format!(
+                        "community_id={}&expected_host={}",
+                        policy.community_id, policy.host
+                    )
+                    .as_str()
+                )
+            );
+            return Json(serde_json::json!({
+                "community_id": policy.community_id, "expected_host": policy.host,
+                "expected_policy_generation": 1, "expected_requires_nip_fi": policy.desired,
+                "mode": "shadow", "effective_required": policy.desired,
+            }));
+        } else {
+            assert_eq!(
+                uri.query(),
+                Some(format!("operation_id={}", policy.operation_id).as_str())
+            );
+            assert!(buzz_auth::verify_nip98_event(
+                &event,
+                &format!("{}{PATH}", policy.origin),
+                "GET",
+                None
+            )
+            .is_err());
+        }
+        Json(policy.response)
+    }
+
     #[tokio::test]
     async fn policy_commands_send_saved_action_and_recover_current_and_history() {
-        use axum::{
-            body::Bytes,
-            extract::RawQuery,
-            http::{HeaderMap, Method},
-            routing::any,
-            Json, Router,
-        };
         let keys = Keys::generate();
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join("key");
@@ -428,21 +491,17 @@ mod tests {
             let expected_body = serde_json::to_value(&saved).unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
-            let app = Router::new().route("/operator/communities/nip-fi-policy", any(
-                move |method: Method, RawQuery(query): RawQuery, headers: HeaderMap, body: Bytes| {
-                    let response = response.clone(); let expected_body = expected_body.clone(); let host = host.clone();
-                    async move {
-                        assert!(headers["authorization"].to_str().unwrap().starts_with("Nostr "));
-                        if method == Method::POST {
-                            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected_body);
-                        } else if query.as_ref().unwrap().starts_with("community_id=") {
-                            return Json(serde_json::json!({"community_id":community_id,"expected_host":host,
-                                "expected_policy_generation":1,"expected_requires_nip_fi":desired,
-                                "requires_nip_fi":desired,"mode":"shadow","effective_required":desired}));
-                        } else { assert_eq!(query, Some(format!("operation_id={id}"))); }
-                        Json(response)
-                    }
-                }));
+            let app = Router::new()
+                .route(PATH, any(policy_test_handler))
+                .with_state(TestPolicy {
+                    origin: origin.clone(),
+                    response,
+                    expected_body,
+                    host,
+                    community_id,
+                    operation_id: id,
+                    desired,
+                });
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let command = if desired {
                 Command::Enable {
