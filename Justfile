@@ -401,10 +401,15 @@ test-unit:
     cargo test -p buzz-audio-client
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        # Mesh JWKS proxy-bypass regression: infra-free loopback I/O with
+        # child-process environment isolation. Its integration-test binary
+        # is not selected by --lib above. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-auth --test mesh_jwks_proxy
         cargo nextest run -p buzz-audit --lib
         # Cross-pod disconnect payload tests (NIP-FI and community archive
-        # fence); all infra-free.
-        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/)'
+        # fence) and the shared Redis connection's timeout bounds (loopback
+        # fake peers); all infra-free. Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-pubsub --lib -E 'test(/^conn_control::tests::/) + test(/^connection::tests::/)'
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
         # `compile_fail` doctests prove the default-feature public API alone
         # cannot forge the issuer→JWKS authority; nextest does not run
@@ -413,6 +418,10 @@ test-unit:
         # already runs it.
         cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
+        # Inter-relay mesh: membership, gossip, registry, and loopback-UDP
+        # runtime tests. Infra-free (Redis-backed paths are unit-faked or
+        # never dialed). Keep the Cargo fallback in step.
+        cargo nextest run -p buzz-relay-mesh
         cargo nextest run -p buzz-cli
         # buzz-sdk builder/validation unit tests: pure event-builder and input
         # validation (e.g. the canvas writer-discipline/skew guard and the
@@ -421,6 +430,9 @@ test-unit:
         # invocation hits. Enumerated explicitly because nothing in CI runs
         # `cargo test --workspace` — membership buys clippy/check, not tests.
         cargo nextest run -p buzz-sdk --lib
+        # buzz-workflow parser, cron, condition and denial-logging unit tests
+        # (infra-free). Its ignored Postgres cases run in the PostgreSQL lane.
+        cargo nextest run -p buzz-workflow --lib
         # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
         # forged relay events cannot regain a path into agent routing unnoticed.
         cargo nextest run -p buzz-acp
@@ -434,6 +446,10 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # buzz-search unit tests: pure query-builder and cancel-outcome checks
+        # (no infra). Its Postgres suite runs in the PostgreSQL lane. Keep
+        # scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-search --lib
         # buzz-db source-policy tests: infra-free scans of the crate sources
         # that enforce the event-write admission chokepoint, metric/provenance
         # contracts, and their fixtures. They live in an integration-test
@@ -448,10 +464,11 @@ test-unit:
         # suites are otherwise absent from the infra-free unit lane.
         cargo nextest run -p buzz-media --lib \
             -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
-        # buzz-admin: storage-snapshot worker plus the community archive
-        # command parser, validation, and propagation-evidence tests.
+        # buzz-admin: storage-snapshot worker, the community archive command
+        # parser, validation, and propagation-evidence tests, and the partition
+        # audit outcome contract, NIP-FI policy/backfill, and user-deletion intake.
         cargo nextest run -p buzz-admin \
-            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/)'
+            -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/) + test(=tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes) + test(/^nip_fi::tests::/) + test(/^user_deletions::tests::/)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -496,7 +513,8 @@ test-unit:
         # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
         # and a red one could ship green (exactly how a broken admin test slipped
         # past every gate once). Scoped to api::admin, not the whole buzz-relay
-        # --lib, because api::media has non-ignored tests that require Postgres.
+        # --lib, because much of handlers::req has non-ignored tests that require
+        # Postgres.
         # DB-backed api::admin tests are #[ignore]d and run in the PostgreSQL
         # lane; the non-ignored ones reject before touching the database. Any
         # new non-ignored test here must stay DB-free: without a database, a
@@ -517,20 +535,30 @@ test-unit:
         # unit job either. The REQ subscription-lifecycle tests are picked by
         # exact name for the same reason: the rest of handlers::req needs a DB.
         # The third clause adds the NIP-FI HTTP ingress and its router/config
-        # neighbours: nip_fi_http, nip_fi_config, router, api::parse_query_tests,
-        # and the Git transport off_mode_precedence_tests. All are infra-free
+        # neighbours: nip_fi_http, nip_fi_config, nip_fi_resolver (snapshot
+        # resolver and its WS/HTTP/audio router tests), router, api::parse_query_tests, api::db_read_error_tests,
+        # the profile search request bounds (api::profiles), the per-user
+        # search cap (api::bridge::search_slots), the Git transport
+        # off_mode_precedence_tests, and the git object-store
+        # client and conformance-probe tests (api::git::store::tests and
+        # ::fault_probe, which serves a fake S3 on loopback; the live-MinIO
+        # ::probe module stays opt-in). All are infra-free
         # and finish in well under a second with no DATABASE_URL, so none wait
         # out the sqlx acquire timeout. `--bin buzz-relay` adds main.rs's
         # `tests::` module (JWKS refresh cadence) and `composition_tests::`
         # (JWKS source + refresh-loop composition), which `--lib` cannot reach
         # because they live in the binary target; the nested
         # `tests::postgres_tests::` stays in the PostgreSQL lane.
-        # The fourth clause adds the startup step timers (startup_steps) and the
-        # env- and log-capture tests in telemetry and config. All three modules
-        # are infra-free; config parses env into a struct and never connects.
+        # The fourth clause adds the startup step timers (startup_steps), the
+        # mesh boot wiring (mesh_boot; Redis and Postgres point at refused
+        # ports), and the env- and log-capture tests in telemetry and config.
+        # All four modules are infra-free; config parses env into a struct and
+        # never connects.
         # `^config::` is anchored so it does not also select nip_fi_config.
+        # subscription::tests covers the in-memory registry and its fan-out
+        # indexes; it is infra-free.
         cargo nextest run -p buzz-relay --lib --bin buzz-relay \
-            -E 'test(/^api::admin::/) + test(/^push_runtime::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_core::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_config::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(/^nip_fi_shadow::tests::/) + test(/^nip_fi_shadow_session::tests::/) + test(/^startup_steps::tests::/) + test(/^telemetry::tests::/) + test(/^config::tests::/) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback) + test(=state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable) + test(=connection::tests::send_loop_sends_policy_close_when_community_is_archived) + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason) + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
+            -E 'test(/^subscription::tests::/) + test(/^api::admin::/) + test(/^access::tests::/) + test(/^api::git::transport::access_log_tests::/) + test(=api::bridge::postgres_tests::nip98_replay_check_logs_only_its_refusal) + test(=api::bridge::postgres_tests::warn_only_artifact_read_lines_keep_the_filter_summary) + test(=connection::tests::close_totals_count_frames_the_writer_flushed) + test(=connection::tests::dispatcher_counts_each_req_and_count_frame_once) + test(=handlers::req::tests::unqueued_eose_logs_aborted_not_served) + test(=api::bridge::postgres_tests::reject_code_keeps_only_a_known_prefix) + test(=api::bridge::postgres_tests::nip98_replay_check_fails_closed_when_guard_errors) + test(=api::bridge::postgres_tests::verify_bridge_auth_rejects_nip98_event_signed_for_wrong_communitys_host) + test(=api::bridge::postgres_tests::verify_bridge_auth_can_require_payload_tag_for_json_body_endpoints) + test(=api::bridge::postgres_tests::verify_bridge_auth_accepts_nip98_event_signed_for_matching_host) + test(=api::bridge::postgres_tests::moderation_read_query_bearing_nip98_event_verifies_with_matching_query) + test(=api::bridge::postgres_tests::moderation_read_query_bearing_nip98_event_rejected_against_bare_path) + test(=api::bridge::postgres_tests::moderation_read_audit_query_bearing_nip98_event_verifies) + test(=api::bridge::postgres_tests::moderation_read_restricted_no_query_still_verifies) + test(=connection::tests::aborting_lifecycle_owner_is_drop_safe) + test(=connection::tests::shutdown_terminalizes_auth_stalled_on_database_before_late_success) + test(=connection::terminal_close_delivery_tests::upgrade_would_deny_line_without_auth_logs_absent_at_close) + test(=handlers::event::tests::observer_owner_cache_is_scoped_to_community) + test(=state::tests::shared_counter_between_direct_and_fanout) + test(=connection::tests::startup_cancellation_writes_one_close_line) + test(=connection::tests::connection_limit_refusal_writes_one_close_line) + test(=connection::tests::dropped_authenticated_handler_writes_one_close_line) + test(=connection::tests::close_totals_count_a_batch_flushed_by_the_drain_after_cancellation) + test(=connection::tests::close_totals_skip_a_frame_the_socket_rejects) + test(=connection::tests::close_totals_skip_frames_stranded_by_a_failed_flush) + test(=connection::tests::read_before_login_logs_one_denial_from_the_handler) + test(=connection::tests::read_refused_by_a_full_handler_semaphore_logs_one_denial) + test(=connection::tests::saturated_handler_write_line_records_whether_its_ok_was_queued) + test(=connection::tests::read_refused_by_unavailable_admission_logs_one_denial) + test(=handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial) + test(=nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line) + test(=api::bridge::moderation_refusal_tests::moderation_lookup_failure_is_unavailable) + test(/^push_runtime::/) + test(/^operator_listener::tests::/) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^handlers::coalesced_refresh::tests::/) + test(/^handlers::system_channels::tests::/) + test(/^nip11::tests::/) + test(/^storage_sweep::tests::/) + test(/^nip_fi_core::tests::/) + test(/^nip_fi_http::tests::/) + test(/^nip_fi_policy::tests::/) + test(/^nip_fi_config::tests::/) + test(/^nip_fi_resolver::tests::/) + test(/^readiness::tests::/) + test(/^router::tests::/) + test(/^api::parse_query_tests::/) + test(/^api::db_read_error_tests::/) + test(/^api::profiles::/) + test(/^api::bridge::search_slots::tests::/) + test(/^api::git::transport::off_mode_precedence_tests::/) + test(/^api::git::store::tests::/) + test(/^api::git::store::fault_probe::/) + test(/^audio::join::tests::/) + test(/^audio::handler::tests::/) + test(/^nip_fi_gate::tests::/) + test(/^nip_fi_session::tests::/) + test(/^nip_fi_shadow::tests::/) + test(/^nip_fi_shadow_session::tests::/) + test(/^startup_steps::tests::/) + test(/^mesh_boot::tests::/) + test(/^telemetry::tests::/) + test(/^config::tests::/) + test(=state::tests::accessible_channel_invalidation_is_scoped_to_community) + test(=state::tests::accessible_channels_join_member_and_open_halves) + test(=state::tests::channel_deleted_invalidation_is_scoped_to_community) + test(=state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket) + test(=state::tests::periodic_revalidation_disconnects_inside_the_fenced_callback) + test(=state::tests::bare_community_disconnect_fails_closed_when_the_fence_is_unavailable) + test(=connection::tests::send_loop_sends_policy_close_when_community_is_archived) + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason) + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame) + test(=handlers::req::tests::timed_out_historical_read_deregisters_before_closed) + test(=handlers::req::tests::superseded_timeout_leaves_replacement_intact) + test(=handlers::req::tests::search_claim_retires_live_and_yields_to_replacement) + test(=handlers::req::tests::failed_search_closes_without_eose_or_trying_later_filters) + test(=handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner) + test(=handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim) + test(=handlers::req::tests::revoke_then_replacement_keeps_replacement_whole) + test(=handlers::req::tests::claims_after_connection_cleanup_are_refused) + test(=handlers::req::tests::dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection) + test(=handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions) + test(=handlers::req::tests::count_fallback_fetches_one_extra_candidate) + test(=handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds) + test(=api::bridge::postgres_tests::bridge_search_mode_extension_accepts_prefix_snake_or_camel_case) + test(=api::bridge::postgres_tests::bridge_search_sort_extension_selects_newest_only_when_named) + test(=api::invites::postgres_tests::restriction_tests::postgres_tests::destructive_fixture_rejects_shared_database_urls) + (kind(bin) & (test(/^tests::/) + test(/^composition_tests::/) + test(/^env_filter_tests::/)) - test(/^tests::postgres_tests::/))'
         # Note on audio::join::tests scope: the full suite is infra-free (no DB,
         # no Redis). The infra-free audio/FI regression witnesses — bootstrap
         # ordering barrier, CommitConfirmed arm, pending-close invisibility,
@@ -539,7 +567,9 @@ test-unit:
         # DB-backed audio join tests use #[ignore] and run in the postgres lane.
         # NIP-FI (S3/S4) relay witnesses: the wholly-new nip_fi_upgrade and
         # api::nip_fi modules,
-        # the auth metrics contract module, plus the exact NIP-FI tests added,
+        # the auth metrics contract module, the DB-free partition alert series
+        # tests (their Postgres case is #[ignore]d and runs in the PostgreSQL
+        # lane), plus the exact NIP-FI tests added,
         # or whose assertions changed, in mixed modules (audio::room,
         # connection, handlers::*, state). nip_fi_config and router are
         # selected whole by the command above. Mixed modules are listed by exact
@@ -550,6 +580,7 @@ test-unit:
         cargo nextest run -p buzz-relay --lib -E '
                 test(/^nip_fi_upgrade::/)
                 + test(/^metrics::contract_tests::/)
+                + test(/^metrics::partition_alert_tests::/)
                 + test(=audio::room::tests::roster_revisions_are_ordered_and_snapshot_is_authoritative)
                 + test(=connection::tests::auth_lifecycle_reconciles_every_terminal_and_never_leaks_gauge)
                 + test(=audio::room::tests::b1_pending_peer_removed_before_commit_emits_no_delta)
@@ -567,12 +598,27 @@ test-unit:
                 + test(=connection::tests::expiry_notice_queued_on_ctrl_before_cancel)
                 + test(=connection::tests::f3_root_outer_wrapper_delivers_denial_on_bootstrap_cancellation)
                 + test(=connection::tests::f3_root_pre_built_expired_gate_terminates_connection)
+                + test(=connection::terminal_close_delivery_tests::key_pairing_mismatch_closes_with_1008_on_real_socket)
+                + test(=connection::terminal_close_delivery_tests::session_expiry_denial_closes_with_1008_on_real_socket)
+                + test(=connection::terminal_close_delivery_tests::server_holds_socket_for_client_close_reply)
+                + test(=connection::terminal_close_delivery_tests::server_finishes_promptly_when_client_answers_close)
+                + test(=connection::terminal_close_delivery_tests::stalled_cleanup_does_not_hold_socket_open)
+                + test(=connection::terminal_close_delivery_tests::bootstrap_drain_holds_socket_for_client_close_reply)
+                + test(=connection::terminal_close_delivery_tests::stalled_expiry_barrier_does_not_hold_socket_open)
+                + test(=connection::terminal_close_delivery_tests::blocked_frame_handler_does_not_hold_socket_open)
+                + test(=connection::terminal_close_delivery_tests::refused_bootstrap_holds_connection_slot_until_socket_ends)
+                + test(=connection::terminal_close_delivery_tests::stalled_bootstrap_holds_connection_slot)
+                + test(=connection::terminal_close_delivery_tests::bootstrap_admits_from_the_cached_community_answer)
+                + test(=connection::terminal_close_delivery_tests::peer_wait_replies_to_client_initiated_close)
                 + test(=handlers::auth::tests::b2_pre_cancelled_connection_never_becomes_authenticated)
                 + test(=handlers::auth::tests::fi_ban_check_error_emits_terminal_authorization_unavailable)
                 + test(=handlers::auth::tests::fi_root_authorization_denied_rows_emit_identical_frames)
                 + test(=handlers::auth::tests::fi_invalid_nip42_proof_emits_terminal_evidence_rejected)
                 + test(=handlers::auth::tests::handle_auth_pairing_mismatch_runs_full_root_denial_path)
                 + test(=handlers::auth::tests::shadow_root_auth_records_pairing_denial)
+                + test(=handlers::auth::tests::shadow_root_auth_records_unavailable_owner_read)
+                + test(=handlers::ingest::postgres_tests::relay_admin_ban_maps_to_blocked_auth_failure)
+                + test(=handlers::ingest::postgres_tests::relay_admin_internal_maps_to_error_not_client_fault)
                 + test(=handlers::auth::tests::shadow_root_invalid_nip42_retires_without_record)
                 + test(=handlers::auth::tests::nip42_denial_class_separates_internal_failure_from_bad_evidence)
                 + test(=handlers::event::tests::fanout_access::owner_only_kinds_keep_only_the_owner)
@@ -585,14 +631,27 @@ test-unit:
                 + test(=state::tests::conn_manager_disconnect_nip_fi_is_issuer_scoped)
                 + test(=state::tests::conn_manager_disconnect_nip_fi_sets_authorization_denied_reason)
                 + test(=state::tests::nip_fi_disconnect_audio_is_issuer_scoped)
+                + test(=state::tests::nip_fi_owner_disconnect_closes_owned_agent_sockets_on_root_and_audio)
                 + test(=state::tests::nip_fi_disconnect_closes_proven_audio_socket_and_sends_policy_close_reason)
                 + test(=state::tests::nip_fi_disconnect_closes_target_audio_only_and_preserves_collocated_peer)
                 + test(=state::tests::nip_fi_disconnect_does_not_close_different_pubkey_audio_socket)
                 + test(=state::tests::nip_fi_disconnect_does_not_close_unproven_audio_socket)
                 + test(=state::tests::community_disconnect_then_nip_fi_keeps_community_deleted_reason)
+                + test(=state::tests::enforce_end_is_recorded_only_by_the_winning_terminal)
                 + test(=state::tests::disconnect_community_wins_reason_losing_nip_fi_does_not_enqueue_frame)
                 + test(=state::tests::manager_disconnect_sets_reason_enqueues_frame_then_cancels)
                 + test(/^api::nip_fi::/)'
+        # Invitation drain/cutoff boundary contracts are infra-free.
+        cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::/) + test(/^config::invite_cutoff_tests::/)'
+        # Relay read caches: the admitted-connection index, the shared-read
+        # gates (open set, restriction, tenant host), the community-active
+        # cache, tenant host cache, the
+        # overlong-host rejection and the ban disconnect's restriction-cache
+        # drop. Infra-free; the
+        # database URL refuses at once. Keep scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(/^shared_reads::tests::/) + test(/^membership_cache::tests::/) + test(/^community_active::tests::/) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(=state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=tenant::tests::an_overlong_host_fails_closed_before_the_resolver) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
+        # Retain partially consumed mesh receives across housekeeping ticks.
+        cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
         # lifecycle, including that buzz_startup_phase_* reaches /metrics. Its
         # non-ignored tests need no Postgres or Redis; the Postgres cases are
@@ -603,6 +662,9 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
+        # Load generator scenario, identity, shard and stats unit tests; all
+        # infra-free. Keep scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-test-client --lib -E 'test(/^loadgen::/)'
     else
         ./scripts/run-tests.sh unit
     fi
@@ -881,7 +943,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
     cd {{desktop_dir}}
-    export BUZZ_RELAY_URL="wss://buzz.test.blockstaging.build"
+    export BUZZ_RELAY_URL="wss://buzz.block.builderlabstaging.xyz"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
@@ -994,6 +1056,7 @@ mobile-test:
     /bin/bash ./scripts/test-mobile-gateway-recipes.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test test/shared/push/push_unconfigured_build_test.dart
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}}/packages/buzz_secp256k1 && dart pub get && dart test
 
 # Regenerate the emoji dataset asset from desktop's emoji-mart install.
 # Output is committed — rerun after bumping @emoji-mart/data.
@@ -1017,10 +1080,14 @@ mobile-build-android:
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! pgrep -x Simulator &>/dev/null; then
-        open -a Simulator
-        sleep 3
+    developer_dir="$(xcode-select -p)"
+    simulator_app="$developer_dir/../Applications/DeviceHub.app"
+    if [[ ! -d "$simulator_app" ]]; then
+        simulator_app="$developer_dir/Applications/Simulator.app"
     fi
+    # Use the selected Xcode even when another version's app is already running.
+    open -a "$simulator_app"
+    sleep 3
     ./scripts/mobile-worktree-overrides.sh
     gateway_url="${BUZZ_PUSH_GATEWAY_URL:-}"
     overrides_file="{{mobile_dir}}/ios/Flutter/AppOverrides.xcconfig"

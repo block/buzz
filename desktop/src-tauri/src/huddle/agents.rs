@@ -18,10 +18,8 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     events,
-    huddle::relay_api::{
-        fetch_channel_members, fetch_channel_members_with_roles, validate_pubkey_hex,
-        MAX_HUDDLE_AGENTS,
-    },
+    huddle::relay_api::{fetch_channel_members_with_roles, validate_pubkey_hex, MAX_HUDDLE_AGENTS},
+    huddle::roster::fetch_huddle_roster,
     relay::submit_event,
 };
 
@@ -216,8 +214,9 @@ pub(crate) async fn sync_agents_for_active_huddle(
 
     // Membership reads can lag a just-accepted write, so merge the relay view
     // with local state instead of allowing a stale snapshot to remove agents.
-    let fresh_agents = fetch_channel_members(&ephemeral_channel_id, Some("bot"), state)
+    let fresh_agents = fetch_huddle_roster(&ephemeral_channel_id, state)
         .await
+        .map(|roster| roster.agents)
         .unwrap_or_default();
     let mut known_agents = HashSet::new();
     let mut merged_agents = Vec::new();

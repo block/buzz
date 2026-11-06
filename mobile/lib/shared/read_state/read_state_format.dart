@@ -6,7 +6,7 @@ import '../relay/nostr_models.dart';
 
 const readStateDTagPrefix = 'read-state:';
 const readStateFetchLimit = 500;
-const readStateHorizonSeconds = 7 * 24 * 60 * 60;
+const readStateHorizonSeconds = 30 * 24 * 60 * 60;
 const _maxContexts = 10000;
 const msgContextPrefix = 'msg:';
 const threadContextPrefix = 'thread:';
@@ -29,6 +29,106 @@ bool readByChannelCatchUp({
   required bool isReply,
   required bool highPriority,
 }) => !isDm && !isReply && !highPriority;
+
+/// The plaintext budget for one published read-state slot. The web app
+/// (`buzz-app`) uses the same limit, well under NIP-44's 64 KiB maximum.
+const readStatePlaintextBytes = 40 * 1024;
+
+/// The implicit read frontier: timestamps at or below it are read even
+/// when no device has retained an explicit mark.
+int readStateFloor(int nowUnixSeconds) =>
+    (nowUnixSeconds - readStateHorizonSeconds).clamp(0, 4294967295);
+
+/// Retain recent hints without count-based eviction. Override registers are
+/// permanent; their co-located frontiers are retained by the owner as well.
+Map<String, int> pruneStaleContexts(
+  Map<String, int> contexts, {
+  required int nowUnixSeconds,
+}) => {
+  for (final entry in contexts.entries)
+    if (isOverrideContext(entry.key) ||
+        entry.value >= readStateFloor(nowUnixSeconds))
+      entry.key: entry.value,
+};
+
+/// Whether [contextId] belongs to the web app's manual-unread overrides
+/// (`ov_s:`, `ov_c:`, `ov_b:`) or their escaped frontiers (`esc:`). This app
+/// does not read overrides. It does not take them from other slots, but it
+/// carries the ones already in its own slot unchanged: NIP-RS forbids
+/// dropping them, and an old version of this app copied them there.
+bool isOverrideContext(String contextId) =>
+    contextId.startsWith('ov_') || contextId.startsWith('esc:');
+
+const _overridePrefixes = ['ov_s:', 'ov_c:', 'ov_b:'];
+
+/// The raw context ID of an override counter key, or null for other keys.
+String? _overrideTarget(String key) {
+  for (final prefix in _overridePrefixes) {
+    if (key.startsWith(prefix)) return key.substring(prefix.length);
+  }
+  return null;
+}
+
+/// The frontier key of raw context [contextId] on the wire. NIP-RS escapes
+/// a raw ID that begins with `ov_` or `esc:` by prepending `esc:`.
+String overrideFrontierKey(String contextId) =>
+    contextId.startsWith('ov_') || contextId.startsWith('esc:')
+    ? 'esc:$contextId'
+    : contextId;
+
+/// Whether [keys] form a legal override group for [target]: exactly
+/// `ov_s:`, `ov_c:` and `ov_b:`, or `ov_c:` alone as a tombstone.
+bool _isOverrideShape(String target, Iterable<String> keys) {
+  final set = keys.toSet();
+  return set.length == _overridePrefixes.length ||
+      (set.length == 1 && set.contains('ov_c:$target'));
+}
+
+/// The override groups in [contexts] that have a legal shape, by target.
+Map<String, Map<String, int>> _overrideGroups(Map<String, int> contexts) {
+  final groups = <String, Map<String, int>>{};
+  for (final entry in contexts.entries) {
+    if (_overrideTarget(entry.key) case final target?) {
+      (groups[target] ??= {})[entry.key] = entry.value;
+    }
+  }
+  return {
+    for (final MapEntry(key: target, value: group) in groups.entries)
+      if (_isOverrideShape(target, group.keys)) target: group,
+  };
+}
+
+/// The override keys of [contexts] that this app may carry. NIP-RS accepts
+/// an override group only whole (see [_isOverrideShape]), and a group must
+/// travel with its frontier, found in [contexts] or [frontiers]. Any other
+/// group is rejected whole, so none of its keys is carried. Escaped
+/// frontiers (`esc:`) are frontier keys, not counters, so each is carried
+/// as it is.
+Map<String, int> completeOverrideGroups(
+  Map<String, int> contexts, {
+  Map<String, int> frontiers = const {},
+}) {
+  final kept = <String, int>{
+    for (final entry in contexts.entries)
+      if (entry.key.startsWith('esc:')) entry.key: entry.value,
+  };
+  for (final MapEntry(key: target, value: group) in _overrideGroups(
+    contexts,
+  ).entries) {
+    final frontier = overrideFrontierKey(target);
+    if (contexts.containsKey(frontier) || frontiers.containsKey(frontier)) {
+      kept.addAll(group);
+    }
+  }
+  return kept;
+}
+
+/// The frontier keys that must travel with the override groups in
+/// [contexts] (NIP-RS's co-location rule).
+Set<String> overrideGroupFrontierKeys(Map<String, int> contexts) => {
+  for (final target in _overrideGroups(contexts).keys)
+    overrideFrontierKey(target),
+};
 
 int? maxReadAt(Iterable<int?> markers) {
   int? latest;
@@ -142,16 +242,37 @@ ReadStateBlob? decodeReadStateBlob(String plaintext) {
   );
 }
 
+/// The valid entries of a decoded `contexts` object. Override counters are
+/// checked as whole groups first, on the raw values, as NIP-RS requires: one
+/// invalid sibling rejects its whole group, so dropping it alone can never
+/// turn a live group into a tombstone. Other `ov_` keys are reserved and
+/// dropped. Every other entry is checked on its own.
 Map<String, int> sanitizeReadStateContexts(Map<String, Object?> contexts) {
+  bool valid(String key, Object? value) =>
+      utf8.encode(key).length <= 256 &&
+      value is int &&
+      value >= 0 &&
+      value <= 4294967295;
+  final groups = <String, Map<String, Object?>>{};
+  for (final entry in contexts.entries) {
+    if (_overrideTarget(entry.key) case final target?) {
+      (groups[target] ??= {})[entry.key] = entry.value;
+    }
+  }
+  final rejected = {
+    for (final MapEntry(key: target, value: group) in groups.entries)
+      if (!_isOverrideShape(target, group.keys) ||
+          group.entries.any((entry) => !valid(entry.key, entry.value)))
+        target,
+  };
   final sanitized = <String, int>{};
   for (final entry in contexts.entries) {
-    if (utf8.encode(entry.key).length > 256) continue;
-
+    if (entry.key.startsWith('ov_')) {
+      final target = _overrideTarget(entry.key);
+      if (target == null || rejected.contains(target)) continue;
+    }
     final value = entry.value;
-    if (value is! int) continue;
-    if (value < 0 || value > 4294967295) continue;
-
-    sanitized[entry.key] = value;
+    if (valid(entry.key, value)) sanitized[entry.key] = value as int;
   }
   return sanitized;
 }

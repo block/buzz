@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -132,10 +133,9 @@ class ProfileEditPage extends HookConsumerWidget {
                   !(ModalRoute.of(context)?.isCurrent ?? true)) {
                 return;
               }
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text("We couldn't save this change. Try again."),
-                ),
+              ScaffoldMessenger.of(context).showFeedbackSnackBar(
+                const SnackBar(content: Text('Couldn’t save changes')),
+                kind: ToastKind.error,
               );
             },
           );
@@ -538,7 +538,7 @@ class _ProfilePhotoEditor extends ConsumerWidget {
           key: const ValueKey('profile-edit-avatar'),
           imageUrl: profile?.avatarUrl,
           radius: ProfileEditPage._avatarRadius,
-          backgroundColor: context.colors.primaryContainer,
+          backgroundColor: context.controlSurface,
           loadingImage: activeHandoff == null
               ? null
               : MemoryImage(activeHandoff.animation),
@@ -663,7 +663,7 @@ class _ProfileTextEditSheet extends HookWidget {
       } on ProfileCommunityChangedException {
         if (context.mounted) Navigator.of(context).pop();
       } catch (_) {
-        error.value = "We couldn't save this change. Try again.";
+        error.value = 'Couldn’t save changes';
       } finally {
         if (context.mounted) isSaving.value = false;
       }

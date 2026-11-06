@@ -4,6 +4,7 @@
 //! the voice pipelines. Extracted from mod.rs to keep the command layer thin.
 
 use std::{
+    ops::AsyncFnOnce,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -20,6 +21,7 @@ use crate::events;
 
 use super::models;
 use super::relay_api::{self, fetch_channel_members, parse_channel_uuid};
+use super::roster::fetch_huddle_roster;
 use super::state::{HuddlePhase, HuddleState, VoiceInputMode};
 use super::stt;
 use super::tts;
@@ -36,6 +38,15 @@ pub(crate) enum PostConnectOutcome {
 /// the huddle is not active or pipelines are already running.
 #[tauri::command]
 pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), String> {
+    pipeline_hotstart(&state, start_ready_pipelines).await
+}
+
+/// Hot-start body. `start_pipelines` starts the voice pipelines whose models
+/// are ready; tests replace it to keep model files and audio out of the run.
+async fn pipeline_hotstart(
+    state: &AppState,
+    start_pipelines: impl AsyncFnOnce(&AppState, Option<&str>) -> Result<(), String>,
+) -> Result<(), String> {
     let (is_active, ephemeral_channel_id, huddle_generation) = {
         let hs = state.huddle()?;
         (
@@ -49,6 +60,40 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         return Ok(());
     }
 
+    start_pipelines(state, ephemeral_channel_id.as_deref()).await?;
+
+    // Periodically refresh agent membership from the relay.
+    // This catches mid-huddle additions/removals by other participants, keeps
+    // STT p-tags authoritative, and auto-enables transcription when the first
+    // agent appears unless the user has already chosen a transcription state.
+    // Throttled independently from the more frequent hotstart poll.
+    //
+    // NOTE: The frontend ALSO polls agent membership independently via
+    // get_huddle_agent_pubkeys. This is intentional — the two polls have
+    // different failure semantics:
+    //   - Rust (here): preserves stale list on failure (STT p-tags should not
+    //     disappear on a transient network blip).
+    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
+    //     must fail-closed — never speak from a stale agent list).
+    //
+    // On a complete roster: replace (even with empty — agents may have been
+    // removed). On an incomplete roster (managed-agent records unreadable):
+    // add the role-proven agents and keep stored agents that are still
+    // members. On Err: preserve the existing list (transient failure shouldn't
+    // zero it).
+    if let Some(eph_id) = &ephemeral_channel_id {
+        refresh_huddle_roster(state, eph_id, huddle_generation).await?;
+    }
+
+    Ok(())
+}
+
+/// Start the STT and TTS pipelines whose models are ready, and clear handles
+/// of pipelines whose worker has exited.
+async fn start_ready_pipelines(
+    state: &AppState,
+    ephemeral_channel_id: Option<&str>,
+) -> Result<(), String> {
     // Detect dead pipelines: if the worker thread has exited (init failure or crash),
     // clear the pipeline handle so hot-start can retry on the next cycle.
     {
@@ -84,127 +129,104 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
 
     // Start TTS first so STT can observe its active-playback gate.
     if !has_tts && (tts_ready || models::is_tts_ready()) {
-        if let Err(e) = maybe_start_tts_pipeline(&state).await {
+        if let Err(e) = maybe_start_tts_pipeline(state).await {
             eprintln!("buzz-desktop: TTS hotstart failed: {e}");
         }
     }
     if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
-        if let Some(eph_id) = &ephemeral_channel_id {
-            if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
+        if let Some(eph_id) = ephemeral_channel_id {
+            if let Err(e) = maybe_start_stt_pipeline(state, eph_id).await {
                 eprintln!("buzz-desktop: STT hotstart failed: {e}");
             }
         }
     }
-
-    // Periodically refresh agent membership from the relay.
-    // This catches mid-huddle additions/removals by other participants, keeps
-    // STT p-tags authoritative, and auto-enables transcription when the first
-    // agent appears unless the user has already chosen a transcription state.
-    // Throttled independently from the more frequent hotstart poll.
-    //
-    // NOTE: The frontend ALSO polls agent membership independently via
-    // get_huddle_agent_pubkeys. This is intentional — the two polls have
-    // different failure semantics:
-    //   - Rust (here): preserves stale list on failure (STT p-tags should not
-    //     disappear on a transient network blip).
-    //   - React (HuddleContext.tsx): clears list on failure (TTS authorization
-    //     must fail-closed — never speak from a stale agent list).
-    //
-    // On Ok: always replace (even with empty — agents may have been removed).
-    // On Err: preserve the existing list (transient failure shouldn't zero it).
-    if let Some(eph_id) = &ephemeral_channel_id {
-        let should_refresh = {
-            let hs = state.huddle()?;
-            match hs.last_agent_refresh {
-                None => true,
-                Some(t) => t.elapsed() >= std::time::Duration::from_secs(15),
-            }
-        };
-        if should_refresh {
-            // Fetch agents (for STT p-tags) before all members (for participant
-            // list) so relay membership queries remain ordered.
-            // Only update the throttle timestamp when at least one fetch succeeds,
-            // so transient failures retry immediately on the next poll cycle.
-            // Fetch both lists before acquiring the lock — no lock held across await.
-            let fresh_agents = fetch_channel_members(eph_id, Some("bot"), &state)
-                .await
-                .ok();
-            let fresh_members = fetch_channel_members(eph_id, None, &state).await.ok();
-            let (roster_changed, transcription_auto_enabled) =
-                if fresh_agents.is_some() || fresh_members.is_some() {
-                    let mut hs = state.huddle()?;
-                    if !hs.is_current_huddle(eph_id, huddle_generation) {
-                        return Ok(());
-                    }
-                    let mut roster_changed = false;
-                    if let Some(agents) = fresh_agents {
-                        let mut current_agents =
-                            hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
-                        if *current_agents != agents {
-                            *current_agents = agents;
-                            roster_changed = true;
-                        }
-                    }
-                    if let Some(members) = fresh_members {
-                        if hs.participants != members {
-                            hs.participants = members;
-                            roster_changed = true;
-                        }
-                    }
-                    hs.last_agent_refresh = Some(std::time::Instant::now());
-                    (
-                        roster_changed,
-                        hs.maybe_auto_enable_transcription_for_agents(),
-                    )
-                } else {
-                    (false, false)
-                };
-            if transcription_auto_enabled {
-                start_auto_enabled_transcription(&state, eph_id).await;
-            }
-            // Audio authentication auto-adds a joining human to the ephemeral
-            // channel. Emit whenever that authoritative roster changes so the
-            // desktop participant strip updates immediately instead of waiting
-            // for its slow fallback IPC read.
-            if roster_changed || transcription_auto_enabled {
-                state.emit_huddle_state_changed();
-            }
-        }
-    }
-
     Ok(())
 }
 
-pub(crate) async fn post_connect_setup(
+/// Periodic roster refresh for an active Huddle, at most every 15 s: store
+/// the agents and participants read from the relay.
+async fn refresh_huddle_roster(
+    state: &AppState,
+    eph_id: &str,
+    huddle_generation: u64,
+) -> Result<(), String> {
+    let should_refresh = {
+        let hs = state.huddle()?;
+        match hs.last_agent_refresh {
+            None => true,
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(15),
+        }
+    };
+    if should_refresh {
+        // Fetch agents (for STT p-tags) before all members (for participant
+        // list) so relay membership queries remain ordered.
+        // Only update the throttle timestamp when at least one fetch succeeds,
+        // so transient failures retry immediately on the next poll cycle.
+        // Fetch both lists before acquiring the lock — no lock held across await.
+        let fresh_agents = fetch_huddle_roster(eph_id, state).await.ok();
+        let fresh_members = fetch_channel_members(eph_id, state).await.ok();
+        let (roster_changed, transcription_auto_enabled) = if fresh_agents.is_some()
+            || fresh_members.is_some()
+        {
+            let mut hs = state.huddle()?;
+            if !hs.is_current_huddle(eph_id, huddle_generation) {
+                return Ok(());
+            }
+            let mut roster_changed = false;
+            if let Some(roster) = fresh_agents {
+                let mut current_agents = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
+                roster_changed |= roster.apply_agents(&mut current_agents);
+            }
+            if let Some(members) = fresh_members {
+                if hs.participants != members {
+                    hs.participants = members;
+                    roster_changed = true;
+                }
+            }
+            hs.last_agent_refresh = Some(std::time::Instant::now());
+            (
+                roster_changed,
+                hs.maybe_auto_enable_transcription_for_agents(),
+            )
+        } else {
+            (false, false)
+        };
+        if transcription_auto_enabled {
+            start_auto_enabled_transcription(state, eph_id).await;
+        }
+        // Audio authentication auto-adds a joining human to the ephemeral
+        // channel. Emit whenever that authoritative roster changes so the
+        // desktop participant strip updates immediately instead of waiting
+        // for its slow fallback IPC read.
+        if roster_changed || transcription_auto_enabled {
+            state.emit_huddle_state_changed();
+        }
+    }
+    Ok(())
+}
+
+/// First roster read after connecting: store the agents and participants read
+/// from the relay. Returns false when the Huddle is no longer current.
+async fn hydrate_huddle_roster(
     state: &AppState,
     ephemeral_channel_id: &str,
     huddle_generation: u64,
-) -> Result<PostConnectOutcome, String> {
-    {
-        let hs = state.huddle()?;
-        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
-            return Ok(PostConnectOutcome::Stale);
-        }
-    }
-
+) -> Result<bool, String> {
     // Hydrate agent pubkeys and participants from relay in parallel
     // (authoritative — overrides local guesses).
     let (agents_result, all_members_result) = tokio::join!(
-        fetch_channel_members(ephemeral_channel_id, Some("bot"), state),
-        fetch_channel_members(ephemeral_channel_id, None, state),
+        async { fetch_huddle_roster(ephemeral_channel_id, state).await.ok() },
+        fetch_channel_members(ephemeral_channel_id, state),
     );
     let (roster_changed, transcription_auto_enabled) = {
         let mut hs = state.huddle()?;
         if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
-            return Ok(PostConnectOutcome::Stale);
+            return Ok(false);
         }
         let mut roster_changed = false;
-        if let Ok(agents) = agents_result {
+        if let Some(roster) = agents_result {
             let mut current_agents = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
-            if *current_agents != agents {
-                *current_agents = agents;
-                roster_changed = true;
-            }
+            roster_changed |= roster.apply_agents(&mut current_agents);
         }
         if let Ok(all_members) = all_members_result {
             if !all_members.is_empty() && hs.participants != all_members {
@@ -221,7 +243,39 @@ pub(crate) async fn post_connect_setup(
     if roster_changed || transcription_auto_enabled {
         state.emit_huddle_state_changed();
     }
+    Ok(true)
+}
 
+/// Setup after the Huddle connects: read the roster, then run `start_media`.
+/// Callers pass [`start_huddle_media`]; tests replace it to keep model files
+/// and audio out of the run.
+pub(crate) async fn post_connect_setup(
+    state: &AppState,
+    ephemeral_channel_id: &str,
+    huddle_generation: u64,
+    start_media: impl AsyncFnOnce(&AppState, &str, u64) -> Result<PostConnectOutcome, String>,
+) -> Result<PostConnectOutcome, String> {
+    {
+        let hs = state.huddle()?;
+        if !hs.is_current_huddle(ephemeral_channel_id, huddle_generation) {
+            return Ok(PostConnectOutcome::Stale);
+        }
+    }
+
+    if !hydrate_huddle_roster(state, ephemeral_channel_id, huddle_generation).await? {
+        return Ok(PostConnectOutcome::Stale);
+    }
+
+    start_media(state, ephemeral_channel_id, huddle_generation).await
+}
+
+/// Download voice models, connect the audio relay, and start the voice
+/// pipelines. Audio relay failure is an error.
+pub(crate) async fn start_huddle_media(
+    state: &AppState,
+    ephemeral_channel_id: &str,
+    huddle_generation: u64,
+) -> Result<PostConnectOutcome, String> {
     // Prepare voice models. Agent presence may have auto-enabled transcription;
     // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
@@ -734,6 +788,10 @@ pub(crate) fn spawn_transcription_task(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "roster_hydration_tests.rs"]
+mod roster_hydration_tests;
 
 #[cfg(test)]
 mod tts_start_race_tests {

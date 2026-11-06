@@ -6,6 +6,8 @@ import Foundation
 
 /// Content resolved from unread Buzz events for a mutable push notification.
 public struct BuzzPushResolution: Decodable, Equatable, Sendable {
+  /// Local sign-in that authorized this result; checked again before delivery.
+  public let notificationScope: BuzzNotificationCacheScope?
   public let title: String
   public let body: String
   public let subtitle: String?
@@ -28,8 +30,10 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
     senderAvatarPNG: Data? = nil,
     conversationIdentifier: String? = nil,
     conversationDisplayName: String? = nil,
-    conversationRecipientCount: Int? = nil
+    conversationRecipientCount: Int? = nil,
+    notificationScope: BuzzNotificationCacheScope? = nil
   ) {
+    self.notificationScope = notificationScope
     self.title = title
     self.body = body
     self.subtitle = subtitle
@@ -46,43 +50,60 @@ public struct BuzzPushResolution: Decodable, Equatable, Sendable {
 /// Resolves the content used to mutate a generic Buzz push notification.
 public protocol BuzzPushNotificationResolving {
   func resolve(completion: @escaping (BuzzPushResolution?) -> Void)
+  /// Cancels any retry in flight and prevents new ones. Call when the notification is delivered.
+  func cancel()
+  /// Whether the organization session behind the resolved message, if any, still holds.
+  func isStillAuthorized() -> Bool
 }
 
-/// Reads configured Buzz communities and resolves their newest unread event.
+/// Reads configured Buzz communities and resolves their newest message not yet shown.
 public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
-  // Verified profiles may carry bounded inline raster avatars. Keep the refresh
-  // response capped, but large enough to recover the sender name from those
-  // otherwise valid kind-0 events when the app cache has not been populated.
-  static let maximumPresentationResponseBytes = 256 * 1_024
+  // Each independent refresh has a hard transfer limit, allowing bounded
+  // content plus JSON escaping, tags, and envelopes.
+  // Each record still passes the cache's separate content and signature checks.
+  static let maximumPresentationResponseBytes = 2 * 1_024 * 1_024
 
   private let session: URLSession
+  private let makeRetrySession: () -> URLSession
+  // Recursive because a retry that fails synchronously completes while the lock is held,
+  // and that completion may finish the notification and call cancel().
+  private let retryLock = NSRecursiveLock()
+  private var isCancelled = false
+  private var retrySessions: [URLSession] = []
   private let loadCommunitiesData: () -> Data?
-  private let loadPresentationCacheData: () -> Data?
   private let loadPrivateKey: (String) -> String?
+  private let assertionLock = NSLock()
+  private var resolvedAssertion: BuzzRelayAssertion?
   private let now: () -> Date
-  private let presentationCacheLifetime: TimeInterval
+  private let notificationCache: BuzzNotificationCache?
+  private let avatarLoader: BuzzNotificationAvatarLoader?
+  private let assertionIssuer: BuzzRelayAssertionIssuer?
 
   /// Creates a resolver around the notification extension's App Group and Keychain I/O.
   public init(
     session: URLSession,
     loadCommunitiesData: @escaping () -> Data?,
     loadPrivateKey: @escaping (String) -> String?,
-    loadPresentationCacheData: @escaping () -> Data? = { nil },
+    notificationCache: BuzzNotificationCache? = nil,
+    avatarLoader: BuzzNotificationAvatarLoader? = nil,
+    assertionIssuer: BuzzRelayAssertionIssuer? = nil,
     now: @escaping () -> Date = Date.init,
-    presentationCacheLifetime: TimeInterval = BuzzPushPresentationCacheStore.freshnessLifetime
+    makeRetrySession: (() -> URLSession)? = nil
   ) {
+    self.makeRetrySession = makeRetrySession ?? { URLSession(configuration: session.configuration) }
+    self.notificationCache = notificationCache
+    self.avatarLoader = avatarLoader
+    self.assertionIssuer = assertionIssuer
     self.session = session
     self.loadCommunitiesData = loadCommunitiesData
-    self.loadPresentationCacheData = loadPresentationCacheData
     self.loadPrivateKey = loadPrivateKey
     self.now = now
-    self.presentationCacheLifetime = presentationCacheLifetime
   }
 
   public func resolve(completion: @escaping (BuzzPushResolution?) -> Void) {
     let communities = loadCommunities().filter {
       $0.pubkey?.isEmpty == false
-        && loadPrivateKey($0.id) != nil
+        && accountPrivateKey(for: $0) != nil
         && !$0.policies.isEmpty
     }
     guard !communities.isEmpty else {
@@ -91,36 +112,82 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     }
     let group = DispatchGroup()
     let lock = NSLock()
-    var candidates: [(VerifiedNostrEvent, PushLeaseCommunity)] = []
+    var candidates: [(VerifiedNostrEvent, PushLeaseCommunity, BuzzRelayAssertion?)] = []
     for community in communities {
       group.enter()
-      query(community) { candidate in
-        if let candidate {
-          lock.lock()
-          candidates.append(candidate)
-          lock.unlock()
-        }
+      query(community) { messages, assertion in
+        lock.lock()
+        candidates += messages.map { ($0, community, assertion) }
+        lock.unlock()
         group.leave()
       }
     }
     group.notify(queue: .global(qos: .userInitiated)) {
-      let newest = candidates.max {
-        $0.0.createdAt == $1.0.createdAt ? $0.0.id > $1.0.id : $0.0.createdAt < $1.0.createdAt
+      let newestFirst = candidates.sorted {
+        $0.0.createdAt == $1.0.createdAt ? $0.0.id < $1.0.id : $0.0.createdAt > $1.0.createdAt
       }
-      guard let newest else {
+      guard let newest = self.firstUnpresented(newestFirst, communities: communities) else {
         completion(nil)
         return
       }
+      self.assertionLock.lock()
+      self.resolvedAssertion = newest.2
+      self.assertionLock.unlock()
       self.resolvePresentation(event: newest.0, community: newest.1, completion: completion)
     }
   }
 
+  /// The push doesn't say which event it is for, so take the newest message not yet
+  /// shown, in any community. Without extension storage, fall back to the newest message.
+  /// The claim is made before presentation: if presenting then fails or expires, that
+  /// push shows the generic text and the message isn't offered again, which is better
+  /// than repeating a message in later notifications.
+  private func firstUnpresented(
+    _ newestFirst: [(VerifiedNostrEvent, PushLeaseCommunity, BuzzRelayAssertion?)],
+    communities: [PushLeaseCommunity]
+  ) -> (VerifiedNostrEvent, PushLeaseCommunity, BuzzRelayAssertion?)? {
+    guard let notificationCache else { return newestFirst.first }
+    let candidates = newestFirst.compactMap { event, community, assertion in
+      BuzzNotificationCacheScope(community: community).map {
+        (candidate: (event, community, assertion), scope: $0)
+      }
+    }
+    do {
+      // Every community's history bounds the others, even one whose query failed, so a
+      // community with nothing shown yet can't surface its old messages.
+      return try notificationCache.claimFirstUnpresented(
+        candidates.map { (event: $0.candidate.0, scope: $0.scope) },
+        scopes: communities.compactMap(BuzzNotificationCacheScope.init(community:))
+      ).map { candidates[$0].candidate }
+    } catch {
+      // Unusable storage must not hide new messages; it can only fail to dedupe them.
+      NSLog("Notification dedupe unavailable: %@", String(describing: error))
+      return candidates.first?.candidate
+    }
+  }
+
+  private func matchingPrivateKey(for community: PushLeaseCommunity) -> String? {
+    guard let scope = BuzzNotificationCacheScope(community: community),
+      loadCommunities().contains(where: { BuzzNotificationCacheScope(community: $0) == scope })
+    else { return nil }
+    return accountPrivateKey(for: community)
+  }
+
+  // Initial requests share the snapshot loaded by resolve. Asynchronous results
+  // use matchingPrivateKey to check that the account and session are still current.
+  private func accountPrivateKey(for community: PushLeaseCommunity) -> String? {
+    guard let scope = BuzzNotificationCacheScope(community: community),
+      let key = loadPrivateKey(community.id), scope.matchesAccountKey(key)
+    else { return nil }
+    return key
+  }
+
   private func query(
     _ community: PushLeaseCommunity,
-    completion: @escaping ((VerifiedNostrEvent, PushLeaseCommunity)?) -> Void
+    completion: @escaping ([VerifiedNostrEvent], BuzzRelayAssertion?) -> Void
   ) {
-    guard let privateKey = loadPrivateKey(community.id), community.pubkey?.isEmpty == false else {
-      completion(nil)
+    guard let privateKey = accountPrivateKey(for: community), community.pubkey?.isEmpty == false else {
+      completion([], nil)
       return
     }
     guard
@@ -131,9 +198,82 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         withJSONObject: community.policies.map { $0.filter.queryFilter(since: nil, limit: 10) }
       )
     else {
+      completion([], nil)
+      return
+    }
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
+      self.send(
+        url: url, body: body, privateKey: privateKey, federatedIdentity: assertion?.header,
+        session: self.session,
+        canRetry: {
+          self.matchingPrivateKey(for: community) == privateKey && self.isCurrent(assertion)
+        }
+      ) { data, response in
+        guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
+          let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+          let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+        else {
+          completion([], assertion)
+          return
+        }
+        completion(
+          Self.messages(
+            events: events.filter { event in
+              event.hasValidIDAndSignature()
+                && community.policies.contains { policy in
+                  PushLeaseMatcher.matches(event: event, policy: policy)
+                }
+            },
+            community: community
+          ), assertion)
+      }
+    }
+  }
+
+  /// The NIP-FI assertion an organization relay requires, or nil for any other relay.
+  private func federatedIdentity(
+    relayURL: URL, privateKey: String, completion: @escaping (BuzzRelayAssertion?) -> Void
+  ) {
+    guard let assertionIssuer else {
       completion(nil)
       return
     }
+    assertionIssuer.header(relayURL: relayURL, privateKeyHex: privateKey, completion: completion)
+  }
+
+  /// Whether the organization session behind the resolved message, if any, is still the shared
+  /// one. The extension checks this again before delivering, as it does the account scope.
+  public func isStillAuthorized() -> Bool {
+    assertionLock.lock()
+    let assertion = resolvedAssertion
+    assertionLock.unlock()
+    return isCurrent(assertion)
+  }
+
+  /// Responses fetched with an assertion are accepted only while its organization session lasts.
+  private func isCurrent(_ assertion: BuzzRelayAssertion?) -> Bool {
+    guard let assertion else { return true }
+    return assertionIssuer?.isCurrent(assertion) ?? false
+  }
+
+  /// Sends one signed `/query`. A timeout or dropped connection is retried once on a new
+  /// session, because the failed attempt may have used a pooled connection that went stale
+  /// when the network path changed. Each attempt is signed afresh so the relay's NIP-98
+  /// replay guard accepts it. `canRetry` rechecks the account first; nil means no retry.
+  public func cancel() {
+    retryLock.lock()
+    isCancelled = true
+    let sessions = retrySessions
+    retrySessions = []
+    retryLock.unlock()
+    sessions.forEach { $0.invalidateAndCancel() }
+  }
+
+  private func send(
+    url: URL, body: Data, privateKey: String, federatedIdentity: String?, session: URLSession,
+    canRetry: (() -> Bool)?,
+    completion: @escaping (Data?, URLResponse?) -> Void
+  ) {
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.httpBody = body
@@ -144,28 +284,41 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         url: url, method: "POST", body: body, privateKeyHex: privateKey
       )
     else {
-      completion(nil)
+      completion(nil, nil)
       return
     }
     request.setValue(auth, forHTTPHeaderField: "Authorization")
-    session.dataTask(with: request) { data, response, _ in
-      guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
-        let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+    if let federatedIdentity {
+      request.setValue(federatedIdentity, forHTTPHeaderField: "Nostr-Federated-Identity")
+    }
+    let task = session.dataTask(with: request) { data, response, error in
+      guard let error = error as? URLError,
+        [.timedOut, .networkConnectionLost].contains(error.code), canRetry?() == true
       else {
-        completion(nil)
+        completion(data, response)
         return
       }
-      let candidate = Self.newestMessage(
-        events: events.filter { event in
-          event.hasValidIDAndSignature()
-            && community.policies.contains { policy in
-              PushLeaseMatcher.matches(event: event, policy: policy)
-            }
-        },
-        community: community
-      )
-      completion(candidate.map { ($0, community) })
-    }.resume()
+      // Creating the retry under the lock means cancel() either stops it or sees its session.
+      self.retryLock.lock()
+      guard !self.isCancelled else {
+        self.retryLock.unlock()
+        completion(data, response)
+        return
+      }
+      defer { self.retryLock.unlock() }
+      let retrySession = self.makeRetrySession()
+      self.retrySessions.append(retrySession)
+      self.send(
+        url: url, body: body, privateKey: privateKey, federatedIdentity: federatedIdentity,
+        session: retrySession, canRetry: nil
+      ) { data, response in
+        retrySession.finishTasksAndInvalidate()
+        completion(data, response)
+      }
+    }
+    // A redirect would forward the federated identity header to its target, so it is refused.
+    task.delegate = BuzzRedirectRefusal.shared
+    task.resume()
   }
 
   private func resolvePresentation(
@@ -173,241 +326,121 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     community: PushLeaseCommunity,
     completion: @escaping (BuzzPushResolution?) -> Void
   ) {
-    let snapshot = BuzzPushPresentationCacheSnapshot.decode(loadPresentationCacheData())
-    let relayOrigin = BuzzPushPresentationCacheStore.canonicalRelayOrigin(community.relayUrl)
-    let cachedProfile = relayOrigin.flatMap {
-      snapshot.profile(
-        communityID: community.id,
-        relayOrigin: $0,
-        pubkey: event.pubkey
-      )
-    }
-    let channelID = Self.tagValue("h", in: event)
-    let relayMetadataPubkey = community.relayMetadataPubkey?.lowercased()
-    let cachedChannel = channelID.flatMap { channelID in
-      relayOrigin.flatMap {
-        snapshot.channel(
-          communityID: community.id,
-          relayOrigin: $0,
-          channelID: channelID
-        )
-      }
-    }.flatMap { channel in
-      channel.relayMetadataPubkey == relayMetadataPubkey ? channel : nil
-    }
-    let timestamp = Int(now().timeIntervalSince1970)
-    let profileNeedsRefresh = Self.isStale(
-      cachedAt: cachedProfile?.cachedAt,
-      now: timestamp,
-      lifetime: presentationCacheLifetime
-    )
-    let membershipNeedsRefresh: Bool = {
-      guard let cachedChannel else { return true }
-      if Self.isStale(
-        cachedAt: cachedChannel.membershipCachedAt,
-        now: timestamp,
-        lifetime: presentationCacheLifetime
-      ) {
-        return true
-      }
-      guard let memberCount = cachedChannel.memberCount else { return true }
-      guard memberCount <= BuzzPushPresentationCacheStore.maximumMembersPerChannel
-      else { return false }
-      return cachedChannel.memberDigests?.count != memberCount
-    }()
-    let channelNeedsRefresh =
-      channelID != nil
-      && (Self.isStale(
-        cachedAt: cachedChannel?.cachedAt,
-        now: timestamp,
-        lifetime: presentationCacheLifetime
-      ) || membershipNeedsRefresh)
-    let fallback = Self.makeResolution(
-      event: event,
-      community: community,
-      profile: cachedProfile,
-      channel: cachedChannel
-    )
-    guard profileNeedsRefresh || channelNeedsRefresh else {
-      completion(fallback)
+    guard matchingPrivateKey(for: community) != nil else {
+      completion(nil)
       return
     }
-
-    refreshPresentation(
-      event: event,
-      community: community,
-      refreshProfile: profileNeedsRefresh,
-      refreshChannel: channelNeedsRefresh
-    ) { refreshedProfileEvent, refreshedChannelEvent, refreshedMembershipEvent in
-      let profile =
-        refreshedProfileEvent.flatMap {
-          guard
-            BuzzPushPresentationCacheStore.shouldReplace(
-              existingCreatedAt: cachedProfile?.eventCreatedAt,
-              existingID: cachedProfile?.eventID,
-              candidateCreatedAt: $0.createdAt,
-              candidateID: $0.id
-            )
-          else { return nil }
-          return Self.ephemeralProfile(
-            event: $0,
-            communityID: community.id,
-            relayOrigin: relayOrigin ?? community.relayUrl,
-            cached: cachedProfile,
-            cachedAt: timestamp
-          )
-        } ?? cachedProfile
-      let newerChannelEvent: VerifiedNostrEvent? = refreshedChannelEvent.flatMap { event in
-        guard
-          BuzzPushPresentationCacheStore.shouldReplace(
-            existingCreatedAt: cachedChannel?.eventCreatedAt,
-            existingID: cachedChannel?.eventID,
-            candidateCreatedAt: event.createdAt,
-            candidateID: event.id
-          )
-        else { return nil }
-        return event
+    if let notificationCache {
+      guard let scope = BuzzNotificationCacheScope(community: community) else {
+        completion(nil)
+        return
       }
-      let newerMembershipEvent: VerifiedNostrEvent? = refreshedMembershipEvent.flatMap { event in
-        guard
-          BuzzPushPresentationCacheStore.shouldReplace(
-            existingCreatedAt: cachedChannel?.membershipEventCreatedAt,
-            existingID: cachedChannel?.membershipEventID,
-            candidateCreatedAt: event.createdAt,
-            candidateID: event.id
-          )
-        else { return nil }
-        return event
-      }
-      let channel =
-        relayMetadataPubkey.flatMap {
-          Self.ephemeralChannel(
-            metadataEvent: newerChannelEvent,
-            membershipEvent: newerMembershipEvent,
-            cached: cachedChannel,
-            communityID: community.id,
-            relayOrigin: relayOrigin ?? community.relayUrl,
-            relayMetadataPubkey: $0,
-            cachedAt: timestamp
-          )
-        } ?? cachedChannel
-      completion(
-        Self.makeResolution(
-          event: event,
-          community: community,
-          profile: profile,
-          channel: channel
-        ) ?? fallback
-      )
+      let operation = BuzzNotificationEnrichmentOperation(
+        event: event, community: community, scope: scope, cache: notificationCache,
+        avatarLoader: avatarLoader, now: now,
+        isCurrent: { [self] in
+          matchingPrivateKey(for: community) != nil && isStillAuthorized()
+        },
+        refresh: { [self] profile, channel, done in
+          refreshPresentation(event: event, community: community,
+            refreshProfile: profile, refreshChannel: channel, completion: done)
+        }, completion: completion)
+      operation.start()
+      return
     }
+    // Without extension storage, keep the verified message but omit enrichment.
+    completion(Self.makeResolution(event: event, community: community, profile: nil, channel: nil))
   }
 
   private func refreshPresentation(
-    event: VerifiedNostrEvent,
-    community: PushLeaseCommunity,
-    refreshProfile: Bool,
-    refreshChannel: Bool,
-    completion:
-      @escaping (
-        VerifiedNostrEvent?, VerifiedNostrEvent?, VerifiedNostrEvent?
-      ) -> Void
+    event: VerifiedNostrEvent, community: PushLeaseCommunity,
+    refreshProfile: Bool, refreshChannel: Bool,
+    completion: @escaping (BuzzNotificationEnrichmentOperation.RefreshResult) -> Void
   ) {
-    guard let privateKey = loadPrivateKey(community.id),
-      let relayURL = community.relayURL,
-      let url = URL(string: "/query", relativeTo: relayURL)
-    else {
-      completion(nil, nil, nil)
-      return
-    }
-    let channelID = Self.tagValue("h", in: event)
-    let relayMetadataPubkey = community.relayMetadataPubkey?.lowercased()
-    var filters: [[String: Any]] = []
+    // A full channel roster can be much larger than a profile. Keep these
+    // transfers independent so its size or latency cannot hide the sender.
     if refreshProfile {
-      filters.append(["kinds": [0], "authors": [event.pubkey.lowercased()], "limit": 1])
+      queryPresentation(
+        filters: [["kinds": [0], "authors": [event.pubkey.lowercased()], "limit": 1]],
+        community: community
+      ) { events in
+        completion(.profile(Self.newest(events.filter {
+          $0.kind == 0 && $0.pubkey.lowercased() == event.pubkey.lowercased()
+        })))
+      }
     }
-    if refreshChannel, let channelID, let relayMetadataPubkey {
-      filters.append([
-        "kinds": [39_000],
-        "authors": [relayMetadataPubkey],
-        "#d": [channelID],
-        "limit": 1,
-      ])
-      filters.append([
-        "kinds": [39_002],
-        "authors": [relayMetadataPubkey],
-        "#d": [channelID],
-        "limit": 1,
-      ])
-    }
-    guard !filters.isEmpty,
-      let body = try? JSONSerialization.data(withJSONObject: filters)
-    else {
-      completion(nil, nil, nil)
-      return
-    }
-
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.httpBody = body
-    // A verified kind-0 profile may include a bounded inline raster avatar.
-    // Railway can take longer than one second to return that larger response,
-    // while three seconds remains a small fraction of the NSE execution budget.
-    request.timeoutInterval = 3
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    guard
-      let auth = try? NostrHTTPAuth.authorizationHeader(
-        url: url,
-        method: "POST",
-        body: body,
-        privateKeyHex: privateKey
-      )
-    else {
-      completion(nil, nil, nil)
-      return
-    }
-    request.setValue(auth, forHTTPHeaderField: "Authorization")
-    session.downloadTask(with: request) { fileURL, response, _ in
-      guard let response = response as? HTTPURLResponse,
-        (200..<300).contains(response.statusCode),
-        let fileURL,
-        let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
-        let fileSize = values.fileSize,
-        fileSize <= Self.maximumPresentationResponseBytes,
-        let data = try? Data(contentsOf: fileURL),
-        let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+    if refreshChannel {
+      guard let channelID = Self.tagValue("h", in: event),
+        let authority = community.relayMetadataPubkey?.lowercased()
       else {
-        completion(nil, nil, nil)
+        completion(.channel(nil, nil))
         return
       }
-      let verified = events.filter { $0.hasValidIDAndSignature() }
-      let profile =
-        refreshProfile
-        ? Self.newest(
-          verified.filter {
-            $0.kind == 0 && $0.pubkey.lowercased() == event.pubkey.lowercased()
-          }) : nil
-      let channel =
-        refreshChannel
-        ? channelID.flatMap { channelID in
-          Self.newest(
-            verified.filter {
-              $0.kind == 39_000
-                && $0.pubkey.lowercased() == relayMetadataPubkey
-                && Self.tagValue("d", in: $0) == channelID
-            })
-        } : nil
-      let membership =
-        refreshChannel
-        ? channelID.flatMap { channelID in
-          Self.newest(
-            verified.filter {
-              $0.kind == 39_002
-                && $0.pubkey.lowercased() == relayMetadataPubkey
-                && Self.tagValue("d", in: $0) == channelID
-            })
-        } : nil
-      completion(profile, channel, membership)
-    }.resume()
+      let group = DispatchGroup()
+      let lock = NSLock()
+      var records: [Int: VerifiedNostrEvent] = [:]
+      for kind in [39000, 39002] {
+        group.enter()
+        queryPresentation(filters: [[
+          "kinds": [kind], "authors": [authority], "#d": [channelID], "limit": 1,
+        ]], community: community) { events in
+          let record = Self.newest(events.filter {
+            $0.kind == kind && $0.pubkey.lowercased() == authority
+              && Self.tagValue("d", in: $0) == channelID
+          })
+          lock.lock()
+          records[kind] = record
+          lock.unlock()
+          group.leave()
+        }
+      }
+      group.notify(queue: .global(qos: .utility)) {
+        completion(.channel(records[39000], records[39002]))
+      }
+    }
+  }
+
+  private func queryPresentation(
+    filters: [[String: Any]], community: PushLeaseCommunity,
+    completion: @escaping ([VerifiedNostrEvent]) -> Void
+  ) {
+    guard let privateKey = matchingPrivateKey(for: community),
+      let relayURL = community.relayURL,
+      let url = URL(string: "/query", relativeTo: relayURL),
+      let body = try? JSONSerialization.data(withJSONObject: filters)
+    else {
+      completion([])
+      return
+    }
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
+      var request = URLRequest(url: url)
+      request.httpMethod = "POST"
+      request.httpBody = body
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      guard let auth = try? NostrHTTPAuth.authorizationHeader(
+        url: url, method: "POST", body: body, privateKeyHex: privateKey)
+      else {
+        completion([])
+        return
+      }
+      request.setValue(auth, forHTTPHeaderField: "Authorization")
+      if let assertion {
+        request.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
+      }
+      BuzzNotificationDownload.start(
+        request: request, configuration: self.session.configuration,
+        maximumBytes: Self.maximumPresentationResponseBytes
+      ) { result in
+        guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
+          case .success(let data) = result,
+          let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+        else {
+          completion([])
+          return
+        }
+        completion(events.filter { $0.hasValidIDAndSignature() })
+      }
+    }
   }
 
   static func decodeResolution(
@@ -430,15 +463,23 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     events: [VerifiedNostrEvent],
     community: PushLeaseCommunity
   ) -> VerifiedNostrEvent? {
-    guard let mine = community.pubkey?.lowercased() else { return nil }
+    messages(events: events, community: community).first
+  }
+
+  /// Messages from others that a notification can show, newest first.
+  private static func messages(
+    events: [VerifiedNostrEvent],
+    community: PushLeaseCommunity
+  ) -> [VerifiedNostrEvent] {
+    guard let mine = community.pubkey?.lowercased() else { return [] }
     return events.filter {
       $0.pubkey.lowercased() != mine && [9, 40002, 45001, 45003].contains($0.kind)
     }.sorted {
       $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
-    }.first
+    }
   }
 
-  private static func makeResolution(
+  static func makeResolution(
     event: VerifiedNostrEvent,
     community: PushLeaseCommunity,
     profile: BuzzPushCachedProfile?,
@@ -454,7 +495,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       communicationConversation(event: event, community: community, channel: $0)
     }
     return BuzzPushResolution(
-      title: profile?.displayName ?? shortPubkey(event.pubkey),
+      title: profile?.displayName ?? "",
       body: body,
       subtitle: community.name,
       threadIdentifier: conversationIdentifier ?? community.id,
@@ -462,39 +503,20 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         BuzzPushNavigationTarget(
           eventID: event.id,
           communityID: community.id,
-          channelID: $0
+          channelID: $0,
+          threadRootID: BuzzPushNavigationTarget.threadRootID(in: event.tags)
         )
       },
       senderPubkey: event.pubkey.lowercased(),
       senderAvatarPNG: profile?.avatarPNG,
       conversationIdentifier: conversationIdentifier,
       conversationDisplayName: conversation?.displayName,
-      conversationRecipientCount: conversation?.recipientCount
+      conversationRecipientCount: conversation?.recipientCount,
+      notificationScope: BuzzNotificationCacheScope(community: community)
     )
   }
 
-  private static func ephemeralProfile(
-    event: VerifiedNostrEvent,
-    communityID: String,
-    relayOrigin: String,
-    cached: BuzzPushCachedProfile?,
-    cachedAt: Int
-  ) -> BuzzPushCachedProfile {
-    let metadata = BuzzPushPresentationCacheStore.profileMetadata(event)
-    return BuzzPushCachedProfile(
-      communityID: communityID,
-      relayOrigin: relayOrigin,
-      pubkey: event.pubkey.lowercased(),
-      displayName: metadata.displayName,
-      pictureHash: metadata.pictureHash,
-      avatarPNG: cached?.pictureHash == metadata.pictureHash ? cached?.avatarPNG : nil,
-      eventID: event.id,
-      eventCreatedAt: event.createdAt,
-      cachedAt: cachedAt
-    )
-  }
-
-  private static func ephemeralChannel(
+  static func ephemeralChannel(
     metadataEvent: VerifiedNostrEvent?,
     membershipEvent: VerifiedNostrEvent?,
     cached: BuzzPushCachedChannel?,
@@ -529,6 +551,12 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       channelType: metadataEvent.map {
         BuzzPushPresentationCacheStore.normalizedChannelType(tagValue("t", in: $0))
       } ?? cached?.channelType,
+      isSolo: metadataEvent.map {
+        BuzzPushPresentationCacheStore.isSoloChannel($0)
+      } ?? cached?.isSolo,
+      creatorPubkey: metadataEvent.map {
+        BuzzPushPresentationCacheStore.normalizedCreator($0)
+      } ?? cached?.creatorPubkey,
       memberCount: membership?.count ?? cached?.memberCount,
       memberDigests: membership?.digests ?? cached?.memberDigests,
       membershipEventID: acceptedMembershipEvent?.id ?? cached?.membershipEventID,
@@ -575,6 +603,12 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       ["stream", "forum"].contains(channelType),
       let displayName = channel.displayName
     else { return nil }
+    // Your own Solo chats are personal conversations, not channels, so they
+    // get no `#`. Like the app (`Channel.isPersonalChat`), someone else's
+    // Solo chat you belong to stays an ordinary channel.
+    if channel.isSolo == true, channel.creatorPubkey == currentUser {
+      return (displayName, recipientCount)
+    }
     return (displayName.hasPrefix("#") ? displayName : "#\(displayName)", recipientCount)
   }
 
@@ -584,17 +618,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     }.first
   }
 
-  private static func tagValue(_ name: String, in event: VerifiedNostrEvent) -> String? {
+  static func tagValue(_ name: String, in event: VerifiedNostrEvent) -> String? {
     event.tags.first { $0.count >= 2 && $0[0] == name }?[1]
-  }
-
-  private static func isStale(
-    cachedAt: Int?,
-    now: Int,
-    lifetime: TimeInterval
-  ) -> Bool {
-    guard let cachedAt else { return true }
-    return TimeInterval(max(0, now - cachedAt)) > lifetime
   }
 
   static func previewBody(_ content: String) -> String {
@@ -650,5 +675,18 @@ extension PushLeaseCommunity {
       }
     components.path = ""
     return components.url
+  }
+}
+
+/// Refuses every redirect, so a signed relay request never forwards its proof or assertion.
+final class BuzzRedirectRefusal: NSObject, URLSessionTaskDelegate, Sendable {
+  static let shared = BuzzRedirectRefusal()
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
   }
 }

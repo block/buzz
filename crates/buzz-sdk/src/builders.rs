@@ -6,13 +6,13 @@
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_ENTRY, KIND_EMOJI_SET, KIND_GIT_ISSUE,
+        KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_REPORT, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -154,7 +154,8 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
     Ok(trimmed.to_ascii_lowercase())
 }
 
-fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
+/// Validate a custom emoji image URL: non-empty, at most 2048 bytes, `http(s)://`.
+pub fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
     if url.is_empty() {
         return Err(SdkError::InvalidInput(
             "emoji image URL must not be empty".into(),
@@ -189,14 +190,34 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
     Ok(())
 }
 
-/// Deduplicate and cap mentions, emitting p-tags.
+/// Validate, deduplicate, and cap mentions, emitting p-tags.
+///
+/// Validation lives here rather than in [`crate::mentions::normalize_mention_pubkeys`]
+/// because this helper is the single choke point every mention reaches: it is
+/// shared by `build_message`, `build_forum_post`, and `build_forum_comment`, and
+/// a caller may hand those builders an explicit list without going through the
+/// normalizer at all. Without a check here, `"not-a-pubkey"`, `""`, and
+/// `"../../etc/passwd"` were lowercased into `p` tags and signed, so the
+/// composer reported a successful mention that could notify nobody.
+///
+/// [`check_pubkey_hex`] is reused deliberately: it is the SDK's existing
+/// structural pubkey contract (64 ASCII hex, returned lowercased) and is already
+/// applied before other builders emit `p` tags, so mentions now agree with the
+/// rest of this module and yield the same [`SdkError::InvalidInput`]. Adopting
+/// `nostr::PublicKey::from_hex`'s stricter on-curve rule would be a wider
+/// consistency change across every `check_pubkey_hex` call site, not a
+/// mentions-only fix.
+///
+/// The cap is checked before validation so an over-cap list still reports
+/// [`SdkError::TooManyMentions`] rather than being masked by whichever entry
+/// happens to be malformed.
 fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
     if mentions.len() > crate::mentions::MENTION_CAP {
         return Err(SdkError::TooManyMentions);
     }
     let mut seen = std::collections::HashSet::new();
     for &hex in mentions {
-        let lower = hex.to_ascii_lowercase();
+        let lower = check_pubkey_hex(hex, "mention pubkey")?;
         if seen.insert(lower.clone()) {
             tags.push(tag(&["p", &lower])?);
         }
@@ -554,6 +575,29 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
     Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
 }
 
+/// Search text for a kind:30180 emoji entry: the normalized shortcode with `_`
+/// and `-` turned into spaces, so full-text search sees each word.
+pub fn emoji_entry_search_text(normalized_shortcode: &str) -> String {
+    normalized_shortcode.replace(['_', '-'], " ")
+}
+
+/// Build one custom emoji entry event (kind:30180).
+///
+/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30180, d)`
+/// where `d` is the normalized shortcode. Publishing the same shortcode again
+/// replaces the caller's earlier entry. `content` is the search text from
+/// [`emoji_entry_search_text`].
+pub fn build_emoji_entry(shortcode: &str, url: &str) -> Result<EventBuilder, SdkError> {
+    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
+    check_custom_emoji_url(url)?;
+    let tags = vec![tag(&["d", &shortcode])?, tag(&["emoji", &shortcode, url])?];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_EMOJI_ENTRY as u16),
+        emoji_entry_search_text(&shortcode),
+    )
+    .tags(tags))
+}
+
 /// Build a canvas update event (kind 40100).
 ///
 /// When `expected_revision` is set, an `["expected-revision", …]` tag is
@@ -803,20 +847,39 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, SdkError> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl (kind 9002).
+/// Build a NIP-29 edit-metadata event for
+/// name/about/visibility/ttl/join_role/unlisted/auto_join (kind 9002).
 ///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
+/// `unlisted`: `None` leaves it unchanged; `Some(b)` emits
+/// `["unlisted", "true"|"false"]`.
+///
+/// `auto_join`: whether the relay joins new community members into the
+/// channel. Relay owner/admin only; accepted only on an open, unarchived
+/// stream channel.
+#[allow(clippy::too_many_arguments)]
 pub fn build_update_channel(
     channel_id: Uuid,
     name: Option<&str>,
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    join_role: Option<buzz_core::channel::ChannelJoinRole>,
+    unlisted: Option<bool>,
+    auto_join: Option<bool>,
 ) -> Result<EventBuilder, SdkError> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && ttl.is_none()
+        && join_role.is_none()
+        && unlisted.is_none()
+        && auto_join.is_none()
+    {
         return Err(SdkError::InvalidTag(
-            "at least one of name, about, visibility, or ttl must be provided".into(),
+            "at least one of name, about, visibility, ttl, join_role, unlisted, or auto_join must be provided"
+                .into(),
         ));
     }
     if let Some(v) = visibility {
@@ -851,6 +914,20 @@ pub fn build_update_channel(
             None => tags.push(tag(&["ttl", ""])?),
         }
     }
+    // Always explicit: kind:9002 is a partial update, so an absent tag
+    // leaves the setting unchanged and going back needs `member`.
+    if let Some(join_role) = join_role {
+        tags.push(tag(&["join_role", join_role.as_str()])?);
+    }
+    if let Some(unlisted) = unlisted {
+        tags.push(tag(&["unlisted", if unlisted { "true" } else { "false" }])?);
+    }
+    if let Some(auto_join) = auto_join {
+        tags.push(tag(&[
+            "auto_join",
+            if auto_join { "true" } else { "false" },
+        ])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
 
@@ -877,6 +954,11 @@ pub fn build_set_purpose(channel_id: Uuid, purpose: &str) -> Result<EventBuilder
 /// `ttl`: `Some(secs)` makes the channel ephemeral with that lifetime in
 /// seconds (the relay archives it once the deadline passes without activity);
 /// `None` leaves it permanent.
+///
+/// `unlisted`: `true` emits `["unlisted", "true"]`, so the channel starts out
+/// of channel listings for non-members; `false` emits nothing, and the
+/// channel is listed. Check the relay's NIP-11 `buzz-unlisted-channels`
+/// extension first: a relay without it ignores the tag.
 pub fn build_create_channel(
     channel_id: Uuid,
     name: &str,
@@ -884,6 +966,7 @@ pub fn build_create_channel(
     channel_type: Option<ChannelKind>,
     about: Option<&str>,
     ttl: Option<i32>,
+    unlisted: bool,
 ) -> Result<EventBuilder, SdkError> {
     let name = buzz_core::channel::canonical_channel_name(name);
     if name.trim().is_empty() {
@@ -901,6 +984,9 @@ pub fn build_create_channel(
     }
     if let Some(secs) = ttl {
         tags.push(tag(&["ttl", &secs.to_string()])?);
+    }
+    if unlisted {
+        tags.push(tag(&["unlisted", "true"])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9007), "").tags(tags))
 }
@@ -1915,11 +2001,32 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
 /// status — kind 30315 is parameterized-replaceable, so an event carrying
 /// neither is what clients read as "no status".
 pub fn build_user_status(text: &str, emoji: Option<&str>) -> Result<EventBuilder, SdkError> {
+    build_user_status_expiring(text, emoji, None)
+}
+
+/// Like [`build_user_status`], with an optional NIP-40 `["expiration", unix_secs]`
+/// tag after the emoji tag. Clients read the status as cleared once that time
+/// passes. An expiry on a status with neither text nor emoji is rejected,
+/// because that shape is the clear.
+pub fn build_user_status_expiring(
+    text: &str,
+    emoji: Option<&str>,
+    expires_at: Option<u64>,
+) -> Result<EventBuilder, SdkError> {
     let text = text.trim();
     check_content(text, 64 * 1024)?;
+    let emoji = emoji.map(str::trim).filter(|e| !e.is_empty());
+    if expires_at.is_some() && text.is_empty() && emoji.is_none() {
+        return Err(SdkError::InvalidInput(
+            "an expiring status needs text or an emoji".into(),
+        ));
+    }
     let mut tags = vec![tag(&["d", "general"])?];
-    if let Some(emoji) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(emoji) = emoji {
         tags.push(tag(&["emoji", emoji])?);
+    }
+    if let Some(expires_at) = expires_at {
+        tags.push(tag(&["expiration", &expires_at.to_string()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_USER_STATUS as u16), text).tags(tags))
 }
@@ -2027,6 +2134,70 @@ pub fn build_moderation_resolve_report(
         tags.push(tag(&["reason", r])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_RESOLVE_REPORT as u16), "").tags(tags))
+}
+
+/// NIP-56 report types the relay accepts at ingest (`report.rs` `REPORT_TYPES`).
+pub const REPORT_TYPES: &[&str] = &[
+    "illegal",
+    "nudity",
+    "malware",
+    "spam",
+    "impersonation",
+    "profanity",
+    "other",
+];
+
+/// What a NIP-56 report points at.
+#[derive(Debug, Clone, Copy)]
+pub enum ReportTarget<'a> {
+    /// A message: the reported author's pubkey and the event id.
+    Event {
+        /// Hex pubkey of the message author.
+        author_pubkey: &'a str,
+        /// Hex id of the reported event.
+        event_id: &'a str,
+    },
+    /// A user, with no message.
+    Pubkey(&'a str),
+}
+
+/// Build a NIP-56 report (kind 1984).
+///
+/// A message report carries `["p", author]` and `["e", event_id, type]`; a
+/// user report carries `["p", pubkey, type]`. No `h` tag is added: the relay
+/// reads the channel from the stored event. `note` is trimmed and becomes the
+/// content; blank means empty content. Self-tagging is allowed so reporting
+/// your own message or key keeps the `p` tag the relay requires.
+pub fn build_report(
+    target: ReportTarget<'_>,
+    report_type: &str,
+    note: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    if !REPORT_TYPES.contains(&report_type) {
+        return Err(SdkError::InvalidInput(format!(
+            "report type must be one of {} (got: {report_type})",
+            REPORT_TYPES.join(", ")
+        )));
+    }
+    let tags = match target {
+        ReportTarget::Event {
+            author_pubkey,
+            event_id,
+        } => {
+            let author = check_pubkey_hex(author_pubkey, "author_pubkey")?;
+            let event_id = check_hex_exact(event_id, 64, "event_id")?;
+            vec![tag(&["p", &author])?, tag(&["e", &event_id, report_type])?]
+        }
+        ReportTarget::Pubkey(pubkey) => {
+            let pubkey = check_pubkey_hex(pubkey, "pubkey")?;
+            vec![tag(&["p", &pubkey, report_type])?]
+        }
+    };
+    let note = note.map(str::trim).unwrap_or("");
+    check_content(note, 64 * 1024)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_REPORT as u16), note)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 // ---------------------------------------------------------------------------
@@ -2550,6 +2721,12 @@ mod tests {
         Uuid::new_v4()
     }
 
+    /// A distinct well-formed 64-character hex pubkey per index, for tests that
+    /// need many valid mentions.
+    fn distinct_pubkey_hex(i: u8) -> String {
+        format!("{i:02x}{}", "ab".repeat(31))
+    }
+
     fn tag_values(event: &nostr::Event, key: &str) -> Vec<String> {
         event
             .tags
@@ -2733,6 +2910,131 @@ mod tests {
         let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[], &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
+    }
+
+    /// Every structurally invalid mention must be refused by all three builders
+    /// that share `mention_tags`, rather than lowercased into a `p` tag and
+    /// signed. See #6291.
+    #[test]
+    fn malformed_mention_pubkeys_are_refused_by_every_builder() {
+        let cid = uuid();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let short = "a".repeat(63);
+        let long = "a".repeat(65);
+        // Empty, non-hex, and both off-by-one lengths. The wrong-alphabet cases
+        // are pinned separately from the wrong-length cases because a
+        // length-only check would otherwise pass: "zzzz" is caught by length,
+        // but a 64-character non-hex string is not.
+        let non_hex_64 = "z".repeat(64);
+        let path_like_64 = format!("../../etc/passwd{}", "0".repeat(48));
+        for bad in [
+            "",
+            "not-a-pubkey",
+            "zzzz",
+            "../../etc/passwd",
+            short.as_str(),
+            long.as_str(),
+            non_hex_64.as_str(),
+            path_like_64.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    build_message(cid, "hi", None, &[bad], false, &[], &[]),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "build_message must refuse mention {bad:?}"
+            );
+            assert!(
+                matches!(
+                    build_forum_post(cid, "hi", &[bad], &[]),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "build_forum_post must refuse mention {bad:?}"
+            );
+            assert!(
+                matches!(
+                    build_forum_comment(cid, "hi", &tr, &[bad], &[]),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "build_forum_comment must refuse mention {bad:?}"
+            );
+        }
+    }
+
+    /// One malformed entry must refuse the whole list rather than being silently
+    /// dropped: a filtered mention looks successful to the composer while
+    /// notifying nobody.
+    #[test]
+    fn one_malformed_mention_refuses_the_whole_list() {
+        let cid = uuid();
+        let valid = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let result = build_message(cid, "hi", None, &[valid, "nope", valid], false, &[], &[]);
+        assert!(matches!(result, Err(SdkError::InvalidInput(_))));
+    }
+
+    /// Validation must not break the two behaviours callers already rely on:
+    /// uppercase hex is legitimate input and is canonicalized to lowercase, and
+    /// duplicates across cases collapse to a single `p` tag.
+    #[test]
+    fn valid_mentions_are_canonicalized_and_deduped_across_case() {
+        let cid = uuid();
+        let upper = "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234";
+        let lower = upper.to_ascii_lowercase();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+
+        let ev = sign(build_message(cid, "hi", None, &[upper], false, &[], &[]).unwrap());
+        assert_eq!(
+            tag_values(&ev, "p"),
+            vec![lower.clone()],
+            "uppercase hex must be accepted and lowercased"
+        );
+
+        // Same pubkey in both spellings is one person, so one p tag.
+        let ev = sign(build_message(cid, "hi", None, &[upper, &lower], false, &[], &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![lower.clone()]);
+
+        let ev = sign(build_forum_post(cid, "hi", &[upper], &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![lower.clone()]);
+
+        let ev = sign(build_forum_comment(cid, "hi", &tr, &[upper], &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![lower]);
+    }
+
+    /// The cap is checked before per-entry validation, so an over-cap list of
+    /// well-formed pubkeys keeps reporting `TooManyMentions`, and a list that is
+    /// both over-cap *and* malformed reports `TooManyMentions` too rather than
+    /// changing which error callers see.
+    #[test]
+    fn too_many_mentions_takes_precedence_over_validation() {
+        let cid = uuid();
+        let hexes: Vec<String> = (0..51u8).map(distinct_pubkey_hex).collect();
+        let mut refs: Vec<&str> = hexes.iter().map(String::as_str).collect();
+        refs.push("not-a-pubkey");
+        assert!(matches!(
+            build_message(cid, "hi", None, &refs, false, &[], &[]),
+            Err(SdkError::TooManyMentions)
+        ));
+    }
+
+    /// A list exactly at the cap still signs, so the guard cannot have moved the
+    /// boundary.
+    #[test]
+    fn mentions_at_the_cap_still_sign() {
+        let cid = uuid();
+        let hexes: Vec<String> = (0..crate::mentions::MENTION_CAP as u8)
+            .map(distinct_pubkey_hex)
+            .collect();
+        let refs: Vec<&str> = hexes.iter().map(String::as_str).collect();
+        let ev = sign(build_message(cid, "hi", None, &refs, false, &[], &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p").len(), crate::mentions::MENTION_CAP);
     }
 
     #[test]
@@ -3158,6 +3460,51 @@ mod tests {
     }
 
     #[test]
+    fn emoji_entry_happy_path() {
+        let ev = sign(build_emoji_entry(":Party_Parrot-2:", "https://example.com/p.gif").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30180);
+        assert_eq!(ev.content, "party parrot 2");
+        assert!(has_tag(&ev, "d", "party_parrot-2"));
+        let emoji: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().is_some_and(|k| k == "emoji"))
+            .map(|t| t.as_slice().to_vec())
+            .collect();
+        assert_eq!(
+            emoji,
+            vec![vec![
+                "emoji".to_string(),
+                "party_parrot-2".to_string(),
+                "https://example.com/p.gif".to_string()
+            ]]
+        );
+        assert!(!ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().is_some_and(|k| k == "h")));
+    }
+
+    #[test]
+    fn emoji_entry_rejects_bad_input() {
+        for (shortcode, url) in [
+            ("", "https://example.com/p.gif"),
+            ("bad name", "https://example.com/p.gif"),
+            ("bad!", "https://example.com/p.gif"),
+            ("ok", ""),
+            ("ok", "ftp://example.com/p.gif"),
+            ("ok", "javascript:alert(1)"),
+        ] {
+            assert!(
+                build_emoji_entry(shortcode, url).is_err(),
+                "{shortcode:?} {url:?} must be rejected"
+            );
+        }
+        let long = "a".repeat(MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+        assert!(build_emoji_entry(&long, "https://example.com/p.gif").is_err());
+    }
+
+    #[test]
     fn remove_reaction_happy_path() {
         let eid = event_id();
         let ev = sign(build_remove_reaction(eid).unwrap());
@@ -3480,7 +3827,17 @@ mod tests {
     fn update_channel_name_and_about() {
         let cid = uuid();
         let ev = sign(
-            build_update_channel(cid, Some("new-name"), Some("new about"), None, None).unwrap(),
+            build_update_channel(
+                cid,
+                Some("new-name"),
+                Some("new about"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "name", "new-name"));
@@ -3489,15 +3846,26 @@ mod tests {
 
     #[test]
     fn update_channel_strips_all_leading_hashes_from_name() {
-        let ev =
-            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        let ev = sign(
+            build_update_channel(
+                uuid(),
+                Some("  ###new-name  "),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
         assert!(has_tag(&ev, "name", "new-name"));
     }
 
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3505,8 +3873,19 @@ mod tests {
     #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
-        let ev =
-            sign(build_update_channel(cid, None, None, Some("private"), Some(Some(3600))).unwrap());
+        let ev = sign(
+            build_update_channel(
+                cid,
+                None,
+                None,
+                Some("private"),
+                Some(Some(3600)),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "visibility", "private"));
         assert!(has_tag(&ev, "ttl", "3600"));
@@ -3515,7 +3894,9 @@ mod tests {
     #[test]
     fn update_channel_clears_ttl() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, None, None, None, Some(None)).unwrap());
+        let ev = sign(
+            build_update_channel(cid, None, None, None, Some(None), None, None, None).unwrap(),
+        );
         assert!(has_tag(&ev, "ttl", ""));
     }
 
@@ -3523,16 +3904,96 @@ mod tests {
     fn update_channel_invalid_visibility_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, Some("secret"), None),
+            build_update_channel(cid, None, None, Some("secret"), None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn update_channel_join_role_is_always_explicit() {
+        use buzz_core::channel::ChannelJoinRole;
+        let cid = uuid();
+        let on = sign(
+            build_update_channel(
+                cid,
+                None,
+                None,
+                None,
+                None,
+                Some(ChannelJoinRole::Guest),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&on, "join_role", "guest"));
+        let off = sign(
+            build_update_channel(
+                cid,
+                None,
+                None,
+                None,
+                None,
+                Some(ChannelJoinRole::Member),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&off, "join_role", "member"));
+        let other =
+            sign(build_update_channel(cid, Some("n"), None, None, None, None, None, None).unwrap());
+        assert!(!other
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "join_role"));
+    }
+
+    #[test]
+    fn update_channel_unlisted_is_always_explicit() {
+        let cid = uuid();
+        let on = sign(
+            build_update_channel(cid, None, None, Some("open"), None, None, Some(true), None)
+                .unwrap(),
+        );
+        assert!(has_tag(&on, "visibility", "open"));
+        assert!(has_tag(&on, "unlisted", "true"));
+        let off = sign(
+            build_update_channel(cid, None, None, None, None, None, Some(false), None).unwrap(),
+        );
+        assert!(has_tag(&off, "unlisted", "false"));
+        let other =
+            sign(build_update_channel(cid, Some("n"), None, None, None, None, None, None).unwrap());
+        assert!(!other
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "unlisted"));
+    }
+
+    #[test]
+    fn update_channel_auto_join_is_always_explicit() {
+        let cid = uuid();
+        let on = sign(
+            build_update_channel(cid, None, None, None, None, None, None, Some(true)).unwrap(),
+        );
+        assert!(has_tag(&on, "auto_join", "true"));
+        let off = sign(
+            build_update_channel(cid, None, None, None, None, None, None, Some(false)).unwrap(),
+        );
+        assert!(has_tag(&off, "auto_join", "false"));
+        let other =
+            sign(build_update_channel(cid, Some("n"), None, None, None, None, None, None).unwrap());
+        assert!(!other
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "auto_join"));
     }
 
     #[test]
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, None, None),
+            build_update_channel(cid, None, None, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -3564,6 +4025,7 @@ mod tests {
                 Some(ChannelKind::Stream),
                 Some("General chat"),
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -3585,6 +4047,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -3602,6 +4065,7 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                false,
             )
             .unwrap(),
         );
@@ -3618,9 +4082,33 @@ mod tests {
                 None::<ChannelKind>,
                 None,
                 None,
+                false,
             ),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn create_channel_unlisted_emits_tag_only_when_set() {
+        let build = |unlisted| {
+            sign(
+                build_create_channel(
+                    uuid(),
+                    "solo",
+                    Some(Visibility::Private),
+                    Some(ChannelKind::Stream),
+                    None,
+                    None,
+                    unlisted,
+                )
+                .unwrap(),
+            )
+        };
+        assert!(has_tag(&build(true), "unlisted", "true"));
+        assert!(!build(false)
+            .tags
+            .iter()
+            .any(|t| t.kind().to_string() == "unlisted"));
     }
 
     #[test]
@@ -3634,6 +4122,7 @@ mod tests {
                 Some(ChannelKind::Stream),
                 None,
                 Some(3600),
+                false,
             )
             .unwrap(),
         );
@@ -4664,6 +5153,31 @@ mod tests {
     }
 
     #[test]
+    fn expiring_user_status_adds_expiration_after_emoji() {
+        let ev =
+            sign(build_user_status_expiring("lunch", Some("🥪"), Some(1_900_000_000)).unwrap());
+        assert_eq!(ev.content, "lunch");
+        assert_eq!(tag_values(&ev, "expiration"), vec!["1900000000"]);
+        let names: Vec<&str> = ev.tags.iter().map(|t| t.as_slice()[0].as_str()).collect();
+        assert_eq!(names, vec!["d", "emoji", "expiration"]);
+    }
+
+    #[test]
+    fn expiring_user_status_without_expiry_matches_build_user_status() {
+        let plain = sign(build_user_status("same", Some("🚀")).unwrap());
+        let none = sign(build_user_status_expiring("same", Some("🚀"), None).unwrap());
+        assert_eq!(plain.tags, none.tags);
+        assert!(tag_values(&plain, "expiration").is_empty());
+    }
+
+    #[test]
+    fn expiring_user_status_requires_text_or_emoji() {
+        let err = build_user_status_expiring("  ", Some(" "), Some(1_900_000_000)).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        assert!(build_user_status_expiring("", Some("🎶"), Some(1_900_000_000)).is_ok());
+    }
+
+    #[test]
     fn user_status_rejects_oversize_text() {
         let err = build_user_status(&"x".repeat(64 * 1024 + 1), None).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
@@ -4940,6 +5454,104 @@ mod tests {
         assert!(has_tag(&ev, "status", "dismissed"));
         assert!(has_tag(&ev, "action", "dismiss"));
         assert!(tag_values(&ev, "reason").is_empty());
+    }
+
+    fn tag_vecs(event: &nostr::Event) -> Vec<Vec<String>> {
+        event.tags.iter().map(|t| t.clone().to_vec()).collect()
+    }
+
+    #[test]
+    fn report_message_shape_matches_desktop() {
+        let author = "AB".repeat(32);
+        let eid = event_id().to_hex();
+        let ev = sign(
+            build_report(
+                ReportTarget::Event {
+                    author_pubkey: &author,
+                    event_id: &eid,
+                },
+                "spam",
+                Some("  buy now  "),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), KIND_REPORT as u16);
+        assert_eq!(ev.content, "buy now");
+        assert_eq!(
+            tag_vecs(&ev),
+            vec![
+                vec!["p".to_string(), "ab".repeat(32)],
+                vec!["e".to_string(), eid, "spam".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn report_keeps_p_tag_when_signer_is_the_reported_user() {
+        let keys = nostr::Keys::generate();
+        let me = keys.public_key().to_hex();
+        let eid = event_id().to_hex();
+        let user = build_report(ReportTarget::Pubkey(&me), "spam", None).unwrap();
+        let msg = build_report(
+            ReportTarget::Event {
+                author_pubkey: &me,
+                event_id: &eid,
+            },
+            "spam",
+            None,
+        )
+        .unwrap();
+        for builder in [user, msg] {
+            let ev = builder.sign_with_keys(&keys).unwrap();
+            assert!(tag_vecs(&ev).iter().any(|t| t[0] == "p" && t[1] == me));
+        }
+    }
+
+    #[test]
+    fn report_user_puts_type_on_p_tag() {
+        let pk = "c".repeat(64);
+        let ev =
+            sign(build_report(ReportTarget::Pubkey(&pk), "impersonation", Some("  ")).unwrap());
+        assert_eq!(ev.content, "");
+        assert_eq!(
+            tag_vecs(&ev),
+            vec![vec!["p".to_string(), pk, "impersonation".to_string()]]
+        );
+    }
+
+    #[test]
+    fn report_accepts_every_relay_type_and_nothing_else() {
+        let pk = "c".repeat(64);
+        for t in REPORT_TYPES {
+            assert!(
+                build_report(ReportTarget::Pubkey(&pk), t, None).is_ok(),
+                "{t}"
+            );
+        }
+        for bad in ["", "Spam", "abuse", "harassment"] {
+            let err = build_report(ReportTarget::Pubkey(&pk), bad, None).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn report_rejects_malformed_ids_and_oversized_note() {
+        let pk = "c".repeat(64);
+        let eid = event_id().to_hex();
+        let bad_author = ReportTarget::Event {
+            author_pubkey: "abc",
+            event_id: &eid,
+        };
+        assert!(build_report(bad_author, "spam", None).is_err());
+        let bad_event = ReportTarget::Event {
+            author_pubkey: &pk,
+            event_id: "abc",
+        };
+        assert!(build_report(bad_event, "spam", None).is_err());
+        assert!(build_report(ReportTarget::Pubkey("xyz"), "spam", None).is_err());
+        let big = "a".repeat(64 * 1024 + 1);
+        let err = build_report(ReportTarget::Pubkey(&pk), "spam", Some(&big)).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 
     #[test]

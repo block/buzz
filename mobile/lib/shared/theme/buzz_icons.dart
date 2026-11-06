@@ -3,8 +3,19 @@ import 'package:flutter/widgets.dart';
 /// Tabler 3.46.0 icons for the mobile icon preview.
 ///
 /// Semantic names preserve existing call sites; artwork matches buzz-app.
-/// Native iOS controls continue to use their platform symbols.
+/// Native iOS controls share Tabler artwork except Back and Close navigation.
 abstract final class BuzzIcons {
+  /// Tabler `filter-2`. Referenced from Dart so release icon pruning retains it.
+  static const filter2 = IconData(0x1014b, fontFamily: 'BuzzTabler');
+
+  static const cornerUpLeft = IconData(0xeb77, fontFamily: 'BuzzTabler');
+  static const droplet = IconData(0xea97, fontFamily: 'BuzzTabler');
+
+  static const edit = IconData(0xea98, fontFamily: 'BuzzTabler');
+
+  /// Tabler `qrcode`.
+  static const qrcode = IconData(0xeb11, fontFamily: 'BuzzTabler');
+
   /// Tabler `text-size`.
   static const aLargeSmall = IconData(0xf2b1, fontFamily: 'BuzzTabler');
 
@@ -145,6 +156,9 @@ abstract final class BuzzIcons {
 
   /// Tabler `flag`.
   static const flag = IconData(0xeaa6, fontFamily: 'BuzzTabler');
+
+  /// Tabler `cube-3d-sphere`, matching the desktop workspace control.
+  static const workspace = IconData(0xecd7, fontFamily: 'BuzzTabler');
 
   /// Tabler `folder`.
   static const folder = IconData(0xeaad, fontFamily: 'BuzzTabler');

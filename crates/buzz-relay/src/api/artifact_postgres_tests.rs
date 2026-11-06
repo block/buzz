@@ -120,7 +120,7 @@ impl Fixture {
             .await
             .unwrap();
         let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
@@ -144,25 +144,74 @@ impl Fixture {
 #[ignore = "requires Postgres"]
 async fn project_filter_survives_artifact_query_hook() {
     let f = Fixture::new().await;
-    let project = EventBuilder::new(Kind::Custom(30621), "")
-        .tags([
-            Tag::parse(["d", "review-project"]).unwrap(),
-            Tag::parse(["buzz-channel", &f.home.to_string()]).unwrap(),
-        ])
-        .sign_with_keys(&f.owner)
-        .unwrap();
-    f.state
-        .db
-        .insert_event(f.community, &project, None)
-        .await
-        .unwrap();
-    let filter = json!([{"kinds":[30621],"#buzz-channel":[f.home]}]);
-    let (status, body) = f.request("/query", filter.clone()).await;
-    assert!(status.is_success(), "{status}: {body}");
-    assert_eq!(body.as_array().unwrap().len(), 1);
-    assert_eq!(body[0]["id"], project.id.to_hex());
-    let (status, body) = f.request("/count", filter).await;
-    assert!(status.is_success(), "{status}: {body}");
+    let home = f.home.to_string();
+    // 30621 projects and 30617 repositories bind a channel via `buzz-channel`.
+    for kind in [30621u16, 30617] {
+        let event = |tag: &[&str], at: u64| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .tags([
+                    Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+                    Tag::parse(tag.iter().copied()).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&f.owner)
+                .unwrap()
+        };
+        let now = nostr::Timestamp::now().as_secs();
+        let bound = event(&["buzz-channel", &home], now - 10);
+        // Newer, unbound: `buzz-channel` and the wanted id sit in an unrelated tag.
+        let decoy = event(&["x", "buzz-channel", &home], now);
+        for e in [&bound, &decoy] {
+            f.state.db.insert_event(f.community, e, None).await.unwrap();
+        }
+        let filter = json!([{"kinds":[kind],"#buzz-channel":[f.home],"limit":1}]);
+        let (status, body) = f.request("/query", filter.clone()).await;
+        assert!(status.is_success(), "{kind} {status}: {body}");
+        assert_eq!(body.as_array().unwrap().len(), 1, "{kind}: {body}");
+        assert_eq!(body[0]["id"], bound.id.to_hex(), "{kind}: {body}");
+        let (status, body) = f.request("/count", filter).await;
+        assert!(status.is_success(), "{kind} {status}: {body}");
+        assert_eq!(body["count"], 1, "{kind}: {body}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn count_honors_buzz_channel_filter() {
+    let f = Fixture::new().await;
+    // Two projects bound to `home`, one bound to `private`, all stored in
+    // `home` so the explicit `#h` scope alone would count all three.
+    for channel in [f.home, f.home, f.private] {
+        let event = EventBuilder::new(Kind::Custom(30621), "")
+            .tags([
+                Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+                Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+                Tag::parse(["t", "proj"]).unwrap(),
+            ])
+            .sign_with_keys(&f.owner)
+            .unwrap();
+        f.state
+            .db
+            .insert_event(f.community, &event, Some(f.home))
+            .await
+            .unwrap();
+    }
+    for filter in [
+        // Fast COUNT over the reader's accessible channels.
+        json!([{"kinds":[30621],"#buzz-channel":[f.home]}]),
+        // Fast COUNT on the explicit-channel path.
+        json!([{"kinds":[30621],"#h":[f.home],"#buzz-channel":[f.home]}]),
+        // `#t` is not fully pushable, forcing the per-event fallback on both paths.
+        json!([{"kinds":[30621],"#t":["proj"],"#buzz-channel":[f.home]}]),
+        json!([{"kinds":[30621],"#h":[f.home],"#t":["proj"],"#buzz-channel":[f.home]}]),
+    ] {
+        let (status, body) = f.request("/query", filter.clone()).await;
+        assert!(status.is_success(), "{filter} {status}: {body}");
+        assert_eq!(body.as_array().unwrap().len(), 2, "{filter}: {body}");
+        let (status, body) = f.request("/count", filter.clone()).await;
+        assert!(status.is_success(), "{filter} {status}: {body}");
+        assert_eq!(body["count"], 2, "{filter}: {body}");
+    }
 }
 
 #[tokio::test]
@@ -311,21 +360,36 @@ async fn writes_use_channel_gates_for_home_and_move_source() {
         .as_array()
         .unwrap()
         .contains(&json!(["prev", peer_edit.id.to_hex()])));
+    // An unwritable source answers exactly like a move of a missing artifact.
+    let missing_move =
+        |key: &Keys| f.revision_as(key, f.home, Uuid::new_v4(), "move", Some(&moved));
+    let (status, body) = f.try_publish(&missing_move(&f.peer)).await;
+    let peer_missing = (status, without_event_id(body));
+    assert!(!peer_missing.0.is_success(), "{peer_missing:?}");
     // The peer can write the destination but not the private source.
     let back = f.revision_as(&f.peer, f.home, d, "move", Some(&moved));
     let (status, body) = f.try_publish(&back).await;
-    assert!(!status.is_success() || body["accepted"] == false, "{body}");
-    assert!(body.to_string().contains("not a channel member"), "{body}");
+    assert_eq!((status, without_event_id(body)), peer_missing);
     sqlx::query("UPDATE channels SET archived_at=now() WHERE community_id=$1 AND id=$2")
         .bind(f.community.as_uuid())
         .bind(f.private)
         .execute(&f.pool)
         .await
         .unwrap();
+    let (status, body) = f.try_publish(&missing_move(&f.owner)).await;
+    let owner_missing = (status, without_event_id(body));
+    assert!(!owner_missing.0.is_success(), "{owner_missing:?}");
     let archived_source = f.revision_as(&f.owner, f.home, d, "move", Some(&moved));
     let (status, body) = f.try_publish(&archived_source).await;
-    assert!(!status.is_success() || body["accepted"] == false, "{body}");
-    assert!(body.to_string().contains("archived"), "{body}");
+    assert_eq!((status, without_event_id(body)), owner_missing);
+}
+
+/// Drop the per-event id so rejections of different events compare exactly.
+fn without_event_id(mut body: Value) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("event_id");
+    }
+    body
 }
 
 /// Re-sign an artifact revision with extra tags and an explicit timestamp.
@@ -422,3 +486,6 @@ async fn generic_d_lookup_matches_before_limit() {
     expected.sort();
     assert_eq!(ids, expected, "{body}");
 }
+
+#[path = "artifact_postgres_tests/sync_postgres_tests.rs"]
+mod sync_postgres_tests;

@@ -1,20 +1,21 @@
-//! Community-admitted event-write transactions.
+//! Community-admitted write transactions.
 
 use std::collections::BTreeSet;
 
 use buzz_core::CommunityId;
+use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::deletion::{DeletionStore, ServingWriteLease};
 use crate::Result;
 
-/// An event-write transaction that has passed community admission.
+/// A transaction that has passed community write admission.
 ///
 /// Its only constructors take the shared community admission lock (or
 /// validate a serving write lease) on the transaction they wrap, for the
 /// community they record, so construction and admission are one step.
-/// Event-write helpers take `&mut AdmittedTx` and read the community from it,
+/// Write helpers take `&mut AdmittedTx` and read the community from it,
 /// so the compiler rejects a raw [`sqlx::Transaction`] or a transaction
 /// admitted for a different community.
 ///
@@ -24,8 +25,9 @@ use crate::Result;
 /// are the only ways it can end the transaction. Inside the crate, the
 /// `conn()` accessor hands statements the connection; the type can't stop
 /// crate code from issuing a raw `COMMIT` through it, so the database
-/// community write fences remain the backstop. Dropping the value without
-/// committing rolls back, as with [`sqlx::Transaction`].
+/// community write fences remain the backstop while deployed. Internal writers
+/// must preserve this boundary and use `commit()` for staged follow-up work.
+/// Dropping the value without committing rolls back, as with [`sqlx::Transaction`].
 ///
 /// These are live regressions for the guarantee. Event-write helpers accept an
 /// admitted transaction:
@@ -74,12 +76,17 @@ pub struct AdmittedTx {
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
-    push_events: Vec<Vec<u8>>,
+    push_events: Vec<StagedPushEvent>,
+}
+
+struct StagedPushEvent {
+    event_id: Vec<u8>,
+    created_at: DateTime<Utc>,
 }
 
 impl AdmittedTx {
     /// Take the shared community admission lock on `tx` and wrap it.
-    pub(super) async fn admit(
+    pub(crate) async fn admit(
         mut tx: Transaction<'static, Postgres>,
         store: &DeletionStore,
         community: CommunityId,
@@ -117,13 +124,21 @@ impl AdmittedTx {
         self.push_enqueue = producer;
     }
 
-    pub(crate) fn record_push_event(&mut self, event_id: &[u8], kind: i32) {
+    pub(crate) fn record_push_event(
+        &mut self,
+        event_id: &[u8],
+        created_at: DateTime<Utc>,
+        kind: i32,
+    ) {
         if self.push_enqueue.is_some()
             && crate::store::event_follow_up::PUSH_MATCH_KINDS.contains(&kind)
         {
             // Bound transaction-local staging as well as the shared worker queue.
             if self.push_events.len() < super::push_enqueue::CAPACITY {
-                self.push_events.push(event_id.to_vec());
+                self.push_events.push(StagedPushEvent {
+                    event_id: event_id.to_vec(),
+                    created_at,
+                });
             } else {
                 super::push_enqueue::record_drop("transaction_full");
             }
@@ -154,7 +169,7 @@ impl AdmittedTx {
     }
 
     /// Commit the transaction. This is the only commit path for admitted
-    /// event writes.
+    /// writes.
     ///
     /// Refreshes the TTL of every channel that received an event first, as
     /// the last statement before COMMIT.
@@ -169,8 +184,8 @@ impl AdmittedTx {
         }
         self.tx.commit().await?;
         if let Some(producer) = self.push_enqueue {
-            for event_id in self.push_events {
-                producer.submit(self.community, event_id);
+            for event in self.push_events {
+                producer.submit(self.community, event.event_id, event.created_at);
             }
         }
         Ok(())
@@ -190,3 +205,7 @@ impl std::fmt::Debug for AdmittedTx {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "admitted_tx/postgres_tests.rs"]
+mod postgres_tests;

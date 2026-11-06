@@ -11,21 +11,24 @@ class _MessageGalleryPrecache extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    final prefetch = useMemoized(_GalleryPrecache.new, const []);
+    useEffect(() => prefetch.dispose, [prefetch]);
     final providerSignature = Object.hashAll(providers);
     useEffect(() {
       var cancelled = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (cancelled || !context.mounted) {
-          return;
-        }
-        for (var index = focusedIndex - 2; index <= focusedIndex + 2; index++) {
-          if (index < 0 || index >= providers.length) {
-            continue;
-          }
-          unawaited(
-            precacheImage(providers[index], context, onError: (_, _) {}),
-          );
-        }
+        if (cancelled || !context.mounted) return;
+        // Prepare a five-photo strip immediately, then keep four ahead and two
+        // behind the current page. Two workers bound speculative network work.
+        final indices = [
+          for (var i = focusedIndex; i <= focusedIndex + 4; i++) i,
+          focusedIndex - 1,
+          focusedIndex - 2,
+        ];
+        prefetch.update(context, [
+          for (final i in indices)
+            if (i >= 0 && i < providers.length) providers[i],
+        ]);
       });
       return () => cancelled = true;
     }, [focusedIndex, providerSignature]);
@@ -33,8 +36,95 @@ class _MessageGalleryPrecache extends HookWidget {
   }
 }
 
+// Loads that leave the window are abandoned, so scrolling past previews on a
+// slow link frees both workers instead of finishing downloads nobody needs.
+class _GalleryPrecache {
+  BuildContext? _context;
+  List<ImageProvider<Object>> _window = [];
+  final _ready = <ImageProvider<Object>>{};
+  final _loading = <ImageProvider<Object>, _PrecacheLoad>{};
+
+  void update(BuildContext context, List<ImageProvider<Object>> window) {
+    _context = context;
+    _window = window;
+    _ready.removeWhere((provider) => !window.contains(provider));
+    for (final provider in _loading.keys.toList()) {
+      if (!window.contains(provider)) _loading.remove(provider)!.cancel();
+    }
+    _drain();
+  }
+
+  void _drain() {
+    final context = _context;
+    if (context == null || !context.mounted) return;
+    for (final provider in _window) {
+      if (_loading.length >= 2) break;
+      if (_ready.contains(provider) || _loading.containsKey(provider)) continue;
+      final load = _loading[provider] = _PrecacheLoad(
+        provider,
+        createLocalImageConfiguration(context),
+        () => _finish(provider),
+      );
+      // A cached image settles synchronously, so start once it is tracked.
+      load.start();
+    }
+  }
+
+  void _finish(ImageProvider<Object> provider) {
+    _loading.remove(provider);
+    if (_window.contains(provider)) _ready.add(provider);
+    _drain();
+  }
+
+  void dispose() {
+    _context = null;
+    _window = [];
+    _ready.clear();
+    for (final load in _loading.values) {
+      load.cancel();
+    }
+    _loading.clear();
+  }
+}
+
+// Like precacheImage, but cancellable before the first frame.
+class _PrecacheLoad {
+  _PrecacheLoad(this.provider, this.config, this.onDone);
+
+  final ImageProvider<Object> provider;
+  final ImageConfiguration config;
+  final VoidCallback onDone;
+  late final _stream = provider.resolve(config);
+  late final _listener = ImageStreamListener((image, _) {
+    image.dispose();
+    _settle();
+  }, onError: (_, _) => _settle());
+  bool _settled = false;
+
+  void start() => _stream.addListener(_listener);
+
+  void _settle() {
+    if (_settled) return;
+    _settled = true;
+    // Like precacheImage, keep listening until the end of the frame so a
+    // widget can subscribe before the image cache may drop the live image.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _stream.removeListener(_listener),
+    );
+    onDone();
+  }
+
+  void cancel() {
+    if (_settled) return;
+    _settled = true;
+    _stream.removeListener(_listener);
+    abandonPendingImage(_stream, provider, config);
+  }
+}
+
 class _MessageImageCarousel extends HookConsumerWidget {
   final List<MessageGalleryItem> items;
+  final bool mirrored;
   final double leadingOverflow;
   final double trailingOverflow;
   final VoidCallback? onReply;
@@ -43,6 +133,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
   const _MessageImageCarousel({
     super.key,
     required this.items,
+    required this.mirrored,
     required this.leadingOverflow,
     required this.trailingOverflow,
     required this.onReply,
@@ -51,6 +142,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final viewerContext = context;
     final itemSignature = items.map((item) => item.url).join('\u0000');
     final heroTags = useMemoized(
       () => [for (var index = 0; index < items.length; index++) Object()],
@@ -62,158 +154,223 @@ class _MessageImageCarousel extends HookConsumerWidget {
 
     return MessageGalleryFrame(
       count: items.length,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final contentWidth = constraints.hasBoundedWidth
-              ? constraints.maxWidth
-              : messageMediaMaxWidth(context);
-          final carouselWidth =
-              contentWidth + leadingOverflow + trailingOverflow;
-          final leadingExtent = leadingOverflow;
-          final isLeftToRight = Directionality.of(context) == TextDirection.ltr;
-          final itemTrailingPaddings = [
-            for (var index = 0; index < items.length; index++)
-              index == items.length - 1 ? Grid.gutter : Grid.half,
-          ];
-          final previewDecodeWidths = [
-            for (var index = 0; index < items.length; index++)
-              math.max(1.0, carouselWidth * 0.9 - itemTrailingPaddings[index]),
-          ];
-          final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
-          final previewProviders = [
-            for (var index = 0; index < items.length; index++)
-              ResizeImage.resizeIfNeeded(
-                (previewDecodeWidths[index] * devicePixelRatio).ceil(),
-                null,
-                MediaImageProvider(
-                  url: items[index].url,
-                  auth: mediaAuth,
-                  client: mediaClient,
+      mirrored: mirrored,
+      child: Directionality(
+        textDirection: mirrored ? TextDirection.rtl : TextDirection.ltr,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final contentWidth = constraints.hasBoundedWidth
+                ? constraints.maxWidth
+                : messageMediaMaxWidth(context);
+            final carouselWidth =
+                contentWidth + leadingOverflow + trailingOverflow;
+            // Directionality mirrors both the starting edge and trailing overflow.
+            final leadingExtent = leadingOverflow;
+            final isLeftToRight =
+                Directionality.of(context) == TextDirection.ltr;
+            final itemTrailingPaddings = [
+              for (var index = 0; index < items.length; index++)
+                index == items.length - 1 ? Grid.gutter : Grid.half,
+            ];
+            final previewDecodeWidths = [
+              for (var index = 0; index < items.length; index++)
+                math.max(
+                  1.0,
+                  carouselWidth * 0.9 - itemTrailingPaddings[index],
                 ),
-              ),
-          ];
-          final viewerItems = [
-            for (var index = 0; index < items.length; index++)
-              MediaViewerImage(
-                url: items[index].url,
-                heroTag: heroTags[index],
-                semanticLabel: items[index].semanticLabel,
-                previewDecodeWidth: previewDecodeWidths[index],
-                aspectRatio: items[index].aspectRatio,
-                preloadProvider: previewProviders[index],
-              ),
-          ];
-          final carousel = SizedBox(
-            key: const ValueKey('message-media-carousel'),
-            width: carouselWidth,
-            height: messageMediaCarouselHeight,
-            child: _MessageCarouselViewport(
-              width: carouselWidth,
-              currentIndex: currentIndex.value,
-              itemCount: items.length,
-              onPageChanged: (index) {
-                if (index != currentIndex.value) {
-                  unawaited(HapticFeedback.selectionClick());
-                }
-                currentIndex.value = index;
-              },
-              itemBuilder: (context, index) {
-                final item = items[index];
-                return Padding(
-                  key: ValueKey('message-media-carousel-page:${item.url}'),
-                  padding: EdgeInsetsDirectional.only(
-                    end: itemTrailingPaddings[index],
+            ];
+            final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+            final previewProviders = [
+              for (var index = 0; index < items.length; index++)
+                ResizeImage.resizeIfNeeded(
+                  (previewDecodeWidths[index] * devicePixelRatio).ceil(),
+                  null,
+                  MediaImageProvider(
+                    url: items[index].url,
+                    auth: mediaAuth,
+                    client: mediaClient,
                   ),
-                  child: Semantics(
-                    button: true,
-                    excludeSemantics: true,
-                    label: 'Open ${item.semanticLabel}',
-                    child: GestureDetector(
-                      key: ValueKey('message-media-carousel-item:${item.url}'),
-                      onTap: () => openImageViewer(
-                        context,
-                        imageUrl: item.url,
-                        heroTag: heroTags[index],
-                        semanticLabel: item.semanticLabel,
-                        previewDecodeWidth: previewDecodeWidths[index],
-                        aspectRatio: item.aspectRatio,
-                        galleryItems: viewerItems,
-                        initialIndex: index,
-                        onReply: onReply,
-                        onMore: onMore,
-                      ),
-                      child: Container(
-                        clipBehavior: Clip.antiAlias,
-                        decoration: BoxDecoration(
-                          color: context.colors.surfaceContainerHighest,
-                          borderRadius: BorderRadius.circular(Radii.md),
-                          border: Border.all(
-                            color: context.colors.outlineVariant,
-                          ),
+                ),
+            ];
+            final viewerItems = [
+              for (var index = 0; index < items.length; index++)
+                MediaViewerImage(
+                  url: items[index].url,
+                  heroTag: heroTags[index],
+                  semanticLabel: items[index].semanticLabel,
+                  previewDecodeWidth: previewDecodeWidths[index],
+                  aspectRatio: items[index].aspectRatio,
+                  preloadProvider: previewProviders[index],
+                ),
+            ];
+            final nativeGutter = math.max(
+              0.0,
+              MediaQuery.sizeOf(context).width - carouselWidth,
+            );
+            final carousel = SizedBox(
+              key: const ValueKey('message-media-carousel'),
+              width: carouselWidth,
+              height: messageMediaCarouselHeight,
+              child: !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS
+                  ? OverflowBox(
+                      minWidth: carouselWidth + 2 * nativeGutter,
+                      maxWidth: carouselWidth + 2 * nativeGutter,
+                      child: IosMediaCarousel(
+                        key: ValueKey((itemSignature, mediaAuth)),
+                        providers: previewProviders,
+                        labels: [for (final item in items) item.semanticLabel],
+                        width: carouselWidth,
+                        gutter: nativeGutter,
+                        gap: Grid.half,
+                        trailingPadding: Grid.gutter,
+                        radius:
+                            (MessageAttachmentCorners.of(context) ??
+                                    BorderRadius.circular(Radii.md))
+                                .topLeft
+                                .x,
+                        onScroll: (offset) => MessageGalleryScrollNotification(
+                          offset,
+                        ).dispatch(context),
+                        onPageChanged: (index) {
+                          if (index != currentIndex.value) {
+                            unawaited(HapticFeedback.selectionClick());
+                          }
+                          currentIndex.value = index;
+                        },
+                        onOpen: (index) => openImageViewer(
+                          viewerContext,
+                          imageUrl: items[index].url,
+                          heroTag: heroTags[index],
+                          semanticLabel: items[index].semanticLabel,
+                          previewDecodeWidth: previewDecodeWidths[index],
+                          aspectRatio: items[index].aspectRatio,
+                          galleryItems: viewerItems,
+                          initialIndex: index,
+                          onReply: onReply,
+                          onMore: onMore,
                         ),
-                        child: MediaViewerHero(
-                          tag: heroTags[index],
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(Radii.md),
-                            child: MediaImage(
-                              url: item.url,
-                              decodeWidth: previewDecodeWidths[index],
-                              fit: BoxFit.cover,
-                              semanticLabel: item.semanticLabel,
-                              frameBuilder:
-                                  (context, child, frame, synchronous) =>
-                                      frame != null || synchronous
-                                      ? child
-                                      : const MediaLoadingPlaceholder(
-                                          label: 'Loading image',
-                                        ),
-                              errorBuilder: (_, _, _) =>
-                                  const _MediaPreviewFallback(
-                                    icon: BuzzIcons.imageOff,
-                                    label: 'Image unavailable',
+                      ),
+                    )
+                  : _MessageCarouselViewport(
+                      width: carouselWidth,
+                      currentIndex: currentIndex.value,
+                      itemCount: items.length,
+                      onPageChanged: (index) {
+                        if (index != currentIndex.value) {
+                          unawaited(HapticFeedback.selectionClick());
+                        }
+                        currentIndex.value = index;
+                      },
+                      itemBuilder: (context, index) {
+                        final item = items[index];
+                        return Padding(
+                          key: ValueKey(
+                            'message-media-carousel-page:${item.url}',
+                          ),
+                          padding: EdgeInsetsDirectional.only(
+                            end: itemTrailingPaddings[index],
+                          ),
+                          child: Semantics(
+                            button: true,
+                            excludeSemantics: true,
+                            label: 'Open ${item.semanticLabel}',
+                            child: GestureDetector(
+                              key: ValueKey(
+                                'message-media-carousel-item:${item.url}',
+                              ),
+                              onTap: () => openImageViewer(
+                                viewerContext,
+                                imageUrl: item.url,
+                                heroTag: heroTags[index],
+                                semanticLabel: item.semanticLabel,
+                                previewDecodeWidth: previewDecodeWidths[index],
+                                aspectRatio: item.aspectRatio,
+                                galleryItems: viewerItems,
+                                initialIndex: index,
+                                onReply: onReply,
+                                onMore: onMore,
+                              ),
+                              child: Container(
+                                clipBehavior: Clip.antiAlias,
+                                decoration: BoxDecoration(
+                                  color: context.colors.surfaceContainerHighest,
+                                  borderRadius:
+                                      MessageAttachmentCorners.of(context) ??
+                                      BorderRadius.circular(Radii.md),
+                                  border: Border.all(
+                                    color: context.colors.outlineVariant,
                                   ),
+                                ),
+                                child: MediaViewerHero(
+                                  tag: heroTags[index],
+                                  child: ClipRRect(
+                                    borderRadius:
+                                        MessageAttachmentCorners.of(context) ??
+                                        BorderRadius.circular(Radii.md),
+                                    child: MediaImage(
+                                      url: item.url,
+                                      decodeWidth: previewDecodeWidths[index],
+                                      fit: BoxFit.cover,
+                                      semanticLabel: item.semanticLabel,
+                                      frameBuilder:
+                                          (
+                                            context,
+                                            child,
+                                            frame,
+                                            synchronous,
+                                          ) => frame != null || synchronous
+                                          ? child
+                                          : const MediaLoadingPlaceholder(
+                                              label: 'Loading image',
+                                            ),
+                                      errorBuilder: (_, _, _) =>
+                                          const _MediaPreviewFallback(
+                                            icon: BuzzIcons.imageOff,
+                                            label: 'Image unavailable',
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
-                        ),
-                      ),
+                        );
+                      },
                     ),
-                  ),
-                );
-              },
-            ),
-          );
+            );
 
-          final carouselSurface = Stack(
-            clipBehavior: Clip.none,
-            children: [
-              carousel,
-              _MessageGalleryPrecache(
-                providers: previewProviders,
-                focusedIndex: currentIndex.value,
-              ),
-            ],
-          );
-
-          if (leadingExtent <= 0 && trailingOverflow <= 0) {
-            return carouselSurface;
-          }
-          return SizedBox(
-            width: contentWidth,
-            height: messageMediaCarouselHeight,
-            child: OverflowBox(
-              alignment: AlignmentDirectional.centerStart,
-              minWidth: carouselWidth,
-              maxWidth: carouselWidth,
-              child: Transform.translate(
-                offset: Offset(
-                  isLeftToRight ? -leadingExtent : leadingExtent,
-                  0,
+            final carouselSurface = Stack(
+              clipBehavior: Clip.none,
+              children: [
+                carousel,
+                _MessageGalleryPrecache(
+                  providers: previewProviders,
+                  focusedIndex: currentIndex.value,
                 ),
-                child: carouselSurface,
+              ],
+            );
+
+            if (leadingExtent <= 0 && trailingOverflow <= 0) {
+              return carouselSurface;
+            }
+            return SizedBox(
+              width: contentWidth,
+              height: messageMediaCarouselHeight,
+              child: OverflowBox(
+                alignment: AlignmentDirectional.centerStart,
+                minWidth: carouselWidth,
+                maxWidth: carouselWidth,
+                child: Transform.translate(
+                  offset: Offset(
+                    isLeftToRight ? -leadingExtent : leadingExtent,
+                    0,
+                  ),
+                  child: carouselSurface,
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -256,6 +413,10 @@ class _MessageCarouselViewport extends HookWidget {
       child: NotificationListener<ScrollUpdateNotification>(
         onNotification: (notification) {
           if (notification.depth == 0 && notification.metrics is PageMetrics) {
+            MessageGalleryScrollNotification(
+              notification.metrics.pixels -
+                  notification.metrics.minScrollExtent,
+            ).dispatch(context);
             final index = (notification.metrics as PageMetrics).page!.round();
             if (index != currentIndex) onPageChanged(index);
           }
@@ -264,7 +425,11 @@ class _MessageCarouselViewport extends HookWidget {
         child: CustomScrollView(
           controller: controller,
           scrollDirection: Axis.horizontal,
-          physics: const _CarouselPagePhysics(),
+          physics: _CarouselPagePhysics(
+            parent: Theme.of(context).platform == TargetPlatform.iOS
+                ? const BouncingScrollPhysics()
+                : const ClampingScrollPhysics(),
+          ),
           clipBehavior: Clip.none,
           slivers: [
             SliverPadding(

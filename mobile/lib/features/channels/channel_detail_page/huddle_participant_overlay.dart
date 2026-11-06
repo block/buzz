@@ -198,13 +198,8 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                     ? Duration.zero
                     : const Duration(milliseconds: 180),
                 padding: EdgeInsets.all(active ? Grid.xxs : Grid.half),
-                decoration: BoxDecoration(
-                  shape: isAgent ? BoxShape.rectangle : BoxShape.circle,
-                  borderRadius: isAgent
-                      ? BorderRadius.circular(
-                          (_huddleParticipantSpotlightRadius + Grid.half) * 0.6,
-                        )
-                      : null,
+                decoration: ShapeDecoration(
+                  shape: avatarShape(isAgent: isAgent),
                   color: context.colors.primary.withValues(
                     alpha: active ? 0.18 : 0.08,
                   ),
@@ -212,7 +207,7 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
                 child: AvatarImage(
                   imageUrl: profile?.avatarUrl,
                   radius: _huddleParticipantSpotlightRadius,
-                  backgroundColor: context.colors.primaryContainer,
+                  backgroundColor: context.controlSurface,
                   fallback: Icon(
                     BuzzIcons.userRound,
                     size: 56,
@@ -355,8 +350,7 @@ class _HuddleParticipantRoster extends ConsumerWidget {
                                   AvatarImage(
                                     imageUrl: profile?.avatarUrl,
                                     radius: 22,
-                                    backgroundColor:
-                                        context.colors.primaryContainer,
+                                    backgroundColor: context.controlSurface,
                                     fallback: Icon(
                                       BuzzIcons.userRound,
                                       size: 22,

@@ -23,7 +23,10 @@ impl Fixture {
         if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
             crate::migration::run_migrations(&pool).await.unwrap();
         }
-        let db = Db::from_pool(pool);
+        Self::on(Db::from_pool(pool)).await
+    }
+    /// The fixture on `db`, which is already migrated.
+    async fn on(db: Db) -> Self {
         db.maintain_partitions(
             1,
             crate::partition::PartitionMaintenancePolicy {
@@ -255,6 +258,157 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     f.db.validate_deletion_serving_catalog().await.unwrap();
 }
 
+/// An artifact in a system channel is read only by a query whose `#h` names
+/// that channel (NIP-CL), even when the channel is open.
+/// Mutation: drop the `channel_type` condition from `query_artifacts` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn system_channel_artifacts_are_read_only_by_name() {
+    let f = Fixture::new().await;
+    let system = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by) VALUES($1,$2,$3,'open','system',$4)")
+        .bind(f.community.as_uuid())
+        .bind(system)
+        .bind(system.to_string())
+        .bind(f.owner.public_key().to_bytes().as_slice())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    for home in [f.a, system] {
+        let create = f.revision(Uuid::new_v4(), "create", home, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+    }
+    for reader in [&f.owner, &f.peer] {
+        let (events, _) = f
+            .query(reader, serde_json::json!({"artifact":"current"}), false)
+            .await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(homes, [Some(f.a)], "no #h");
+        assert_eq!(
+            f.count(reader, serde_json::json!({"artifact":"current"}))
+                .await,
+            1
+        );
+        let named = serde_json::json!({"artifact":"current","#h":[system.to_string()]});
+        let (events, _) = f.query(reader, named.clone(), false).await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(homes, [Some(system)], "#h names the system channel");
+        assert_eq!(f.count(reader, named).await, 1);
+    }
+}
+
+/// An artifact in an unlisted open channel is read by a non-member only
+/// through a query whose `#h` names that channel; a member reads it as usual.
+/// Mutation: drop the unlisted condition from `query_artifacts` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unlisted_channel_artifacts_are_read_by_name_for_non_members() {
+    let f = Fixture::new().await;
+    let unlisted = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by,unlisted) VALUES($1,$2,$3,'open','stream',$4,TRUE)")
+        .bind(f.community.as_uuid())
+        .bind(unlisted)
+        .bind(unlisted.to_string())
+        .bind(f.owner.public_key().to_bytes().as_slice())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_members(community_id,channel_id,pubkey,role) VALUES($1,$2,$3,'owner')",
+    )
+    .bind(f.community.as_uuid())
+    .bind(unlisted)
+    .bind(f.owner.public_key().to_bytes().as_slice())
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    for home in [f.a, unlisted] {
+        let create = f.revision(Uuid::new_v4(), "create", home, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+    }
+    let unnamed = serde_json::json!({"artifact":"current"});
+    let named = serde_json::json!({"artifact":"current","#h":[unlisted.to_string()]});
+    let homes = |events: Vec<buzz_core::StoredEvent>| {
+        let mut homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        homes.sort();
+        homes
+    };
+
+    // The member reads both without naming either.
+    let (events, _) = f.query(&f.owner, unnamed.clone(), false).await;
+    let mut both = vec![Some(f.a), Some(unlisted)];
+    both.sort();
+    assert_eq!(homes(events), both, "member without #h");
+
+    // A non-member reads the unlisted one only by naming it.
+    let (events, _) = f.query(&f.peer, unnamed.clone(), false).await;
+    assert_eq!(homes(events), [Some(f.a)], "non-member without #h");
+    assert_eq!(f.count(&f.peer, unnamed).await, 1);
+    let (events, _) = f.query(&f.peer, named.clone(), false).await;
+    assert_eq!(homes(events), [Some(unlisted)], "non-member #h names it");
+    assert_eq!(f.count(&f.peer, named).await, 1);
+}
+
+/// An artifact in a channel of a type added later is read only by a query
+/// whose `#h` names that channel, like a system channel (NIP-CL).
+/// Mutation: put back `c.channel_type <> 'system'` in `query_artifacts` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifacts_of_a_later_channel_type_are_read_only_by_name() {
+    use super::legacy_channel_types_postgres_tests::{scratch_db_with_future_type, FUTURE_TYPE};
+    let (db, _scratch) = scratch_db_with_future_type().await;
+    let f = Fixture::on(db).await;
+    let later = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by) VALUES($1,$2,$3,'open',$4::channel_type,$5)")
+        .bind(f.community.as_uuid())
+        .bind(later)
+        .bind(later.to_string())
+        .bind(FUTURE_TYPE)
+        .bind(f.owner.public_key().to_bytes().as_slice())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let mut ds = Vec::new();
+    for home in [f.a, later] {
+        let d = Uuid::new_v4();
+        let create = f.revision(d, "create", home, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        let update = f.revision(d, "update", home, Some(&create), &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&update, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        ds.push(d.to_string());
+    }
+    // History needs `#d`; both queries name both artifacts.
+    for (view, per_channel) in [("current", 1), ("history", 2)] {
+        let unnamed = serde_json::json!({ "artifact": view, "#d": ds });
+        let (events, _) = f.query(&f.owner, unnamed.clone(), false).await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(homes, vec![Some(f.a); per_channel], "{view} without #h");
+        assert_eq!(f.count(&f.owner, unnamed).await, per_channel as i64);
+
+        let named = serde_json::json!({ "artifact": view, "#d": ds, "#h": [later.to_string()] });
+        let (events, _) = f.query(&f.owner, named.clone(), false).await;
+        let homes: Vec<_> = events.iter().map(|e| e.channel_id).collect();
+        assert_eq!(
+            homes,
+            vec![Some(later); per_channel],
+            "{view} #h names the channel"
+        );
+        assert_eq!(f.count(&f.owner, named).await, per_channel as i64);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn repeated_moves_get_distinct_source_safe_markers() {
@@ -435,4 +589,237 @@ async fn quiescing_community_rejects_artifact_at_admission_before_coordinate_loc
         (0, 0),
         "a rejected artifact must persist nothing"
     );
+}
+
+/// A non-create revision whose head lives outside the channel the caller
+/// authorized answers exactly like a missing artifact, before the revision,
+/// type, deleted and root checks could describe the head.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn head_outside_authorized_channel_matches_missing_head() {
+    let f = Fixture::new().await;
+    let d = Uuid::new_v4();
+    let create = f.revision(d, "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let gone = Uuid::new_v4();
+    let deleted_d = Uuid::new_v4();
+    let deleted_create = f.revision(deleted_d, "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&deleted_create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let deleted = f.revision(
+        deleted_d,
+        "delete",
+        f.a,
+        Some(&deleted_create),
+        &f.owner,
+        vec![],
+    );
+    assert!(matches!(
+        f.accept(&deleted, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let retyped = {
+        let mut tags: Vec<Vec<String>> = vec![
+            vec!["ar".into(), "1".into()],
+            vec!["d".into(), d.to_string()],
+            vec!["h".into(), f.b.to_string()],
+            vec!["type".into(), "buzz.note".into()],
+            vec!["op".into(), "update".into()],
+            vec!["title".into(), "Test".into()],
+        ];
+        tags.push(vec!["prev".into(), create.id.to_hex()]);
+        EventBuilder::new(Kind::Custom(45010), "secret")
+            .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+            .sign_with_keys(&f.peer)
+            .unwrap()
+    };
+    let cases = [
+        (
+            "missing",
+            f.revision(gone, "update", f.b, Some(&create), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "current prev",
+            f.revision(d, "update", f.b, Some(&create), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "stale prev",
+            f.revision(d, "update", f.b, Some(&deleted), &f.peer, vec![]),
+            None,
+        ),
+        ("other type", retyped, None),
+        (
+            "delete",
+            f.revision(d, "delete", f.b, Some(&create), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "restore deleted",
+            f.revision(deleted_d, "restore", f.b, Some(&deleted), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "update deleted",
+            f.revision(deleted_d, "update", f.b, Some(&deleted), &f.peer, vec![]),
+            None,
+        ),
+        (
+            "move from unauthorized source",
+            f.revision(d, "move", f.b, Some(&create), &f.peer, vec![]),
+            Some(f.b),
+        ),
+    ];
+    for (case, event, source) in cases {
+        match f.accept(&event, source).await {
+            ArtifactOutcome::Conflict(reason) => {
+                assert_eq!(reason, super::artifact::HEAD_UNAVAILABLE, "{case}")
+            }
+            other => panic!("{case}: {other:?}"),
+        }
+    }
+    // Positive control: the same revision homed where the head lives.
+    let update = f.revision(d, "update", f.a, Some(&create), &f.peer, vec![]);
+    assert!(matches!(
+        f.accept(&update, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+}
+
+/// Sync's complete-set read: keyset pages by `d` share one snapshot, so a
+/// change committed after it opens is in no page. Mutation: drop the
+/// `REPEATABLE READ` statement → the late create appears in a later page →
+/// RED. Mutation: drop the `a.artifact_id>` keyset bound → pages repeat → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
+    let f = Fixture::new().await;
+    let mut ids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+    ids.sort();
+    let mut heads = vec![];
+    for d in &ids {
+        let create = f.revision(*d, "create", f.a, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&create, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        heads.push(create);
+    }
+    // A deleted artifact leaves the set but stays visible to the head view.
+    let deleted = f.revision(ids[4], "delete", f.a, Some(&heads[4]), &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&deleted, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let reader = f.owner.public_key();
+    let mut snapshot =
+        f.db.open_artifact_snapshot(f.community, reader.as_bytes(), &[f.a])
+            .await
+            .unwrap()
+            .unwrap();
+    let first = snapshot.next_page(&[], 2).await.unwrap();
+    // Committed after the snapshot opened, and its `d` sorts after the first
+    // page, so only a fresh snapshot per page would return it.
+    let late = loop {
+        let d = Uuid::new_v4();
+        if d > ids[1] {
+            break d;
+        }
+    };
+    let late_create = f.revision(late, "create", f.a, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&late_create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let mut seen: Vec<_> = first.iter().map(|e| e.event.id).collect();
+    loop {
+        let page = snapshot.next_page(&[], 2).await.unwrap();
+        if page.is_empty() {
+            break;
+        }
+        seen.extend(page.iter().map(|e| e.event.id));
+    }
+    snapshot.finish().await.unwrap();
+    assert_eq!(seen, heads[..4].iter().map(|e| e.id).collect::<Vec<_>>());
+
+    // Predicates apply inside the snapshot.
+    let mut filtered =
+        f.db.open_artifact_snapshot(f.community, reader.as_bytes(), &[f.a])
+            .await
+            .unwrap()
+            .unwrap();
+    let none = filtered
+        .next_page(&[("type".into(), vec!["other".into()])], 10)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+
+    // A private channel the reader cannot read refuses the whole sync.
+    assert!(matches!(
+        f.db.open_artifact_snapshot(f.community, f.peer.public_key().as_bytes(), &[f.a, f.b])
+            .await
+            .unwrap(),
+        Err(super::artifact_query::SnapshotDenied::Restricted)
+    ));
+    // So does a channel that does not exist.
+    assert!(matches!(
+        f.db.open_artifact_snapshot(f.community, reader.as_bytes(), &[Uuid::new_v4()])
+            .await
+            .unwrap(),
+        Err(super::artifact_query::SnapshotDenied::Restricted)
+    ));
+
+    let (head, is_deletion) =
+        f.db.artifact_head(f.community, reader.as_bytes(), ids[4], &[])
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(head.event.id, deleted.id);
+    assert!(is_deletion);
+    let (head, is_deletion) =
+        f.db.artifact_head(f.community, reader.as_bytes(), ids[0], &[])
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(head.event.id, heads[0].id);
+    assert!(!is_deletion);
+    let (view, _) = f
+        .query(
+            &f.owner,
+            serde_json::json!({"artifact":"head","#d":[ids[4], ids[0]]}),
+            false,
+        )
+        .await;
+    let mut view: Vec<_> = view.iter().map(|e| e.event.id).collect();
+    view.sort();
+    let mut expected = vec![deleted.id, heads[0].id];
+    expected.sort();
+    assert_eq!(view, expected);
+    assert_eq!(
+        f.count(
+            &f.owner,
+            serde_json::json!({"artifact":"current","#d":[ids[4]]})
+        )
+        .await,
+        0
+    );
+    // A reader who cannot read the head's channel learns nothing.
+    let private = Uuid::new_v4();
+    let create = f.revision(private, "create", f.b, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&create, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    assert!(f
+        .db
+        .artifact_head(f.community, f.peer.public_key().as_bytes(), private, &[])
+        .await
+        .unwrap()
+        .is_none());
 }

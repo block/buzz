@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../relay/relay.dart';
+import '../verified_profiles/verified_profile_directory.dart';
 import 'identity_names.dart';
 
 /// Client-wide naming facts. Views choose their own comparison context with
@@ -10,20 +11,17 @@ import 'identity_names.dart';
 final identityNameSourcesProvider = Provider<IdentityNameSources>((ref) {
   return IdentityNameSources(
     profiles: ref.watch(userCacheProvider),
+    verifiedNames: {
+      for (final MapEntry(:key, :value)
+          in ref.watch(verifiedProfilesProvider).entries)
+        key: value.displayName,
+    },
     agentPubkeys: ref.watch(knownAgentPubkeysProvider),
     agentDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
     agentOwners: ref.watch(agentOwnersProvider).asData?.value ?? const {},
     viewer: ref.watch(myPubkeyProvider)?.toLowerCase(),
   );
 });
-
-/// [names]'s comparison context resolved against the live naming facts.
-/// Lets a surface hand its context to a sheet or route as a watchable
-/// value, so the destination follows later profile and owner changes.
-final liveIdentityNamesProvider = Provider.autoDispose
-    .family<IdentityNames, IdentityNames>(
-      (ref, names) => names.withSources(ref.watch(identityNameSourcesProvider)),
-    );
 
 /// Requests missing owner profiles for [names] after the current build.
 void loadIdentityNameOwners(Ref ref, IdentityNames names) {
@@ -37,8 +35,8 @@ void loadIdentityNameOwners(Ref ref, IdentityNames names) {
 }
 
 /// Labels for a displayed collection with no channel context, such as search
-/// results, a Pulse timeline, or a picker's choices. [candidates] is that
-/// collection; keys outside it resolve against it plus themselves.
+/// results or a picker's choices. [candidates] is that collection; keys
+/// outside it resolve against it plus themselves.
 ///
 /// Uncached profiles are loaded for the identities in [shown] (default: all
 /// [candidates]). Pass [shown] when the context also holds identities that are

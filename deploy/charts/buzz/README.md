@@ -173,8 +173,8 @@ two gauges labelled `phase`:
 - `buzz_startup_phase_seconds` is the finished step's duration.
 
 `degraded` means the step hit a non-fatal error and startup continued — for
-example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
-not warm. `failed` means startup aborted inside the step.
+example, some large channel rosters failed reconciliation or a NIP-FI issuer
+did not warm. `failed` means startup aborted inside the step.
 
 These are gauges, not counters, because each value is written once per boot
 and a monotonic-counter scrape drops a series' first sample. Each is written
@@ -183,8 +183,7 @@ field of the `Prometheus metrics exporter started` log (2700 s with default
 intervals). A step that runs longer than that timeout loses its `_current`
 series, so a pod stuck that long shows no current step. The `phase` values are
 the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
-they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
-also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
+they never reuse an early lifecycle phase name.
 
 ### Readiness contract
 
@@ -195,6 +194,15 @@ gating the probe on them removed the whole deployment from the load balancer at
 once and left a reconnect burst with nowhere to land. There is no separate
 "starting" state — the health listener does not bind until the database,
 migrations, Redis, and pub/sub are up, so a process that can answer has booted.
+With `BUZZ_NIP_FI_COMMUNITY_SOURCE=database` and a mode other than `off`, the
+first NIP-FI binding snapshot also loads before any listener binds (startup
+phase `nip_fi_snapshot_load`); a failed load exits the process, so a pod never
+reports ready without one. Later refresh failures do not affect readiness —
+watch `buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds` instead. The
+source's env vars (`BUZZ_NIP_FI_COMMUNITY_SOURCE`,
+`BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS`, `BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS`,
+`BUZZ_NIP_FI_RESOLVER_NEGATIVE_CACHE_MAX`, `BUZZ_NIP_FI_RESOLVER_MAX_INFLIGHT`)
+and alerts are in `docs/operator-nip-fi-bindings.md`.
 
 Shared-dependency health moved to **`/_status`** on the same private health
 listener, under a `dependencies` object carrying the `postgres`, `redis`,
@@ -319,7 +327,7 @@ maximum gauges when diagnosing total capacity pressure.
 Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
 `bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
 `authorization`, `subscription_history`, `event_write`, and `maintenance`.
-Only the following twelve pairs are valid:
+Only the following eleven pairs are valid:
 
 ```text
 writer/bootstrap                 reader/bootstrap
@@ -329,12 +337,12 @@ writer/authentication
 writer/authorization             reader/authorization
 writer/subscription_history      reader/subscription_history
 writer/event_write
-writer/maintenance               reader/maintenance
+writer/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 216
-raw Prometheus series per pod: `12 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 198
+raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
@@ -408,6 +416,38 @@ reader family remains absent when no read replica is configured; use
 Pool sizing and the aggregate connection budget across all four roles remain
 deployment configuration concerns. The relay does not enforce a combined
 connection ceiling.
+
+The reader pool keeps a warm floor of one fifth of its maximum (at least one)
+established connections per relay pod, so standing reader connections are
+that floor times the pod count; size the replica's `max_connections` for it.
+Each routed read proves the replica is caught up before serving from it. A
+proof that does not answer within 1s falls back to the writer, counted as
+`buzz_db_route_decision{decision="writer",reason="reader_proof_timeout"}`.
+A sustained rise in that series means the replica is reachable but not
+answering, for example during a failover. Every connection returned to the
+reader pool passes a release check first. A connection is closed instead of
+returned, and the pool dials a replacement, when the check does not answer
+within 5s (`reason="timeout"`), fails (`error`), or finds a transaction still
+open (`open_transaction`). Each close increments
+`buzz_db_reader_release_closed_total{reason}`, a counter with those three
+series. A rise in `timeout` means reader sockets stopped answering.
+
+Subscription-history reads are the exception to the writer fallback when the
+reader is merely busy. Each pod admits at most its reader pool size less one
+fifth (16 at the default pool size of 20) history reads to the reader at
+once, which normally leaves authorization reads a free reader connection
+(connections still finishing their release can briefly take it). A history read
+that waits more than 1s for admission, or misses the reader's 150ms acquire
+budget while every reader connection is busy, is rejected with the retryable
+`CLOSED` `error: database error` instead of moving to the writer, where it
+would compete with authentication and tenant lookups. Each rejection
+increments `buzz_db_route_decision{decision="rejected"}`, with
+`reason="history_read_cap"` or `"reader_acquire_timeout"`. A history read
+the reader cannot serve for other reasons (unreachable, validation failure,
+proof timeout, stale replica) still falls back to the writer. The
+compatibility families `buzz_db_pool_acquire_wait_seconds` and
+`buzz_db_pool_acquisitions_total` carry `operation` as well as `pool_role`
+and `outcome`.
 
 ## Relay Pod extensions
 
@@ -593,7 +633,7 @@ default so long-lived WebSocket connections have time to drain.
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
 
-Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. Older relays verify its roster-fence trigger before opening listeners and refuse to start if the trigger is missing or inert. Newer relays run the same check in every roster writer and do not require the trigger. A later release drops it, and that release requires every relay to run a version without the startup check first. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

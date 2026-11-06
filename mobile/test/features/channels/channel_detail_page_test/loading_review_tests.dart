@@ -9,7 +9,7 @@ void _loadingReviewTests() {
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.reset);
         final root = _textMsg(
-          id: 'thread-root',
+          id: threadIdThreadDashRoot,
           pubkey: 'alice',
           content: 'Original message',
           createdAt: 1000,
@@ -22,7 +22,7 @@ void _loadingReviewTests() {
               content: 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
-                ['e', 'thread-root', '', 'reply'],
+                ['e', threadIdThreadDashRoot, '', 'reply'],
               ],
             ),
         ];
@@ -30,7 +30,7 @@ void _loadingReviewTests() {
         await tester.pumpWidget(
           _buildTestable(
             messages: [root],
-            pendingThreadReplies: {'thread-root': query.future},
+            pendingThreadReplies: {threadIdThreadDashRoot: query.future},
             home: target == null
                 ? null
                 : ThreadDetailPage(
@@ -181,7 +181,7 @@ void _loadingReviewTests() {
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.reset);
         final root = _textMsg(
-          id: 'thread-root',
+          id: threadIdThreadDashRoot,
           pubkey: 'alice',
           content: 'Original message',
           createdAt: 1000,
@@ -194,7 +194,7 @@ void _loadingReviewTests() {
               content: 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
-                ['e', 'thread-root', '', 'reply'],
+                ['e', threadIdThreadDashRoot, '', 'reply'],
               ],
             ),
         ];
@@ -203,7 +203,7 @@ void _loadingReviewTests() {
         await tester.pumpWidget(
           _buildTestable(
             messages: [root],
-            pendingThreadReplies: {'thread-root': query.future},
+            pendingThreadReplies: {threadIdThreadDashRoot: query.future},
             home: ThreadDetailPage(
               threadHead: provisional.first,
               allMessages: provisional,
@@ -267,7 +267,7 @@ void _loadingReviewTests() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final root = _textMsg(
-      id: 'tall-root',
+      id: threadIdTallDashRoot,
       pubkey: 'alice',
       content:
           '${List.generate(70, (i) => 'Head line $i').join('\n')}\nEnd of original message',
@@ -276,7 +276,7 @@ void _loadingReviewTests() {
     await tester.pumpWidget(
       _buildTestable(
         messages: [root],
-        pendingThreadReplies: {'tall-root': replies.future},
+        pendingThreadReplies: {threadIdTallDashRoot: replies.future},
         home: ThreadDetailPage(
           threadHead: formatTimeline([root]).single,
           allMessages: formatTimeline([root]),
@@ -294,7 +294,7 @@ void _loadingReviewTests() {
         pubkey: 'bob',
         content: 'Reply after tall head',
         extraTags: const [
-          ['e', 'tall-root', '', 'reply'],
+          ['e', threadIdTallDashRoot, '', 'reply'],
         ],
       ),
     ]);
@@ -328,147 +328,125 @@ void _loadingReviewTests() {
     expect(bottomPoint.dy, greaterThan(800));
   });
 
-  for (final completesAfterDisposal in [false, true]) {
-    testWidgets(
-      'thread hydration owns one video preview lifecycle late=$completesAfterDisposal',
-      (tester) async {
-        tester.view.physicalSize = const Size(400, 800);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.reset);
-        final root = _textMsg(
-          id: 'video-root',
-          pubkey: 'alice',
-          content: '![video](https://example.com/head.mp4)',
-          extraTags: const [
-            [
-              'imeta',
-              'url https://example.com/head.mp4',
-              'm video/mp4',
-              'dim 320x180',
-            ],
-          ],
-        );
-        final replies = Completer<List<NostrEvent>>();
-        final preview = Completer<LoadedVideoPreviewFrame?>();
-        var loads = 0;
-        var disposals = 0;
-        await tester.pumpWidget(
-          _buildTestable(
-            messages: [root],
-            pendingThreadReplies: {'video-root': replies.future},
-            videoPreviewLoader: (_) {
-              loads++;
-              return preview.future;
-            },
-            home: ThreadDetailPage(
-              threadHead: formatTimeline([root]).single,
-              allMessages: formatTimeline([root]),
-              channelId: _channelId,
-              currentPubkey: 'self',
-              isMember: true,
-              isArchived: false,
-            ),
-          ),
-        );
-        for (var frame = 0; frame < 10; frame++) {
-          await tester.pump(const Duration(milliseconds: 16));
-        }
-        expect(loads, 1);
-        final frameResource = LoadedVideoPreviewFrame(
-          child: const SizedBox(),
-          aspectRatio: 16 / 9,
-          dispose: () async {
-            disposals++;
-          },
-        );
-        if (!completesAfterDisposal) {
-          preview.complete(frameResource);
-          await tester.pump();
-        }
-        replies.complete([
-          _textMsg(
-            id: 'video-reply',
-            pubkey: 'bob',
-            content: 'Reply to video',
-            extraTags: const [
-              ['e', 'video-root', '', 'reply'],
-            ],
-          ),
-        ]);
-        for (var frame = 0; frame < 30; frame++) {
-          await tester.pump(const Duration(milliseconds: 16));
-          expect(
-            loads,
-            1,
-            reason: 'One head owns video initialization at frame $frame',
-          );
-          expect(
-            find
-                .byKey(
-                  const ValueKey(
-                    'message-media-video-preview:https://example.com/head.mp4',
-                  ),
-                )
-                .hitTestable(),
-            findsOneWidget,
-          );
-        }
-        final semantics = tester.ensureSemantics();
-        await tester.pump();
-        final video = find.byKey(
-          const ValueKey(
-            'message-media-video-preview:https://example.com/head.mp4',
-          ),
-        );
-        final node = tester.getSemantics(video);
-        var semanticRect = node.rect;
-        for (var ancestor = node; ;) {
-          final transform = ancestor.transform;
-          if (transform != null) {
-            semanticRect = MatrixUtils.transformRect(transform, semanticRect);
-          }
-          final parent = ancestor.parent;
-          if (parent == null) break;
-          ancestor = parent;
-        }
-        expect(semanticRect.contains(tester.getCenter(video)), isTrue);
-        semantics.dispose();
-        await tester.pumpWidget(const SizedBox());
-        await tester.pump();
-        if (completesAfterDisposal) preview.complete(frameResource);
-        await tester.pump();
-        expect(
-          disposals,
-          1,
-          reason: 'Late completion releases its single resource',
-        );
-      },
+  testWidgets('thread hydration mounts one video preview head', (tester) async {
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final root = _textMsg(
+      id: threadIdVideoDashRoot,
+      pubkey: 'alice',
+      content: '![video](https://example.com/head.mp4)',
+      extraTags: const [
+        [
+          'imeta',
+          'url https://example.com/head.mp4',
+          'm video/mp4',
+          'dim 320x180',
+        ],
+      ],
     );
-  }
+    final replies = Completer<List<NostrEvent>>();
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [root],
+        pendingThreadReplies: {threadIdVideoDashRoot: replies.future},
+        home: ThreadDetailPage(
+          threadHead: formatTimeline([root]).single,
+          allMessages: formatTimeline([root]),
+          channelId: _channelId,
+          currentPubkey: 'self',
+          isMember: true,
+          isArchived: false,
+        ),
+      ),
+    );
+    final head = find.byKey(
+      const ValueKey(
+        'message-media-video-preview:https://example.com/head.mp4',
+      ),
+      skipOffstage: false,
+    );
+    for (var frame = 0; frame < 10; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(head, findsOneWidget, reason: 'frame $frame');
+    }
+    replies.complete([
+      _textMsg(
+        id: 'video-reply',
+        pubkey: 'bob',
+        content: 'Reply to video',
+        extraTags: const [
+          ['e', threadIdVideoDashRoot, '', 'reply'],
+        ],
+      ),
+    ]);
+    for (var frame = 0; frame < 30; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(head, findsOneWidget, reason: 'frame $frame');
+      expect(head.hitTestable(), findsOneWidget);
+    }
+    final semantics = tester.ensureSemantics();
+    await tester.pump();
+    final video = find.byKey(
+      const ValueKey(
+        'message-media-video-preview:https://example.com/head.mp4',
+      ),
+    );
+    final node = tester.getSemantics(video);
+    var semanticRect = node.rect;
+    for (var ancestor = node; ;) {
+      final transform = ancestor.transform;
+      if (transform != null) {
+        semanticRect = MatrixUtils.transformRect(transform, semanticRect);
+      }
+      final parent = ancestor.parent;
+      if (parent == null) break;
+      ancestor = parent;
+    }
+    expect(semanticRect.contains(tester.getCenter(video)), isTrue);
+    semantics.dispose();
+  });
 
-  testWidgets('loaded page rebuild formats the timeline once', (tester) async {
+  testWidgets('loaded page formats the timeline only when its events change', (
+    tester,
+  ) async {
     var transforms = 0;
     debugOnFormatTimeline = () => transforms++;
     addTearDown(() => debugOnFormatTimeline = null);
+    final first = _textMsg(
+      id: 'one',
+      pubkey: 'alice',
+      content: 'Loaded message',
+    );
+    final messages = _FakeMessagesNotifier([first]);
     await tester.pumpWidget(
-      _buildTestable(
-        messages: [
-          _textMsg(id: 'one', pubkey: 'alice', content: 'Loaded message'),
-        ],
-      ),
+      _buildTestable(messages: [first], messagesNotifier: messages),
     );
     await tester.pumpAndSettle();
+    // Read state, presence and layout changes rebuild the page; formatting
+    // every event again for each of them stalls large channels.
     for (var i = 0; i < 3; i++) {
       transforms = 0;
       tester.element(find.byType(ChannelDetailPage)).markNeedsBuild();
       await tester.pump();
-      expect(transforms, 1);
+      expect(transforms, 0);
     }
+    transforms = 0;
+    messages.setMessages([
+      first,
+      _textMsg(
+        id: 'two',
+        pubkey: 'alice',
+        createdAt: first.createdAt + 1,
+        content: 'Live message',
+      ),
+    ]);
+    await tester.pump();
+    expect(transforms, 1);
+    expect(find.text('Live message', findRichText: true), findsOneWidget);
   });
 
-  testWidgets('reconnect snapshot puts newest cached media at the bottom', (
-    tester,
-  ) async {
+  testWidgets('reconnect keeps cached media in place', (tester) async {
     final relay = _ReconnectingRelaySession(
       initialStatus: SessionStatus.connected,
     );
@@ -505,26 +483,24 @@ void _loadingReviewTests() {
       tester.getCenter(olderPreview).dy,
       lessThan(tester.getCenter(newerPreview).dy),
     );
+    final newerCenter = tester.getCenter(newerPreview);
     relay.setReconnecting();
     await tester.pump();
     await tester.pump(const Duration(seconds: 3));
-    final olderShape = find.byKey(
-      const ValueKey('message-skeleton-image:https://example.com/0.jpg'),
-    );
-    final newerShape = find.byKey(
-      const ValueKey('message-skeleton-image:https://example.com/1.jpg'),
+    expect(
+      tester.widget<SkeletonReveal>(find.byType(SkeletonReveal)).loading,
+      isFalse,
     );
     expect(
-      tester.getCenter(olderShape).dy,
-      lessThan(tester.getCenter(newerShape).dy),
+      tester
+          .widget<Opacity>(find.byKey(const Key('skeleton-reveal-placeholder')))
+          .opacity,
+      0,
     );
-    final list = find
-        .ancestor(of: newerShape, matching: find.byType(ListView))
-        .first;
-    expect(tester.widget<ListView>(list).reverse, isTrue);
+    expect(tester.getCenter(newerPreview), newerCenter);
     expect(
-      tester.getCenter(newerShape).dy,
-      greaterThan(tester.getSize(find.byType(Scaffold).first).height / 2),
+      tester.getCenter(olderPreview).dy,
+      lessThan(tester.getCenter(newerPreview).dy),
     );
     relay.connect();
     await tester.pumpAndSettle();

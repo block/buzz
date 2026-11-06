@@ -7,7 +7,6 @@ export '../../shared/utils/string_utils.dart' show shortPubkey;
 final _weekdayFormat = DateFormat('EEEE');
 final _weekdayMonthDayFormat = DateFormat('EEEE, MMMM d');
 final _monthDayYearFormat = DateFormat('MMMM d, y');
-final _shortMonthDayFormat = DateFormat('MMM d');
 final _messageTimeFormat = DateFormat('h:mm a', 'en_US');
 
 /// Days in a week, past which the weekday name stops being unambiguous.
@@ -95,32 +94,6 @@ String relativeTime(int unixSeconds) {
   if (diff.inDays < 7) return '${diff.inDays}d ago';
   return '${time.month}/${time.day}/${time.year}';
 }
-
-/// Returns desktop-parity thread activity copy such as "just now",
-/// "3 hours ago", or "on May 19".
-String formatThreadSummaryLastReplyTime(
-  int unixSeconds, {
-  @visibleForTesting int? nowSeconds,
-}) {
-  nowSeconds ??= DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  var diff = nowSeconds - unixSeconds;
-  if (diff < 0) diff = 0;
-
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return _formatAgo(diff ~/ 60, 'minute');
-  if (diff < 86400) return _formatAgo(diff ~/ 3600, 'hour');
-  if (diff < 604800) return _formatAgo(diff ~/ 86400, 'day');
-
-  final date = DateTime.fromMillisecondsSinceEpoch(
-    unixSeconds * 1000,
-    isUtc: true,
-  ).toLocal();
-  // No ordinal suffix, per the writing standard.
-  return 'on ${_shortMonthDayFormat.format(date)}';
-}
-
-String _formatAgo(int value, String unit) =>
-    '$value $unit${value == 1 ? '' : 's'} ago';
 
 /// Desktop-parity message clock time, e.g. "2:34 PM".
 ///

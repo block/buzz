@@ -20,7 +20,7 @@ class _Avatar extends StatelessWidget {
     return AvatarImage(
       imageUrl: avatarUrl,
       radius: messageAvatarSize / 2,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
       fallback: Text(
         initial,
         style: context.textTheme.labelMedium?.copyWith(

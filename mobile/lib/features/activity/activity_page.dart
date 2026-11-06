@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -198,8 +199,9 @@ class ActivityPage extends HookConsumerWidget {
     Future<void> openItem(InboxItem item) async {
       final channelId = item.item.channelId;
       if (channelId == null) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text("This item isn't linked to a channel.")),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('No linked channel')),
+          kind: ToastKind.error,
         );
         return;
       }
@@ -236,16 +238,18 @@ class ActivityPage extends HookConsumerWidget {
         } catch (error) {
           if (!isCurrentScope()) return;
           if (!context.mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
             SnackBar(content: Text('Could not reopen conversation: $error')),
+            kind: ToastKind.error,
           );
           return;
         }
       }
       if (channel == null) {
         if (!context.mounted) return;
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text('Channel not found in this workspace.')),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Channel not found here')),
+          kind: ToastKind.error,
         );
         return;
       }
@@ -253,8 +257,9 @@ class ActivityPage extends HookConsumerWidget {
 
       // Deep-link to the represented message: oldest unread in the group,
       // falling back to the latest event.
-      final readAt = resolveInboxItemReadAt(item, markerOf: markerOf);
-      final target = item.deepLinkTarget(readAt);
+      final target = item.deepLinkTarget(
+        (event) => isInboxEventRead(event, markerOf: markerOf),
+      );
       final thread = threadReferenceOf(target.tags);
       final threadRootId = isBroadcastReply(target.tags)
           ? null
@@ -277,10 +282,9 @@ class ActivityPage extends HookConsumerWidget {
     void openDraft(ComposeDraft draft) {
       final channel = channelById[draft.channelId];
       if (channel == null) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('Channel for this draft is no longer available.'),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Draft’s channel unavailable')),
+          kind: ToastKind.error,
         );
         return;
       }
@@ -299,19 +303,17 @@ class ActivityPage extends HookConsumerWidget {
     void openReminder(Reminder reminder) {
       final target = reminder.target;
       if (target == null) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text("This reminder isn't linked to a message."),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Reminder has no linked message')),
+          kind: ToastKind.error,
         );
         return;
       }
       final channel = channelById[target.channelId];
       if (channel == null) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('Channel for this reminder is no longer available.'),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Reminder’s channel unavailable')),
+          kind: ToastKind.error,
         );
         return;
       }
@@ -421,12 +423,22 @@ class ActivityPage extends HookConsumerWidget {
     return FrostedScaffold(
       backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
-        nativeTitle: 'Activity',
+        nativeTitle: 'Inbox',
+        nativeLeading: IosNavigationAction(
+          label: 'Close inbox',
+          symbol: 'xmark',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        leading: IconButton(
+          tooltip: 'Close inbox',
+          icon: const Icon(BuzzIcons.x),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         nativeLargeTitle: true,
         nativeActions: [
           IosNavigationAction(
-            label: 'Filter activity',
-            symbol: 'line.3.horizontal.decrease',
+            label: 'Filter inbox',
+            icon: BuzzIcons.filter2,
             children: [
               for (final entry in _filterLabels.entries)
                 IosNavigationAction(
@@ -437,7 +449,7 @@ class ActivityPage extends HookConsumerWidget {
             ],
           ),
           IosNavigationAction(
-            label: 'Activity options',
+            label: 'Inbox options',
             symbol: 'ellipsis',
             children: [
               IosNavigationAction(
@@ -460,9 +472,8 @@ class ActivityPage extends HookConsumerWidget {
         ],
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
-        showBottomDivider: true,
-        bottomDividerOpacity: 0.07,
-        title: Text('Activity', style: headerTitleStyle),
+
+        title: Text('Inbox', style: headerTitleStyle),
         titleStyle: headerTitleStyle,
         actions: [
           _ActivityActionsPill(

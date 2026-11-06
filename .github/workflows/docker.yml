@@ -34,6 +34,10 @@ name: Docker image
 #   intact) and the bare version flows straight to the semver parser. On a
 #   real push event value= is empty and the match strips relay-v from the ref.
 #
+# ghcr.io/block/buzz-push-gateway carries the same :main, :sha-<7> and
+# :main-<commit UTC>-<7> tags on main pushes, and publishes only after the
+# relay's `qualify` job accepts the same source SHA.
+#
 # :main-<YYYYMMDDHHmmss>-<7> names the same main build as :sha-<7>, prefixed
 # with its UTC commit time so the tag sorts by build order. Kargo's Lexical
 # strategy picks the newest from the tag list alone; :sha-<7> cannot be
@@ -614,7 +618,9 @@ jobs:
     name: Publish public push gateway image
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    needs: push-gateway-build
+    # Staging promotes every published main gateway image automatically, so the
+    # gateway publishes only from a source the relay's same-SHA CI qualified.
+    needs: [push-gateway-build, qualify]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -646,6 +652,7 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sha}},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Merge and publish manifest
         id: manifest
         working-directory: /tmp/gateway-digests

@@ -11,7 +11,10 @@ import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
-import '../../shared/relay/media_auth.dart';
+import '../../shared/hosted/builderlab_account.dart';
+import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/native_media_headers.dart';
+import '../../shared/relay/relay_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_avatar.dart';
@@ -22,8 +25,8 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
-import 'emoji_picker.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/emoji_picker.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import 'message_long_press_region.dart';
 import 'timeline_message.dart';
 
@@ -104,6 +107,9 @@ class ReactionRow extends HookWidget {
   /// Channel whose members define the reactor names' comparison context.
   final String channelId;
 
+  /// Groups reaction controls in one capsule attached to a bubble.
+  final bool combined;
+
   final List<TimelineReaction> reactions;
   final void Function(String emoji) onToggle;
 
@@ -122,6 +128,7 @@ class ReactionRow extends HookWidget {
     required this.reactions,
     required this.onToggle,
     this.showAddButton = false,
+    this.combined = false,
     this.onAddReaction,
   });
 
@@ -147,6 +154,78 @@ class ReactionRow extends HookWidget {
     // With the add button on, an empty row still renders — that affordance is
     // the point. Without it, an empty row would be dead space.
     if (reactions.isEmpty && !showAddButton) return const SizedBox.shrink();
+
+    if (combined && reactions.isNotEmpty) {
+      final count = reactions.fold<int>(
+        0,
+        (sum, reaction) => sum + reaction.count,
+      );
+      final ownReaction = reactions.any(
+        (reaction) => reaction.reactedByCurrentUser,
+      );
+      void openDetails() => showReactionDetailSheet(
+        context: context,
+        channelId: channelId,
+        reactions: liveReactions,
+        onToggle: (emoji) {
+          if (context.mounted) latestToggle.value(emoji);
+        },
+        onAddReaction: showAddButton ? onAddReaction : null,
+      );
+      return Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xxs),
+        child: Align(
+          widthFactor: 1,
+          alignment: Alignment.centerLeft,
+          child: Semantics(
+            button: true,
+            label:
+                'View $count ${count == 1 ? 'reaction' : 'reactions'}'
+                '${ownReaction ? ', including yours' : ''}',
+            child: GestureDetector(
+              key: const ValueKey('combined-reaction-tray'),
+              behavior: HitTestBehavior.opaque,
+              onTap: openDetails,
+              onLongPress: openDetails,
+              child: ExcludeSemantics(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: context.colors.secondaryContainer,
+                    borderRadius: BorderRadius.circular(Radii.container),
+                    border: Border.all(color: context.colors.surface, width: 2),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.xxs + Grid.quarter,
+                      vertical: Grid.half,
+                    ),
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: Grid.quarter,
+                      runSpacing: Grid.quarter,
+                      children: [
+                        for (final reaction in reactions)
+                          Padding(
+                            padding: const EdgeInsets.all(Grid.quarter),
+                            child: _ReactionEmoji(reaction: reaction, size: 20),
+                          ),
+                        Padding(
+                          padding: const EdgeInsets.only(left: Grid.half),
+                          child: Text(
+                            '${reactions.fold<int>(0, (sum, reaction) => sum + reaction.count)}',
+                            style: context.textTheme.labelMedium,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
@@ -354,10 +433,25 @@ class _ReactionEmoji extends StatelessWidget {
   Widget build(BuildContext context) {
     final emojiUrl = reaction.emojiUrl;
     if (emojiUrl == null || emojiUrl.isEmpty) {
-      return NativeEmojiGlyph(emoji: reaction.emoji, size: size);
+      return NativeEmojiGlyph(
+        emoji: reaction.emoji,
+        size: size,
+        opticalBoxSize: size,
+        centerInOpticalBox: true,
+      );
     }
     final shortcode = reaction.emoji.substring(1, reaction.emoji.length - 1);
-    return CustomEmojiImage(shortcode: shortcode, url: emojiUrl, size: size);
+    return SizedBox.square(
+      dimension: size,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: CustomEmojiImage(
+          shortcode: shortcode,
+          url: emojiUrl,
+          size: size,
+        ),
+      ),
+    );
   }
 }
 
@@ -366,6 +460,7 @@ Future<void> showReactionDetailSheet({
   required String channelId,
   required ValueListenable<List<TimelineReaction>> reactions,
   required ValueChanged<String> onToggle,
+  VoidCallback? onAddReaction,
 }) async {
   if (reactions.value.isEmpty) return;
   if (await _showNativeReactionDetails(
@@ -373,6 +468,7 @@ Future<void> showReactionDetailSheet({
     channelId,
     reactions,
     onToggle,
+    onAddReaction,
   )) {
     return;
   }
@@ -398,6 +494,7 @@ Future<void> showReactionDetailSheet({
           channelId: channelId,
           reactions: value,
           onToggle: onToggle,
+          onAddReaction: onAddReaction,
         );
       },
     ),
@@ -408,11 +505,13 @@ class _ReactionDetailSheet extends HookConsumerWidget {
   final String channelId;
   final List<TimelineReaction> reactions;
   final ValueChanged<String> onToggle;
+  final VoidCallback? onAddReaction;
 
   const _ReactionDetailSheet({
     required this.channelId,
     required this.reactions,
     required this.onToggle,
+    this.onAddReaction,
   });
 
   @override
@@ -446,6 +545,16 @@ class _ReactionDetailSheet extends HookConsumerWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
+                  if (onAddReaction != null)
+                    IconButton(
+                      key: const ValueKey('reaction-sheet-add'),
+                      tooltip: 'Add reaction',
+                      icon: const Icon(BuzzIcons.smilePlus),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        onAddReaction!();
+                      },
+                    ),
                   for (final reaction in reactions)
                     Padding(
                       padding: const EdgeInsets.only(right: Grid.half),
@@ -613,10 +722,15 @@ Future<bool> _showNativeReactionDetails(
   String channelId,
   ValueListenable<List<TimelineReaction>> reactions,
   ValueChanged<String> onToggle,
+  VoidCallback? onAddReaction,
 ) async {
   if (!NativeMessagePresentation.isSupportedPlatform) return false;
-  return NativeMessagePresentation.withLease(() async {
+  var addRequested = false;
+  final handled = await NativeMessagePresentation.withLease(() async {
     final container = ProviderScope.containerOf(context, listen: false);
+    final theme = Theme.of(context);
+    if (reactions.value.isEmpty) return true;
+    final nativeMediaHeaders = container.read(nativeMediaHeadersProvider);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     List<String> pubkeys() =>
         reactions.value.expand((r) => r.userPubkeys).toSet().toList();
@@ -649,9 +763,7 @@ Future<bool> _showNativeReactionDetails(
             'avatarColor': avatar.colorValue,
           } else if (url != null && !url.startsWith('data:')) ...{
             'url': url,
-            'headers': container
-                .read(mediaGetAuthServiceProvider)
-                .headersFor(url),
+            'headers': nativeMediaHeaders(url),
           },
         };
       }
@@ -710,9 +822,7 @@ Future<bool> _showNativeReactionDetails(
           'users': reaction.userPubkeys.toSet().toList(),
           if (reaction.emojiUrl case final String url) ...{
             'url': url,
-            'headers': container
-                .read(mediaGetAuthServiceProvider)
-                .headersFor(url),
+            'headers': nativeMediaHeaders(url),
           },
         },
     ];
@@ -731,23 +841,45 @@ Future<bool> _showNativeReactionDetails(
     }
 
     reactions.addListener(updateReactions);
+    // Native headers read the cached assertion synchronously, and that cache
+    // reads as empty inside its refresh margin while the live socket is still
+    // valid. Present at once with what is cached, refresh in the background,
+    // and resend the media rows if the refresh produced a new assertion, so a
+    // stalled issuer never delays the sheet.
+    final config = container.read(relayConfigProvider);
+    final auth = container.read(hostedRelayAuthProvider);
+    final cachedAuth = auth.cachedHeaders(config);
+    unawaited(() async {
+      try {
+        await auth.headers(config);
+      } on AccountFailure {
+        // Send without the assertion; the relay decides, and sign-in is
+        // offered elsewhere.
+        return;
+      }
+      if (disposed || mapEquals(auth.cachedHeaders(config), cachedAuth)) return;
+      sent.clear();
+      updateReactions();
+    }());
     try {
-      final sheetColors = utilitySurfaceThemeData(
-        Theme.of(context),
-      ).colorScheme;
+      final sheetColors = utilitySurfaceThemeData(theme).colorScheme;
       final pending = NativeMessagePresentation.present('reactions', {
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
-        'outlineColor': Theme.of(
-          context,
-        ).colorScheme.onSurface.withValues(alpha: 0.25).toARGB32(),
-        'dark': Theme.of(context).brightness == Brightness.dark,
+        'outlineColor': theme.colorScheme.onSurface
+            .withValues(alpha: 0.25)
+            .toARGB32(),
+        'dark': theme.brightness == Brightness.dark,
+        'canAddReaction': onAddReaction != null,
+        'addReactionIconCodePoint': BuzzIcons.smilePlus.codePoint,
         'profiles': profiles(),
         'reactions': reactionData(),
       }, onReaction: onToggle);
       container.read(userCacheProvider.notifier).preload(pubkeys());
-      return await pending != null;
+      final result = await pending;
+      addRequested = result?['action'] == 'addReaction';
+      return result != null;
     } finally {
       disposed = true;
       reactions.removeListener(updateReactions);
@@ -756,4 +888,6 @@ Future<bool> _showNativeReactionDetails(
       namesSubscription.close();
     }
   });
+  if (addRequested && context.mounted) onAddReaction?.call();
+  return handled;
 }

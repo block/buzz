@@ -4,10 +4,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
+import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/hosted/account_identity_store.dart';
+import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/hosted/organization_environment.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
@@ -15,16 +18,10 @@ import '../../shared/relay/relay.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'pairing_provider_helpers.dart';
 part 'pairing_state.dart';
-
-/// HTTP client used by [PairingNotifier] for the validation request.
-final pairingHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
-  ref.onDispose(client.close);
-  return client;
-});
 
 typedef PairingSocketFactory =
     PairingSocket Function({
@@ -47,6 +44,7 @@ class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
   final PairingCredentialValidator? _credentialValidator;
   final RelaySocketFactory _validationSocketFactory;
+  final bool Function(Uri relay) _organizationRelay;
   RelaySocket? _validationSocket;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
@@ -60,9 +58,12 @@ class PairingNotifier extends Notifier<PairingState> {
     PairingSocketFactory? socketFactory,
     PairingCredentialValidator? credentialValidator,
     RelaySocketFactory validationSocketFactory = RelaySocket.new,
+    bool Function(Uri relay) organizationRelay =
+        OrganizationEnvironment.protects,
   }) : _socketFactory = socketFactory ?? _createPairingSocket,
        _credentialValidator = credentialValidator,
-       _validationSocketFactory = validationSocketFactory;
+       _validationSocketFactory = validationSocketFactory,
+       _organizationRelay = organizationRelay;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -119,7 +120,9 @@ class PairingNotifier extends Notifier<PairingState> {
       return false;
     }
 
-    _identityExportCommunity = community;
+    // Keep the authorized snapshot and exported payload in the same key
+    // representation used by RelayConfig for authentication.
+    _identityExportCommunity = community.copyWith(nsec: community.nsec?.trim());
     _identityExportBiometricOnly = biometricOnly;
     _identityExportAuthorizedAt = ref.read(identityExportClockProvider)();
     state = state.copyWith(authorizationInProgress: false);
@@ -521,7 +524,7 @@ class PairingNotifier extends Notifier<PairingState> {
       // NIP-AB §Event Validation: verify event signature (NIP-01).
       // The nostr package's Event.fromJson verifies id + sig on construction.
       try {
-        final event = nostr.Event.fromJson(jsonEncode(eventJson));
+        final event = verifiedNostrEventFromJson(jsonEncode(eventJson));
         if (event.id != eventId) return; // id mismatch
       } catch (_) {
         return; // invalid signature or malformed event
@@ -737,19 +740,6 @@ class PairingNotifier extends Notifier<PairingState> {
       _validateRelayUrl(relayUrl);
       state = state.copyWith(destinationRelayUrl: relayUrl);
 
-      // Validate credentials against the relay via NIP-42 WS handshake.
-      final credentialValidator = _credentialValidator ?? _validateCredentials;
-      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
-      if (pairingGeneration != _pairingGeneration ||
-          state.status != PairingStatus.storing ||
-          _sendIdentityToSource) {
-        return;
-      }
-
-      // Send complete only after credentials are validated.
-      _sendComplete(true);
-
-      // Store as community and switch to it.
       final community = Community.create(
         name: Community.nameFromUrl(relayUrl),
         relayUrl: relayUrl,
@@ -759,15 +749,31 @@ class PairingNotifier extends Notifier<PairingState> {
             ? SensitiveActionPolicy.enabled
             : SensitiveActionPolicy.disabledByUser,
       );
-      await ref
-          .read(authProvider.notifier)
-          .authenticateWithCommunity(community);
-      if (pairingGeneration != _pairingGeneration ||
-          state.status != PairingStatus.storing ||
-          _sendIdentityToSource) {
+      bool current() =>
+          pairingGeneration == _pairingGeneration &&
+          state.status == PairingStatus.storing &&
+          !_sendIdentityToSource;
+      if (HostedEnvironment.requiresAuth(Uri.parse(relayUrl).host)) {
+        final flow = ref.read(hostedFlowProvider);
+        await flow.stagePairedCommunity(community, isCurrent: current);
+        if (!current()) return;
+        // NIP-AB complete acknowledges durable transfer, not hosted admission.
+        _sendComplete(true);
+        _cleanup();
+        state = const PairingState();
+        unawaited(flow.retry());
         return;
       }
+      final credentialValidator = _credentialValidator ?? _validateCredentials;
+      await credentialValidator(relayUrl: relayUrl, nsec: nsec);
+      if (!current()) return;
+      await ref
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(community, shouldContinue: current);
+      if (!current()) return;
 
+      // A validated transfer is not successful admission until storage succeeds.
+      _sendComplete(true);
       _cleanup();
       state = state.copyWith(status: PairingStatus.success);
       ref.read(pairedCommunityLandingProvider.notifier).request(community);
@@ -781,7 +787,9 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = PairingState(
         status: PairingStatus.error,
-        errorMessage: 'Failed to import credentials: $e',
+        errorMessage: e == AccountIdentityFailure.mismatch
+            ? 'This device uses a different identity. Your saved identity has been kept.'
+            : 'Could not import the identity. Try pairing again.',
       );
     }
   }
@@ -832,7 +840,7 @@ class PairingNotifier extends Notifier<PairingState> {
     final jitter = math.Random.secure().nextInt(31);
     final createdAt = (DateTime.now().millisecondsSinceEpoch ~/ 1000) - jitter;
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: kind,
       content: content,
       tags: tags,
@@ -864,13 +872,28 @@ class PairingNotifier extends Notifier<PairingState> {
 
     try {
       final community = _parseLegacyInput(rawInput);
+      if (HostedEnvironment.requiresAuth(Uri.parse(community.relayUrl).host)) {
+        final flow = ref.read(hostedFlowProvider);
+        await flow.stagePairedCommunity(
+          community,
+          isCurrent: () => generation == _pairingGeneration,
+        );
+        if (generation != _pairingGeneration) return;
+        state = const PairingState();
+        unawaited(flow.retry());
+        return;
+      }
       final validator = _credentialValidator ?? _validateCredentials;
       await validator(relayUrl: community.relayUrl, nsec: community.nsec);
 
       if (generation != _pairingGeneration) return;
+      state = const PairingState(status: PairingStatus.storing);
       await ref
           .read(authProvider.notifier)
-          .authenticateWithCommunity(community);
+          .authenticateWithCommunity(
+            community,
+            shouldContinue: () => generation == _pairingGeneration,
+          );
       if (generation != _pairingGeneration) return;
       state = PairingState(
         status: PairingStatus.success,
@@ -909,7 +932,18 @@ class PairingNotifier extends Notifier<PairingState> {
     if (nsec == null || nsec.isEmpty) {
       throw const FormatException('Pairing payload missing nsec');
     }
+    // A malformed key could never connect, and the organization branch below
+    // saves without a relay check, so reject it before anything is stored.
+    try {
+      AccountIdentityStore.publicKeyForNsec(nsec);
+    } on AccountIdentityFailure {
+      throw const FormatException('Pairing payload has an invalid nsec');
+    }
     final uri = Uri.parse(relayUrl);
+    // Organization relays refuse the upgrade until organization sign-in
+    // supplies an assertion, which the saved community's session then offers.
+    // A check here can only fail, so admission is left to that session.
+    if (_organizationRelay(uri)) return;
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
@@ -923,6 +957,9 @@ class PairingNotifier extends Notifier<PairingState> {
     _validationSocket = socket;
     try {
       await socket.connect().timeout(const Duration(seconds: 8));
+      if (socket.state != SocketState.connected) {
+        throw StateError('Relay did not authenticate the paired identity');
+      }
     } finally {
       if (identical(_validationSocket, socket)) _validationSocket = null;
       await socket.disconnect();

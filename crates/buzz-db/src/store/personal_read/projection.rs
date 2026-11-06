@@ -91,14 +91,16 @@ impl Db {
         // anything counted; the shallow probe answers only when the horizon
         // holds no top-level message. Thread replies are never the timeline's
         // latest: a timeline mark cannot use one as its anchor.
-        let rows = sqlx::query(
-            r#"WITH roster AS MATERIALIZED (
+        // `replace`, not `format!`: the SQL has regex braces.
+        let sql = r#"WITH roster AS MATERIALIZED (
                 SELECT c.id,c.channel_type::text AS channel_type
                 FROM channel_members cm JOIN channels c
                     ON c.community_id=cm.community_id AND c.id=cm.channel_id
                 WHERE cm.community_id=$1 AND cm.pubkey=$2 AND cm.removed_at IS NULL
                     AND c.deleted_at IS NULL AND ($3::uuid IS NULL OR c.id>$3)
                     AND ($9::uuid[] IS NULL OR c.id=ANY($9))
+                    -- Other channel types only when the request names them.
+                    AND ($9::uuid[] IS NOT NULL OR {legacy_types})
                 ORDER BY c.id LIMIT $4
              )
              SELECT r.*, COALESCE(e.latest_id, latest.latest_id) AS latest_id,
@@ -187,16 +189,28 @@ impl Db {
                         FILTER (WHERE NOT is_reply AND NOT unresolved))[1] AS latest_id,
                     (SELECT jsonb_agg(to_jsonb(grouped)) FROM grouped) AS evidence
                 FROM threaded
-             ) e ON true ORDER BY r.id"#,
-        ).bind(community.as_uuid()).bind(actor_bytes.as_slice()).bind(after)
-            .bind((limit+1) as i64).bind(MAX_CHANNEL_SCAN as i64)
+             ) e ON true ORDER BY r.id"#
+            .replace(
+                "{legacy_types}",
+                &crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+            );
+        // Built only from the constant type list.
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community.as_uuid())
+            .bind(actor_bytes.as_slice())
+            .bind(after)
+            .bind((limit + 1) as i64)
+            .bind(MAX_CHANNEL_SCAN as i64)
             .bind(ELIGIBLE_KINDS.as_slice())
-            .bind(DateTime::from_timestamp_millis(account.cutoff_ms)
-                .ok_or_else(|| DbError::InvalidData("invalid unread cutoff".into()))?)
+            .bind(
+                DateTime::from_timestamp_millis(account.cutoff_ms)
+                    .ok_or_else(|| DbError::InvalidData("invalid unread cutoff".into()))?,
+            )
             .bind(MAX_UNREAD_SCAN as i64)
             .bind(only)
             .bind(account.started_at)
-            .fetch_all(&mut *tx).await?;
+            .fetch_all(&mut *tx)
+            .await?;
         let has_more = rows.len() > limit;
         // An unstarted account has read every arrival, so nothing is unread.
         let started = account.started_at.is_some();

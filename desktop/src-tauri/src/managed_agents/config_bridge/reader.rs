@@ -607,7 +607,7 @@ fn build_thinking_field(
     let rec_native = thinking_env_var
         .and_then(|k| super::effort::get_ci(&record.env_vars, k))
         .and_then(|v| norm(v));
-    let column = record.effort_level.as_deref().and_then(&norm);
+    let column = record.effort_level.as_deref().and_then(norm);
     let rec_legacy = thinking_env_var
         .filter(|k| *k != LEGACY_THINKING_EFFORT_KEY)
         .and_then(|_| super::effort::get_ci(&record.env_vars, LEGACY_THINKING_EFFORT_KEY))
@@ -620,7 +620,7 @@ fn build_thinking_field(
     let glob = thinking_env_var.and_then(|k| effort_tier_alias(&tiers.global_env, k, norm, false));
     let def =
         thinking_env_var.and_then(|k| effort_tier_alias(&tiers.definition_env, k, norm, false));
-    let file = file_effort.as_deref().and_then(&norm);
+    let file = file_effort.as_deref().and_then(norm);
 
     // Live ACP value: normalized through the runtime CONTRACT only, never the
     // persisted `effort_accepted` vocabulary. The ACP running value comes from

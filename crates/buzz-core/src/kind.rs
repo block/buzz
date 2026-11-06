@@ -79,6 +79,9 @@ pub const KIND_AUTH: u32 = 22242;
 pub const KIND_BLOSSOM_AUTH: u32 = 24242;
 /// Buzz custom one-time identity binding proof (ephemeral, not stored).
 pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
+/// Operator-listener registration proof: a target pubkey consents to mention
+/// delivery to the listener in its `p` tag (HTTP body only, not stored).
+pub const KIND_OPERATOR_LISTENER_REGISTRATION: u32 = 24245;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
 
@@ -116,6 +119,15 @@ pub const KIND_PUSH_LEASE: u32 = 30350;
 /// the owner's key to itself and contains the runnable identity/configuration
 /// plus exact public projection bindings. See `docs/nips/NIP-PMA.md`.
 pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
+/// Custom emoji entry (parameterized replaceable) — one event per emoji.
+///
+/// User-owned, keyed by `(pubkey, kind, d_tag)` where `d` is the normalized
+/// shortcode. `content` is the shortcode with `_` and `-` turned into spaces (the
+/// search text); one `["emoji", shortcode, url]` tag carries the image. Unlike
+/// the kind:30030 set, the catalog scales without any client loading it whole:
+/// clients resolve names with `#d` filters and search with NIP-50 prefix mode.
+/// See `docs/nips/NIP-CE.md`.
+pub const KIND_EMOJI_ENTRY: u32 = 30180;
 
 /// Kinds whose stored events are readable only by their author.
 ///
@@ -166,9 +178,20 @@ pub fn k_tag_kinds(event: &nostr::Event) -> impl Iterator<Item = u32> + '_ {
 /// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
 /// path for events whose existence must not be leaked.
 ///
-/// Used by `filter_can_match_result_gated_kinds` to force the per-event
-/// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+/// Membership notices (44100/44101) are here because the relay signs them, so
+/// their id is not author-bound, and they name the target, the channel and
+/// the actor. A system channel's notice must not reach anyone but its target.
+///
+/// This is the one list every delivery surface reads: the filter-level `ids`
+/// exemption, `reader_authorized_for_event` (WS/HTTP history, push), live
+/// fan-out (same pod and Redis), and the COUNT fallback
+/// (`filter_can_match_result_gated_kinds`).
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -469,6 +492,12 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 /// NIP-CW thread-mode query-time bounds, bound to a normalized newest-first thread request.
 pub const KIND_THREAD_WINDOW_BOUNDS: u32 = 39007;
 
+/// NIP-CL: request-bound compact viewer membership overlay; query-time only, never stored.
+pub const KIND_MEMBERSHIP_SNAPSHOT: u32 = 39008;
+
+/// NIP-CL: request-bound public membership overlay; query-time only, never stored.
+pub const KIND_MEMBERSHIP_PUBLIC: u32 = 39009;
+
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
@@ -684,6 +713,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_FOLLOW_SET,
     KIND_BOOKMARK_SET,
     KIND_EMOJI_SET,
+    KIND_EMOJI_ENTRY,
     KIND_CHANNEL_METADATA,
     KIND_DELETION,
     KIND_REACTION,
@@ -733,11 +763,14 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
     KIND_THREAD_WINDOW_BOUNDS,
+    KIND_MEMBERSHIP_SNAPSHOT,
+    KIND_MEMBERSHIP_PUBLIC,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_AGENT_PRESENCE,
     KIND_HUDDLE_REACTION,
     KIND_BLOSSOM_AUTH,
+    KIND_OPERATOR_LISTENER_REGISTRATION,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
     KIND_HTTP_AUTH,
@@ -870,12 +903,16 @@ pub const fn is_command_kind(kind: u32) -> bool {
     )
 }
 
+/// NIP-85 relay-signed NIP-FI verified profile (output only).
+pub const KIND_VERIFIED_PROFILE: u32 = 30382;
+
 /// Returns `true` if `kind` may only be authored by the relay.
 /// Client submission of these kinds must be rejected.
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_ARTIFACT_REMOVAL
+        KIND_VERIFIED_PROFILE
+            | KIND_ARTIFACT_REMOVAL
             | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
@@ -883,6 +920,8 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
             | KIND_THREAD_WINDOW_BOUNDS
+            | KIND_MEMBERSHIP_SNAPSHOT
+            | KIND_MEMBERSHIP_PUBLIC
     )
 }
 
@@ -905,6 +944,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_EMOJI_ENTRY)); // 30180 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
@@ -964,6 +1004,15 @@ mod tests {
     fn thread_window_bounds_is_relay_only() {
         assert_eq!(KIND_THREAD_WINDOW_BOUNDS, 39007);
         assert!(is_relay_only_kind(KIND_THREAD_WINDOW_BOUNDS));
+    }
+
+    #[test]
+    fn compact_membership_snapshot_is_relay_only() {
+        assert_eq!(KIND_MEMBERSHIP_SNAPSHOT, 39008);
+        assert!(is_relay_only_kind(KIND_MEMBERSHIP_SNAPSHOT));
+        assert_eq!(KIND_MEMBERSHIP_PUBLIC, 39009);
+        assert!(is_relay_only_kind(KIND_MEMBERSHIP_PUBLIC));
+        assert!(ALL_KINDS.contains(&KIND_MEMBERSHIP_PUBLIC));
     }
 
     #[test]

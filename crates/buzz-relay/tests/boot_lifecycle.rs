@@ -82,6 +82,11 @@ impl RelayProcess {
             }
             thread::sleep(Duration::from_millis(10));
         };
+        self.collect(status)
+    }
+
+    /// The captured output of a child that has already exited as `status`.
+    fn collect(&mut self, status: ExitStatus) -> Output {
         self.child.take();
         let output = Output {
             status,
@@ -166,22 +171,44 @@ fn wait_for_relay_metrics(process: &mut RelayProcess, port: u16) -> String {
 
 /// Polls the relay's own `/metrics` until `needle` appears, bounded by
 /// [`METRICS_SCRAPE_DEADLINE`]. A relay that exits first is a failure, not a
-/// timeout, so the panic names the real cause.
+/// timeout, so the panic names the real cause and carries the relay's output.
 fn wait_for_scraped_metric(process: &mut RelayProcess, port: u16, needle: &str) -> String {
+    wait_for_scraped_metrics(process, port, &[needle])
+}
+
+/// Waits for one scrape to contain every requested sample, bounded by
+/// [`METRICS_SCRAPE_DEADLINE`]. A scrape can overlap the sampler's sequential
+/// metric writes, so related series may appear in different responses.
+fn wait_for_scraped_metrics(process: &mut RelayProcess, port: u16, needles: &[&str]) -> String {
+    let requested = needles.join(", ");
+    let mut last_scrape = String::new();
+    let mut last_error: Option<String>;
     let deadline = Instant::now() + METRICS_SCRAPE_DEADLINE;
     loop {
-        assert!(
-            process.try_wait().is_none(),
-            "relay exited before exporting {needle}"
-        );
-        if let Ok(response) = scrape_metrics(port) {
-            if response.contains(needle) {
-                return response;
+        if let Some(status) = process.try_wait() {
+            let output = process.collect(status);
+            panic!(
+                "relay exited ({status}) before exporting {requested}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        match scrape_metrics(port) {
+            Ok(response) => {
+                if needles
+                    .iter()
+                    .all(|needle| response.lines().any(|line| line.starts_with(needle)))
+                {
+                    return response;
+                }
+                last_scrape = response;
+                last_error = None;
             }
+            Err(error) => last_error = Some(error.to_string()),
         }
         assert!(
             Instant::now() < deadline,
-            "relay did not export {needle} within {METRICS_SCRAPE_DEADLINE:?}"
+            "relay did not export {requested} within {METRICS_SCRAPE_DEADLINE:?}; last error: {last_error:?}; last scrape: {last_scrape}"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -674,7 +701,10 @@ mod postgres_tests {
     /// passes. Unlike `run_relay`, a relay that keeps serving is a result to
     /// assert on rather than a panic, which is the whole point here.
     fn run_until_exit(environment: &[(&str, &str)], timeout: Duration) -> (bool, Output) {
-        let mut process = RelayProcess::spawn(environment);
+        wait_for_exit(RelayProcess::spawn(environment), timeout)
+    }
+
+    fn wait_for_exit(mut process: RelayProcess, timeout: Duration) -> (bool, Output) {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if process.try_wait().is_some() {
@@ -686,7 +716,7 @@ mod postgres_tests {
     }
 
     /// Redis is required for pub/sub fan-out, presence, and typing, but nothing
-    /// in boot ever opened a command connection: `deadpool_redis` pools dial
+    /// in boot ever opened a command connection: the shared Redis connection dials
     /// lazily and `PubSubManager::new` only allocates channels, so "Redis
     /// pub/sub connected" was logged against a dead port. A relay could
     /// therefore boot with Redis unreachable, bind its health listener, and —
@@ -744,7 +774,7 @@ mod postgres_tests {
     }
 
     /// A peer that accepts the socket but withholds its Redis response exercises
-    /// the outer timeout around both lazy pool checkout and PING. Removing or
+    /// the outer timeout around connect, handshake, and PING. Removing or
     /// narrowing that timeout makes this test kill a still-running relay at the
     /// deadline instead of observing a startup failure.
     #[test]
@@ -814,10 +844,10 @@ mod postgres_tests {
     /// fires immediately, so the wait is bounded by
     /// [`METRICS_SCRAPE_DEADLINE`] and never a fixed sleep.
     ///
-    /// The completion-timestamp gauge is the needle because `sample` writes it
-    /// last, after the cache already serves the report: observing it proves the
-    /// whole cycle ran, with no window where the counters have landed but the
-    /// timestamp has not.
+    /// The sampler writes counters and histograms before the completion gauge,
+    /// but a concurrent `/metrics` scrape is not an atomic snapshot. Wait for
+    /// the actual timestamp, counter, and duration samples together so a scrape
+    /// that overlaps those sequential writes cannot report a false failure.
     #[test]
     #[ignore = "requires PostgreSQL"]
     fn startup_owns_the_dependency_sampler() {
@@ -839,10 +869,14 @@ mod postgres_tests {
             ("REDIS_URL", &redis_url),
             ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
         ]);
-        let scrape = wait_for_scraped_metric(
+        let scrape = wait_for_scraped_metrics(
             &mut process,
             metrics_port,
-            "buzz_readiness_dependency_sample_completed_timestamp_seconds",
+            &[
+                "buzz_readiness_dependency_sample_completed_timestamp_seconds ",
+                "buzz_readiness_dependency_checks_total{",
+                "buzz_readiness_check_duration_seconds_count{check=\"overall\"}",
+            ],
         );
         let output = process.terminate();
         let logs = format!(
@@ -852,20 +886,247 @@ mod postgres_tests {
         );
 
         assert!(
-            scrape.contains("buzz_readiness_dependency_checks_total{"),
-            "the same cycle must publish its per-dependency outcomes: {scrape}"
-        );
-        assert!(
-            scrape.contains("buzz_readiness_check_duration_seconds"),
-            "a completed evaluation must publish its latency too: {scrape}"
-        );
-        assert!(
             !scrape.contains("buzz_readiness_checks_total{"),
             "no readiness probe was sent, so the sampler alone produced this: {scrape}"
         );
         assert!(
             logs.contains("Health probe listener started"),
             "the sampler must be owned by a relay that finished booting: {logs}"
+        );
+    }
+
+    /// A read replica that is down at boot must not block startup: the main
+    /// read pool is lazy and degrades to the writer, and the search pool must
+    /// be lazy too. An eager search-pool connect waits out sqlx's 30s acquire
+    /// timeout and then fails boot, so this relay would never turn ready
+    /// inside `CHILD_TIMEOUT`.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn unreachable_read_replica_does_not_block_boot() {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = std::env::var("REDIS_URL")
+            .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
+        let read_database_url = format!(
+            "postgres://buzz:buzz@127.0.0.1:{}/buzz", // sadscan:disable np.postgres.1
+            reserve_closed_port()
+        );
+        let metrics_port_value = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+
+        let mut process = RelayProcess::spawn(&[
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_METRICS_PORT", &metrics_port_value),
+            ("BUZZ_HEALTH_PORT", &health_port_value),
+            ("BUZZ_BIND_ADDR", &bind_addr),
+            ("DATABASE_URL", &database_url),
+            ("READ_DATABASE_URL", &read_database_url),
+            ("REDIS_URL", &redis_url),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+        ]);
+        let ready = wait_for_readiness(&mut process, health_port);
+        let output = process.terminate();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            ready.starts_with("HTTP/1.1 200"),
+            "a dead read replica must not block boot: {ready}: {logs}"
+        );
+        assert!(
+            logs.contains("Search service ready"),
+            "boot must have passed the search pool: {logs}"
+        );
+    }
+
+    /// Polls `/_readiness` until it answers 200, the relay exits, or
+    /// `CHILD_TIMEOUT` passes, and returns the last response.
+    fn wait_for_readiness(process: &mut RelayProcess, health_port: u16) -> String {
+        let deadline = Instant::now() + CHILD_TIMEOUT;
+        loop {
+            if process.try_wait().is_some() {
+                return "relay exited before turning ready".to_string();
+            }
+            let response = TcpStream::connect(("127.0.0.1", health_port))
+                .and_then(|mut stream| {
+                    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                    stream.write_all(
+                        b"GET /_readiness HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )?;
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response)?;
+                    Ok(response)
+                })
+                .unwrap_or_default();
+            if response.starts_with("HTTP/1.1 200") || Instant::now() >= deadline {
+                return response;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    const NIP_FI_ISSUERS: &str = r#"[{
+        "issuer": "https://idp.example.com",
+        "command_audiences": ["https://relay.example.com"],
+        "token_class": "nip-fi+jwt",
+        "algorithms": ["ES256"],
+        "maximum_assertion_age_seconds": 3600,
+        "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+        "jwks_refresh_interval_seconds": 300,
+        "jwks_hard_deadline_seconds": 86400,
+        "maximum_command_age_seconds": 30,
+        "authorized_principals": ["https://idp.example.com/operator"]
+    }]"#;
+    /// A suffix that never covers the relay's own host, so deployment
+    /// bootstrap writes no binding and the startup load is the first reader
+    /// of `community_nip_fi_issuers`.
+    const NIP_FI_PROVISION_BINDING: &str = r#"{"host_suffix":"communities.example.com","authorized_issuers":["https://idp.example.com"]}"#;
+
+    /// Boots the relay with the database community source; `extra` adds or
+    /// overrides variables. Returns the health port alongside the process.
+    fn spawn_database_source(extra: &[(&str, &str)]) -> (RelayProcess, u16) {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("postgres lane provides DATABASE_URL for each test process");
+        let redis_url = std::env::var("REDIS_URL")
+            .expect("the postgres lane runs alongside Redis and exports REDIS_URL");
+        let metrics_port = reserve_closed_port().to_string();
+        let health_port = reserve_closed_port();
+        let health_port_value = health_port.to_string();
+        let bind_addr = format!("127.0.0.1:{}", reserve_closed_port());
+        let mut environment = vec![
+            ("BUZZ_RELAY_PRIVATE_KEY", VALID_RELAY_PRIVATE_KEY),
+            ("BUZZ_METRICS_PORT", metrics_port.as_str()),
+            ("BUZZ_HEALTH_PORT", health_port_value.as_str()),
+            ("BUZZ_BIND_ADDR", bind_addr.as_str()),
+            ("DATABASE_URL", database_url.as_str()),
+            ("REDIS_URL", redis_url.as_str()),
+            ("BUZZ_GIT_CONFORMANCE_PROBE", "false"),
+            // Shadow: off builds no resolver, so it loads no snapshot.
+            ("BUZZ_NIP_FI_MODE", "shadow"),
+            ("BUZZ_NIP_FI_COMMUNITY_SOURCE", "database"),
+            ("BUZZ_NIP_FI_ISSUERS", NIP_FI_ISSUERS),
+            ("BUZZ_NIP_FI_PROVISION_BINDING", NIP_FI_PROVISION_BINDING),
+            ("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600"),
+        ];
+        environment.extend_from_slice(extra);
+        (RelayProcess::spawn(&environment), health_port)
+    }
+
+    /// Binds `count` active communities under the provision suffix to the
+    /// registered issuer, on the test's own database.
+    fn seed_bindings(count: u32) {
+        use sqlx::Connection as _;
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(async {
+            let mut connection = sqlx::PgConnection::connect(&database_url)
+                .await
+                .expect("connect to the test database");
+            // One statement per thousand rows: each insert takes a write-fence
+            // advisory lock per community, held to the end of its transaction.
+            for start in (1..=count).step_by(1000) {
+                sqlx::query(
+                    "WITH c AS (
+                         INSERT INTO communities (id, host)
+                         SELECT gen_random_uuid(), 'c' || n || '.communities.example.com'
+                         FROM generate_series($1, $2) AS n
+                         RETURNING id
+                     )
+                     INSERT INTO community_nip_fi_issuers (community_id, issuer)
+                     SELECT id, 'https://idp.example.com' FROM c",
+                )
+                .bind(i64::from(start))
+                .bind(i64::from(count.min(start + 999)))
+                .execute(&mut connection)
+                .await
+                .expect("seed NIP-FI bindings");
+            }
+        });
+    }
+
+    fn assert_failed_before_listeners(
+        exited: bool,
+        output: &Output,
+        health_port: u16,
+        failure: &str,
+    ) {
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            exited && !output.status.success(),
+            "a failed startup binding load must be startup-fatal: {logs}"
+        );
+        assert!(
+            logs.contains(&format!("startup binding snapshot load failed: {failure}")),
+            "the failure must name the snapshot load and why it failed: {logs}"
+        );
+        assert!(
+            !logs.contains("Health probe listener started"),
+            "no listener may bind before the snapshot loads: {logs}"
+        );
+        assert!(
+            TcpListener::bind(("0.0.0.0", health_port)).is_ok(),
+            "the health port must never have been bound"
+        );
+    }
+
+    /// The database source must never let a pod serve without a snapshot: a
+    /// load that fails exits non-zero before any listener binds, so the
+    /// orchestrator restarts the pod instead of routing to it. Two bindings
+    /// over a one-row cap make the load itself fail after every earlier
+    /// startup step has read the same table successfully.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn database_source_failed_snapshot_stops_boot_before_listeners_bind() {
+        seed_bindings(2);
+        let (process, health_port) =
+            spawn_database_source(&[("BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS", "1")]);
+        let (exited, output) = wait_for_exit(process, CHILD_TIMEOUT);
+        assert_failed_before_listeners(exited, &output, health_port, "OverCap");
+    }
+
+    /// A load that cannot finish in time must hit the refresh timeout and fail
+    /// the same way, rather than leaving the pod waiting unbound. A
+    /// millisecond budget cannot cover a scan of this many rows.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn database_source_slow_snapshot_times_out_before_listeners_bind() {
+        seed_bindings(20_000);
+        let (process, health_port) =
+            spawn_database_source(&[("BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS", "1")]);
+        let (exited, output) = wait_for_exit(process, CHILD_TIMEOUT);
+        assert_failed_before_listeners(exited, &output, health_port, "Timeout");
+    }
+
+    /// With a loadable snapshot the same configuration boots and readiness
+    /// turns ready, so the two failure tests above fail for the load alone. One
+    /// seeded binding proves the snapshot reads rows, not just an empty table.
+    #[test]
+    #[ignore = "requires PostgreSQL"]
+    fn database_source_snapshot_load_lets_readiness_turn_ready() {
+        seed_bindings(1);
+        let (mut process, health_port) = spawn_database_source(&[]);
+        let ready = wait_for_readiness(&mut process, health_port);
+        let output = process.terminate();
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            ready.starts_with("HTTP/1.1 200"),
+            "readiness never turned ready: {ready}: {logs}"
+        );
+        assert!(
+            logs.contains("NIP-FI: binding snapshot loaded"),
+            "readiness must follow the snapshot load: {logs}"
         );
     }
 }

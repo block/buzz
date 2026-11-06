@@ -32,13 +32,19 @@ void _useComposerChannelNames(
   _MarkdownEditingController controller,
   AsyncValue<List<Channel>> channelsAsync,
 ) {
-  final channelNames = {
-    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
-      channel.name.toLowerCase(): channel.id,
-  };
-  final channelNamesKey = channelNames.entries
-      .map((entry) => '${entry.key}\u0000${entry.value}')
-      .join('\u0001');
+  // The composer rebuilds on every keystroke and keyboard frame, so build the
+  // name map and its key only when the channel list itself changes.
+  final channels = channelsAsync.asData?.value;
+  final (:channelNames, :channelNamesKey) = useMemoized(() {
+    final names = {
+      for (final channel in channels ?? const <Channel>[])
+        channel.name.toLowerCase(): channel.id,
+    };
+    final key = names.entries
+        .map((entry) => '${entry.key}\u0000${entry.value}')
+        .join('\u0001');
+    return (channelNames: names, channelNamesKey: key);
+  }, [channels]);
   useEffect(() {
     controller.setChannelNames(channelNames);
     return null;
@@ -47,11 +53,17 @@ void _useComposerChannelNames(
 
 const _typingThrottleMs = 3000;
 
+/// How long a keyboard that was up before an inactive spell may take to come
+/// back after the app resumes. iOS restores it natively a few hundred
+/// milliseconds after `resumed` (flutter/flutter#189051 logs about 0.4 s).
+const _composerKeyboardRestoreGrace = Duration(seconds: 1);
+
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
+  Timer? _restoreGrace;
 
   _ComposerKeyboardMetricsObserver({
     required this.view,
@@ -59,8 +71,47 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
+  // iOS drops the keyboard inset while the app is inactive (Control Center,
+  // the app switcher) and restores the keyboard natively after it resumes.
+  // Treating that drop as a dismissal collapsed the composer and left the
+  // restored keyboard attached to no field. So ignore metrics until the app
+  // resumes, and give a keyboard that was up the restore grace to return
+  // before deciding it was dismissed.
   @override
   void didChangeMetrics() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    if (_restoreGrace != null) {
+      if (view.viewInsets.bottom <= 0) return;
+      _cancelRestoreGrace();
+    }
+    _reconcile();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _cancelRestoreGrace();
+      return;
+    }
+    if (_wasVisible && view.viewInsets.bottom <= 0) {
+      _restoreGrace ??= Timer(_composerKeyboardRestoreGrace, () {
+        _restoreGrace = null;
+        _reconcile();
+      });
+      return;
+    }
+    _reconcile();
+  }
+
+  void dispose() => _cancelRestoreGrace();
+
+  void _cancelRestoreGrace() {
+    _restoreGrace?.cancel();
+    _restoreGrace = null;
+  }
+
+  void _reconcile() {
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
@@ -160,6 +211,8 @@ Widget _composerSuggestionPanel({
   required List<MentionCandidate> mentionSuggestions,
   required Set<String> unavailableMentions,
   required bool mentionSearchFailed,
+  required bool reserveMentionHeight,
+  required bool mentionSearching,
   required VoidCallback onMentionSearchRetry,
   required Map<String, UserProfile> userCache,
   required String? currentPubkey,
@@ -181,6 +234,8 @@ Widget _composerSuggestionPanel({
           suggestions: mentionSuggestions,
           unavailable: unavailableMentions,
           searchFailed: mentionSearchFailed,
+          reserveHeight: reserveMentionHeight,
+          searching: mentionSearching,
           onRetry: onMentionSearchRetry,
           userCache: userCache,
           currentPubkey: currentPubkey,
@@ -203,6 +258,7 @@ Widget _composerAttachmentPanel({
   required Future<List<XFile>> Function() onPickAllPhotos,
   required Future<void> Function(List<XFile> photos) onChoosePhotos,
   required Future<void> Function(List<XFile> photos) onChooseAllPhotos,
+  required Future<void> Function(Future<void> Function()) preparePhotos,
 }) => _AttachmentSurfacePanel(
   key: ValueKey(
     surface == _AttachmentSurface.closed
@@ -221,6 +277,7 @@ Widget _composerAttachmentPanel({
   onPickAllPhotos: onPickAllPhotos,
   onChoosePhotos: onChoosePhotos,
   onChooseAllPhotos: onChooseAllPhotos,
+  preparePhotos: preparePhotos,
 );
 
 const _pastedImageMimeTypes = <String>[
@@ -308,14 +365,6 @@ void _insertTriggerAtCursor(
   focusNode.requestFocus();
 }
 
-bool hasMention(String text, String name) {
-  final pattern = RegExp(
-    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
-    caseSensitive: false,
-  );
-  return pattern.hasMatch(text);
-}
-
 /// Outcome of the non-member mention prompt. `null` (dialog dismissed)
 /// cancels the send and keeps the draft.
 enum _NonMemberMentionChoice { invite, sendWithoutInviting }
@@ -396,12 +445,11 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
@@ -419,8 +467,9 @@ void _sendTypingIndicator(
 /// identity change that causes the failure also resets that state on the next
 /// frame, so [messenger] must be resolved before the send's first `await`.
 void _reportSendCancelledByCommunitySwitch(ScaffoldMessengerState? messenger) {
-  messenger?.showSnackBar(
-    const SnackBar(content: Text('Message not sent: the community changed')),
+  messenger?.showFeedbackSnackBar(
+    const SnackBar(content: Text('Not sent. Community changed.')),
+    kind: ToastKind.error,
   );
 }
 
@@ -525,9 +574,12 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
   );
   if (selectedMentions.isEmpty) return none;
 
-  final channel = (await ref.read(
-    channelsProvider.future,
-  )).firstWhere((candidate) => candidate.id == channelId);
+  // A DM opened ahead of a reloading list is found without waiting for it.
+  final channel =
+      ref.read(channelsProvider.notifier).channelById(channelId) ??
+      (await ref.read(
+        channelsProvider.future,
+      )).firstWhere((candidate) => candidate.id == channelId);
 
   // A DM decides who is inside it the way its send does: by current
   // membership, or by the channel metadata when membership is unavailable.
@@ -639,8 +691,9 @@ class _OutgoingMentions {
     );
     demote(outcome.notAdded);
     if (outcome.errors.isNotEmpty) {
-      messenger?.showSnackBar(
+      messenger?.showFeedbackSnackBar(
         SnackBar(content: Text(outcome.errors.join(' '))),
+        kind: ToastKind.error,
       );
     }
   }

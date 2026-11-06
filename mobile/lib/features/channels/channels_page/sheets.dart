@@ -2,17 +2,7 @@ part of '../channels_page.dart';
 
 const int _defaultCreateChannelTtlSeconds = 7 * 24 * 60 * 60;
 
-class _CreateChannelMenuOption<T> {
-  final Key? key;
-  final String label;
-  final T value;
-
-  const _CreateChannelMenuOption({
-    this.key,
-    required this.label,
-    required this.value,
-  });
-}
+typedef _CreateChannelMenuOption<T> = BuzzSettingMenuOption<T>;
 
 const _createChannelTtlOptions = [
   _CreateChannelMenuOption(label: '30 minutes', value: 30 * 60),
@@ -30,9 +20,7 @@ const _createChannelTtlOptions = [
 ];
 
 class _CreateChannelSheet extends HookConsumerWidget {
-  final String channelType;
-
-  const _CreateChannelSheet({required this.channelType});
+  const _CreateChannelSheet();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,7 +33,6 @@ class _CreateChannelSheet extends HookConsumerWidget {
     final errorMessage = useState<String?>(null);
     useListenable(nameController);
 
-    final kindLabel = channelType == 'forum' ? 'forum' : 'channel';
     final canSubmit =
         nameController.text.trim().isNotEmpty && !isSubmitting.value;
 
@@ -62,7 +49,7 @@ class _CreateChannelSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .createChannel(
               name: name,
-              channelType: channelType,
+              channelType: 'stream',
               visibility: visibility.value,
               description: descriptionController.text.trim(),
               ttlSeconds: temporary.value ? ttlSeconds.value : null,
@@ -71,150 +58,184 @@ class _CreateChannelSheet extends HookConsumerWidget {
           Navigator.of(context).pop(created);
         }
       } catch (error) {
-        errorMessage.value = error.toString();
+        if (context.mounted) errorMessage.value = relayErrorMessage(error);
       } finally {
-        isSubmitting.value = false;
+        if (context.mounted) isSubmitting.value = false;
       }
     }
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        0,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
-      ),
-      child: SafeArea(
-        top: false,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _CreateChannelFieldLabel(label: 'Name'),
-              const SizedBox(height: Grid.xxs),
-              _CreateChannelFieldShell(
-                child: TextField(
-                  key: const Key('create-channel-name'),
-                  controller: nameController,
-                  enabled: !isSubmitting.value,
-                  autofocus: true,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  textCapitalization: TextCapitalization.none,
-                  decoration: InputDecoration(
-                    hintText: channelType == 'forum'
-                        ? 'design-discussions'
-                        : 'release-notes',
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: Grid.twelve,
-                      vertical: Grid.xs,
+    return _CreationSheetLayout(
+      title: 'New channel',
+      actionKey: const Key('create-channel-submit'),
+      actionLabel: 'Create',
+      busy: isSubmitting.value,
+      onSubmit: canSubmit ? submit : null,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
+        ),
+        child: SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const ExcludeSemantics(
+                  child: _CreateChannelFieldLabel(label: 'Name'),
+                ),
+                const SizedBox(height: Grid.xxs),
+                _CreateChannelFieldShell(
+                  label: 'Name',
+                  child: TextField(
+                    key: const Key('create-channel-name'),
+                    controller: nameController,
+                    enabled: !isSubmitting.value,
+                    autofocus: true,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    textCapitalization: TextCapitalization.none,
+                    decoration: InputDecoration(
+                      hintText: 'release-notes',
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: Grid.twelve,
+                        vertical: Grid.xs,
+                      ),
+                    ),
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) {
+                      if (canSubmit) {
+                        unawaited(submit());
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(height: Grid.xs),
+                const ExcludeSemantics(
+                  child: _CreateChannelFieldLabel(
+                    label: 'Description',
+                    optional: true,
+                  ),
+                ),
+                const SizedBox(height: Grid.xxs),
+                _CreateChannelFieldShell(
+                  label: 'Description, optional',
+                  child: TextField(
+                    key: const Key('create-channel-description'),
+                    controller: descriptionController,
+                    enabled: !isSubmitting.value,
+                    decoration: InputDecoration(
+                      hintText: 'What this channel is for',
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: Grid.twelve,
+                        vertical: Grid.xs,
+                      ),
+                    ),
+                    minLines: 2,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) {
+                      if (canSubmit) {
+                        unawaited(submit());
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(height: Grid.sm),
+                SheetActionSection(
+                  dividerIndent: Grid.xs,
+                  children: [
+                    BuzzSettingMenu<bool>(
+                      controlKey: const Key('create-channel-type'),
+                      grouped: true,
+                      preserveTextInput: true,
+                      trailingIcon: Icons.unfold_more,
+                      valueLabel: temporary.value ? 'Temporary' : 'Ongoing',
+                      enabled: !isSubmitting.value,
+                      label: 'Channel type',
+                      onSelected: (value) => temporary.value = value,
+                      options: const [
+                        _CreateChannelMenuOption(
+                          key: Key('create-channel-type-ongoing'),
+                          label: 'Ongoing',
+                          value: false,
+                        ),
+                        _CreateChannelMenuOption(
+                          key: Key('create-channel-type-temporary'),
+                          label: 'Temporary',
+                          value: true,
+                        ),
+                      ],
+                      value: temporary.value,
+                    ),
+                    if (temporary.value) ...[
+                      BuzzSettingMenu<int>(
+                        grouped: true,
+                        preserveTextInput: true,
+                        trailingIcon: Icons.unfold_more,
+                        controlKey: const Key('create-channel-ttl'),
+                        enabled: !isSubmitting.value,
+                        label: 'Expires after',
+                        onSelected: (value) => ttlSeconds.value = value,
+                        options: _createChannelTtlOptions,
+                        value: ttlSeconds.value,
+                        valueLabel: _createChannelTtlOptions
+                            .firstWhere(
+                              (option) => option.value == ttlSeconds.value,
+                            )
+                            .label,
+                      ),
+                    ],
+                    BuzzSettingMenu<String>(
+                      controlKey: const Key('create-channel-visibility'),
+                      grouped: true,
+                      preserveTextInput: true,
+                      trailingIcon: Icons.unfold_more,
+                      valueLabel: visibility.value == 'open'
+                          ? 'Public'
+                          : 'Private',
+                      enabled: !isSubmitting.value,
+                      label: 'Visibility',
+                      onSelected: (value) => visibility.value = value,
+                      options: const [
+                        _CreateChannelMenuOption(
+                          key: Key('create-channel-visibility-public'),
+                          label: 'Public',
+                          value: 'open',
+                        ),
+                        _CreateChannelMenuOption(
+                          key: Key('create-channel-visibility-private'),
+                          label: 'Private',
+                          value: 'private',
+                        ),
+                      ],
+                      value: visibility.value,
+                    ),
+                  ],
+                ),
+                if (errorMessage.value case final error?) ...[
+                  const SizedBox(height: Grid.xs),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      error,
+                      style: context.textTheme.bodySmall?.copyWith(
+                        color: context.colors.error,
+                      ),
                     ),
                   ),
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) {
-                    if (canSubmit) {
-                      unawaited(submit());
-                    }
-                  },
-                ),
-              ),
-              const SizedBox(height: Grid.xs),
-              const _CreateChannelFieldLabel(
-                label: 'Description',
-                optional: true,
-              ),
-              const SizedBox(height: Grid.xxs),
-              _CreateChannelFieldShell(
-                child: TextField(
-                  key: const Key('create-channel-description'),
-                  controller: descriptionController,
-                  enabled: !isSubmitting.value,
-                  decoration: InputDecoration(
-                    hintText: 'What this $kindLabel is for',
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: Grid.twelve,
-                      vertical: Grid.xs,
-                    ),
-                  ),
-                  minLines: 2,
-                  maxLines: 3,
-                  textInputAction: TextInputAction.done,
-                  onSubmitted: (_) {
-                    if (canSubmit) {
-                      unawaited(submit());
-                    }
-                  },
-                ),
-              ),
-              const SizedBox(height: Grid.sm),
-              _CreateChannelRadioGroup<bool>(
-                enabled: !isSubmitting.value,
-                label: 'Channel type',
-                onSelected: (value) => temporary.value = value,
-                options: const [
-                  _CreateChannelMenuOption(
-                    key: Key('create-channel-type-ongoing'),
-                    label: 'Ongoing',
-                    value: false,
-                  ),
-                  _CreateChannelMenuOption(
-                    key: Key('create-channel-type-temporary'),
-                    label: 'Temporary',
-                    value: true,
-                  ),
                 ],
-                value: temporary.value,
-              ),
-              if (temporary.value) ...[
-                const SizedBox(height: Grid.xs),
-                _CreateChannelSettingMenu<int>(
-                  controlKey: const Key('create-channel-ttl'),
-                  enabled: !isSubmitting.value,
-                  label: 'Expires after',
-                  onSelected: (value) => ttlSeconds.value = value,
-                  options: _createChannelTtlOptions,
-                  value: ttlSeconds.value,
-                  valueLabel: _createChannelTtlOptions
-                      .firstWhere((option) => option.value == ttlSeconds.value)
-                      .label,
-                ),
               ],
-              const SizedBox(height: Grid.sm),
-              _CreateChannelRadioGroup<String>(
-                enabled: !isSubmitting.value,
-                label: 'Visibility',
-                onSelected: (value) => visibility.value = value,
-                options: const [
-                  _CreateChannelMenuOption(
-                    key: Key('create-channel-visibility-public'),
-                    label: 'Public',
-                    value: 'open',
-                  ),
-                  _CreateChannelMenuOption(
-                    key: Key('create-channel-visibility-private'),
-                    label: 'Private',
-                    value: 'private',
-                  ),
-                ],
-                value: visibility.value,
-              ),
-              if (errorMessage.value case final error?) ...[
-                const SizedBox(height: Grid.xs),
-                Text(
-                  error,
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.error,
-                  ),
-                ),
-              ],
-            ],
+            ),
           ),
         ),
       ),
@@ -255,180 +276,18 @@ class _CreateChannelFieldLabel extends StatelessWidget {
 class _CreateChannelFieldShell extends StatelessWidget {
   final Widget child;
 
-  const _CreateChannelFieldShell({required this.child});
+  final String label;
+
+  const _CreateChannelFieldShell({required this.child, required this.label});
 
   @override
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: context.colors.primaryContainer.withValues(alpha: 0.55),
-        border: Border.all(color: context.colors.outlineVariant),
+        color: context.colors.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(Radii.container),
       ),
-      child: child,
-    );
-  }
-}
-
-class _CreateChannelRadioGroup<T> extends StatelessWidget {
-  final bool enabled;
-  final String label;
-  final ValueChanged<T> onSelected;
-  final List<_CreateChannelMenuOption<T>> options;
-  final T value;
-
-  const _CreateChannelRadioGroup({
-    required this.enabled,
-    required this.label,
-    required this.onSelected,
-    required this.options,
-    required this.value,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _CreateChannelFieldLabel(label: label),
-        const SizedBox(height: Grid.xxs),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            color: context.colors.surface,
-            border: Border.all(color: context.colors.outlineVariant),
-            borderRadius: BorderRadius.circular(Radii.container),
-          ),
-          child: RadioGroup<T>(
-            groupValue: value,
-            onChanged: (nextValue) {
-              if (enabled && nextValue != null) {
-                onSelected(nextValue);
-              }
-            },
-            child: Column(
-              children: [
-                for (final (index, option) in options.indexed) ...[
-                  RadioListTile<T>(
-                    key: option.key,
-                    value: option.value,
-                    enabled: enabled,
-                    selected: option.value == value,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: Grid.xs,
-                      vertical: Grid.half,
-                    ),
-                    visualDensity: VisualDensity.standard,
-                    activeColor: context.colors.primary,
-                    title: Text(
-                      option.label,
-                      style: context.textTheme.bodyMedium?.copyWith(
-                        color: enabled
-                            ? context.colors.onSurface
-                            : context.colors.onSurface.withValues(alpha: 0.38),
-                        fontWeight: option.value == value
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                      ),
-                    ),
-                  ),
-                  if (index < options.length - 1)
-                    Divider(
-                      height: 1,
-                      indent: Grid.xs,
-                      endIndent: Grid.xs,
-                      color: context.colors.outlineVariant,
-                    ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _CreateChannelSettingMenu<T> extends StatelessWidget {
-  final Key controlKey;
-  final bool enabled;
-  final String label;
-  final ValueChanged<T> onSelected;
-  final List<_CreateChannelMenuOption<T>> options;
-  final T value;
-  final IconData? valueIcon;
-  final String valueLabel;
-
-  const _CreateChannelSettingMenu({
-    required this.controlKey,
-    required this.enabled,
-    required this.label,
-    required this.onSelected,
-    required this.options,
-    required this.value,
-    this.valueIcon,
-    required this.valueLabel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: context.colors.surface,
-        border: Border.all(color: context.colors.outlineVariant),
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      child: PopupMenuButton<T>(
-        enabled: enabled,
-        initialValue: value,
-        onSelected: onSelected,
-        tooltip: '$label: $valueLabel',
-        itemBuilder: (context) => [
-          for (final option in options)
-            CheckedPopupMenuItem<T>(
-              checked: option.value == value,
-              value: option.value,
-              child: Text(option.label),
-            ),
-        ],
-        child: Padding(
-          key: controlKey,
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.twelve,
-            vertical: Grid.xs,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  label,
-                  style: context.textTheme.labelLarge?.copyWith(
-                    color: context.colors.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              if (valueIcon case final icon?) ...[
-                Icon(icon, size: 16, color: context.colors.onSurfaceVariant),
-                const SizedBox(width: Grid.half),
-              ],
-              Text(
-                valueLabel,
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.onSurface,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: Grid.half),
-              Icon(
-                BuzzIcons.chevronDown,
-                size: 16,
-                color: context.colors.onSurfaceVariant,
-              ),
-            ],
-          ),
-        ),
-      ),
+      child: Semantics(label: label, child: child),
     );
   }
 }
@@ -436,57 +295,55 @@ class _CreateChannelSettingMenu<T> extends StatelessWidget {
 class _NewDirectMessageSheet extends HookConsumerWidget {
   final String? currentPubkey;
 
-  const _NewDirectMessageSheet({required this.currentPubkey});
+  final bool nativePresentation;
+  const _NewDirectMessageSheet({
+    required this.currentPubkey,
+    this.nativePresentation = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final queryController = useTextEditingController();
     final queryFocusNode = useFocusNode();
     final query = useState('');
-    final debouncedQuery = useState('');
-    final selectedUsers = useState<List<DirectoryUser>>([]);
+    // A new opening after each pick, as the mention chooser starts one per
+    // `@`: shown rows keep their places only within one query and opening.
+    final opening = useState(0);
+    final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
-    final previewDirectoryActive = ref.watch(dmDirectoryPreviewEnabledProvider);
+    final completedChannel = useState<Channel?>(null);
 
-    useEffect(() {
-      final timer = Timer(const Duration(milliseconds: 250), () {
-        debouncedQuery.value = query.value.trim().toLowerCase();
-      });
-      return timer.cancel;
-    }, [query.value]);
-
-    final normalizedQuery = previewDirectoryActive
-        ? query.value.trim().toLowerCase()
-        : debouncedQuery.value;
-    final isSearchTransitionPending =
-        !previewDirectoryActive &&
-        query.value.trim().toLowerCase() != normalizedQuery;
-    final directoryAsync = previewDirectoryActive
-        ? AsyncValue.data(dmDirectoryPreviewUsers)
-        : normalizedQuery.isEmpty
-        ? ref.watch(relayDirectoryUsersProvider)
-        : ref.watch(relayDirectorySearchProvider(normalizedQuery));
-
-    final selectedPubkeys = selectedUsers.value
-        .map((user) => user.pubkey.toLowerCase())
-        .toSet();
-    final availableResults =
-        directoryAsync.asData?.value.where((user) {
-          final normalizedPubkey = user.pubkey.toLowerCase();
-          if (selectedPubkeys.contains(normalizedPubkey) ||
-              normalizedPubkey == currentPubkey?.toLowerCase()) {
-            return false;
-          }
-          if (normalizedQuery.isEmpty) {
-            return true;
-          }
-          return user.label.toLowerCase().contains(normalizedQuery) ||
-              user.secondaryLabel.toLowerCase().contains(normalizedQuery) ||
-              normalizedPubkey.contains(normalizedQuery);
-        }).toList() ??
-        const <DirectoryUser>[];
-    // Eligible recipients shown or chosen here are the comparison context.
+    // The same candidates, ranking, debounce and search cache as mention
+    // autocomplete, so a name finds the same people and agents in both.
+    // A Space never picks here, so a search ignores its edge spaces where a
+    // composer query would end at one.
+    final search = query.value.trim();
+    final ranked = ref.watch(
+      recipientCandidatesProvider((
+        query: search,
+        historyKey: newDmMentionHistoryKey,
+        unsharedAgents: false,
+      )),
+    );
+    final searching = ref.watch(recipientSearchPendingProvider(search));
+    final searchFailed = ref.watch(recipientSearchFailedProvider(search));
+    final selectedPubkeys = {
+      for (final user in selectedUsers.value) user.pubkey,
+    };
+    final shown = useStableMentionRows(
+      [
+        for (final candidate in ranked)
+          if (!selectedPubkeys.contains(candidate.pubkey)) candidate,
+      ],
+      query: search,
+      opening: opening.value,
+      pending: searching,
+    );
+    final availableResults = shown.rows;
+    // Shown and chosen recipients are named together on every build, so a
+    // pick stays told apart from a same-name result of a later search, and
+    // loading their profiles tracks them for verified names.
     final recipients = [...availableResults, ...selectedUsers.value];
     final names = watchIdentityNames(
       ref,
@@ -495,19 +352,29 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         for (final user in recipients)
           if (user.isAgent) user.pubkey,
       },
-      fallbackNames: {for (final user in recipients) user.pubkey: user.label},
+      fallbackNames: {
+        for (final user in recipients) user.pubkey: user.pickerLabel,
+      },
     );
+    String labelFor(MentionCandidate user) => names.labelFor(user.pubkey);
+    final userCache = ref.watch(userCacheProvider);
+    String? detail(MentionCandidate user) =>
+        recipientRowDetail(user, currentPubkey, userCache);
+    void select(MentionCandidate user) {
+      selectedUsers.value = [...selectedUsers.value, user];
+      opening.value++;
+      ref
+          .read(mentionHistoryProvider.notifier)
+          .remember(newDmMentionHistoryKey, user.pubkey);
+    }
+
+    void retry() => ref.invalidate(mentionUserSearchProvider(search));
     final canSubmit = !isSubmitting.value && selectedUsers.value.isNotEmpty;
 
     Future<void> submit() async {
       if (selectedUsers.value.isEmpty || isSubmitting.value) {
         return;
       }
-      if (previewDirectoryActive) {
-        submitError.value = 'Preview only — mock people cannot be messaged.';
-        return;
-      }
-
       isSubmitting.value = true;
       submitError.value = null;
       try {
@@ -515,240 +382,332 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .openDm(
               pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
+              waitForChannelList: false,
             );
         if (context.mounted) {
-          Navigator.of(context).pop(channel);
+          if (nativePresentation) {
+            completedChannel.value = channel;
+          } else {
+            Navigator.of(context).pop(channel);
+          }
         }
       } catch (error) {
-        submitError.value = error.toString();
+        if (context.mounted) submitError.value = error.toString();
       } finally {
-        isSubmitting.value = false;
+        if (context.mounted) isSubmitting.value = false;
       }
     }
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        0,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
-      ),
-      child: SafeArea(
-        top: false,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onTap: isSubmitting.value ? null : queryFocusNode.requestFocus,
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ConstrainedBox(
-                    key: const Key('new-dm-recipient-field'),
-                    constraints: const BoxConstraints(minHeight: Grid.xl),
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: context.colors.surface,
-                        border: Border.all(
-                          color: context.colors.outlineVariant,
-                        ),
-                        borderRadius: BorderRadius.circular(Radii.container),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: Grid.twelve,
-                          vertical: Grid.xxs,
-                        ),
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final hasSelectedUsers =
-                                selectedUsers.value.isNotEmpty;
-                            final searchFieldWidth = hasSelectedUsers
-                                ? 96.0
-                                : (constraints.maxWidth - 32).clamp(
-                                    96.0,
-                                    constraints.maxWidth,
-                                  );
+    if (nativePresentation) {
+      final auth = ref.watch(mediaGetAuthServiceProvider);
+      final client = ref.watch(mediaHttpClientProvider);
+      final colors = context.colors;
+      String? avatarUrl(MentionCandidate user) =>
+          user.avatarUrl ?? userCache[user.pubkey]?.avatarUrl;
+      String avatarKey(MentionCandidate user) => jsonEncode([
+        user.pubkey,
+        avatarUrl(user),
+        user.initial,
+        user.isAgent,
+        colors.primaryContainer.toARGB32(),
+        colors.onPrimaryContainer.toARGB32(),
+      ]);
+      Map<String, Object?> row(MentionCandidate user) => {
+        'pubkey': user.pubkey,
+        'name': labelFor(user),
+        'detail': detail(user),
+        'agent': user.isAgent,
+        'unavailable': shown.unavailable.contains(user.pubkey),
+        'avatarKey': avatarKey(user),
+        'initial': user.initial,
+        'avatarBackground': colors.primaryContainer.toARGB32(),
+        'avatarForeground': colors.onPrimaryContainer.toARGB32(),
+      };
+      MentionCandidate? find(String pubkey) => [
+        ...selectedUsers.value,
+        ...availableResults,
+      ].where((user) => user.pubkey == pubkey).firstOrNull;
+      return IosAddMembersSheet(
+        onAvatar: (pubkey, key) async {
+          final user = find(pubkey);
+          if (user == null || avatarKey(user) != key) return null;
+          return nativeAvatarImage(
+            url: avatarUrl(user),
+            initial: user.initial,
+            isAgent: user.isAgent,
+            background: colors.primaryContainer,
+            foreground: colors.onPrimaryContainer,
+            networkImage: (url) =>
+                MediaImageProvider(url: url, auth: auth, client: client),
+          );
+        },
+        state: {
+          'title': 'New DM',
+          'confirmWithCheckmark': true,
+          'clearQueryOnPick': true,
+          'emptyQueryHint': 'Type a name to find people or agents.',
+          'selectionLimit': 8,
+          'completed': completedChannel.value != null,
+          'query': query.value,
+          'loading': searching,
+          'loadError': searchFailed,
+          'error': submitError.value,
+          'submitting': isSubmitting.value,
+          'selected': [for (final user in selectedUsers.value) row(user)],
+          'users': [for (final user in availableResults) row(user)],
+        },
+        onQuery: (value) {
+          if (!isSubmitting.value) query.value = value;
+        },
+        onToggle: (pubkey) {
+          if (isSubmitting.value) return;
+          if (selectedPubkeys.contains(pubkey)) {
+            selectedUsers.value = selectedUsers.value
+                .where((user) => user.pubkey != pubkey)
+                .toList();
+            opening.value++;
+            return;
+          }
+          final user = find(pubkey);
+          if (user == null ||
+              shown.unavailable.contains(pubkey) ||
+              selectedUsers.value.length >= 8) {
+            return;
+          }
+          select(user);
+        },
+        onSubmit: () => unawaited(submit()),
+        onRetry: retry,
+        onClose: () => Navigator.of(context).pop(completedChannel.value),
+      );
+    }
 
-                            return Wrap(
-                              key: const Key('new-dm-recipient-wrap'),
-                              spacing: 6,
-                              runSpacing: 6,
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: Grid.half,
-                                  ),
-                                  child: Text(
-                                    'To:',
-                                    style: context.textTheme.bodyLarge
-                                        ?.copyWith(fontWeight: FontWeight.w600),
-                                  ),
-                                ),
-                                for (final user in selectedUsers.value)
-                                  _SelectedDmRecipientChip(
-                                    user: user,
-                                    label: names.labelFor(user.pubkey),
-                                    enabled: !isSubmitting.value,
-                                    onDeleted: () {
-                                      selectedUsers.value = [
-                                        for (final candidate
-                                            in selectedUsers.value)
-                                          if (candidate.pubkey != user.pubkey)
-                                            candidate,
-                                      ];
-                                      queryFocusNode.requestFocus();
-                                    },
-                                  ),
-                                SizedBox(
-                                  width: searchFieldWidth,
-                                  child: TextField(
-                                    key: const Key('new-dm-search'),
-                                    controller: queryController,
-                                    focusNode: queryFocusNode,
-                                    autofocus: true,
-                                    autocorrect: false,
-                                    enableSuggestions: false,
-                                    enabled: !isSubmitting.value,
-                                    onChanged: (value) => query.value = value,
-                                    onSubmitted: (_) {
-                                      if (canSubmit) {
-                                        unawaited(submit());
-                                      }
-                                    },
-                                    decoration: InputDecoration(
-                                      hintText: hasSelectedUsers
-                                          ? null
-                                          : 'Search for a person',
-                                      border: InputBorder.none,
-                                      enabledBorder: InputBorder.none,
-                                      focusedBorder: InputBorder.none,
-                                      isDense: true,
-                                      contentPadding:
-                                          const EdgeInsets.symmetric(
-                                            vertical: Grid.half,
-                                          ),
-                                      suffixIcon: isSubmitting.value
-                                          ? const Padding(
-                                              padding: EdgeInsets.all(
-                                                Grid.half,
-                                              ),
-                                              child: SizedBox.square(
-                                                dimension: 16,
-                                                child: BuzzLoadingIndicator(
-                                                  size: 16,
-                                                  semanticLabel:
-                                                      'Creating conversation',
-                                                ),
-                                              ),
-                                            )
-                                          : null,
-                                      suffixIconConstraints:
-                                          const BoxConstraints(
-                                            minHeight: 32,
-                                            minWidth: 32,
+    return _CreationSheetLayout(
+      title: 'New DM',
+      actionKey: const Key('new-dm-submit'),
+      actionLabel: 'Done',
+      busy: isSubmitting.value,
+      onSubmit: canSubmit ? submit : null,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
+        ),
+        child: SafeArea(
+          top: false,
+          // The sheet bounds this viewport even with the keyboard visible.
+          // Keep rows as slivers so search and chip updates do not lay out the
+          // entire directory. The field still scrolls with long chip selections.
+          child: CustomScrollView(
+            shrinkWrap: true,
+            slivers: [
+              SliverToBoxAdapter(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: isSubmitting.value
+                      ? null
+                      : queryFocusNode.requestFocus,
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: ConstrainedBox(
+                      key: const Key('new-dm-recipient-field'),
+                      constraints: const BoxConstraints(minHeight: Grid.xl),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: context.colors.surface,
+                          border: Border.all(
+                            color: context.colors.outlineVariant,
+                          ),
+                          borderRadius: BorderRadius.circular(Radii.container),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Grid.twelve,
+                            vertical: Grid.xxs,
+                          ),
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              final hasSelectedUsers =
+                                  selectedUsers.value.isNotEmpty;
+                              final searchFieldWidth = hasSelectedUsers
+                                  ? 96.0
+                                  : (constraints.maxWidth - 32).clamp(
+                                      96.0,
+                                      constraints.maxWidth,
+                                    );
+
+                              return Wrap(
+                                key: const Key('new-dm-recipient-wrap'),
+                                spacing: 6,
+                                runSpacing: 6,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: Grid.half,
+                                    ),
+                                    child: Text(
+                                      'To:',
+                                      style: context.textTheme.bodyLarge
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w600,
                                           ),
                                     ),
-                                    textInputAction: TextInputAction.done,
                                   ),
-                                ),
-                              ],
-                            );
-                          },
+                                  for (final user in selectedUsers.value)
+                                    _SelectedDmRecipientChip(
+                                      user: user,
+                                      label: labelFor(user),
+                                      enabled: !isSubmitting.value,
+                                      onDeleted: () {
+                                        selectedUsers.value = [
+                                          for (final candidate
+                                              in selectedUsers.value)
+                                            if (candidate.pubkey != user.pubkey)
+                                              candidate,
+                                        ];
+                                        opening.value++;
+                                        queryFocusNode.requestFocus();
+                                      },
+                                    ),
+                                  SizedBox(
+                                    width: searchFieldWidth,
+                                    child: TextField(
+                                      key: const Key('new-dm-search'),
+                                      controller: queryController,
+                                      focusNode: queryFocusNode,
+                                      autofocus: true,
+                                      autocorrect: false,
+                                      enableSuggestions: false,
+                                      enabled: !isSubmitting.value,
+                                      onChanged: (value) => query.value = value,
+                                      onSubmitted: (_) {
+                                        if (canSubmit) {
+                                          unawaited(submit());
+                                        }
+                                      },
+                                      decoration: InputDecoration(
+                                        hintText: hasSelectedUsers
+                                            ? null
+                                            : 'Search for people or agents',
+                                        border: InputBorder.none,
+                                        enabledBorder: InputBorder.none,
+                                        focusedBorder: InputBorder.none,
+                                        isDense: true,
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(
+                                              vertical: Grid.half,
+                                            ),
+                                        suffixIcon: isSubmitting.value
+                                            ? const Padding(
+                                                padding: EdgeInsets.all(
+                                                  Grid.half,
+                                                ),
+                                                child: SizedBox.square(
+                                                  dimension: 16,
+                                                  child: BuzzLoadingIndicator(
+                                                    size: 16,
+                                                    semanticLabel:
+                                                        'Creating conversation',
+                                                  ),
+                                                ),
+                                              )
+                                            : null,
+                                        suffixIconConstraints:
+                                            const BoxConstraints(
+                                              minHeight: 32,
+                                              minWidth: 32,
+                                            ),
+                                      ),
+                                      textInputAction: TextInputAction.done,
+                                    ),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-              const SizedBox(height: Grid.xs),
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xs)),
               Builder(
                 key: const Key('new-dm-results'),
                 builder: (context) {
                   if (selectedUsers.value.length >= 8) {
-                    return const SizedBox(
-                      height: 96,
-                      child: Center(
-                        child: Text(
-                          'DMs support up to nine people, including you.',
+                    return const SliverToBoxAdapter(
+                      child: SizedBox(
+                        height: 96,
+                        child: Center(
+                          child: Text(
+                            'DMs support up to nine people, including you.',
+                          ),
                         ),
                       ),
                     );
                   }
-                  if (directoryAsync.isLoading &&
-                          directoryAsync.asData == null ||
-                      isSearchTransitionPending) {
-                    return const SizedBox(
-                      height: 280,
-                      child: Center(
-                        child: BuzzLoadingIndicator(
-                          size: 44,
-                          semanticLabel: 'Loading people',
+                  if (availableResults.isEmpty && !searchFailed) {
+                    return SliverToBoxAdapter(
+                      child: SizedBox(
+                        height: 96,
+                        child: Center(
+                          child: searching
+                              ? const BuzzLoadingIndicator(
+                                  size: 32,
+                                  semanticLabel: 'Searching people',
+                                )
+                              : Text(
+                                  query.value.trim().isEmpty
+                                      ? 'Type a name to find people or agents.'
+                                      : 'No matching people or agents.',
+                                ),
                         ),
                       ),
                     );
                   }
-                  if (directoryAsync.hasError) {
-                    return SizedBox(
-                      height: 280,
-                      child: Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Text(
-                              'Could not load people from this relay.',
+                  return SliverList.builder(
+                    itemCount: availableResults.length + (searchFailed ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == availableResults.length) {
+                        return Material(
+                          type: MaterialType.transparency,
+                          child: ListTile(
+                            key: const Key('new-dm-search-error'),
+                            title: Text(
+                              'Could not search community people.',
+                              style: context.textTheme.bodySmall?.copyWith(
+                                color: context.colors.error,
+                              ),
                             ),
-                            const SizedBox(height: Grid.half),
-                            TextButton(
-                              onPressed: () {
-                                if (normalizedQuery.isEmpty) {
-                                  ref.invalidate(relayDirectoryUsersProvider);
-                                } else {
-                                  ref.invalidate(
-                                    relayDirectorySearchProvider(
-                                      normalizedQuery,
-                                    ),
-                                  );
-                                }
-                              },
+                            trailing: TextButton(
+                              onPressed: retry,
                               child: const Text('Retry'),
                             ),
-                          ],
-                        ),
-                      ),
-                    );
-                  }
-                  if (availableResults.isEmpty) {
-                    return SizedBox(
-                      height: 280,
-                      child: Center(
-                        child: Text(
-                          normalizedQuery.isEmpty
-                              ? 'No people or agents available to message.'
-                              : 'No matching users.',
-                        ),
-                      ),
-                    );
-                  }
-                  return ListView.builder(
-                    physics: const NeverScrollableScrollPhysics(),
-                    shrinkWrap: true,
-                    itemCount: availableResults.length,
-                    itemBuilder: (context, index) {
+                          ),
+                        );
+                      }
                       final user = availableResults[index];
+                      final available = !shown.unavailable.contains(
+                        user.pubkey,
+                      );
+                      final info = detail(user);
                       return AppListCardItem(
                         index: index,
                         itemCount: availableResults.length,
                         dividerIndent: Grid.xs + 40 + Grid.xs,
                         child: ListTile(
                           key: Key('new-dm-person-${user.pubkey}'),
+                          enabled: available,
                           leading: AvatarImage(
-                            imageUrl: user.avatarUrl,
+                            imageUrl:
+                                user.avatarUrl ??
+                                userCache[user.pubkey]?.avatarUrl,
                             radius: 20,
-                            backgroundColor: context.colors.primaryContainer,
+                            backgroundColor: context.controlSurface,
                             fallback: Text(
                               user.initial,
                               style: context.textTheme.labelLarge?.copyWith(
@@ -759,30 +718,23 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                             isAgent: user.isAgent,
                           ),
                           title: Text(
-                            names.labelFor(user.pubkey),
+                            labelFor(user),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          subtitle: Text(
-                            user.secondaryLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: Icon(
-                            BuzzIcons.plus,
-                            size: 18,
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                          onTap: isSubmitting.value
+                          subtitle: info == null
+                              ? null
+                              : Text(
+                                  info,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                          onTap: isSubmitting.value || !available
                               ? null
                               : () {
-                                  selectedUsers.value = [
-                                    ...selectedUsers.value,
-                                    user,
-                                  ];
+                                  select(user);
                                   queryController.clear();
                                   query.value = '';
-                                  debouncedQuery.value = '';
                                   submitError.value = null;
                                   queryFocusNode.requestFocus();
                                 },
@@ -793,11 +745,13 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                 },
               ),
               if (submitError.value case final error?) ...[
-                const SizedBox(height: Grid.xxs),
-                Text(
-                  error,
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.error,
+                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+                SliverToBoxAdapter(
+                  child: Text(
+                    error,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.error,
+                    ),
                   ),
                 ),
               ],
@@ -810,7 +764,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
 }
 
 class _SelectedDmRecipientChip extends StatelessWidget {
-  final DirectoryUser user;
+  final MentionCandidate user;
   final String label;
   final bool enabled;
   final VoidCallback onDeleted;
@@ -854,7 +808,7 @@ class _SelectedDmRecipientChip extends StatelessWidget {
                     AvatarImage(
                       imageUrl: user.avatarUrl,
                       radius: 16,
-                      backgroundColor: context.colors.primaryContainer,
+                      backgroundColor: context.controlSurface,
                       fallback: Text(
                         user.initial,
                         style: context.textTheme.labelMedium?.copyWith(
@@ -882,6 +836,89 @@ class _SelectedDmRecipientChip extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CreationSheetLayout extends StatelessWidget {
+  const _CreationSheetLayout({
+    required this.title,
+    required this.actionKey,
+    required this.actionLabel,
+    required this.busy,
+    required this.onSubmit,
+    required this.child,
+  });
+
+  final String title;
+  final Key actionKey;
+  final String actionLabel;
+  final bool busy;
+  final VoidCallback? onSubmit;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final close = busy ? null : () => Navigator.of(context).pop();
+    final ios = defaultTargetPlatform == TargetPlatform.iOS;
+    return PopScope(
+      canPop: !busy,
+      child: BuzzTitledSheetLayout(
+        title: title,
+        leading: ios
+            ? IosGlassNavigationButton(
+                icon: IosGlassNavigationIcon.close,
+                semanticLabel: 'Close',
+                onPressed: close,
+              )
+            : IconButton(
+                tooltip: 'Close',
+                onPressed: close,
+                icon: const Icon(BuzzIcons.x),
+              ),
+        trailing: actionLabel == 'Done'
+            ? (ios
+                  ? IosGlassNavigationButton(
+                      key: actionKey,
+                      icon: IosGlassNavigationIcon.check,
+                      semanticLabel: 'Done',
+                      onPressed: onSubmit,
+                      isBusy: busy,
+                    )
+                  : IconButton(
+                      key: actionKey,
+                      tooltip: 'Done',
+                      onPressed: onSubmit,
+                      icon: busy
+                          ? const SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(BuzzIcons.check),
+                    ))
+            : ios
+            ? IosGlassNavigationAction(
+                width: 80,
+                key: actionKey,
+                label: actionLabel,
+                onPressed: onSubmit,
+                isBusy: busy,
+              )
+            : TextButton(
+                key: actionKey,
+                onPressed: onSubmit,
+                child: busy
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          semanticsLabel: 'Creating',
+                        ),
+                      )
+                    : Text(actionLabel),
+              ),
+        child: child,
       ),
     );
   }

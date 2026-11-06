@@ -2,6 +2,8 @@ part of '../message_actions.dart';
 
 class _QuickReactionRow extends ConsumerWidget {
   final TimelineMessage message;
+  final List<TimelineReaction> reactions;
+  final ValueChanged<String>? onToggleReaction;
 
   /// The sheet's context, popped before the reaction fires.
   final BuildContext sheetContext;
@@ -16,6 +18,8 @@ class _QuickReactionRow extends ConsumerWidget {
 
   const _QuickReactionRow({
     required this.message,
+    required this.reactions,
+    this.onToggleReaction,
     required this.sheetContext,
     required this.pageContext,
     required this.pageRef,
@@ -36,10 +40,12 @@ class _QuickReactionRow extends ConsumerWidget {
     };
 
     void react(String value) {
-      if (message.reactions.any(
-        (r) => r.emoji == value && r.reactedByCurrentUser,
-      )) {
-        toggleReaction(pageRef, message, value);
+      if (reactions.any((r) => r.emoji == value && r.reactedByCurrentUser)) {
+        if (onToggleReaction != null) {
+          onToggleReaction!(value);
+        } else {
+          toggleReaction(pageRef, message, value);
+        }
         return;
       }
       // The generic picker is also used for composing and statuses. Record
@@ -49,7 +55,11 @@ class _QuickReactionRow extends ConsumerWidget {
       // The sheet is on its way out, so the burst can't come from this tile —
       // hand it to the pill that's about to appear in the timeline.
       armReactionBurst(pageRef, message, value);
-      pageRef.read(channelActionsProvider).addReaction(message.id, value);
+      if (onToggleReaction != null) {
+        onToggleReaction!(value);
+      } else {
+        pageRef.read(channelActionsProvider).addReaction(message.id, value);
+      }
     }
 
     return LayoutBuilder(
@@ -73,7 +83,7 @@ class _QuickReactionRow extends ConsumerWidget {
               child: _QuickReactionCircle(
                 size: circleSize,
                 label: dataset.displayName(emoji[index]),
-                selected: message.reactions.any(
+                selected: reactions.any(
                   (r) => r.emoji == emoji[index] && r.reactedByCurrentUser,
                 ),
                 onTap: () {

@@ -815,11 +815,37 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// startup budget (see block/buzz#3355). Skip that unrelated global startup
 /// by default; an operator or persona can still opt back in by setting the
 /// variable explicitly.
+///
+/// Every runtime: `buzz` event reads (`messages get/thread/search`, `feed get`)
+/// default to the `agent` format, which drops signature material an agent
+/// would otherwise pay for on every history read.
 pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
     match normalize_agent_command_identity(command).as_str() {
-        "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
-        _ => &[],
+        "hermes" | "hermes-agent" | "hermes-acp" => &[
+            AGENT_OUTPUT_FORMAT_ENV,
+            ("HERMES_ACP_SKIP_CONFIGURED_MCP", "1"),
+        ],
+        _ => &[AGENT_OUTPUT_FORMAT_ENV],
     }
+}
+
+const AGENT_OUTPUT_FORMAT_ENV: (&str, &str) = ("BUZZ_OUTPUT_FORMAT", "agent");
+
+/// Resolve the CLI format for MCP servers that filter inherited environment.
+/// Match `AcpClient::spawn`: parent env wins, then the last persona value,
+/// then the shared runtime default.
+pub(crate) fn agent_output_format(extra_env: &[(String, String)]) -> String {
+    let (key, default) = AGENT_OUTPUT_FORMAT_ENV;
+    std::env::var(key)
+        .ok()
+        .or_else(|| {
+            extra_env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_else(|| default.into())
 }
 
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
@@ -1777,14 +1803,18 @@ mod tests {
         ] {
             assert_eq!(
                 default_agent_env(command),
-                &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+                &[
+                    ("BUZZ_OUTPUT_FORMAT", "agent"),
+                    ("HERMES_ACP_SKIP_CONFIGURED_MCP", "1"),
+                ],
                 "unexpected env defaults for {command}"
             );
         }
         for command in ["goose", "codex-acp", "claude-agent-acp", "buzz-agent", ""] {
-            assert!(
-                default_agent_env(command).is_empty(),
-                "non-Hermes command must have no env defaults: {command}"
+            assert_eq!(
+                default_agent_env(command),
+                &[("BUZZ_OUTPUT_FORMAT", "agent")],
+                "non-Hermes command must only get the shared env defaults: {command}"
             );
         }
     }

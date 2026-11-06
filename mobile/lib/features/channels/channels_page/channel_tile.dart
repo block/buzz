@@ -3,6 +3,10 @@ part of '../channels_page.dart';
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
   final bool isUnread;
+
+  /// Whether unread thread replies, mentions or broadcasts need attention.
+  /// They show as a dot without bolding the label.
+  final bool hasAttention;
   final bool isMuted;
   final String? currentPubkey;
   final VoidCallback onTap;
@@ -18,6 +22,7 @@ class _ChannelTile extends ConsumerWidget {
     required this.channel,
     required this.isUnread,
     required this.currentPubkey,
+    this.hasAttention = false,
     required this.onTap,
     this.isMuted = false,
     this.onMarkRead,
@@ -27,10 +32,8 @@ class _ChannelTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final contentColor = isMuted
-        ? navigationSecondaryForeground(context)
-        : navigationPrimaryForeground(
-            context,
-          ).withValues(alpha: isUnread ? 1 : 0.8);
+        ? navigationMetadataForeground(context)
+        : channelNavigationForeground(context);
 
     return InkWell(
       borderRadius: BorderRadius.circular(Radii.md),
@@ -45,21 +48,35 @@ class _ChannelTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: channel.isDm
-                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-                    : Icon(
-                        channelIcon(channel),
-                        key: ValueKey('channel-icon-${channel.id}'),
-                        size: _kChannelIconSize,
-                        color: contentColor,
-                      ),
+            if (channel.isDm) ...[
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _DmAvatar(
+                    channel: channel,
+                    currentPubkey: currentPubkey,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
+              const SizedBox(width: _kChannelLabelGap),
+            ] else ...[
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(
+                    channel.visibility == 'private'
+                        ? BuzzIcons.lock
+                        : BuzzIcons.hash,
+                    key: ValueKey('channel-icon-${channel.id}'),
+                    size: _kChannelIconSize,
+                    color: contentColor,
+                  ),
+                ),
+              ),
+              const SizedBox(width: _kChannelLabelGap),
+            ],
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -76,24 +93,51 @@ class _ChannelTile extends ConsumerWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: contentListTitleTextStyle.copyWith(
-                      color: contentColor,
-                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
+                    style: navigationChatTitleTextStyle.copyWith(
+                      color: isMuted
+                          ? contentColor
+                          : channelNavigationForeground(
+                              context,
+                              unread: isUnread,
+                            ),
+                      fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
                     ),
                   ),
                 ],
               ),
             ),
+            if (hasAttention) ...[
+              const SizedBox(width: Grid.xxs),
+              // The dot is the only sign of this state, so name it for
+              // screen readers; it merges into the row's label.
+              Semantics(
+                label: 'Needs your attention',
+                child: Container(
+                  key: ValueKey('channel-attention-dot-${channel.id}'),
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: context.colors.primary,
+                  ),
+                ),
+              ),
+            ],
             if (channel.isEphemeral) ...[
               const SizedBox(width: Grid.xxs),
               _EphemeralBadge(channel: channel),
             ],
             if (isMuted) ...[
               const SizedBox(width: Grid.xxs),
-              Icon(
-                BuzzIcons.bellOff,
-                size: 12,
-                color: context.colors.onSurface.withValues(alpha: 0.4),
+              SizedBox(
+                width: _kChannelIconSize,
+                child: Center(
+                  child: Icon(
+                    BuzzIcons.bellOff,
+                    size: 12,
+                    color: navigationMetadataForeground(context),
+                  ),
+                ),
               ),
             ],
             if (!channel.isMember && !channel.isDm)
@@ -127,7 +171,8 @@ class _ChannelTile extends ConsumerWidget {
     showChannelActionsSheet(
       context: context,
       channel: channel,
-      isUnread: isUnread,
+      // Mark read also clears the dot: the channel mark reads every reply.
+      isUnread: isUnread || hasAttention,
       onMarkRead: onMarkRead,
       sectionId: sectionId,
     );
@@ -180,7 +225,7 @@ class _DmAvatar extends ConsumerWidget {
       ),
     );
     final presence = ref.watch(
-      presenceCacheProvider.select(
+      presentedPresenceProvider.select(
         (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
       ),
     );
@@ -211,7 +256,7 @@ class _DmAvatar extends ConsumerWidget {
           AvatarImage(
             imageUrl: avatarUrl,
             radius: _kDmAvatarSize / 2,
-            backgroundColor: context.colors.primaryContainer,
+            backgroundColor: context.controlSurface,
             fallback: Text(
               initial,
               style: context.textTheme.labelSmall?.copyWith(

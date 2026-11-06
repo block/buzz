@@ -14,7 +14,13 @@ Before planning or reviewing a non-trivial change:
 2. Read the `VISION_*.md` documents relevant to the affected product surface.
 3. Read the applicable guidance in [TESTING.md](TESTING.md) and any
    package-local `TESTING.md`.
-4. Check that the proposed design advances, or at least does not contradict,
+4. For any change to `migrations/`, `schema/`, or schema-dependent `buzz-db`
+   queries, read [docs/database.md](docs/database.md): no new triggers,
+   functions, or foreign keys; no data backfills in migrations; update every
+   schema location; keep every migration compatible with the relay that
+   is currently deployed; and never make a migration refuse a populated
+   table.
+5. Check that the proposed design advances, or at least does not contradict,
    that product intent. Call out any intentional tension explicitly.
 
 Implementation describes the product today; the vision documents describe the
@@ -54,7 +60,7 @@ confirmation, not app runs.
 
 - Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
   issue. Review the change against what it is trying to do.
-- Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers here find most often.
+- Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers and load tests here find most often.
 - Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
   below 9 names the concrete defect and the fix.
 - Recommend blocking only for concrete correctness, security, or agreed-contract
@@ -67,25 +73,26 @@ confirmation, not app runs.
 - Agents post reviews as comments, never Request Changes. Humans decide which
   findings must be fixed.
 
+## Open-source boundary
+
+This repository is public and contains the relay, NIP specifications, legacy desktop app, and mobile clients. Never commit values that only make sense inside Block: the employee-only bb-block community and its hosts (`block.builderlab.xyz`, `buzz.block.builderlab.xyz`, `*.communities.block.xyz`), private GitHub organizations or repositories, organization-specific SSH users, internal hosts, cloud accounts, IAM roles or buckets, internal ticket keys, `go/` links, internal Slack channels, or real employees' names and personal setups. Public Builderlab (`app.builderlab.xyz`, `*.communities.builderlab.xyz`) is supported and fine.
+
+Distributor-specific values belong in the relevant release configuration: build-time settings for clients and deployment configuration for the relay. If a setting is missing, add a generic one; never hardcode a Block-only value or special-case a host or organization.
+
+The rule covers functionality, not only identifiers. Every feature here must be generic: useful to any operator or distributor, with no knowledge of one company's internal services, workflows or identity setup. Functionality that only serves Block lives in Block's private repositories (release builds, deployment configuration, private plugins) and reaches this code only through generic settings or documented extension points that never name, detect or special-case a specific organization, plugin or service. Review judges a change's purpose and approach, not just its strings.
+
+Tests, fixtures, docs, and examples use example values (`example.org`, `example-org`, fictional names).
+
+Reviewers treat a violation as a blocking finding.
+
 ## Ecosystem
 
-Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+This repository (`block/buzz`) is the OSS source for the relay, mobile, CLI, and the deprecated Buzz 0.X desktop app. [block/buzz-app](https://github.com/block/buzz-app) is the OSS source for the Buzz 1.0 desktop and web app. Block's internal builds and deployments live in private repositories.
 
 | Repo | Purpose |
 |------|---------|
-| [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
-| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
-| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
-| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
-
-```
-block/buzz (source)
-  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
-  ├─► sprout-oss         (relay Docker image → ECR)
-  │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
-  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
-```
+| [block/buzz](https://github.com/block/buzz) | OSS source — relay, mobile app, CLI, agent harness, deprecated Buzz 0.X desktop app |
+| [block/buzz-app](https://github.com/block/buzz-app) | OSS source — Buzz 1.0 desktop and web app; all new desktop feature work |
 
 See [RELEASING.md](RELEASING.md) for the desktop release flow and
 [CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
@@ -125,10 +132,11 @@ crates/
   buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
-desktop/              # Tauri 2 + React 19 desktop app
+desktop/              # Buzz 0.X Tauri desktop app (deprecated: new desktop work goes to block/buzz-app)
 web/                  # Browser web client (repo browser, served by the relay)
 mobile/               # Flutter mobile app
-migrations/           # SQL migrations (auto-applied on relay startup)
+migrations/           # SQL migrations (run at relay startup when BUZZ_AUTO_MIGRATE is on: binary default off, Helm default on; deployments at scale apply them out of band — see docs/database.md)
+schema/               # Desired-state schema (schema/tables/public/ is the declarative schema source)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running
 ```
@@ -208,7 +216,8 @@ once flagged: test-seam binding and unbounded-resource findings were fixed
 **100%** of the time, swallowed-error findings **90%**, stale-state races
 **70%** — these are not style opinions, they are defects authors agree
 with on sight. Authors apply them **before writing code**, and reviewers check
-against them; each cites the PRs where reviewers litigated it.
+against them; each cites the PRs where reviewers litigated it. Rules
+mined from other sources, such as load tests, say so in their text.
 
 1. **Every caught failure must leave a durable retry record or propagate.**
    Never catch-log-and-return-success (opt-out revocation permanently
@@ -280,6 +289,32 @@ against them; each cites the PRs where reviewers litigated it.
    non-primary ones — that's where the defects were. (PRs #5958, #5972,
    #6793, #6860, #6862, #6908, #7006)
 
+9. **Design every client-driven path for the whole fleet running it at
+   once.** This rule comes from relay load tests rather than review
+   mining. A rollout drain, node eviction, relay restart, or network blip
+   makes every connected client run its reconnect, renewal, and catch-up
+   paths in the same few seconds, so cost per client times clients is the
+   load that matters. Before adding or changing a connect, reconnect,
+   renewal, poll, or catch-up path:
+   - **Count its relay reads per client** and keep reconnect to a delta
+     from the client's cursor, not a rebuild. One replay filter per
+     channel meant ~306 filters per reconnect for a 300-channel client
+     (block/buzz-app#2308).
+   - **Jitter its start and back off on failure with a cap** (backoff:
+     see rule 4). Spread the server side of a mass close, too (drain close
+     jitter, PR #4542).
+   - **Prefer an event-driven refresh with a long backstop over a short
+     poll.** For example, a full channel-list re-read every 60 s became
+     every 15 min (block/buzz-app#2215).
+   - **On the relay, assume a 0% hit rate for every cache on a connect
+     or auth path.** Concurrent misses for one key share one read, with a
+     bounded wait and a fallback read if the leader fails or hangs. Date
+     each entry from when its read checked out a connection: stamped before
+     the pool wait, 1 s entries expired on insert and storms ran uncached;
+     stamped at insert, they would outlive their staleness bound (PRs
+     #8846, #9012).
+     (PRs #4542, #8846, #9012; block/buzz-app#2215, #2308)
+
 ---
 
 ## Key Patterns
@@ -313,7 +348,9 @@ Filters and queries must scope to `h` tags when operating within a channel.
 This applies to events *inside* a channel. Addressable events that describe a
 channel carry its id in their `d` tag instead: kind:39000 (metadata),
 kind:39001, kind:39002 (membership). `get_channels` resolves a user's channels
-from the `d` tag of their kind:39002 events, not from `h`.
+from the `d` tag of their kind:39002 events, not from `h`. The relay leaves
+system channels out of these reads unless the filter asks for them (see
+`docs/nips/NIP-CL.md`).
 
 **Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
 
@@ -363,8 +400,13 @@ canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
-`--format compact` is a **global** flag — it goes before the subcommand:
+`--format` is a **global** flag — it goes before the subcommand:
 `buzz --format compact channels list`, NOT `buzz channels list --format compact`.
+Without the flag it falls back to `BUZZ_OUTPUT_FORMAT` (unknown values mean
+`json`); buzz-acp sets that to `agent` for agent
+processes, so their event reads drop `sig`, trim the NIP-OA `auth` tag to
+`["auth", <owner>]`, and fold the NIP-10 `root`/`reply` tags into `reply_to`
+(plus `thread_root` on nested replies); other tags remain.
 
 See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
 
@@ -600,11 +642,21 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
-7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape SchemaBot reads), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
+7. **`pgschema` omits seed DML and some storage parameters** — `schema/schema.sql` is an ordered `\i` manifest: `schema/tables/public/<table>.sql` holds only that table's `CREATE TABLE` and `CREATE INDEX` statements (one table per file, the shape out-of-band schema tools read), and types, functions, partitions, triggers, and seed rows live in the sibling `schema/` directories. Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script, and must run pgschema from the repository root so it reads `.pgschemaignore`; from any other directory a re-apply plans to drop the partitions the relay created at runtime. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 
 ## Desktop App
+
+> **`desktop/` is deprecated.** It is the Buzz 0.X desktop app. The Buzz 1.0
+> desktop app lives in [block/buzz-app](https://github.com/block/buzz-app).
+> Do not open block/buzz PRs that add features to `desktop/`; build desktop
+> features in block/buzz-app (or as a Buzz plugin) instead. Change `desktop/`
+> here only to fix a 0.X bug, or to keep it compiling when a shared crate it
+> depends on changes. This includes agent guidance bundled with the 0.X app,
+> such as `desktop/src-tauri/src/managed_agents/nest_skill.md`: CLI PRs do not
+> need to update it. Never use it as an implementation or design reference for
+> the mobile app, which is current.
 
 The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
@@ -686,13 +738,20 @@ Key files:
 
 The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
+The mobile app is current. Do not use the legacy `desktop/` app as an
+implementation or design reference for it: `desktop/` will soon be superseded
+by [block/buzz-app](https://github.com/block/buzz-app). This does not relax
+cross-client wire compatibility: mobile must keep reading and writing the same
+event payloads as other clients (for example the `channel-sort` NIP-78 payload,
+which buzz-app also uses), even where a payload is documented only in code.
+
 ### Architecture
 
 - **State management:** Riverpod + `flutter_hooks` (`HookConsumerWidget`)
-- **Theme:** Catppuccin Latte (light) / Macchiato (dark) — matches desktop
+- **Theme:** Catppuccin Latte (light) / Macchiato (dark)
 - **Features:** Isolated under `lib/features/`, shared code in `lib/shared/`
 - **Nostr models:** `lib/shared/relay/nostr_models.dart` — event kinds must
-  stay in sync with `desktop/src/shared/constants/kinds.ts`
+  stay in sync with `crates/buzz-core/src/kind.rs`
 
 ### Rules
 
@@ -763,12 +822,37 @@ usage.
 
 ### Testing Conventions
 
-- Prefer **widget tests** over unit tests for UI components — test the
-  whole widget tree, not individual methods.
-- Use `ProviderScope(overrides: [...])` to inject fake notifiers.
-- Fake notifiers should extend the real notifier class and override `build()`.
-- Use the `WidgetHelpers.testable()` wrapper for simple widget tests or
-  build a custom `ProviderScope` + `MaterialApp` when you need specific overrides.
+Favor a few functional tests over many small ones. Every test is code we
+maintain, so each one must protect a distinct user outcome or invariant.
+
+- **Start with journeys.** For each user-visible flow, write one widget test
+  that drives it through real widgets, notifiers and coordinators. Assert what
+  the user sees and what is durably saved, not internal stages or call counts.
+  Where Flutter can observe it, include semantics and non-primary input in the
+  journey: screen-reader labels and actions, keyboard, alternate gestures, text
+  scale and reduced motion.
+- **Put failure paths inside the journey.** Retry, cancel, resume and a second
+  request arriving midway are steps of a journey, not separate tests.
+- **Fake only external boundaries:** network, relay, OS, browser and storage.
+  Keep the flow's own notifiers and coordinators real. Override boundary
+  providers with `ProviderScope(overrides: [...])`, using
+  `WidgetHelpers.testable()` or a custom `ProviderScope` + `MaterialApp`.
+- **Use focused tests only for what a journey can't enumerate or observe.**
+  That means security and data-loss invariants, protocol or crypto vectors,
+  pure functions with many input combinations, and accessibility or platform
+  behavior owned by native code that a widget journey can't observe, such as
+  VoiceOver stops and traits, Dynamic Type layout and reduced motion in native
+  views. Make them table-driven where cases repeat.
+- **Extend before adding.** When a review finds a defect, add a step to an
+  existing journey or a row to an existing table. Don't add a new test per
+  finding. When a Review-Proven Rule says to test each path, cover the paths
+  as journey steps or table rows.
+- **Delete what a journey covers.** Remove a lower-level test once a journey
+  demonstrably catches the same failures; passing through the same path is not
+  enough. Keep distinct safety, interop, accessibility and native-platform
+  invariants.
+- **Prove it can fail.** Break the production code a test guards once and
+  confirm the test fails. A test that only exercises a fake protects nothing.
 
 ---
 

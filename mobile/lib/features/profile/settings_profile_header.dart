@@ -74,7 +74,7 @@ class SettingsProfileHeader extends HookConsumerWidget {
                 child: ColoredBox(
                   key: const ValueKey('settings-profile-avatar-background'),
                   color: animatedAvatar == null
-                      ? context.colors.primaryContainer
+                      ? context.controlSurface
                       : Colors.transparent,
                   child:
                       animatedAvatar != null &&
@@ -96,6 +96,7 @@ class SettingsProfileHeader extends HookConsumerWidget {
                       : activeHandoff == null || animatedPosterUrl == null
                       ? AvatarImageContent(
                           imageUrl: avatarUrl,
+                          preferThumbnail: true,
                           fallback: _AvatarFallback(initial: profile?.initial),
                         )
                       : Stack(

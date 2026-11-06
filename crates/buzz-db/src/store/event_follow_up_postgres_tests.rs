@@ -1,6 +1,6 @@
 //! PostgreSQL contract for the event follow-up producers (push match
 //! enqueue and channel TTL refresh), on the desired and migration schemas,
-//! with the follow-up triggers present (dual) and dropped (app-only).
+//! app-only as shipped and with the historical trigger overlap reconstructed.
 use crate::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 use crate::{event, migration, push, AdmittedTx, Db, DbConfig, DbError};
 use buzz_core::CommunityId;
@@ -214,10 +214,9 @@ async fn activate_lease(
     );
 }
 
-/// Which producers are live. `Dual` is production during the migration
-/// window: the app follow-ups plus the 0023/0024 triggers. `AppOnly` drops
-/// both triggers in this disposable database, as the retirement migration
-/// will.
+/// Which producers are live. `AppOnly` is the shipped schema: 0063 and 0065
+/// retired both follow-up triggers. `Dual` reconstructs the historical overlap
+/// (app follow-ups plus both triggers) in this disposable database only.
 #[derive(Clone, Copy, Debug)]
 enum Arm {
     Dual,
@@ -227,44 +226,54 @@ enum Arm {
 async fn apply_arm(pool: &PgPool, arm: Arm) {
     let triggers: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_trigger \
-         WHERE tgrelid = 'events'::regclass \
-           AND tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
+         WHERE tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
     )
     .fetch_one(pool)
     .await
-    .expect("count follow-up triggers");
-    assert_eq!(triggers, 2, "both follow-up triggers exist before the arm");
-    if let Arm::AppOnly = arm {
-        for statement in [
-            "DROP TRIGGER events_enqueue_push_match ON events",
-            "DROP TRIGGER events_refresh_channel_ttl ON events",
-        ] {
-            sqlx::query(statement)
-                .execute(pool)
-                .await
-                .expect("drop follow-up trigger in disposable database");
-        }
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_trigger \
-             WHERE tgname IN ('events_enqueue_push_match', 'events_refresh_channel_ttl')",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("count remaining follow-up triggers, including partition clones");
-        assert_eq!(
-            remaining, 0,
-            "app-only arm must leave no trigger on any partition"
-        );
-        sqlx::query("DROP FUNCTION enqueue_push_match_job()")
-            .execute(pool)
-            .await
-            .unwrap();
+    .expect("count follow-up triggers, including partition clones");
+    assert_eq!(
+        triggers, 0,
+        "no follow-up trigger remains on any partition of the shipped schema"
+    );
+    let absent: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('enqueue_push_match_job()') IS NULL \
+         AND to_regprocedure('refresh_channel_ttl_after_event_insert()') IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(absent, "no follow-up trigger function remains");
+    if let Arm::Dual = arm {
         sqlx::raw_sql(include_str!(
-            "../../../../migrations/0059_push_rollback_gate.sql"
+            "../../../../migrations/0040_push_message_kinds.sql"
         ))
         .execute(pool)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0024_event_ttl_refresh_shared_lock.sql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/0059_push_rollback_gate.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    if let Arm::Dual = arm {
+        for statement in [
+            "CREATE TRIGGER events_enqueue_push_match AFTER INSERT ON events \
+             FOR EACH ROW EXECUTE FUNCTION enqueue_push_match_job()",
+            "CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl AFTER INSERT ON events \
+             DEFERRABLE INITIALLY DEFERRED \
+             FOR EACH ROW EXECUTE FUNCTION refresh_channel_ttl_after_event_insert()",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+    } else {
         let absent: bool =
             sqlx::query_scalar("SELECT to_regprocedure('enqueue_push_match_job()') IS NULL")
                 .fetch_one(pool)
@@ -272,7 +281,7 @@ async fn apply_arm(pool: &PgPool, arm: Arm) {
                 .unwrap();
         assert!(
             absent,
-            "rollback migration must not resurrect a retired function"
+            "rollback migration must not resurrect the retired function"
         );
     }
 }
@@ -502,7 +511,7 @@ async fn assert_contract(migration_schema: bool, arm: Arm) {
     assert!(
         deadline(pool, community, channel).await
             >= database_time_before_commit + chrono::Duration::seconds(60),
-        "the deferred trigger must refresh TTL at commit"
+        "the TTL refresh must set the deadline at commit time"
     );
     assert_eq!(match_count(&db, community, &committed).await, 1);
 
@@ -1018,13 +1027,30 @@ async fn assert_async_isolation(db: &Db, community: CommunityId, keys: &Keys) {
          endpoint_grant, max_class, subscriptions, expires_at, updated_at) \
          SELECT $1, author, installation_id, source_event_id, source_created_at, generation, \
          active, endpoint_enabled, endpoint_hash, endpoint_grant, max_class, \
-         subscriptions, expires_at, clock_timestamp() FROM push_leases WHERE community_id=$2",
+         subscriptions, expires_at, \
+         (SELECT received_at + interval '1 second' FROM events WHERE community_id=$1 AND id=$3) \
+         FROM push_leases WHERE community_id=$2",
     )
     .bind(later.as_uuid())
     .bind(community.as_uuid())
+    .bind(before_enrollment.id.as_bytes().as_slice())
     .execute(&mut *activation)
     .await
     .unwrap();
+    let leases_strictly_newer: bool = sqlx::query_scalar(
+        "SELECT count(*) > 0 AND bool_and(l.updated_at > e.received_at) \
+         FROM push_leases l JOIN events e ON e.community_id=l.community_id \
+         WHERE l.community_id=$1 AND e.id=$2",
+    )
+    .bind(later.as_uuid())
+    .bind(before_enrollment.id.as_bytes().as_slice())
+    .fetch_one(&mut *activation)
+    .await
+    .unwrap();
+    assert!(
+        leases_strictly_newer,
+        "fixture leases must follow recorded receipt"
+    );
     activation.commit().await.unwrap();
     assert_eq!(match_count(&isolated, later, &before_enrollment).await, 0);
     assert_eq!(

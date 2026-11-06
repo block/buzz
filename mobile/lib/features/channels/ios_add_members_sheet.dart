@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:collection';
 
@@ -149,8 +150,13 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   void _failed() {
     if (!mounted || _closed) return;
     _closed = true;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Couldn't open Add members. Try again.")),
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(
+        content: Text(
+          'Couldn’t open ${widget.state['title'] ?? 'Add members'}',
+        ),
+      ),
+      kind: ToastKind.error,
     );
     widget.onClose();
   }
@@ -158,6 +164,12 @@ class _IosAddMembersSheetState extends State<IosAddMembersSheet> {
   Future<void> _update() async {
     if (!_presented || !mounted || _closed) return;
     try {
+      if (widget.state['completed'] == true) {
+        _closed = true;
+        await _channel.invokeMethod<void>('dismiss', {'session': _session});
+        if (mounted) widget.onClose();
+        return;
+      }
       await _channel.invokeMethod<void>('update', _state);
     } on PlatformException {
       _failed();

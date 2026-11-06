@@ -725,6 +725,9 @@ for (const scenario of [
     } else {
       await expect.poll(effects).toEqual(["shutdown"]);
       await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+      await expect(page.locator("[data-sonner-toast]")).toContainText(
+        "shutdown refused",
+      );
       // Retry the same user action without healing presence. A successful
       // request permits the explicitly confirmed local deletion, not a claim
       // of remote termination. No membership write precedes it.
@@ -733,8 +736,16 @@ for (const scenario of [
           window as typeof window & { __DELETE_FAIL_SHUTDOWN__?: boolean }
         ).__DELETE_FAIL_SHUTDOWN__ = false;
       });
-      await page.getByTestId("user-profile-delete-agent-row").click();
-      await page.getByTestId("agent-delete-confirm-action").click();
+      // The failure toast can cover the action rows, and a pointer over it
+      // pauses its dismissal. The toaster has no close button, so retry with
+      // the keyboard, which the toast cannot intercept.
+      const deleteRow = page.getByTestId("user-profile-delete-agent-row");
+      await expect(deleteRow).toBeEnabled();
+      await deleteRow.focus();
+      await deleteRow.press("Enter");
+      const confirmDelete = page.getByTestId("agent-delete-confirm-action");
+      await confirmDelete.focus();
+      await confirmDelete.press("Enter");
       await expect
         .poll(effects)
         .toEqual(["shutdown", "shutdown", "delete", "remove-member"]);

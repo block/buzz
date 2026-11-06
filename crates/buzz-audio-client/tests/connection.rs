@@ -3,7 +3,14 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::{net::TcpListener, sync::oneshot};
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{
+    accept_async, accept_hdr_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        handshake::server::{Request, Response},
+        Message,
+    },
+};
 
 #[tokio::test]
 async fn authenticates_with_host_signer_and_preserves_v2_media() {
@@ -130,4 +137,53 @@ fn rejects_invalid_rosters_without_truncation() {
         &json!({"peers":vec![json!({"peer_index":1,"pubkey":"a".repeat(64)});257]})
     )
     .is_err());
+}
+
+#[tokio::test]
+// tungstenite fixes the accept callback's `Result<Response, ErrorResponse>` signature.
+#[allow(clippy::result_large_err)]
+async fn request_headers_reach_the_upgrade() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/huddle/room/audio", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (seen, header) = oneshot::channel();
+        let mut socket = accept_hdr_async(stream, |request: &Request, response: Response| {
+            let _ = seen.send(request.headers().get("authorization").cloned());
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"challenge","challenge":"c"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"joined","peer_index":0,"peers":[]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        header.await.unwrap()
+    });
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer upgrade-token".parse().unwrap());
+    connect(request, None, None, |challenge| async move {
+        Ok(json!({ "signed": challenge }))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.await.unwrap().unwrap().to_str().unwrap(),
+        "Bearer upgrade-token"
+    );
 }

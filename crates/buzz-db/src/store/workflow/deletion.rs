@@ -4,7 +4,6 @@ use buzz_core::{kind::KIND_WORKFLOW_DEF, CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::AdmittedTx;
@@ -115,13 +114,16 @@ async fn delete_workflow_in_transaction(
     }
 
     // UUID coordinates are canonical; retain the legacy name-based path.
-    // The owner predicate remains in the mutation, not just a prior check.
+    // The owner predicate is in the locking SELECT; FOR UPDATE keeps it
+    // binding for the deletes below.
     let workflow_id = Uuid::parse_str(d_tag).ok();
-    let row = sqlx::query(
-        "DELETE FROM workflows WHERE community_id = $1 AND owner_pubkey = $2 \
+    // Lock the workflow first: a concurrent run or fire insert must lock it for
+    // its foreign key, so the child deletes below see every committed child.
+    let target: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflows WHERE community_id = $1 AND owner_pubkey = $2 \
              AND id = COALESCE($3::uuid, (SELECT id FROM workflows \
              WHERE community_id = $1 AND owner_pubkey = $2 AND name = $4 LIMIT 1)) \
-             RETURNING channel_id",
+             FOR UPDATE",
     )
     .bind(community_id.as_uuid())
     .bind(owner_pubkey)
@@ -129,6 +131,10 @@ async fn delete_workflow_in_transaction(
     .bind(d_tag)
     .fetch_optional(tx.conn())
     .await?;
+    let deleted_channel = match target {
+        Some(id) => Some(delete_workflow_with_children(tx, id).await?),
+        None => None,
+    };
     let definitions = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
              AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL AND created_at <= $5",
@@ -140,15 +146,63 @@ async fn delete_workflow_in_transaction(
     .bind(cutoff)
     .execute(tx.conn())
     .await?;
-    let changed = row.is_some() || definitions.rows_affected() > 0;
-    let channel_id = row
-        .map(|row| row.try_get("channel_id"))
-        .transpose()?
-        .flatten();
+    let changed = deleted_channel.is_some() || definitions.rows_affected() > 0;
+    let channel_id = deleted_channel.flatten();
     Ok(WorkflowDeletionOutcome {
         changed,
         channel_id,
     })
+}
+
+/// Delete a locked workflow and the rows that hang off it, children first, so
+/// no foreign-key action is needed: scheduled fires, approvals (of the workflow
+/// or any of its runs), then runs. Returns the workflow's `channel_id`.
+async fn delete_workflow_with_children(tx: &mut AdmittedTx, id: Uuid) -> Result<Option<Uuid>> {
+    let community = *tx.community().as_uuid();
+    // Fires go before the run lock. A new fire must key-share lock the workflow,
+    // which is already locked. Attaching a run to a fire locks the fire row and
+    // then the run, so taking the run lock first would invert that order and can
+    // deadlock; deleting the fire first waits for any in-flight attach instead.
+    sqlx::query(
+        "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND workflow_id = $2",
+    )
+    .bind(community)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
+    // The workflow lock stops new runs, but an approval naming another workflow
+    // can still reference one of these runs; it key-share locks only that run.
+    // Lock the runs (in a fixed order) so such an insert either commits before
+    // the approval delete below or waits until this transaction ends.
+    sqlx::query(
+        "SELECT id FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2 \
+             ORDER BY id FOR UPDATE",
+    )
+    .bind(community)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
+    sqlx::query(
+        "DELETE FROM workflow_approvals WHERE community_id = $1 AND (workflow_id = $2 \
+             OR run_id IN (SELECT id FROM workflow_runs \
+             WHERE community_id = $1 AND workflow_id = $2))",
+    )
+    .bind(community)
+    .bind(id)
+    .execute(tx.conn())
+    .await?;
+    sqlx::query("DELETE FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2")
+        .bind(community)
+        .bind(id)
+        .execute(tx.conn())
+        .await?;
+    Ok(sqlx::query_scalar(
+        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 RETURNING channel_id",
+    )
+    .bind(community)
+    .bind(id)
+    .fetch_one(tx.conn())
+    .await?)
 }
 
 #[cfg(test)]

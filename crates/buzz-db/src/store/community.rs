@@ -6,7 +6,13 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{relay_members, Db, DbError, Result};
+use crate::{relay_members, Db, DbError, ReadAt, Result};
+
+// Admission and policy must select the same serving row. A deletion request
+// alone does not stop serving; begin_quiescing changes deletion_state.
+pub(super) const SERVING_HOST_QUERY: &str = "SELECT id, host, requires_nip_fi, policy_generation
+    FROM communities WHERE lower(host) = lower($1)
+    AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'";
 
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,57 +116,73 @@ impl Db {
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
     /// request/connection error. buzz-db only reads the durable host map.
-    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
     pub async fn lookup_community_by_host(
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        Ok(self
+            .lookup_community_by_host_read_at(normalized_host)
+            .await?
+            .value)
+    }
+
+    /// [`Self::lookup_community_by_host`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
+    pub async fn lookup_community_by_host_read_at(
+        &self,
+        normalized_host: &str,
+    ) -> Result<ReadAt<Option<CommunityRecord>>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::TenantResolution,
         )
         .await?;
-        let row = sqlx::query(
-            r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&mut *connection)
-        .await?;
+        let read_at = std::time::Instant::now();
+        let row = sqlx::query(SERVING_HOST_QUERY)
+            .bind(normalized_host)
+            .fetch_optional(&mut *connection)
+            .await?;
 
-        row.map(|row| {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
+        let value = row
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let host: String = row.try_get("host")?;
 
-            Ok(CommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
+                Ok::<_, DbError>(CommunityRecord {
+                    id: CommunityId::from_uuid(id),
+                    host,
+                })
             })
-        })
-        .transpose()
+            .transpose()?;
+        Ok(ReadAt { value, read_at })
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.
-    #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        Ok(self.is_community_active_read_at(community_id).await?.value)
+    }
+
+    /// [`Self::is_community_active`], with when its connection was checked
+    /// out, for caches that bound staleness from the read.
+    #[datastore_span(name = "is_community_active", system = "postgresql")]
+    pub async fn is_community_active_read_at(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<ReadAt<bool>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        let active = sqlx::query_scalar::<_, bool>(
+        let read_at = std::time::Instant::now();
+        let value = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
         .fetch_one(&mut *connection)
         .await?;
-        Ok(active)
+        Ok(ReadAt { value, read_at })
     }
 
     /// Runs `apply` while holding the community row lock only when the exact
@@ -289,6 +311,40 @@ impl Db {
             })
         })
         .transpose()
+    }
+
+    /// Active communities the identity has joined, regardless of role.
+    /// Operator-plane callers must authenticate before exposing this cross-tenant read.
+    #[datastore_span(name = "list_communities_joined_by", system = "postgresql")]
+    pub async fn list_communities_joined_by(&self, pubkey: &str) -> Result<Vec<CommunityRecord>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.host FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE rm.pubkey = $1 AND c.archived_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM community_deletion_requests request
+                  WHERE request.community_id = c.id AND request.stage <> 'aborted'
+              )
+            ORDER BY c.created_at ASC, c.host ASC
+            "#,
+        )
+        .bind(pubkey.to_ascii_lowercase())
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(CommunityRecord {
+                    id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                })
+            })
+            .collect()
     }
 
     /// Lists communities where `owner_pubkey` currently holds the `owner` role.
@@ -450,14 +506,32 @@ impl Db {
         &self,
         normalized_host: &str,
     ) -> Result<EnsuredCommunityRecord> {
+        self.ensure_configured_community_with_nip_fi_issuers(normalized_host, &[])
+            .await
+    }
+
+    /// Like [`Db::ensure_configured_community`], binding `nip_fi_issuers` to
+    /// the community in the same transaction when this call creates its row.
+    /// An existing row keeps its bindings unchanged.
+    #[datastore_span(
+        name = "ensure_configured_community_with_nip_fi_issuers",
+        system = "postgresql"
+    )]
+    pub async fn ensure_configured_community_with_nip_fi_issuers(
+        &self,
+        normalized_host: &str,
+        nip_fi_issuers: &[String],
+    ) -> Result<EnsuredCommunityRecord> {
         self.ensure_configured_community_with_operation(
             normalized_host,
+            nip_fi_issuers,
             crate::observability::WriterOperation::Authorization,
         )
         .await
     }
 
-    /// Ensure the deployment-configured community during process bootstrap.
+    /// Ensure the deployment-configured community during process bootstrap,
+    /// binding `nip_fi_issuers` when this call creates its row.
     #[datastore_span(
         name = "ensure_configured_community_for_bootstrap",
         system = "postgresql"
@@ -465,9 +539,11 @@ impl Db {
     pub async fn ensure_configured_community_for_bootstrap(
         &self,
         normalized_host: &str,
+        nip_fi_issuers: &[String],
     ) -> Result<EnsuredCommunityRecord> {
         self.ensure_configured_community_with_operation(
             normalized_host,
+            nip_fi_issuers,
             crate::observability::WriterOperation::Bootstrap,
         )
         .await
@@ -476,9 +552,11 @@ impl Db {
     async fn ensure_configured_community_with_operation(
         &self,
         normalized_host: &str,
+        nip_fi_issuers: &[String],
         operation: crate::observability::WriterOperation,
     ) -> Result<EnsuredCommunityRecord> {
-        let mut connection = crate::observability::acquire_writer(&self.pool, operation).await?;
+        let connection = crate::observability::acquire_writer(&self.pool, operation).await?;
+        let mut connection = sqlx::Transaction::begin(connection, None).await?;
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -498,15 +576,16 @@ impl Db {
             ))
         })?;
 
-        let id: Uuid = row.try_get("id")?;
+        let id = CommunityId::from_uuid(row.try_get("id")?);
         let host: String = row.try_get("host")?;
         let created: bool = row.try_get("created")?;
+        if created {
+            self.insert_nip_fi_issuers_in_transaction(&mut connection, id, nip_fi_issuers)
+                .await?;
+        }
+        connection.commit().await?;
 
-        Ok(EnsuredCommunityRecord {
-            id: CommunityId::from_uuid(id),
-            host,
-            created,
-        })
+        Ok(EnsuredCommunityRecord { id, host, created })
     }
 
     /// Atomically creates a community and its initial owner.
@@ -519,7 +598,32 @@ impl Db {
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
-    ) -> Result<CreateCommunityWithOwnerResult> {
+        relay_keypair: &nostr::Keys,
+    ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
+        self.create_community_with_owner_and_nip_fi_issuers(
+            normalized_host,
+            owner_pubkey,
+            &[],
+            relay_keypair,
+        )
+        .await
+    }
+
+    /// Like [`Db::create_community_with_owner`], binding `nip_fi_issuers` to
+    /// the new community in the same transaction. Identical retries return the
+    /// original record without touching its bindings.
+    #[datastore_span(
+        name = "create_community_with_owner_and_nip_fi_issuers",
+        system = "postgresql"
+    )]
+    pub async fn create_community_with_owner_and_nip_fi_issuers(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+        nip_fi_issuers: &[String],
+        relay_keypair: &nostr::Keys,
+    ) -> Result<relay_members::MembershipWrite<CreateCommunityWithOwnerResult>> {
+        use relay_members::MembershipWrite;
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let connection = crate::observability::acquire_writer(
             &self.pool,
@@ -550,7 +654,7 @@ impl Db {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let (id, host) = if let Some(row) = row {
+        if let Some(row) = row {
             let id: Uuid = row.try_get("id")?;
             let host: String = row.try_get("host")?;
 
@@ -560,8 +664,16 @@ impl Db {
                 .admits()
             {
                 tx.rollback().await?;
-                return Ok(CreateCommunityWithOwnerResult::LimitReached);
+                return Ok(MembershipWrite::unchanged(
+                    CreateCommunityWithOwnerResult::LimitReached,
+                ));
             }
+
+            // The community row was just created in this transaction. Admit
+            // its first tenant row before inserting the initial owner.
+            self.deletion_store()
+                .guard_transaction(&mut tx, CommunityId::from_uuid(id))
+                .await?;
 
             sqlx::query(
                 "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
@@ -570,7 +682,20 @@ impl Db {
             .bind(&owner_pubkey)
             .execute(&mut *tx)
             .await?;
-            (id, host)
+            self.insert_nip_fi_issuers_in_transaction(
+                &mut tx,
+                CommunityId::from_uuid(id),
+                nip_fi_issuers,
+            )
+            .await?;
+            let tx =
+                crate::AdmittedTx::admit(tx, &self.deletion_store(), CommunityId::from_uuid(id))
+                    .await?;
+            let record = CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            });
+            relay_members::commit_membership_write(tx, record, true, relay_keypair).await
         } else {
             let existing = sqlx::query(
                 r#"
@@ -591,25 +716,24 @@ impl Db {
             .await?;
             let Some(existing) = existing else {
                 tx.rollback().await?;
-                return Ok(CreateCommunityWithOwnerResult::HostExists);
+                return Ok(MembershipWrite::unchanged(
+                    CreateCommunityWithOwnerResult::HostExists,
+                ));
             };
-            (existing.try_get("id")?, existing.try_get("host")?)
-        };
-
-        tx.commit().await?;
-        Ok(CreateCommunityWithOwnerResult::Created(
-            CreatedCommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
-            },
-        ))
+            let record = CreateCommunityWithOwnerResult::Created(CreatedCommunityRecord {
+                id: CommunityId::from_uuid(existing.try_get("id")?),
+                host: existing.try_get("host")?,
+            });
+            tx.commit().await?;
+            Ok(MembershipWrite::unchanged(record))
+        }
     }
 
     /// Idempotently archives a community when the asserted pubkey is its current owner.
     ///
     /// Locks the community row before reading ownership so a concurrent owner
-    /// transfer, whose `FOR UPDATE` conflicts with this `FOR NO KEY UPDATE`,
-    /// has one serial order with the archive. The weaker lock lets the archive
+    /// transfer, whose `FOR NO KEY UPDATE` conflicts with this one, has one
+    /// serial order with the archive. The weaker lock lets the archive
     /// proceed past foreign-key child inserts' `FOR KEY SHARE`. A single
     /// `UPDATE ... FROM relay_members` would keep its pre-lock ownership
     /// snapshot after waiting and could archive the new owner's community on
@@ -991,13 +1115,21 @@ mod postgres_tests {
         let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-        let created = db
-            .create_community_with_owner(&host, owner)
+        let keys = nostr::Keys::generate();
+        let write = db
+            .create_community_with_owner(&host, owner, &keys)
             .await
             .expect("create community");
-        let CreateCommunityWithOwnerResult::Created(created) = created else {
+        let CreateCommunityWithOwnerResult::Created(created) = write.outcome else {
             panic!("expected new community");
         };
+        crate::relay_members::assert_membership_list_matches(
+            &db.pool,
+            created.id,
+            &keys,
+            write.snapshot.as_ref(),
+        )
+        .await;
         assert_eq!(created.host, host);
         let owner_role: Option<String> = sqlx::query_scalar(
             "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
@@ -1010,8 +1142,13 @@ mod postgres_tests {
         assert_eq!(owner_role.as_deref(), Some("owner"));
 
         let retry = db
-            .create_community_with_owner(&host.to_ascii_uppercase(), owner)
+            .create_community_with_owner(
+                &host.to_ascii_uppercase(),
+                owner,
+                &nostr::Keys::generate(),
+            )
             .await
+            .map(|write| write.outcome)
             .expect("same-owner retry");
         assert_eq!(
             retry,
@@ -1020,8 +1157,9 @@ mod postgres_tests {
         );
 
         let collision = db
-            .create_community_with_owner(&host, other)
+            .create_community_with_owner(&host, other, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("collision result");
         assert_eq!(collision, CreateCommunityWithOwnerResult::HostExists);
         let roles: Vec<(String, String)> = sqlx::query_as(
@@ -1033,12 +1171,14 @@ mod postgres_tests {
         .expect("community roles");
         assert_eq!(roles, vec![(owner.to_string(), "owner".to_string())]);
 
-        db.bootstrap_owner(created.id, other)
+        db.bootstrap_owner(created.id, other, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("rotate owner");
         let post_rotation_retry = db
-            .create_community_with_owner(&host, owner)
+            .create_community_with_owner(&host, owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("post-rotation retry");
         assert_eq!(
             post_rotation_retry,
@@ -1054,8 +1194,9 @@ mod postgres_tests {
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let created = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community");
         let CreateCommunityWithOwnerResult::Created(created) = created else {
             panic!("expected new community");
@@ -1127,8 +1268,9 @@ mod postgres_tests {
         let host = format!("archive-fence-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let created = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community");
         let CreateCommunityWithOwnerResult::Created(created) = created else {
             panic!("expected new community");
@@ -1180,39 +1322,7 @@ mod postgres_tests {
     }
 
     async fn named_contender_db(application_name: &str) -> Db {
-        use std::str::FromStr as _;
-        let options =
-            sqlx::postgres::PgConnectOptions::from_str(&crate::test_support::database_url())
-                .expect("parse test database URL")
-                .application_name(application_name);
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .expect("connect contender DB");
-        Db::from_pool(pool)
-    }
-
-    async fn wait_for_lock_wait(db: &Db, application_name: &str) {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
-                     WHERE datname = current_database() AND application_name = $1 \
-                       AND wait_event_type = 'Lock')",
-                )
-                .bind(application_name)
-                .fetch_one(&db.pool)
-                .await
-                .expect("inspect contender lock wait");
-                if waiting {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("contender reached a lock wait");
+        Db::from_pool(crate::test_support::named_pool(application_name).await)
     }
 
     /// An archive that queues behind an ownership transfer must re-check
@@ -1226,8 +1336,9 @@ mod postgres_tests {
         let previous_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let new_owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let CreateCommunityWithOwnerResult::Created(created) = db
-            .create_community_with_owner(&host, &previous_owner)
+            .create_community_with_owner(&host, &previous_owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         else {
             panic!("expected new community");
@@ -1252,11 +1363,17 @@ mod postgres_tests {
             let new_owner = new_owner.clone();
             async move {
                 transfer_db
-                    .transfer_ownership(community, &new_owner, &previous_owner)
+                    .transfer_ownership(
+                        community,
+                        &new_owner,
+                        &previous_owner,
+                        &nostr::Keys::generate(),
+                    )
                     .await
+                    .map(|write| write.outcome)
             }
         });
-        wait_for_lock_wait(&db, &transfer_name).await;
+        crate::test_support::wait_for_lock_wait(&db.pool, &transfer_name).await;
 
         let archive_name = format!("archive-transfer-archive-{}", Uuid::new_v4().simple());
         let archive_db = named_contender_db(&archive_name).await;
@@ -1269,7 +1386,7 @@ mod postgres_tests {
                     .await
             }
         });
-        wait_for_lock_wait(&db, &archive_name).await;
+        crate::test_support::wait_for_lock_wait(&db.pool, &archive_name).await;
 
         owner_rows_gate
             .rollback()
@@ -1315,8 +1432,9 @@ mod postgres_tests {
         );
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let created = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community");
         let CreateCommunityWithOwnerResult::Created(created) = created else {
             panic!("expected new community");
@@ -1401,8 +1519,9 @@ mod postgres_tests {
         let host = format!("fence-key-share-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let CreateCommunityWithOwnerResult::Created(created) = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create community")
         else {
             panic!("expected new community");
@@ -1456,8 +1575,9 @@ mod postgres_tests {
         for i in 0..crate::relay_members::MAX_COMMUNITIES_PER_OWNER {
             let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
             assert!(matches!(
-                db.create_community_with_owner(&host, &owner)
+                db.create_community_with_owner(&host, &owner, &nostr::Keys::generate())
                     .await
+                    .map(|write| write.outcome)
                     .expect("create community"),
                 CreateCommunityWithOwnerResult::Created(_)
             ));
@@ -1475,8 +1595,9 @@ mod postgres_tests {
 
         let host = format!("limit-test-overflow-{}.example", Uuid::new_v4().simple());
         assert_eq!(
-            db.create_community_with_owner(&host, &owner)
+            db.create_community_with_owner(&host, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("create community call"),
             CreateCommunityWithOwnerResult::LimitReached
         );
@@ -1496,9 +1617,14 @@ mod postgres_tests {
         let host = format!("concurrent-create-{}.example", Uuid::new_v4().simple());
         let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+        let keys = nostr::Keys::generate();
         let (first, second) = tokio::join!(
-            db.create_community_with_owner(&host, owner),
-            db.create_community_with_owner(&host, owner),
+            db.create_community_with_owner(&host, owner, &keys),
+            db.create_community_with_owner(&host, owner, &keys),
+        );
+        let (first, second) = (
+            first.map(|write| write.outcome),
+            second.map(|write| write.outcome),
         );
         let first = first.expect("first concurrent create");
         let second = second.expect("second concurrent create");
@@ -1544,14 +1670,17 @@ mod postgres_tests {
         let other = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let other = other.as_str();
 
-        db.bootstrap_owner(community_a, owner)
+        db.bootstrap_owner(community_a, owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("owner A");
-        db.bootstrap_owner(community_b, other)
+        db.bootstrap_owner(community_b, other, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("other owner B");
-        db.add_relay_member(community_c, owner, "admin", None)
+        db.add_relay_member(community_c, owner, "admin", None, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("admin C");
 
         let owned = db
@@ -1567,6 +1696,29 @@ mod postgres_tests {
             crate::relay_members::max_communities_per_owner()
         );
         assert!(owned.can_create);
+
+        // Discovery includes every membership role, while management remains owner-only.
+        let community_d = CommunityId::from_uuid(make_community(&db.pool).await);
+        db.add_relay_member(community_d, owner, "member", None, &nostr::Keys::generate())
+            .await
+            .map(|write| write.outcome)
+            .expect("member D");
+        let joined = db
+            .list_communities_joined_by(&owner.to_uppercase())
+            .await
+            .expect("joined");
+        let ids: Vec<_> = joined.iter().map(|row| row.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&community_a));
+        assert!(ids.contains(&community_c));
+        assert!(ids.contains(&community_d));
+        assert!(!ids.contains(&community_b));
+        sqlx::query("UPDATE communities SET archived_at = NOW() WHERE id = $1")
+            .bind(community_d.as_uuid())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(db.list_communities_joined_by(owner).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -1579,16 +1731,18 @@ mod postgres_tests {
         for index in 0..(crate::relay_members::MAX_COMMUNITIES_PER_OWNER - 2) {
             let host = format!("quota-live-{index}-{}.example", Uuid::new_v4().simple());
             assert!(matches!(
-                db.create_community_with_owner(&host, &recipient)
+                db.create_community_with_owner(&host, &recipient, &nostr::Keys::generate())
                     .await
+                    .map(|write| write.outcome)
                     .expect("create live quota fixture"),
                 CreateCommunityWithOwnerResult::Created(_)
             ));
         }
         let reserved_host = format!("quota-held-{}.example", Uuid::new_v4().simple());
         let reserved = db
-            .create_community_with_owner(&reserved_host, &recipient)
+            .create_community_with_owner(&reserved_host, &recipient, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create reservation fixture");
         let CreateCommunityWithOwnerResult::Created(reserved) = reserved else {
             panic!("expected reservation community")
@@ -1615,20 +1769,26 @@ mod postgres_tests {
 
         let transfer_host = format!("quota-transfer-{}.example", Uuid::new_v4().simple());
         let transfer_target = db
-            .create_community_with_owner(&transfer_host, &source_owner)
+            .create_community_with_owner(&transfer_host, &source_owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create transfer target");
         let CreateCommunityWithOwnerResult::Created(transfer_target) = transfer_target else {
             panic!("expected transfer target")
         };
         let create_host = format!("quota-race-{}.example", Uuid::new_v4().simple());
 
+        let keys = nostr::Keys::generate();
         let (create, transfer) = tokio::join!(
-            db.create_community_with_owner(&create_host, &recipient),
-            db.transfer_ownership(transfer_target.id, &recipient, &source_owner),
+            db.create_community_with_owner(&create_host, &recipient, &keys),
+            db.transfer_ownership(transfer_target.id, &recipient, &source_owner, &keys),
         );
-        let create = create.expect("concurrent create result");
-        let transfer = transfer.expect("concurrent transfer result");
+        let create = create
+            .map(|write| write.outcome)
+            .expect("concurrent create result");
+        let transfer = transfer
+            .map(|write| write.outcome)
+            .expect("concurrent transfer result");
         let create_won = matches!(create, CreateCommunityWithOwnerResult::Created(_));
         let transfer_won = matches!(
             transfer,
@@ -1665,8 +1825,9 @@ mod postgres_tests {
         for i in 0..crate::relay_members::MAX_LIFETIME_COMMUNITIES_PER_OWNER {
             let host = format!("lifetime-{i}-{}.example", Uuid::new_v4().simple());
             let CreateCommunityWithOwnerResult::Created(record) = db
-                .create_community_with_owner(&host, &owner)
+                .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("create under lifetime cap")
             else {
                 panic!("create {i} must succeed below the lifetime cap")
@@ -1706,23 +1867,26 @@ mod postgres_tests {
 
         let host = format!("lifetime-overflow-{}.example", Uuid::new_v4().simple());
         assert_eq!(
-            db.create_community_with_owner(&host, &owner)
+            db.create_community_with_owner(&host, &owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("create past lifetime cap"),
             CreateCommunityWithOwnerResult::LimitReached
         );
 
         let transfer_host = format!("lifetime-transfer-{}.example", Uuid::new_v4().simple());
         let CreateCommunityWithOwnerResult::Created(target) = db
-            .create_community_with_owner(&transfer_host, &other_owner)
+            .create_community_with_owner(&transfer_host, &other_owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create transfer target")
         else {
             panic!("expected transfer target")
         };
         assert_eq!(
-            db.transfer_ownership(target.id, &owner, &other_owner)
+            db.transfer_ownership(target.id, &owner, &other_owner, &nostr::Keys::generate())
                 .await
+                .map(|write| write.outcome)
                 .expect("transfer past lifetime cap"),
             crate::relay_members::TransferResult::LimitReached
         );

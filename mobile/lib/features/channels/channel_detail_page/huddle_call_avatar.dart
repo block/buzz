@@ -188,15 +188,8 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             key: ValueKey('huddle-speaking-halo-$pubkey'),
                             width: speakingRingSize,
                             height: speakingRingSize,
-                            decoration: BoxDecoration(
-                              shape: isAgent
-                                  ? BoxShape.rectangle
-                                  : BoxShape.circle,
-                              borderRadius: isAgent
-                                  ? BorderRadius.circular(
-                                      speakingRingSize * 0.3,
-                                    )
-                                  : null,
+                            decoration: ShapeDecoration(
+                              shape: avatarShape(isAgent: isAgent),
                               color: context.colors.primary.withValues(
                                 alpha: 0.07,
                               ),
@@ -219,16 +212,9 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 ),
                                 width: avatarRadius * 2,
                                 height: avatarRadius * 2,
-                                decoration: BoxDecoration(
-                                  shape: isAgent
-                                      ? BoxShape.rectangle
-                                      : BoxShape.circle,
-                                  borderRadius: isAgent
-                                      ? BorderRadius.circular(
-                                          avatarRadius * 0.6,
-                                        )
-                                      : null,
-                                  color: context.colors.primaryContainer,
+                                decoration: ShapeDecoration(
+                                  shape: avatarShape(isAgent: isAgent),
+                                  color: context.controlSurface,
                                 ),
                                 alignment: Alignment.center,
                                 child: BouncingDotsIndicator(
@@ -243,8 +229,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                 key: ValueKey('huddle-avatar-image-$pubkey'),
                                 imageUrl: profile?.avatarUrl,
                                 radius: avatarRadius,
-                                backgroundColor:
-                                    context.colors.primaryContainer,
+                                backgroundColor: context.controlSurface,
                                 fallback: Icon(
                                   BuzzIcons.userRound,
                                   size: fallbackIconSize,

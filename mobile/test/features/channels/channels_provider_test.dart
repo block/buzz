@@ -1,17 +1,25 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
+part 'channels_provider_request_path_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -27,6 +35,8 @@ part 'channels_provider_readiness_cases.dart';
 /// events on demand.
 void main() {
   _unreadReadinessCases();
+  _unreadDeletionCases();
+  _requestPathCases();
   const myPk = 'me';
 
   test(
@@ -56,6 +66,105 @@ void main() {
       expect(session.directoryQueryFilters, isNotEmpty);
     },
   );
+
+  test('ensureDirectoryLoaded reads again once older than maxAge', () async {
+    final session = _FakeRelaySession(
+      memberships: const [],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final channels = container.read(channelsProvider.notifier);
+
+    await channels.ensureDirectoryLoaded();
+    final reads = session.directoryQueryFilters.length;
+    expect(reads, isPositive);
+    // A loaded directory serves later calls until it is older than maxAge.
+    await channels.ensureDirectoryLoaded();
+    await channels.ensureDirectoryLoaded(maxAge: const Duration(hours: 1));
+    expect(session.directoryQueryFilters, hasLength(reads));
+    await channels.ensureDirectoryLoaded(maxAge: Duration.zero);
+    expect(session.directoryQueryFilters, hasLength(reads * 2));
+  });
+
+  test(
+    'ensureDirectoryLoaded reads again after the community switches away and back',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final config = container.read(relayConfigProvider.notifier);
+      final communityA = container.read(relayConfigProvider).baseUrl;
+      const maxAge = Duration(hours: 1);
+
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: maxAge);
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        _channelA,
+      ]);
+
+      // Switch to B without loading its directory, then back to A. The switch
+      // drops A's cached directory, so A's earlier load no longer serves it.
+      config.update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
+      config.update(baseUrl: communityA);
+      await container.read(channelsProvider.future);
+      final reads = session.directoryQueryFilters.length;
+
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: maxAge);
+      expect(session.directoryQueryFilters.length, greaterThan(reads));
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
+        _channelA,
+      ]);
+    },
+  );
+
+  test('a directory load during the first channel load waits for it', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(id: _channelB, name: 'discoverable'),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    final sub = container.listen(channelsProvider, (_, _) {});
+    addTearDown(sub.close);
+
+    // Search starts while the first load's member metadata is held.
+    session.pauseNextMemberMetadataQuery();
+    container.read(channelsProvider);
+    await session.nextMemberMetadataQueryStarted;
+    final directory = container
+        .read(channelsProvider.notifier)
+        .ensureDirectoryLoaded(maxAge: const Duration(seconds: 30));
+    await _settle();
+
+    // The first load's reply arrives last. It must not replace the list.
+    session.resumePausedMemberMetadataQuery();
+    await directory;
+    await _settle();
+
+    final state = container.read(channelsProvider);
+    expect(state.hasError, isFalse);
+    expect(
+      state.requireValue.map((c) => c.id),
+      unorderedEquals([_channelA, _channelB]),
+    );
+    expect(
+      container.read(channelDirectoryLoadStatusProvider).status,
+      ChannelDirectoryLoadStatus.loaded,
+    );
+  });
 
   test('paginates channel discovery with a composite cursor', () async {
     final firstPage = List.generate(
@@ -296,6 +405,38 @@ void main() {
     );
   });
 
+  test(
+    'a directory retry clears an earlier failure before it yields',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      session.membershipFailures = 1;
+      await container.read(channelsProvider.notifier).retryDirectory();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.error,
+      );
+
+      // A refresh that retires this attempt in the same microtask drain must
+      // not leave the old error to be read as its result.
+      final retry = container.read(channelsProvider.notifier).retryDirectory();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.idle,
+      );
+      await retry;
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    },
+  );
+
   for (final rebuild in [false, true]) {
     test(
       '${rebuild ? 'Same-scope rebuild' : 'Ordinary refresh'} settles a superseded directory load for retry',
@@ -341,7 +482,7 @@ void main() {
 
         expect(
           container.read(channelDirectoryLoadStatusProvider).status,
-          ChannelDirectoryLoadStatus.error,
+          ChannelDirectoryLoadStatus.idle,
         );
         expect(
           container
@@ -618,7 +759,7 @@ void main() {
   );
 
   test(
-    'community switch after directory success discards a late failure',
+    'community switch during a directory refresh discards a late failure',
     () async {
       final session = _FakeRelaySession(
         memberships: const [],
@@ -629,15 +770,15 @@ void main() {
 
       expect(await container.read(channelsProvider.future), isEmpty);
 
-      // The directory query succeeds, then the refresh parks on the member-count
-      // query and fails there after the switch. A retired failure must not
+      // The directory refresh parks on the member-metadata query and fails there
+      // after the switch. A retired failure must not
       // overwrite the new scope's list or push it into an error state.
       session.memberships = [_membership(_channelA, myPk)];
-      session.pauseNextMemberCountQuery();
+      session.pauseNextMemberMetadataQuery();
       final staleRefresh = container
           .read(channelsProvider.notifier)
           .retryDirectory();
-      await session.nextMemberCountQueryStarted;
+      await session.nextMemberMetadataQueryStarted;
 
       session.memberships = [_membership(_channelB, myPk)];
       session.metadata = [_meta(id: _channelB, name: 'community-b-general')];
@@ -646,8 +787,8 @@ void main() {
           .update(baseUrl: 'https://community-b.example');
       await container.read(channelsProvider.future);
 
-      session.failClaimedMemberCountQuery = true;
-      session.resumePausedMemberCountQuery();
+      session.failClaimedMemberMetadataQuery = true;
+      session.resumePausedMemberMetadataQuery();
       await staleRefresh;
       await _settle();
 
@@ -670,7 +811,7 @@ void main() {
   );
 
   test(
-    'identity switch after directory success discards the late refresh',
+    'identity switch during a directory refresh discards the late refresh',
     () async {
       final session = _FakeRelaySession(
         memberships: const [],
@@ -681,7 +822,7 @@ void main() {
 
       expect(await container.read(channelsProvider.future), isEmpty);
 
-      // Directory success, then the refresh parks on the hidden-DM query while
+      // The directory refresh parks on the hidden-DM query while
       // the signing identity changes and the new identity finishes its rebuild.
       session.pauseNextHiddenDmQuery();
       final staleRefresh = container
@@ -709,7 +850,7 @@ void main() {
   );
 
   test(
-    'identity switch after directory success discards a late failure',
+    'identity switch during a directory refresh discards a late failure',
     () async {
       final session = _FakeRelaySession(
         memberships: const [],
@@ -721,19 +862,19 @@ void main() {
       expect(await container.read(channelsProvider.future), isEmpty);
 
       session.memberships = [_membership(_channelA, myPk)];
-      session.pauseNextMemberCountQuery();
+      session.pauseNextMemberMetadataQuery();
       final staleRefresh = container
           .read(channelsProvider.notifier)
           .retryDirectory();
-      await session.nextMemberCountQueryStarted;
+      await session.nextMemberMetadataQueryStarted;
 
       session.memberships = [_membership(_channelB, _otherPk)];
       session.metadata = [_meta(id: _channelB, name: 'second-identity-joined')];
       container.read(_testPubkeyProvider.notifier).set(_otherPk);
       await container.read(channelsProvider.future);
 
-      session.failClaimedMemberCountQuery = true;
-      session.resumePausedMemberCountQuery();
+      session.failClaimedMemberMetadataQuery = true;
+      session.resumePausedMemberMetadataQuery();
       await staleRefresh;
       await _settle();
 
@@ -744,6 +885,39 @@ void main() {
       expect(ids, contains(_channelB));
     },
   );
+
+  test('reads after the membership list share one round trip', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'joined-a')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    // Park all three reads. Any of them waiting on another would leave that one
+    // unsent.
+    final metadataGate = session.metadataGate = Completer<void>();
+    session.pauseNextHiddenDmQuery();
+    session.pauseNextHuddleStartQuery();
+    final load = container.read(channelsProvider.future);
+    await _settle();
+
+    // The membership list's own kind:39002 read has no `#d` tag.
+    final sentKinds = {
+      for (final filter in session.historyFilters)
+        if (!filter.kinds.contains(39002) || filter.tags['#d'] != null)
+          ...filter.kinds,
+    };
+    expect(
+      sentKinds,
+      containsAll([39000, EventKind.dmVisibility, EventKind.huddleStarted]),
+    );
+
+    metadataGate.complete();
+    session.resumePausedHiddenDmQuery();
+    session.resumePausedHuddleStartQuery();
+    expect((await load).map((channel) => channel.id), [_channelA]);
+  });
 
   test('a newer ordinary refresh owns the installed membership list', () async {
     final session = _FakeRelaySession(
@@ -840,8 +1014,8 @@ void main() {
     await container.read(channelsProvider.future);
     final notifier = container.read(channelsProvider.notifier);
 
-    // Park an older refresh on its Huddle-start query. Both of its membership
-    // fetches have already landed, so channel A is the list it is carrying.
+    // Park an older refresh on its Huddle-start query. Its membership snapshot
+    // has already landed, so channel A is the list it is carrying.
     session.pauseNextHuddleStartQuery();
     final olderRefresh = notifier.refresh();
     await session.nextHuddleStartQueryStarted;
@@ -1801,23 +1975,122 @@ void main() {
     });
   });
 
+  test('channel batches stay within the relay explicit-channel cap', () async {
+    final ids = [
+      for (var i = 0; i <= kMaxExplicitChannelValues; i++) 'capped-channel-$i',
+    ];
+    const backing = 'capped-huddle-backing';
+    final session = _FakeRelaySession(
+      memberships: [
+        for (final id in ids) _membership(id, myPk),
+        _membership(backing, myPk, ownerPubkey: myPk),
+      ],
+      metadata: [
+        for (final id in ids) _meta(id: id, name: id),
+        _meta(
+          id: backing,
+          name: 'huddle-backing',
+          ttlSeconds: 3600,
+          visibility: 'private',
+        ),
+      ],
+      huddleStarts: [
+        _huddleStart(pubkey: myPk, parent: ids.last, backing: backing),
+      ],
+      recentMessages: [
+        NostrEvent(
+          id: 'last-chunk',
+          pubkey: 'alice',
+          createdAt: 30,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', ids.last],
+          ],
+          content: 'hi',
+          sig: 'sig',
+        ),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    final channels = await container.read(channelsProvider.future);
+    await _waitUntil(
+      () => session.queryBatches.any(
+        (batch) => batch.isNotEmpty && batch.every((f) => f.since != null),
+      ),
+    );
+    await _settle();
+
+    final batches = session.queryBatches.where((batch) => batch.isNotEmpty);
+    expect(
+      batches.map(_explicitChannelValues),
+      everyElement(lessThanOrEqualTo(kMaxExplicitChannelValues)),
+    );
+    expect(session.messageHistoryCount, 0);
+    expect(
+      channels.firstWhere((channel) => channel.id == ids.last).lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+    );
+    final huddleFilters = session.historyFilters.where(
+      (filter) => filter.kinds.contains(EventKind.huddleStarted),
+    );
+    expect(
+      huddleFilters.map((filter) => filter.tags['#h']!.length),
+      everyElement(lessThanOrEqualTo(kMaxExplicitChannelValues)),
+    );
+    expect(channels.map((channel) => channel.id), unorderedEquals(ids));
+  });
+
+  test('channel batches keep four relay requests in flight', () async {
+    final ids = [
+      for (var i = 0; i <= 4 * kMaxExplicitChannelValues; i++)
+        'bounded-channel-$i',
+    ];
+    final session = _BridgeDownRelaySession(
+      memberships: [for (final id in ids) _membership(id, myPk)],
+      metadata: [for (final id in ids) _meta(id: id, name: id)],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    // Held requests take real time, so wait on the clock, not microtasks.
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    while (!session.peakInFlight.containsKey('unread') ||
+        session.inFlight.values.any((open) => open > 0)) {
+      if (DateTime.now().isAfter(deadline)) fail('Unread catch-up never ran');
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+
+    // Every HTTP chunk failed, so each batch also ran the websocket fallback.
+    expect(session.peakInFlight, {'latest': 4, 'unread': 4, 'huddle': 4});
+    // The fallback covered latest messages, unread messages, and deletions.
+    expect(session.messageHistoryCount, 3 * ids.length);
+  });
+
   group('deadline-unavailable channel batches', () {
     Object deadline() => RelayException(503, '{"error":"query timed out"}');
     bool isUnread(List<NostrFilter> batch) =>
         batch.isNotEmpty && batch.every((filter) => filter.since != null);
-    NostrEvent message(String id, int createdAt, {bool mention = false}) =>
-        NostrEvent(
-          id: id,
-          pubkey: 'alice',
-          createdAt: createdAt,
-          kind: EventKind.streamMessageV2,
-          tags: [
-            const ['h', _channelA],
-            if (mention) const ['p', myPk],
-          ],
-          content: 'hi',
-          sig: 'sig',
-        );
+    NostrEvent message(
+      String id,
+      int createdAt, {
+      bool mention = false,
+      bool quiet = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'alice',
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: [
+        const ['h', _channelA],
+        if (mention) const ['p', myPk],
+        if (quiet) const ['audience', 'agents'],
+      ],
+      content: 'hi',
+      sig: 'sig',
+    );
 
     test('a latest-message deadline keeps known timestamps', () async {
       final session = _FakeRelaySession(
@@ -1890,6 +2163,305 @@ void main() {
         DateTime.fromMillisecondsSinceEpoch(60 * 1000, isUtc: true),
       );
     });
+
+    test(
+      'a repeated catch-up starts before the last one by the relay drift',
+      () async {
+        int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [message('seen', now() - 3600, mention: true)],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final notifier = container.read(channelsProvider.notifier);
+        List<int?> lastUnreadSince() => [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ];
+        Future<(int, int)> refreshed() async {
+          final before = session.queryBatches.where(isUnread).length;
+          final from = now();
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isUnread).length > before,
+          );
+          await _settle();
+          return (from, now());
+        }
+
+        final firstFrom = now();
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        final firstTo = now();
+        // Never read: the first catch-up asks for the whole window.
+        expect(lastUnreadSince(), [0, 0]);
+
+        // While the app is away, a message from a phone whose clock is slow
+        // reaches the relay with a created_at well before the newest one the
+        // app has seen.
+        session.recentMessages.add(
+          message('late', firstFrom - 1500, mention: true),
+        );
+        final (secondFrom, secondTo) = await refreshed();
+        for (final since in lastUnreadSince()) {
+          expect(
+            since,
+            inInclusiveRange(
+              firstFrom - relayCrossDeviceSkewSeconds,
+              firstTo - relayCrossDeviceSkewSeconds,
+            ),
+            reason: 'starts 1860s before the previous catch-up was sent',
+          );
+        }
+        expect(
+          notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+          unorderedEquals(['seen', 'late']),
+        );
+
+        // Each catch-up moves the start forward.
+        await refreshed();
+        for (final since in lastUnreadSince()) {
+          expect(
+            since,
+            inInclusiveRange(
+              secondFrom - relayCrossDeviceSkewSeconds,
+              secondTo - relayCrossDeviceSkewSeconds,
+            ),
+          );
+        }
+      },
+    );
+
+    test('a channel whose fallback failed catches up over its whole window '
+        'again', () async {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session =
+          _FakeRelaySession(
+              memberships: [_membership(_channelA, myPk)],
+              metadata: [_meta(id: _channelA, name: 'general')],
+              recentMessages: [message('old', now() - 3600, mention: true)],
+            )
+            // The batch fails and so does its websocket fallback, without a
+            // deadline: the catch-up completes with no events for the channel.
+            ..messageBatchError = Exception('batch unavailable')
+            ..messageHistoryError = Exception('CLOSED: socket error');
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      final notifier = container.read(channelsProvider.notifier);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      expect(notifier.observedUnreadEventsByChannel[_channelA], isNull);
+
+      session
+        ..messageBatchError = null
+        ..messageHistoryError = null;
+      final before = session.queryBatches.where(isUnread).length;
+      await notifier.refresh();
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > before,
+      );
+      await _settle();
+      expect(
+        [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ],
+        [0, 0],
+      );
+      expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, ['old']);
+    });
+
+    test('a channel unmuted since catches up over its whole window', () async {
+      int now() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('backlog', now() - 3600)],
+      );
+      final mutes = _TestMutes(initiallyMuted: {_channelA});
+      final container = _buildContainer(session: session, mutes: mutes);
+      addTearDown(container.dispose);
+      final notifier = container.read(channelsProvider.notifier);
+      Future<void> refreshed() async {
+        final before = session.queryBatches.where(isUnread).length;
+        await notifier.refresh();
+        await _waitUntil(
+          () => session.queryBatches.where(isUnread).length > before,
+        );
+        await _settle();
+      }
+
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      // Muted: ordinary backlog doesn't count, and the next catch-up is
+      // incremental.
+      await refreshed();
+      expect(notifier.observedUnreadEventsByChannel[_channelA], isNull);
+      expect(
+        session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+        everyElement(isNot(0)),
+      );
+
+      mutes.unmute();
+      await refreshed();
+      expect(
+        session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+        everyElement(0),
+      );
+      expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+        'backlog',
+      ]);
+    });
+
+    test('a rebuilt channel list catches up over the whole window', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [message('seen', 10000, mention: true)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+
+      container.invalidate(channelsProvider);
+      final before = session.queryBatches.where(isUnread).length;
+      await container.read(channelsProvider.future);
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > before,
+      );
+      expect(
+        [
+          for (final filter in session.queryBatches.lastWhere(isUnread))
+            filter.since,
+        ],
+        [0, 0],
+      );
+    });
+
+    test('quiet agent messages never count as unread', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [
+          message('quiet-mention', 30, mention: true, quiet: true),
+          message('mention', 20, mention: true),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      session.emit(message('quiet-live', 60, quiet: true));
+      session.emit(message('live', 50));
+      await _settle();
+      final notifier = container.read(channelsProvider.notifier);
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+        unorderedEquals(['mention', 'live']),
+      );
+      expect(notifier.latestObservedByChannel[_channelA], 50);
+    });
+
+    // Quiet messages that fill the bounded catch-up window can hide an older
+    // unread event, so the full window still counts its oldest one, as plain
+    // backlog even when it mentions the reader.
+    for (final (count, deleted, expected) in [
+      (999, false, <String>[]),
+      (1000, false, ['quiet-0']),
+      (999, true, <String>[]),
+      (1000, true, ['quiet-1']),
+    ]) {
+      test(
+        '$count quiet messages, deletion $deleted, record $expected',
+        () async {
+          final session = _FakeRelaySession(
+            memberships: [_membership(_channelA, myPk)],
+            metadata: [_meta(id: _channelA, name: 'general')],
+            recentMessages: [
+              for (var i = count - 1; i >= 0; i--)
+                message('quiet-$i', 100 + i, mention: true, quiet: true),
+              if (deleted)
+                const NostrEvent(
+                  id: 'quiet-deletion',
+                  pubkey: 'alice',
+                  createdAt: 2000,
+                  kind: EventKind.deletion,
+                  tags: [
+                    ['h', _channelA],
+                    ['e', 'quiet-0'],
+                  ],
+                  content: '',
+                  sig: 'sig',
+                ),
+            ],
+          );
+          final container = _buildContainer(session: session);
+          addTearDown(container.dispose);
+          await container.read(channelsProvider.future);
+          await _waitUntil(() => session.queryBatches.any(isUnread));
+          await _settle();
+          final notifier = container.read(channelsProvider.notifier);
+          expect(
+            notifier.observedUnreadEventsByChannel[_channelA]?.keys ?? const [],
+            expected,
+          );
+          for (final event
+              in notifier.observedUnreadEventsByChannel[_channelA]?.values ??
+                  const <ObservedUnreadEvent>[]) {
+            expect(event.highPriority, isFalse);
+            expect(event.channelCatchUp, isTrue);
+          }
+          if (expected.isEmpty) return;
+
+          // Deleting the marker reopens the whole window, which still hides
+          // an older unread event, so the next quiet message stands in. The
+          // deletion lands while an incremental catch-up is out, which must
+          // not restore the cursor the deletion cleared.
+          session.pauseNextUnreadCatchUpQuery();
+          final parked = notifier.refresh();
+          await session.nextUnreadCatchUpQueryStarted;
+          session.emit(
+            NostrEvent(
+              id: 'marker-deletion',
+              pubkey: 'alice',
+              createdAt: 3000,
+              kind: EventKind.deletion,
+              tags: [
+                const ['h', _channelA],
+                ['e', expected.single],
+              ],
+              content: '',
+              sig: 'sig',
+            ),
+          );
+          await _settle();
+          session.resumePausedUnreadCatchUpQuery();
+          await parked;
+          await _settle();
+          final before = session.queryBatches.where(isUnread).length;
+          await notifier.refresh();
+          await _waitUntil(
+            () => session.queryBatches.where(isUnread).length > before,
+          );
+          await _settle();
+          expect(
+            session.queryBatches.lastWhere(isUnread).map((f) => f.since),
+            everyElement(0),
+          );
+          expect(notifier.observedUnreadEventsByChannel[_channelA]?.keys, [
+            deleted ? 'quiet-2' : 'quiet-1',
+          ]);
+        },
+      );
+    }
 
     // HTTP fails ordinarily, then a per-filter websocket fallback times out:
     // the batch is unavailable and no later chunk is sent.
@@ -1980,7 +2552,18 @@ void main() {
             .toSet(),
         {_channelA, _channelB},
       );
-      expect(session.queryBatches.last, hasLength(2));
+      expect(session.queryBatches.last, hasLength(4));
+      for (final channelId in [_channelA, _channelB]) {
+        expect(
+          session.queryBatches.last
+              .where((filter) => filter.tags['#h']!.single == channelId)
+              .map((filter) => filter.kinds),
+          [
+            EventKind.channelMessageEventKinds,
+            [EventKind.deletion, EventKind.nip29DeleteEvent],
+          ],
+        );
+      }
       expect(
         session.queryBatches.last.every(
           (filter) => filter.limit == 1000 && filter.since == 0,
@@ -2188,8 +2771,85 @@ void main() {
     );
   });
 
+  test('a DM opened ahead of the list is not found after it is left', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'Alice', channelType: 'dm')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    final notifier = container.read(channelsProvider.notifier);
+    final dm = (await container.read(channelsProvider.future)).single;
+
+    // A fast open finds the DM from its own metadata before the list has it.
+    session.memberships = [];
+    await notifier.refresh();
+    notifier.rememberOpened(dm);
+    expect(notifier.channelById(_channelA)?.id, _channelA);
+
+    // Once listed, the list owns it, so leaving drops it everywhere.
+    session.memberships = [_membership(_channelA, myPk)];
+    await notifier.refresh();
+    session.memberships = [];
+    await notifier.refresh();
+    expect(container.read(channelsProvider).value, isEmpty);
+    expect(notifier.channelById(_channelA), isNull);
+    expect(container.read(channelByIdProvider(_channelA)), isNull);
+
+    // The open's background refresh can list the DM before the open
+    // remembers it. The list still owns it.
+    session.memberships = [_membership(_channelA, myPk)];
+    await notifier.refresh();
+    notifier.rememberOpened(dm);
+    session.memberships = [];
+    await notifier.refresh();
+    expect(notifier.channelById(_channelA), isNull);
+  });
+
+  test('a DM opened ahead of the list stays in its community', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'Alice', channelType: 'dm')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    final notifier = container.read(channelsProvider.notifier);
+    final dm = (await container.read(channelsProvider.future)).single;
+    session.memberships = [];
+    await notifier.refresh();
+    notifier.rememberOpened(dm);
+    final found = <String?>[];
+    final lookup = container.listen(
+      channelByIdProvider(_channelA),
+      (_, next) => found.add(next?.id),
+      fireImmediately: true,
+    );
+    addTearDown(lookup.close);
+    expect(found, [_channelA]);
+
+    // Neither community lists the DM, yet the open lookup lets it go.
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://community-b.example');
+    await container.read(channelsProvider.future);
+    await _settle();
+    expect(lookup.read(), isNull);
+    expect(
+      container.read(channelsProvider.notifier).channelById(_channelA),
+      isNull,
+    );
+
+    // Likewise across an identity switch.
+    notifier.rememberOpened(dm);
+    expect(lookup.read()?.id, _channelA);
+    container.read(_testPubkeyProvider.notifier).set('other');
+    await container.read(channelsProvider.future);
+    await _settle();
+    expect(lookup.read(), isNull);
+  });
+
   test(
-    'archived kind:39000 metadata sets Channel.isArchived (covers TTL auto-archive)',
+    'archived and unlisted kind:39000 flags reach Channel (covers TTL auto-archive)',
     () async {
       // The relay's TTL reaper auto-archives expired ephemeral channels and
       // republishes kind:39000 with `["archived", "true"]`. The Channel needs
@@ -2204,7 +2864,7 @@ void main() {
           _membership(_channelB, myPk),
         ],
         metadata: [
-          _meta(id: _channelA, name: 'active'),
+          _meta(id: _channelA, name: 'active', unlisted: true),
           _meta(
             id: _channelB,
             name: 'expired-ttl',
@@ -2223,6 +2883,10 @@ void main() {
       // The active channel must not be flagged archived.
       final active = channels.firstWhere((c) => c.name == 'active');
       expect(active.isArchived, isFalse);
+      // The bare `["unlisted"]` flag: an unlisted namesake does not hold a
+      // name in the relay's listed-name rule (starter setup relies on it).
+      expect(active.isUnlisted, isTrue);
+      expect(expired.isUnlisted, isFalse);
     },
   );
 
@@ -2431,10 +3095,12 @@ NostrEvent _membership(
   String pubkey, {
   String? additionalPubkey,
   String? ownerPubkey,
+  int createdAt = 1,
+  String? eventId,
 }) => NostrEvent(
-  id: 'mem-$channelId',
+  id: eventId ?? 'mem-$channelId',
   pubkey: 'creator',
-  createdAt: 1,
+  createdAt: createdAt,
   kind: 39002,
   tags: [
     ['d', channelId],
@@ -2470,6 +3136,8 @@ NostrEvent _meta({
   int createdAt = 1,
   int? ttlSeconds,
   bool archived = false,
+  bool unlisted = false,
+  List<String> participants = const [],
 }) => NostrEvent(
   id: 'meta-$id',
   pubkey: 'creator',
@@ -2482,21 +3150,49 @@ NostrEvent _meta({
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
     if (archived) ['archived', 'true'],
+    if (unlisted) ['unlisted'],
+    for (final participant in participants) ['p', participant],
   ],
   content: '',
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  _TestMutes? mutes,
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
+      if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
       // signing identity mid-flight the way an account change does at runtime.
       myPubkeyProvider.overrideWith((ref) => ref.watch(_testPubkeyProvider)),
     ],
+  );
+}
+
+/// Channel mutes a test sets directly.
+class _TestMutes extends ChannelMutesNotifier {
+  _TestMutes({this.initiallyMuted = const {}});
+
+  final Set<String> initiallyMuted;
+
+  @override
+  ChannelMutesState build() => _muted(initiallyMuted);
+
+  void unmute() => state = _muted(const {});
+
+  static ChannelMutesState _muted(Set<String> channelIds) => ChannelMutesState(
+    isReady: true,
+    store: ChannelMuteStore(
+      channels: {
+        for (final id in channelIds)
+          id: const ChannelMuteEntry(muted: true, updatedAt: 1),
+      },
+    ),
   );
 }
 
@@ -2529,6 +3225,11 @@ Future<void> _waitUntil(bool Function() predicate) async {
 
 /// Fake [RelaySessionNotifier] that returns canned query results and records
 /// subscriptions.
+int _explicitChannelValues(List<NostrFilter> filters) => filters.fold(
+  0,
+  (total, filter) => total + (filter.tags['#h']?.length ?? 0),
+);
+
 class _FakeRelaySession extends RelaySessionNotifier {
   _FakeRelaySession({
     required this.memberships,
@@ -2543,6 +3244,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
     this.recentMessages = const [],
+    this.deletionChannels = const {},
+    this.enforceHistoryLimits = false,
     this.membershipFailures = 0,
   });
 
@@ -2558,14 +3261,19 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
   List<NostrEvent> recentMessages;
+  final Map<String, String> deletionChannels;
+  final bool enforceHistoryLimits;
   int membershipFailures;
   int directoryFailures = 0;
-  bool failClaimedMemberCountQuery = false;
+  bool failClaimedMemberMetadataQuery = false;
   bool failClaimedUnreadCatchUpQuery = false;
   int membershipRequestCount = 0;
   int metadataPageRequestCount = 0;
 
   final List<NostrFilter> historyFilters = [];
+
+  /// While set, member metadata reads wait for it to complete.
+  Completer<void>? metadataGate;
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
   Object? latestBatchError;
@@ -2575,6 +3283,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> directoryQueryFilters = [];
   final List<NostrFilter> membershipQueryFilters = [];
   final List<NostrFilter> subscribeFilters = [];
+  // The channel list notice subscription, kept apart from the live channel
+  // subscriptions these tests count.
+  final List<NostrFilter> listNoticeFilters = [];
+  final Map<int, void Function(NostrEvent)> _listNoticeListeners = {};
   final Map<
     int,
     (NostrFilter, void Function(NostrEvent), void Function(String message)?)
@@ -2588,9 +3300,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _pausedHiddenDm;
   Completer<void>? _hiddenDmStarted;
   Completer<void>? _claimedHiddenDm;
-  Completer<void>? _pausedMemberCount;
-  Completer<void>? _memberCountStarted;
-  Completer<void>? _claimedMemberCount;
+  Completer<void>? _pausedMemberMetadata;
+  Completer<void>? _memberMetadataStarted;
+  Completer<void>? _claimedMemberMetadata;
   Completer<void>? _pausedHuddleStarts;
   Completer<void>? _huddleStartsStarted;
   Completer<void>? _claimedHuddleStarts;
@@ -2688,7 +3400,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   /// Holds the next Huddle-start query open, one shot only.
   ///
-  /// Parks the older refresh AFTER both membership fetches have landed, so the
+  /// Parks the older refresh AFTER membership discovery has landed, so the
   /// only guard left between the park and the member-snapshot write is the
   /// fence on this leg.
   void pauseNextHuddleStartQuery() {
@@ -2717,28 +3429,28 @@ class _FakeRelaySession extends RelaySessionNotifier {
     paused.complete();
   }
 
-  /// Holds the next member-count query open, one shot only.
-  void pauseNextMemberCountQuery() {
-    if (_pausedMemberCount != null) {
-      throw StateError('A member-count query is already paused');
+  /// Holds the next member-metadata query open, one shot only.
+  void pauseNextMemberMetadataQuery() {
+    if (_pausedMemberMetadata != null) {
+      throw StateError('A member-metadata query is already paused');
     }
-    _pausedMemberCount = Completer<void>();
-    _memberCountStarted = Completer<void>();
+    _pausedMemberMetadata = Completer<void>();
+    _memberMetadataStarted = Completer<void>();
   }
 
-  /// Completes once the parked member-count query has been requested.
-  Future<void> get nextMemberCountQueryStarted async {
-    final started = _memberCountStarted;
+  /// Completes once the parked member-metadata query has been requested.
+  Future<void> get nextMemberMetadataQueryStarted async {
+    final started = _memberMetadataStarted;
     if (started == null) {
-      throw StateError('No member-count query is pending');
+      throw StateError('No member-metadata query is pending');
     }
     await started.future;
   }
 
-  /// Releases the parked member-count query so its response lands.
-  void resumePausedMemberCountQuery() {
-    final paused = _claimedMemberCount ?? _pausedMemberCount;
-    if (paused == null) throw StateError('No member-count query is paused');
+  /// Releases the parked member-metadata query so its response lands.
+  void resumePausedMemberMetadataQuery() {
+    final paused = _claimedMemberMetadata ?? _pausedMemberMetadata;
+    if (paused == null) throw StateError('No member-metadata query is paused');
     paused.complete();
   }
 
@@ -2782,22 +3494,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyFilters.add(filter);
+    if ((filter.tags['#h']?.length ?? 0) > kMaxExplicitChannelValues) {
+      throw Exception('restricted: too many explicit channels');
+    }
     if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
-      final paused = _pausedMemberCount;
-      if (paused != null) {
-        _claimedMemberCount = paused;
-        _pausedMemberCount = null;
-        _memberCountStarted!.complete();
-        _memberCountStarted = null;
-        await paused.future;
-        if (failClaimedMemberCountQuery) {
-          throw Exception('member-count fetch failed');
-        }
-      }
-      final ids = (filter.tags['#d'] ?? const <String>[]).toSet();
-      return memberships
-          .where((event) => ids.contains(event.getTagValue('d')))
-          .toList();
+      throw StateError('Membership rosters must reuse discovery events');
     }
     if (filter.kinds.contains(39002) && filter.tags['#p'] != null) {
       membershipRequestCount++;
@@ -2828,7 +3529,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs
-      // unblocked: one shot, exactly like the hidden-DM and member-count hooks.
+      // unblocked: one shot, exactly like the hidden-DM and member-metadata hooks.
       final paused = _pausedHuddleStarts;
       if (paused != null) {
         _claimedHuddleStarts = paused;
@@ -2837,15 +3538,32 @@ class _FakeRelaySession extends RelaySessionNotifier {
         _huddleStartsStarted = null;
         await paused.future;
       }
-      return huddleStarts;
+      final parents = (filter.tags['#h'] ?? const <String>[]).toSet();
+      return huddleStarts
+          .where((event) => parents.contains(event.getTagValue('h')))
+          .toList();
     }
     if (filter.kinds.contains(39000)) {
       final ids = filter.tags['#d']?.toSet();
       if (ids == null) {
         throw StateError('Directory queries must use the HTTP query bridge');
       }
-      // Member metadata query — return only matching `d` tags.
-      return metadata.where((e) => ids.contains(e.getTagValue('d'))).toList();
+      final snapshot = metadata
+          .where((e) => ids.contains(e.getTagValue('d')))
+          .toList();
+      final paused = _pausedMemberMetadata;
+      if (paused != null) {
+        _claimedMemberMetadata = paused;
+        _pausedMemberMetadata = null;
+        _memberMetadataStarted!.complete();
+        _memberMetadataStarted = null;
+        await paused.future;
+        if (failClaimedMemberMetadataQuery) {
+          throw Exception('member-metadata fetch failed');
+        }
+      }
+      await metadataGate?.future;
+      return snapshot;
     }
     // Per-filter websocket fallback of a message batch.
     messageHistoryCount++;
@@ -2928,6 +3646,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return filter.until == null ? directorySnapshot : const [];
     }
     queryBatches.add(filters);
+    if (_explicitChannelValues(filters) > kMaxExplicitChannelValues) {
+      throw RelayException(400, '{"error":"too many explicit channels"}');
+    }
     if (messageBatchError case final error?) throw error;
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at
@@ -2951,13 +3672,27 @@ class _FakeRelaySession extends RelaySessionNotifier {
         }
       }
     }
-    return messageSnapshot.where((event) {
-      return filters.any((filter) {
+    final matched = <String, NostrEvent>{};
+    for (final filter in filters) {
+      final matches = messageSnapshot.where((event) {
         if (!filter.kinds.contains(event.kind)) return false;
+        if (filter.since case final since? when event.createdAt < since) {
+          return false;
+        }
+        if (filter.until case final until? when event.createdAt > until) {
+          return false;
+        }
         for (final entry in filter.tags.entries) {
           final tagName = entry.key.startsWith('#')
               ? entry.key.substring(1)
               : entry.key;
+          // Relay #h matching uses stored channel metadata for h-less NIP-09.
+          if (tagName == 'h' &&
+              event.kind == EventKind.deletion &&
+              event.channelId == null &&
+              entry.value.contains(deletionChannels[event.id])) {
+            continue;
+          }
           if (!event.tags.any(
             (tag) =>
                 tag.length > 1 &&
@@ -2968,9 +3703,25 @@ class _FakeRelaySession extends RelaySessionNotifier {
           }
         }
         return true;
-      });
-    }).toList();
+      }).toList();
+      if (enforceHistoryLimits) {
+        matches.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      }
+      for (final event
+          in enforceHistoryLimits ? matches.take(filter.limit) : matches) {
+        matched[event.id] = event;
+      }
+    }
+    return matched.values.toList();
   }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
   Future<void Function()> subscribe(
@@ -2978,6 +3729,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    if (filter.kinds.contains(EventKind.memberAddedNotification)) {
+      final key = ++_nextSubscriptionKey;
+      listNoticeFilters.add(filter);
+      _listNoticeListeners[key] = onEvent;
+      return () {
+        if (_listNoticeListeners.remove(key) != null) {
+          listNoticeFilters.remove(filter);
+        }
+      };
+    }
     totalSubscribeCount++;
     subscribeFilters.add(filter);
     final paused = _pausedSubscribe;
@@ -3023,7 +3784,82 @@ class _FakeRelaySession extends RelaySessionNotifier {
     for (final (_, listener, _) in List.of(_subscriptions.values)) {
       listener(event);
     }
+    for (final listener in List.of(_listNoticeListeners.values)) {
+      listener(event);
+    }
   }
+}
+
+NostrEvent _huddleStart({
+  required String pubkey,
+  required String parent,
+  required String backing,
+}) => NostrEvent(
+  id: 'huddle-start-$parent',
+  pubkey: pubkey,
+  createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+  kind: EventKind.huddleStarted,
+  tags: [
+    ['h', parent],
+  ],
+  content: '{"ephemeral_channel_id":"$backing"}',
+  sig: 'sig',
+);
+
+/// Fails every HTTP channel-history request the way an unavailable query
+/// bridge does, and records how many relay requests each batch keeps open.
+class _BridgeDownRelaySession extends _FakeRelaySession {
+  _BridgeDownRelaySession({
+    required super.memberships,
+    required super.metadata,
+  });
+
+  final inFlight = <String, int>{};
+  final peakInFlight = <String, int>{};
+
+  static String? _batchOf(List<NostrFilter> filters) {
+    final filter = filters.firstOrNull;
+    if (filter == null) return null;
+    if (filter.kinds.contains(EventKind.huddleStarted)) return 'huddle';
+    if (!filter.kinds.contains(EventKind.streamMessageV2)) return null;
+    return filter.since == null ? 'latest' : 'unread';
+  }
+
+  Future<T> _held<T>(String? batch, Future<T> Function() request) async {
+    if (batch == null) return request();
+    final open = inFlight[batch] = (inFlight[batch] ?? 0) + 1;
+    peakInFlight[batch] = max(peakInFlight[batch] ?? 0, open);
+    try {
+      // Hold each request so everything the batch has started overlaps.
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      return await request();
+    } finally {
+      inFlight[batch] = inFlight[batch]! - 1;
+    }
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    final batch = _batchOf(filters);
+    return _held(
+      batch,
+      () => batch == null
+          ? super.queryRelay(filters, timeout: timeout)
+          : throw Exception('query bridge unavailable'),
+    );
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) => _held(
+    _batchOf([filter]),
+    () => super.fetchHistory(filter, timeout: timeout),
+  );
 }
 
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {

@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
 const _pairingAuthOkTimeout = Duration(seconds: 8);
@@ -66,7 +66,15 @@ class PairingSocket {
     }
     final channel = _channelFactory(Uri.parse(_wsUrl));
     _channel = channel;
-    await Future.any([channel.ready, _closed.future]);
+    try {
+      await Future.any([
+        channel.ready,
+        _closed.future,
+      ]).timeout(const Duration(seconds: 10));
+    } catch (_) {
+      dispose();
+      rethrow;
+    }
     if (_closed.isCompleted) {
       throw const PairingAuthException('Pairing connection cancelled');
     }
@@ -212,7 +220,7 @@ class PairingSocket {
         ['challenge', challenge],
       ];
 
-      final event = nostr.Event.from(
+      final event = signNostrEvent(
         kind: EventKind.auth,
         content: '',
         tags: tags,

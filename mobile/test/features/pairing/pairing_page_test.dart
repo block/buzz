@@ -1,6 +1,8 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,12 +16,178 @@ import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 import '../../helpers/widget_helpers.dart';
 
 void main() {
   group('PairingPage', () {
+    testWidgets('create reuses join form, motion, validation and Back', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.binding.setSurfaceSize(const Size(393, 852));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      for (final reduced in [false, true]) {
+        String? submitted;
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            disableAnimations: reduced,
+            child: HookBuilder(
+              builder: (context) {
+                final creating = useState(false);
+                final joining = useState(false);
+                return PairingPage(
+                  connectionLanding: true,
+                  signedInOnboarding: true,
+                  creatingCommunity: creating.value,
+                  enteringCommunityLink: joining.value,
+                  onCreateCommunity: () => creating.value = true,
+                  onCommunityLink: () => joining.value = true,
+                  onSubmitCommunity: (name) => submitted = name,
+                  onWelcomeBack: () {
+                    creating.value = false;
+                    joining.value = false;
+                  },
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final action = find.byKey(const Key('add-community-link-action'));
+        final originalAction = tester.element(action);
+        await tester.tap(find.text('Create a community'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        expect(tester.element(action), same(originalAction));
+        expect(find.bySemanticsLabel('Buzz'), findsNothing);
+        expect(
+          find.text('Choose an address for your community.'),
+          findsOneWidget,
+        );
+        final input = find.byKey(const Key('community-create-input'));
+        final field = tester.widget<CupertinoTextField>(input);
+        expect(field.decoration, isNull);
+        expect(field.focusNode!.hasFocus, isTrue);
+        expect(
+          tester
+              .widget<Transform>(
+                find.byKey(const Key('add-community-link-rise')),
+              )
+              .transform
+              .getTranslation()
+              .y,
+          0,
+        );
+        await tester.enterText(input, 'not a name');
+        await tester.tap(find.text('Continue'));
+        await tester.pumpAndSettle();
+        expect(submitted, isNull);
+        expect(
+          find.text(
+            'Use letters, numbers and single hyphens (up to 63 characters).',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.ancestor(
+            of: find.text(
+              'Use letters, numbers and single hyphens (up to 63 characters).',
+            ),
+            matching: find.byWidgetPredicate(
+              (widget) =>
+                  widget is Semantics && widget.properties.liveRegion == true,
+            ),
+          ),
+          findsOneWidget,
+        );
+        await tester.enterText(input, '  My-Community  ');
+        await tester.testTextInput.receiveAction(TextInputAction.go);
+        await tester.pumpAndSettle();
+        expect(submitted, 'my-community');
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(find.text('Add a community'), findsOneWidget);
+        await tester.tap(find.text('Enter community link'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+        final joinInput = tester.widget<CupertinoTextField>(
+          find.byKey(const Key('community-link-input')),
+        );
+        expect(joinInput.controller!.text, isEmpty);
+        expect(joinInput.decoration, isNull);
+        expect(joinInput.focusNode!.hasFocus, isTrue);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      }
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets(
+      'signed-in onboarding has ordered actions and switcher Add stays separate',
+      (tester) async {
+        var found = false;
+        var created = false;
+        for (final hasCommunities in [true, false]) {
+          await tester.pumpWidget(
+            WidgetHelpers.testable(
+              child: PairingPage(
+                connectionLanding: true,
+                signedInOnboarding: true,
+                hasKnownCommunities: hasCommunities,
+                onBuilderlab: () => found = true,
+                onCreateCommunity: () => created = true,
+                onCommunityLink: () {},
+                onWelcomeBack: () {},
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.bySemanticsLabel('Buzz'), findsNothing);
+          expect(find.text('Scan a QR code'), findsOneWidget);
+          expect(find.text('Enter community link'), findsOneWidget);
+          expect(find.text('Create a community'), findsOneWidget);
+          expect(
+            find.text('Find my communities'),
+            hasCommunities ? findsOneWidget : findsNothing,
+          );
+          expect(
+            tester.getTopLeft(find.text('Scan a QR code')).dy,
+            lessThan(tester.getTopLeft(find.text('Enter community link')).dy),
+          );
+          if (hasCommunities) {
+            await tester.tap(find.text('Find my communities'));
+            expect(found, isTrue);
+          }
+          await tester.tap(find.text('Create a community'));
+          expect(created, isTrue);
+        }
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            child: PairingPage(
+              connectionLanding: true,
+              addingCommunity: true,
+              onWelcomeBack: () {},
+              onCommunityLink: () {},
+              onBuilderlab: () {},
+              onCreateCommunity: () {},
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Scan a QR code'), findsOneWidget);
+        expect(find.text('Enter a community link'), findsOneWidget);
+        expect(find.text('Find my communities'), findsNothing);
+        expect(find.text('Create a community'), findsNothing);
+      },
+    );
+
     testWidgets(
       'verified pairing stays on loading through transfer and import',
       (tester) async {
@@ -293,14 +461,19 @@ void main() {
       expect(find.text('Does your desktop app show this code?'), findsNothing);
     });
 
-    testWidgets('uses Cancel as the only visible SAS exit', (tester) async {
+    testWidgets('fullscreen pairing supports Cancel and system Back', (
+      tester,
+    ) async {
       final notifier = _ConfirmingSasPairingNotifier();
       await tester.pumpWidget(
         ProviderScope(
           overrides: [pairingProvider.overrideWith(() => notifier)],
           child: MaterialApp(
             theme: AppTheme.dark(),
-            home: const PairingPage(addingCommunity: true),
+            home: const PairingPage(
+              addingCommunity: true,
+              connectionLanding: true,
+            ),
           ),
         ),
       );
@@ -312,23 +485,21 @@ void main() {
 
       await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
       expect(notifier.denied, isTrue);
+      notifier.denied = false;
+      await tester.binding.handlePopRoute();
+      expect(notifier.denied, isTrue);
     });
 
-    testWidgets('keeps only Back on the clear add-community header', (
-      tester,
-    ) async {
+    testWidgets('uses the shared frosted add-community header', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(child: const PairingPage(addingCommunity: true)),
       );
-
-      expect(find.byType(AppBar), findsOneWidget);
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.byType(FrostedAppBar), findsOneWidget);
       expect(find.text('Add Community'), findsNothing);
-      final appBar = tester.widget<AppBar>(find.byType(AppBar));
-      expect(appBar.backgroundColor, Colors.transparent);
-      expect(appBar.surfaceTintColor, Colors.transparent);
-      expect(appBar.elevation, 0);
-      expect(appBar.scrolledUnderElevation, 0);
-      expect(find.byIcon(BuzzIcons.arrowLeft), findsOneWidget);
+      final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+      expect(appBar.alwaysFrosted, isTrue);
+      expect(find.byTooltip('Back'), findsOneWidget);
     });
 
     testWidgets('uses the native navigation bar on iOS', (tester) async {
@@ -423,7 +594,7 @@ void main() {
       expect(find.text('Connect'), findsNothing);
     });
 
-    testWidgets('pairing actions are disabled when connecting', (tester) async {
+    testWidgets('connection progress replaces pairing actions', (tester) async {
       await tester.pumpWidget(
         WidgetHelpers.testable(
           overrides: [
@@ -434,13 +605,44 @@ void main() {
       );
       await tester.pump();
 
-      final scanButton = tester.widget<FilledButton>(find.byType(FilledButton));
-      final pairingCodeButton = tester.widget<TextButton>(
-        find.widgetWithText(TextButton, 'Use pairing code'),
+      expect(
+        find.byKey(const Key('pairing-community-loading')),
+        findsOneWidget,
       );
+      expect(find.text('Scan a QR code'), findsNothing);
+      expect(find.text('Use pairing code'), findsNothing);
+    });
 
-      expect(scanButton.onPressed, isNull);
-      expect(pairingCodeButton.onPressed, isNull);
+    testWidgets('connection Cancel closes the identity recovery route', (
+      tester,
+    ) async {
+      final navigator = GlobalKey<NavigatorState>();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConnectingPairingNotifier()),
+          ],
+          child: MaterialApp(
+            navigatorKey: navigator,
+            theme: AppTheme.light(),
+            home: const Scaffold(body: Text('Settings')),
+          ),
+        ),
+      );
+      navigator.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const PairingPage(
+            addingCommunity: true,
+            identityRecoveryOnly: true,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PairingPage), findsNothing);
+      expect(find.text('Settings'), findsOneWidget);
     });
 
     testWidgets('recovery entry rejects ordinary nostrpair codes', (
@@ -689,8 +891,8 @@ void main() {
       expect(confirmTopLeft.dx, Grid.sm);
       expect(tester.getSize(confirmFinder).width, scaffoldWidth - Grid.sm * 2);
       expect(tester.getSize(cancelFinder).width, scaffoldWidth - Grid.sm * 2);
-      expect(tester.getSize(confirmFinder).height, 48);
-      expect(tester.getSize(cancelFinder).height, 48);
+      expect(tester.getSize(confirmFinder).height, 52);
+      expect(tester.getSize(cancelFinder).height, 52);
       expect(
         find.textContaining(
           'Only continue if you started this pairing from your desktop.',

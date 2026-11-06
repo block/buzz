@@ -1,10 +1,10 @@
 use super::model::*;
 use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
-use sqlx::{Acquire, PgConnection, Row};
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-use crate::{observability, Db, Result};
+use crate::{observability, AdmittedTx, Db, Result};
 
 pub(super) fn event_id(value: &str) -> Option<Vec<u8>> {
     if value.len() != 64 || value.bytes().any(|b| !b.is_ascii_hexdigit()) {
@@ -26,7 +26,7 @@ pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
 /// Start the account if this is the actor's first read intent, then serialize
 /// private frontier writes, never shared conversation rows.
 pub(super) async fn lock_account(
-    conn: &mut PgConnection,
+    tx: &mut AdmittedTx,
     community: CommunityId,
     actor: &[u8],
 ) -> Result<()> {
@@ -37,14 +37,14 @@ pub(super) async fn lock_account(
     )
     .bind(community.as_uuid())
     .bind(actor)
-    .execute(&mut *conn)
+    .execute(tx.conn())
     .await?;
     sqlx::query(
         "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2 FOR UPDATE",
     )
     .bind(community.as_uuid())
     .bind(actor)
-    .fetch_one(conn)
+    .fetch_one(tx.conn())
     .await?;
     Ok(())
 }
@@ -161,7 +161,7 @@ pub(super) async fn valid_target(
 /// Advance a monotone frontier. The anchor ID follows the greatest arrival;
 /// an equal arrival keeps the existing anchor.
 async fn frontier(
-    conn: &mut PgConnection,
+    tx: &mut AdmittedTx,
     community: CommunityId,
     actor: &[u8],
     target: &ReadTarget,
@@ -179,12 +179,12 @@ async fn frontier(
                 THEN EXCLUDED.through_message_id ELSE personal_read_frontiers.through_message_id END",
     ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root)
         .bind(msg.received_at).bind(&msg.id)
-        .execute(&mut *conn).await?;
+        .execute(tx.conn()).await?;
     Ok(())
 }
 
 pub(super) async fn apply(
-    conn: &mut PgConnection,
+    tx: &mut AdmittedTx,
     community: CommunityId,
     actor: &[u8],
     intent: &ReadIntent,
@@ -194,11 +194,11 @@ pub(super) async fn apply(
             let Some(id) = event_id(message_id) else {
                 return Ok(IntentOutcome::Invalid);
             };
-            let Some(root) = valid_target(conn, community, actor, target).await? else {
+            let Some(root) = valid_target(tx.conn(), community, actor, target).await? else {
                 return Ok(IntentOutcome::Blocked);
             };
             let Some(msg) = message(
-                conn,
+                tx.conn(),
                 community,
                 target.channel_id,
                 &id,
@@ -214,7 +214,7 @@ pub(super) async fn apply(
             {
                 return Ok(IntentOutcome::Blocked);
             }
-            frontier(conn, community, actor, target, &root, &msg).await?;
+            frontier(tx, community, actor, target, &root, &msg).await?;
         }
     }
     Ok(IntentOutcome::Applied)
@@ -230,11 +230,13 @@ impl Db {
         actor: &nostr::PublicKey,
         intent: &ReadIntent,
     ) -> Result<IntentOutcome> {
-        let mut conn =
-            observability::acquire_writer(&self.pool, observability::WriterOperation::EventWrite)
-                .await?;
-        let mut tx = conn.begin().await?;
-        deadlines(&mut tx).await?;
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community,
+            observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        deadlines(tx.conn()).await?;
         let actor = actor.to_bytes();
         lock_account(&mut tx, community, &actor).await?;
         let outcome = apply(&mut tx, community, &actor, intent).await?;

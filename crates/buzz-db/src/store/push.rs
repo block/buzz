@@ -14,19 +14,14 @@ use crate::error::Result;
 use crate::Db;
 use buzz_datastore_tracing::datastore_span;
 
+mod delivery;
+pub use delivery::due_wake_communities;
+
 async fn acquire_operation_connection(
     pool: &PgPool,
     operation: crate::observability::WriterOperation,
 ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
     Ok(crate::observability::acquire_writer(pool, operation).await?)
-}
-
-async fn begin_operation_transaction(
-    pool: &PgPool,
-    operation: crate::observability::WriterOperation,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-    let connection = acquire_operation_connection(pool, operation).await?;
-    Ok(sqlx::Transaction::begin(connection, None).await?)
 }
 
 /// Namespace for the per-community push-gate advisory lock. The post-commit
@@ -55,6 +50,10 @@ async fn acquire_push_gate_lock(tx: &mut sqlx::PgConnection, community: Communit
 
 /// Maximum claims for a malformed matcher job before it is discarded.
 pub const MAX_MATCH_ATTEMPTS: i32 = 8;
+
+/// Bound tenant admission attempts when a due community fences after the
+/// candidate read. A later tick can continue beyond this page if needed.
+const MATCH_CLAIM_COMMUNITY_CANDIDATES: i64 = 16;
 
 /// Common signed-event ordering fields for a lease replacement.
 #[derive(Debug, Clone, Copy)]
@@ -367,6 +366,7 @@ pub async fn accept_lease_event(
     crate::store::event_follow_up::after_admitted_insert(
         &mut tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         30350,
         None,
     )
@@ -485,11 +485,14 @@ async fn replace_lease(
     // lease" to "eligible"; serialize it against the event producer's shared
     // gate lock (gate → lease row, matching accept_lease_event's global order).
     // Revocations (is_active = false) never make eligibility true and skip it.
-    let mut tx =
-        begin_operation_transaction(pool, crate::observability::WriterOperation::EventWrite)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     if is_active {
-        acquire_push_gate_lock(&mut tx, community).await?;
+        acquire_push_gate_lock(tx.conn(), community).await?;
     }
 
     // The conflict predicate is the acceptance state machine. Keeping both
@@ -537,7 +540,7 @@ async fn replace_lease(
     .bind(max_class)
     .bind(subscriptions)
     .bind(version.expires_at)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     if accepted.is_some() {
@@ -553,7 +556,7 @@ async fn replace_lease(
     .bind(community.as_uuid())
     .bind(author)
     .bind(installation_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(tx.conn())
     .await?;
     tx.commit().await?;
     let current_created_at: i64 = current.try_get("source_created_at")?;
@@ -635,9 +638,12 @@ pub async fn enqueue_wakes(
     if requests.is_empty() {
         return Ok(Vec::new());
     }
-    let mut tx =
-        begin_operation_transaction(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
 
     // 1. Lock and read the current lease row for every distinct requested
     //    (author, installation), in deterministic order.
@@ -666,7 +672,7 @@ pub async fn enqueue_wakes(
     .bind(community.as_uuid())
     .bind(&lock_authors)
     .bind(&lock_installs)
-    .fetch_all(&mut *tx)
+    .fetch_all(tx.conn())
     .await?;
     let mut leases: std::collections::HashMap<(Vec<u8>, String), (i64, Vec<u8>)> =
         std::collections::HashMap::with_capacity(lease_rows.len());
@@ -739,7 +745,7 @@ pub async fn enqueue_wakes(
         .bind(&ins_events)
         .bind(&ins_classes)
         .bind(&ins_expires)
-        .fetch_all(&mut *tx)
+        .fetch_all(tx.conn())
         .await?;
         for row in inserted {
             let key: (Vec<u8>, Vec<u8>) = (row.try_get("endpoint_hash")?, row.try_get("event_id")?);
@@ -762,7 +768,7 @@ pub async fn enqueue_wakes(
             .bind(community.as_uuid())
             .bind(&ins_endpoints)
             .bind(&ins_events)
-            .fetch_all(&mut *tx)
+            .fetch_all(tx.conn())
             .await?;
             for row in dup_rows {
                 let key: (Vec<u8>, Vec<u8>) =
@@ -863,26 +869,47 @@ where
     Fut: std::future::Future<Output = Result<Vec<buzz_core::StoredEvent>>>,
 {
     let claim_id = Uuid::new_v4();
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
-    let rows = sqlx::query(
-        r#"
-        WITH target AS (
-            SELECT community_id
-            FROM push_match_queue
-            WHERE attempts < $3
-              AND next_attempt_at <= now()
-              AND (state = 'pending' OR (state = 'matching' AND lease_until < now()))
-              AND community_write_allowed(community_id)
-            ORDER BY next_attempt_at, created_at
-            LIMIT 1
-        ),
-        candidates AS (
+    let mut refused = Vec::<Uuid>::new();
+    let mut claimed = None;
+    for _ in 0..MATCH_CLAIM_COMMUNITY_CANDIDATES {
+        let mut connection =
+            acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
+                .await?;
+        // Exclude fenced tenants so they cannot occupy the queue head.
+        let candidate: Option<Uuid> = sqlx::query_scalar(
+            "SELECT q.community_id FROM push_match_queue q \
+             JOIN communities c ON c.id = q.community_id \
+             WHERE q.attempts < $1 AND q.next_attempt_at <= now() \
+               AND (q.state = 'pending' OR (q.state = 'matching' AND q.lease_until < now())) \
+               AND c.deletion_state = 'active' AND c.deleted_at IS NULL \
+               AND q.community_id <> ALL($2) \
+             ORDER BY q.next_attempt_at, q.created_at LIMIT 1",
+        )
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(&refused)
+        .fetch_optional(&mut *connection)
+        .await?;
+        drop(connection);
+        let Some(id) = candidate else {
+            break;
+        };
+        let community = CommunityId::from_uuid(id);
+        let Some(mut tx) = crate::begin_community_sweep_transaction(
+            pool,
+            community,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?
+        else {
+            refused.push(id);
+            continue;
+        };
+        let rows = sqlx::query(
+            r#"
+        WITH candidates AS (
             SELECT q.community_id, q.event_id
             FROM push_match_queue q
-            JOIN target t ON q.community_id = t.community_id
-            WHERE q.attempts < $3
+            WHERE q.community_id = $5 AND q.attempts < $3
               AND q.next_attempt_at <= now()
               AND (q.state = 'pending' OR (q.state = 'matching' AND q.lease_until < now()))
             ORDER BY q.next_attempt_at, q.created_at
@@ -895,22 +922,26 @@ where
         WHERE q.community_id=c.community_id AND q.event_id=c.event_id
         RETURNING q.community_id, q.event_id, q.attempts
         "#,
-    )
-    .bind(claim_id)
-    .bind(lease_until)
-    .bind(MAX_MATCH_ATTEMPTS)
-    .bind(limit)
-    .fetch_all(&mut *connection)
-    .await?;
+        )
+        .bind(claim_id)
+        .bind(lease_until)
+        .bind(MAX_MATCH_ATTEMPTS)
+        .bind(limit)
+        .bind(community.as_uuid())
+        .fetch_all(tx.conn())
+        .await?;
+        tx.commit().await?;
+        claimed = Some((community, rows));
+        break;
+    }
+    let Some((community, rows)) = claimed else {
+        return Ok(None);
+    };
     if rows.is_empty() {
         return Ok(None);
     }
-    // The claim query is a single autocommitted statement. Release its pool
-    // slot before loading source events, because the production loader owns a
-    // separately attributed acquisition. Holding this connection across the
-    // load would self-starve a supported size-one writer pool.
-    drop(connection);
-    let community = CommunityId::from_uuid(rows[0].try_get("community_id")?);
+    // The admitted transaction committed above, so no connection is held
+    // across the loader (size-one pools must work).
     let mut attempts = std::collections::HashMap::with_capacity(rows.len());
     for row in &rows {
         let event_id: Vec<u8> = row.try_get("event_id")?;
@@ -932,9 +963,12 @@ where
     // recoverable after their claim lease expires.
     let gone: Vec<Vec<u8>> = attempts.into_keys().collect();
     if !gone.is_empty() {
-        let mut connection =
-            acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-                .await?;
+        let mut tx = crate::begin_community_write_transaction(
+            pool,
+            community,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
         sqlx::query(
             "DELETE FROM push_match_queue \
              WHERE community_id=$1 AND claim_id=$2 AND state='matching' AND event_id = ANY($3)",
@@ -942,8 +976,9 @@ where
         .bind(community.as_uuid())
         .bind(claim_id)
         .bind(&gone)
-        .execute(&mut *connection)
+        .execute(tx.conn())
         .await?;
+        tx.commit().await?;
     }
     if jobs.is_empty() {
         return Ok(None);
@@ -965,15 +1000,34 @@ pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
     let mut connection =
         acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
             .await?;
-    Ok(sqlx::query(
-        "DELETE FROM push_match_queue WHERE attempts >= $1 \
-         AND (state='pending' OR (state='matching' AND lease_until < now())) \
-         AND community_write_allowed(community_id)",
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT community_id FROM push_match_queue WHERE attempts >= $1 \
+         AND (state='pending' OR (state='matching' AND lease_until < now()))",
     )
     .bind(MAX_MATCH_ATTEMPTS)
-    .execute(&mut *connection)
-    .await?
-    .rows_affected())
+    .fetch_all(&mut *connection)
+    .await?;
+    drop(connection);
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "exhausted_match_reap",
+        |id, mut tx| async move {
+            let result = sqlx::query(
+                "DELETE FROM push_match_queue WHERE community_id = $1 AND attempts >= $2 \
+                 AND (state='pending' OR (state='matching' AND lease_until < now()))",
+            )
+            .bind(id)
+            .bind(MAX_MATCH_ATTEMPTS)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Load active endpoint-enabled leases for one tenant.
@@ -1014,19 +1068,24 @@ pub async fn complete_match_batch(
     if event_ids.is_empty() {
         return Ok(0);
     }
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
-    Ok(sqlx::query(
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
+    let affected = sqlx::query(
         "DELETE FROM push_match_queue \
          WHERE community_id=$1 AND claim_id=$2 AND state='matching' AND event_id = ANY($3)",
     )
     .bind(community.as_uuid())
     .bind(claim_id)
     .bind(event_ids)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?
-    .rows_affected())
+    .rows_affected();
+    tx.commit().await?;
+    Ok(affected)
 }
 
 /// Release fenced matcher claims from one batch for retry at the supplied
@@ -1041,10 +1100,13 @@ pub async fn retry_match_batch(
     if event_ids.is_empty() {
         return Ok(0);
     }
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
-    Ok(sqlx::query(
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
+    let affected = sqlx::query(
         "UPDATE push_match_queue \
          SET state='pending', claim_id=NULL, lease_until=NULL, next_attempt_at=$4 \
          WHERE community_id=$1 AND claim_id=$2 AND state='matching' AND event_id = ANY($3)",
@@ -1053,9 +1115,11 @@ pub async fn retry_match_batch(
     .bind(claim_id)
     .bind(event_ids)
     .bind(next)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?
-    .rows_affected())
+    .rows_affected();
+    tx.commit().await?;
+    Ok(affected)
 }
 
 /// Claim due jobs for one community, recovering expired worker leases.
@@ -1069,9 +1133,12 @@ pub async fn claim_due_wakes(
     lease_until: DateTime<Utc>,
 ) -> Result<Vec<ClaimedWake>> {
     let claim_id = Uuid::new_v4();
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         WITH candidates AS (
@@ -1119,8 +1186,9 @@ pub async fn claim_due_wakes(
     .bind(limit)
     .bind(claim_id)
     .bind(lease_until)
-    .fetch_all(&mut *connection)
+    .fetch_all(tx.conn())
     .await?;
+    tx.commit().await?;
 
     rows.into_iter().map(row_to_claimed_wake).collect()
 }
@@ -1187,9 +1255,12 @@ pub async fn complete_wake(
     id: Uuid,
     claim_id: Uuid,
 ) -> Result<bool> {
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE push_wake_outbox \
          SET state = 'delivered', claim_id = NULL, lease_until = NULL \
@@ -1198,8 +1269,9 @@ pub async fn complete_wake(
     .bind(community.as_uuid())
     .bind(id)
     .bind(claim_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -1211,9 +1283,12 @@ pub async fn retry_wake(
     claim_id: Uuid,
     next_attempt_at: DateTime<Utc>,
 ) -> Result<bool> {
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE push_wake_outbox \
          SET state = 'pending', next_attempt_at = $4, claim_id = NULL, lease_until = NULL \
@@ -1223,8 +1298,9 @@ pub async fn retry_wake(
     .bind(id)
     .bind(claim_id)
     .bind(next_attempt_at)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -1235,9 +1311,12 @@ pub async fn fail_wake(
     id: Uuid,
     claim_id: Uuid,
 ) -> Result<bool> {
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE push_wake_outbox \
          SET state = 'failed', claim_id = NULL, lease_until = NULL \
@@ -1246,8 +1325,9 @@ pub async fn fail_wake(
     .bind(community.as_uuid())
     .bind(id)
     .bind(claim_id)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -1262,9 +1342,12 @@ pub async fn disable_endpoint_generation(
     installation_id: &str,
     generation: i64,
 ) -> Result<bool> {
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let result = sqlx::query(
         "UPDATE push_leases SET endpoint_enabled = false, updated_at = now() \
          WHERE community_id = $1 AND author = $2 AND installation_id = $3 \
@@ -1274,8 +1357,9 @@ pub async fn disable_endpoint_generation(
     .bind(author)
     .bind(installation_id)
     .bind(generation)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -1289,9 +1373,12 @@ pub async fn prune_wake_outbox(
     community: CommunityId,
     before: DateTime<Utc>,
 ) -> Result<u64> {
-    let mut connection =
-        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
-            .await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::Maintenance,
+    )
+    .await?;
     let result = sqlx::query(
         "DELETE FROM push_wake_outbox o \
          WHERE o.community_id = $1 AND o.created_at < $2 \
@@ -1304,8 +1391,9 @@ pub async fn prune_wake_outbox(
     )
     .bind(community.as_uuid())
     .bind(before)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -1396,6 +1484,18 @@ impl Db {
         requests: &[crate::push::WakeRequest],
     ) -> Result<Vec<crate::push::EnqueueWakeOutcome>> {
         crate::push::enqueue_wakes(&self.pool, community, requests).await
+    }
+
+    /// Discover the next bounded page of communities with eligible delivery work.
+    ///
+    /// Continue after the last returned ID until empty, then start a new sweep.
+    /// Discovery is advisory: claims and send-time validation remain authoritative.
+    #[datastore_span(name = "due_push_wake_communities", system = "postgresql")]
+    pub async fn due_push_wake_communities(
+        &self,
+        after: Option<CommunityId>,
+    ) -> Result<Vec<CommunityId>> {
+        due_wake_communities(&self.pool, after).await
     }
 
     /// Exclusively claim due wake jobs for one community.
@@ -1499,6 +1599,10 @@ impl Db {
 }
 
 #[cfg(test)]
+#[path = "push/delivery_postgres_tests.rs"]
+mod delivery_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use crate::migration;
@@ -1522,6 +1626,30 @@ mod postgres_tests {
         pool
     }
 
+    async fn insert_push_event(
+        community: CommunityId,
+        event: &nostr::Event,
+        channel: Option<Uuid>,
+    ) -> crate::Result<(buzz_core::StoredEvent, bool)> {
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url: std::env::var("BUZZ_TEST_DATABASE_URL").expect("isolated test database"),
+            push_enabled: true,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect application writer");
+        let result = db.insert_event(community, event, channel).await;
+        db.push_enqueue
+            .as_ref()
+            .expect("enabled producer")
+            .flush()
+            .await;
+        db.cancel_push_enqueue();
+        db.join_push_enqueue().await;
+        db.pool().close().await;
+        result
+    }
+
     fn lease_event(keys: &nostr::Keys, installation: &str, created_at: u64) -> nostr::Event {
         nostr::EventBuilder::new(nostr::Kind::Custom(30_350), "ciphertext")
             .tag(nostr::Tag::parse(["d", installation]).expect("d tag"))
@@ -1530,7 +1658,7 @@ mod postgres_tests {
             .expect("sign lease event")
     }
 
-    async fn make_community(pool: &PgPool) -> CommunityId {
+    pub(super) async fn make_community(pool: &PgPool) -> CommunityId {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(id)
@@ -1550,7 +1678,7 @@ mod postgres_tests {
         }
     }
 
-    async fn activate(
+    pub(super) async fn activate(
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
@@ -1979,7 +2107,7 @@ mod postgres_tests {
         assert_eq!(total, 3, "one row per distinct (endpoint, event) key");
     }
 
-    async fn enqueue_one(
+    pub(super) async fn enqueue_one(
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
@@ -2168,7 +2296,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn matcher_trigger_is_allowlisted_and_deleted_events_are_discarded() {
+    async fn matcher_application_is_allowlisted_and_deleted_events_are_discarded() {
         let pool = setup_pool().await;
         // Global claim assertions below require a queue free of other tests'
         // leftovers.
@@ -2187,10 +2315,10 @@ mod postgres_tests {
         let read_state = nostr::EventBuilder::new(nostr::Kind::Custom(30_078), "read")
             .sign_with_keys(&keys)
             .expect("sign read state");
-        crate::event::insert_event(&pool, community, &push_event, None)
+        insert_push_event(community, &push_event, None)
             .await
             .expect("insert push event");
-        crate::event::insert_event(&pool, community, &read_state, None)
+        insert_push_event(community, &read_state, None)
             .await
             .expect("insert non-push event");
 
@@ -2231,12 +2359,12 @@ mod postgres_tests {
     async fn matcher_load_error_preserves_claimed_job_for_recovery() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
-        // Eligible lease required for the T1b-gated trigger to enqueue.
+        // Eligible lease required for the T1b-gated application producer to enqueue.
         activate(&pool, community, &[79; 32], "install", &[80; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "retry me")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
 
@@ -2281,7 +2409,7 @@ mod postgres_tests {
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "size one")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&setup, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
         setup.close().await;
@@ -2325,12 +2453,12 @@ mod postgres_tests {
             .await
             .expect("drain matcher queue");
         let community = make_community(&pool).await;
-        // Eligible lease required for the T1b-gated trigger to enqueue.
+        // Eligible lease required for the T1b-gated application producer to enqueue.
         activate(&pool, community, &[81; 32], "install", &[82; 32], 1).await;
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "one job")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
         let barrier = Arc::new(Barrier::new(8));
@@ -2361,6 +2489,12 @@ mod postgres_tests {
         let event_id = [23; 32];
         activate(&pool, community, &author, "install", &[24; 32], 1).await;
         let wake_id = enqueue_one(&pool, community, &author, &event_id, 1).await;
+        sqlx::query("INSERT INTO push_match_queue (community_id, event_id) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(event_id)
+            .execute(&pool)
+            .await
+            .expect("queue a rematch independently of the delivered wake");
         sqlx::query(
             "UPDATE push_wake_outbox SET state='delivered', created_at=now()-interval '2 days' \
              WHERE community_id=$1 AND id=$2",
@@ -2404,7 +2538,7 @@ mod postgres_tests {
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "poison")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community, &event, None)
+        insert_push_event(community, &event, None)
             .await
             .expect("insert event");
         let wake_id = match enqueue_wake(
@@ -2513,7 +2647,7 @@ mod postgres_tests {
         .expect("seed matcher row");
     }
 
-    async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
+    pub(super) async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
         let mut lifecycle = pool.begin().await.expect("begin lifecycle fixture");
         sqlx::query(
             "SELECT set_config('buzz.deletion_executor_community', $1, true), \
@@ -2535,7 +2669,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn matcher_claim_skips_quiescing_tenant_while_active_bystanders_progress() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue WHERE community_write_allowed(community_id)")
+        sqlx::query("DELETE FROM push_match_queue")
             .execute(&pool)
             .await
             .expect("drain active matcher queue");
@@ -2565,7 +2699,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn exhausted_match_reaper_skips_quiescing_tenant_and_reaps_active_bystanders() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue WHERE community_write_allowed(community_id)")
+        sqlx::query("DELETE FROM push_match_queue")
             .execute(&pool)
             .await
             .expect("drain active matcher queue");
@@ -2625,7 +2759,7 @@ mod postgres_tests {
             let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), format!("a{i}"))
                 .sign_with_keys(&nostr::Keys::generate())
                 .expect("sign event");
-            crate::event::insert_event(&pool, community_a, &event, None)
+            insert_push_event(community_a, &event, None)
                 .await
                 .expect("insert community-a event");
             a_ids.push(event.id.as_bytes().to_vec());
@@ -2633,7 +2767,7 @@ mod postgres_tests {
         let b_event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "b0")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign event");
-        crate::event::insert_event(&pool, community_b, &b_event, None)
+        insert_push_event(community_b, &b_event, None)
             .await
             .expect("insert community-b event");
 
@@ -2734,37 +2868,43 @@ mod postgres_tests {
         );
     }
 
-    // Lease activation must wait for an event insert holding the shared gate lock.
+    // Lease activation must wait for an enqueue transaction holding the shared gate lock.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn gate_orders_lease_activation_after_in_flight_event() {
+    async fn gate_orders_lease_activation_after_in_flight_enqueue() {
         let pool = setup_pool().await;
         let community = make_community(&pool).await;
 
-        // Hold the insert transaction open after its trigger takes the shared gate lock.
-        let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced wake")
+        let raced = nostr::EventBuilder::new(nostr::Kind::Custom(9), "raced enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign raced event");
-        let mut insert_tx = pool.begin().await.expect("begin raced insert");
-        sqlx::query(
-            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
-             VALUES ($1, $2, $3, now(), 9, '[]', 'raced wake', $4, now())",
-        )
-        .bind(community.as_uuid())
-        .bind(raced.id.as_bytes().as_slice())
-        .bind(raced.pubkey.as_bytes().as_slice())
-        .bind(raced.sig.serialize().as_slice())
-        .execute(&mut *insert_tx)
-        .await
-        .expect("insert raced event inside held txn");
-
-        let insert_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *insert_tx)
+        crate::event::insert_event(&pool, community, &raced, None)
             .await
-            .expect("read insert backend pid");
+            .expect("store event before post-commit enqueue");
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let enqueue = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                crate::runtime::push_enqueue::enqueue_with_gate_barrier(
+                    &pool,
+                    community,
+                    raced.id.as_bytes().to_vec(),
+                    DateTime::from_timestamp(raced.created_at.as_secs() as i64, 0)
+                        .expect("signed timestamp"),
+                    (held_tx, release_rx),
+                )
+                .await
+                .expect("real enqueue transaction succeeds");
+            })
+        };
+        let enqueue_pid = tokio::time::timeout(Duration::from_secs(5), held_rx)
+            .await
+            .expect("enqueue reaches its gate")
+            .expect("enqueue backend pid");
 
         // A concurrent activation must block on the exclusive gate lock until
-        // the insert transaction resolves.
+        // the enqueue transaction resolves.
         let activation = {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -2794,7 +2934,7 @@ mod postgres_tests {
                 "SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted \
                  AND $1 = ANY(pg_blocking_pids(pid))",
             )
-            .bind(insert_pid)
+            .bind(enqueue_pid)
             .fetch_one(&pool)
             .await
             .expect("inspect advisory waiters");
@@ -2807,8 +2947,14 @@ mod postgres_tests {
         assert!(parked, "activation must block on the exclusive gate lock");
         assert!(!activation.is_finished());
 
-        // Committing the insert releases the shared lock so activation can proceed.
-        insert_tx.commit().await.expect("commit raced insert");
+        // Committing the enqueue releases the shared lock so activation can proceed.
+        release_tx
+            .send(())
+            .expect("release real enqueue transaction");
+        tokio::time::timeout(Duration::from_secs(5), enqueue)
+            .await
+            .expect("enqueue commits")
+            .expect("join enqueue");
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(10), activation)
                 .await
@@ -2820,7 +2966,7 @@ mod postgres_tests {
         let direct = nostr::EventBuilder::new(nostr::Kind::Custom(9), "direct enqueue")
             .sign_with_keys(&nostr::Keys::generate())
             .expect("sign direct event");
-        crate::event::insert_event(&pool, community, &direct, None)
+        insert_push_event(community, &direct, None)
             .await
             .expect("insert post-activation event");
         let queued: i64 = sqlx::query_scalar(

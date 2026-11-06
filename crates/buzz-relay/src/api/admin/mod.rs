@@ -40,6 +40,7 @@ pub(crate) fn is_admin_host(state: &crate::state::AppState, headers: &HeaderMap)
 /// [`auth::admin_api_origin`]). Re-exported so the NIP-11 builder can derive
 /// the advertised origin without reaching into the private `auth` module.
 pub(crate) use auth::admin_api_origin;
+pub(crate) use auth::is_relay_operator;
 
 /// Build the deployment-admin routes.
 ///
@@ -165,12 +166,13 @@ struct ProbeResponse {
 
 async fn probe(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<ProbeResponse>, ApiError> {
     let (auth_mode, role, source, can_act, can_staff) =
-        match authorize_read(&state, &headers, &method, &uri).await? {
+        match authorize_read(&state, &slot, &headers, &method, &uri).await? {
             AdminAccess::NetworkTrusted => ("disabled", None, None, false, false),
             AdminAccess::Staff(p) => {
                 let can_staff = p.role == AdminRole::Operator;
@@ -196,12 +198,13 @@ async fn probe(
 
 async fn reports(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Query(query): Query<ReportQuery>,
 ) -> Result<Json<Vec<buzz_db::admin_moderation::AdminReport>>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     validate(
         query.status.as_deref(),
         REPORT_STATUS_ALLOWLIST,
@@ -240,12 +243,13 @@ async fn reports(
 
 async fn report_detail(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminReportDetail>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_report(id)
@@ -272,11 +276,12 @@ struct FeedbackSummary {
 
 async fn feedback(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FeedbackSummary>>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     let items = state
         .db
         .admin_list_feedback(100)
@@ -301,12 +306,13 @@ async fn feedback(
 
 async fn feedback_detail(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<buzz_db::admin_moderation::AdminFeedback>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
     state
         .db
         .admin_get_feedback(id)
@@ -317,13 +323,34 @@ async fn feedback_detail(
 
 async fn feedback_attachment(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Path((id, sha256)): Path<(Uuid, String)>,
 ) -> Result<Response, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
-    if !is_sha256(&sha256) {
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
+    // The request's access line carries the attachment read.
+    let served = serve_feedback_attachment_checked(&state, &headers, id, &sha256).await;
+    if let Ok((_, community_id)) = &served {
+        slot.in_community(*community_id);
+        slot.detail(crate::access::Detail {
+            feedback_id: Some(id),
+            attachment_sha256: Some(sha256),
+            ..Default::default()
+        });
+    }
+    served.map(|(response, _)| response)
+}
+
+/// The attachment `sha256` of feedback `id`, and the community it was read from.
+async fn serve_feedback_attachment_checked(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    id: Uuid,
+    sha256: &str,
+) -> Result<(Response, buzz_core::tenant::CommunityId), ApiError> {
+    if !is_sha256(sha256) {
         return Err(ApiError::not_found());
     }
 
@@ -342,14 +369,14 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     };
 
-    if !feedback_references_hash(&feedback.tags, community_host, &sha256) {
+    if !feedback_references_hash(&feedback.tags, community_host, sha256) {
         return Err(ApiError::not_found());
     }
 
     // Resolve the tenant from server-owned feedback provenance, then assert the
     // resolved row still agrees with the feedback FK. Client input never names
     // a community, host, object key, extension, or upstream URL.
-    let tenant = crate::tenant::bind_community(&state.db, community_host)
+    let tenant = crate::tenant::bind_community(state, community_host)
         .await
         .map_err(|_| ApiError::not_found())?;
     if tenant.community().as_uuid() != &community_id {
@@ -362,19 +389,13 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     }
 
-    let response = crate::api::media::serve_feedback_attachment(&state, &tenant, &sha256, &headers)
+    let response = crate::api::media::serve_feedback_attachment(state, &tenant, sha256, headers)
         .await
         .map_err(|error| match error {
             buzz_media::MediaError::NotFound => ApiError::not_found(),
             _ => ApiError::internal(),
         })?;
-    tracing::info!(
-        feedback_id = %feedback.id,
-        community_id = %community_id,
-        attachment_sha256 = %sha256,
-        "admin feedback attachment read"
-    );
-    Ok(response)
+    Ok((response, tenant.community()))
 }
 
 // ── Phase 2: Report resolution ────────────────────────────────────────────────
@@ -443,6 +464,7 @@ fn compute_timeout_until(secs: u64) -> Result<DateTime<Utc>, ApiError> {
 /// - delete/kick/ban/timeout: server-side enforcement state machine.
 async fn resolve_report(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -454,9 +476,9 @@ async fn resolve_report(
         resolve_report_with_enforcement, ResolutionError,
     };
 
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let body: ResolveReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_e| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -504,7 +526,7 @@ async fn resolve_report(
     };
 
     // Bind tenant from server-owned report provenance (never from client input).
-    let tenant = crate::tenant::bind_community(&state.db, &report_detail.report.community_host)
+    let tenant = crate::tenant::bind_community(&*state, &report_detail.report.community_host)
         .await
         .map_err(|_| ApiError::internal())?;
 
@@ -665,6 +687,7 @@ struct ReopenReportBody {
 /// records a durable `reopen` audit row. `409` if the report is not terminal.
 async fn reopen_report(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -673,9 +696,9 @@ async fn reopen_report(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use buzz_db::relay_admin_actions::ReopenResult;
 
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let body: ReopenReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -688,7 +711,7 @@ async fn reopen_report(
         .ok_or_else(ApiError::not_found)?;
 
     // Bind tenant from server-owned report provenance (never from client input).
-    let tenant = crate::tenant::bind_community(&state.db, &report_detail.report.community_host)
+    let tenant = crate::tenant::bind_community(&*state, &report_detail.report.community_host)
         .await
         .map_err(|_| ApiError::internal())?;
 
@@ -744,15 +767,16 @@ struct CancelReportBody {
 /// `activeAction: null`.
 async fn cancel_report(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(report_id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<axum::http::Response<axum::body::Body>, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let body: CancelReportBody = serde_json::from_slice(&body_bytes)
         .map_err(|_| ApiError::bad_request("invalid_body", "invalid JSON body"))?;
@@ -765,7 +789,7 @@ async fn cancel_report(
         .ok_or_else(ApiError::not_found)?;
 
     // Bind tenant from server-owned report provenance (never from client input).
-    let tenant = crate::tenant::bind_community(&state.db, &report_detail.report.community_host)
+    let tenant = crate::tenant::bind_community(&*state, &report_detail.report.community_host)
         .await
         .map_err(|_| ApiError::internal())?;
 
@@ -813,15 +837,16 @@ async fn cancel_report(
 /// Update product_feedback status. Requires nip98 auth.
 async fn update_feedback_status(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     body_bytes: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let _principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let _principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .act()?;
+        .act(&slot)?;
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -868,13 +893,14 @@ struct OperatorEntry {
 /// Requires nip98 auth + Operator role.
 async fn list_operators(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperatorEntry>>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri)
+    authorize_read(&state, &slot, &headers, &method, &uri)
         .await?
-        .operator()?;
+        .operator(&slot)?;
 
     let config = state
         .config
@@ -943,15 +969,16 @@ struct UpsertOperatorBody {
 /// Requires nip98 auth + Operator role.
 async fn upsert_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     body_bytes: Bytes,
 ) -> Result<Json<OperatorEntry>, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, Some(&body_bytes))
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, Some(&body_bytes))
         .await?
-        .operator()?;
+        .operator(&slot)?;
 
     // Canonicalize the path param once: validate it decodes to 32 bytes, then
     // lowercase it. Config-backed pubkeys are lowercased at parse, so the 409
@@ -1014,14 +1041,15 @@ async fn upsert_operator(
 /// Requires nip98 auth + Operator role.
 async fn delete_operator(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, None)
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
-        .operator()?;
+        .operator(&slot)?;
 
     // Canonicalize the path param once (validate + lowercase) so the 409 check
     // and the DB delete use the same form config-backed pubkeys are stored in;
@@ -1164,8 +1192,15 @@ async fn community_for_host(
     state: &crate::state::AppState,
     host: &str,
 ) -> Result<buzz_core::CommunityId, ApiError> {
-    match crate::tenant::bind_community(&state.db, host).await {
-        Ok(tenant) => Ok(tenant.community()),
+    Ok(tenant_for_host(state, host).await?.community())
+}
+
+async fn tenant_for_host(
+    state: &crate::state::AppState,
+    host: &str,
+) -> Result<buzz_core::TenantContext, ApiError> {
+    match crate::tenant::bind_community(state, host).await {
+        Ok(tenant) => Ok(tenant),
         Err(crate::tenant::BindError::UnmappedHost) => Err(ApiError::bad_request(
             "unknown_community_host",
             "no community is served at this host",
@@ -1201,12 +1236,13 @@ struct RestrictionsQuery {
 /// malformed. Returns 401 without a valid admin credential.
 async fn list_member_restrictions(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     uri: Uri,
     method: Method,
     headers: HeaderMap,
     Query(query): Query<RestrictionsQuery>,
 ) -> Result<Json<RestrictionsPage>, ApiError> {
-    authorize_read(&state, &headers, &method, &uri).await?;
+    authorize_read(&state, &slot, &headers, &method, &uri).await?;
 
     let page_limit = limit(query.limit, 200, 200)?;
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
@@ -1238,18 +1274,19 @@ async fn list_member_restrictions(
 /// Requires nip98 auth.
 async fn unban_member(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, None)
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
-    let community = community_for_host(&state, &query.community_host).await?;
+    let tenant = tenant_for_host(&state, &query.community_host).await?;
 
     let actor_authority = match principal.role {
         AdminRole::Operator => "relay_operator",
@@ -1259,7 +1296,7 @@ async fn unban_member(
     let lifted = state
         .db
         .unban_community_member_with_audit(
-            community,
+            tenant.community(),
             &target_bytes,
             &principal.pubkey,
             actor_authority,
@@ -1268,6 +1305,7 @@ async fn unban_member(
     if !lifted {
         return Err(ApiError::conflict("no active ban for this member"));
     }
+    state.invalidate_restrictions(&tenant);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -1279,18 +1317,19 @@ async fn unban_member(
 /// Requires nip98 auth.
 async fn untimeout_member(
     State(state): State<Arc<crate::state::AppState>>,
+    slot: crate::access::AccessSlot,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(pubkey_hex): Path<String>,
     Query(query): Query<CommunityQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
-    let principal = authorize_write(&state, &headers, &method, &uri, None)
+    let principal = authorize_write(&state, &slot, &headers, &method, &uri, None)
         .await?
-        .act()?;
+        .act(&slot)?;
 
     let target_bytes = decode_hex_pubkey(&pubkey_hex)?;
-    let community = community_for_host(&state, &query.community_host).await?;
+    let tenant = tenant_for_host(&state, &query.community_host).await?;
 
     let actor_authority = match principal.role {
         AdminRole::Operator => "relay_operator",
@@ -1300,7 +1339,7 @@ async fn untimeout_member(
     let lifted = state
         .db
         .untimeout_community_member_with_audit(
-            community,
+            tenant.community(),
             &target_bytes,
             &principal.pubkey,
             actor_authority,
@@ -1309,6 +1348,7 @@ async fn untimeout_member(
     if !lifted {
         return Err(ApiError::conflict("no active timeout for this member"));
     }
+    state.invalidate_restrictions(&tenant);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -1503,9 +1543,7 @@ mod postgres_tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1580,6 +1618,21 @@ mod postgres_tests {
         request: Request<Body>,
     ) -> axum::response::Response {
         router(state).oneshot(request).await.expect("response")
+    }
+
+    /// Sends an admin-relative request to its mounted path on the production
+    /// router, whose access layer writes the request's line.
+    async fn production_status_for(
+        state: Arc<crate::state::AppState>,
+        mut request: Request<Body>,
+    ) -> axum::response::Response {
+        *request.uri_mut() = format!("{ADMIN_API_PREFIX}{}", request.uri())
+            .parse()
+            .expect("mounted uri");
+        crate::router::build_router(state)
+            .oneshot(request)
+            .await
+            .expect("response")
     }
 
     #[tokio::test]
@@ -1718,8 +1771,10 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres — DB lookup returns 500 without a database"]
     async fn feedback_attachment_rejects_unknown_feedback() {
-        let response = status_for(
-            test_state().await,
+        let state = test_state().await;
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let response = production_status_for(
+            state,
             status_request(authorized(&format!(
                 "/feedback/{}/attachments/{HASH}",
                 Uuid::nil()
@@ -1727,6 +1782,106 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // The read's one access line: the login and the read's status.
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "success", "{}", lines[0]);
+        assert_eq!(lines[0]["status"], 404, "{}", lines[0]);
+    }
+
+    /// A served attachment writes one access line carrying the feedback id,
+    /// attachment hash, community and final status, in both admin auth
+    /// modes; a network-trusted read carries no key.
+    mod external_infra_minio_tests {
+        use super::*;
+
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn served_attachment_writes_one_line_in_both_admin_modes() {
+            let signed = nip98_state(vec![test_operator_keys().public_key().to_hex()]).await;
+            let open = disabled_mode_state().await;
+            for (mode, state) in [("nip98", signed), ("network_trusted", open)] {
+                let host = format!("attach-{}.test", Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let tenant = crate::tenant::bind_community(&state.db, &host)
+                    .await
+                    .expect("bind community");
+                let bytes = format!("attachment bytes {}", Uuid::new_v4()).into_bytes();
+                let sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+                state
+                    .media_storage
+                    .put(&format!("{sha256}.txt"), &bytes, "text/plain")
+                    .await
+                    .expect("put blob");
+                let meta = buzz_media::BlobMeta {
+                    dim: String::new(),
+                    blurhash: String::new(),
+                    thumb_url: String::new(),
+                    ext: "txt".into(),
+                    mime_type: "text/plain".into(),
+                    size: bytes.len() as u64,
+                    uploaded_at: 0,
+                    duration_secs: None,
+                };
+                state
+                    .media_storage
+                    .put_sidecar(&tenant, &sha256, &meta)
+                    .await
+                    .expect("put sidecar");
+                let feedback_id = Uuid::new_v4();
+                let tags = serde_json::json!([[
+                    "imeta",
+                    format!("url /media/{sha256}.txt"),
+                    format!("x {sha256}")
+                ]]);
+                sqlx::query(
+                    "INSERT INTO product_feedback (id, community_id, event_id, submitter_pubkey, \
+                     category, body, tags, status, event_created_at, received_at) \
+                     VALUES ($1, $2, $3, $4, 'bug', 'see attachment', $5, 'new', now(), now())",
+                )
+                .bind(feedback_id)
+                .bind(tenant.community().as_uuid())
+                .bind([feedback_id.as_bytes().as_slice(), feedback_id.as_bytes()].concat())
+                .bind(vec![9_u8; 32])
+                .bind(&tags)
+                .execute(state.db.pool())
+                .await
+                .expect("insert feedback");
+
+                let uri = format!("/feedback/{feedback_id}/attachments/{sha256}");
+                let request = if mode == "nip98" {
+                    authorized(&uri)
+                } else {
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::HOST, "admin.example")
+                };
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let response = production_status_for(state, status_request(request)).await;
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body");
+                drop(guard);
+                assert_eq!(status, StatusCode::OK, "{mode}");
+                assert_eq!(body.as_ref(), bytes.as_slice(), "{mode}");
+                let lines = out.lines();
+                assert_eq!(lines.len(), 1, "{mode}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["method"], mode, "{line}");
+                assert_eq!(line["status"], 200, "{line}");
+                assert_eq!(line["feedback_id"], feedback_id.to_string(), "{line}");
+                assert_eq!(line["attachment_sha256"], sha256.as_str(), "{line}");
+                assert_eq!(line["community"], tenant.community().to_string(), "{line}");
+                if mode == "network_trusted" {
+                    assert!(line.get("pubkey").is_none(), "{line}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2140,9 +2295,7 @@ mod postgres_tests {
             web_dir: None,
         });
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2592,11 +2745,19 @@ mod postgres_tests {
             .expect("insert ban fixture for other community");
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
+        // Restriction rows this pod cached before the lift.
+        let cached_keys = [
+            (community, target_pubkey.clone()),
+            (other_community, target_pubkey.clone()),
+        ];
+        for key in cached_keys.clone() {
+            state.seed_restriction(key, buzz_db::moderation::RestrictionState::default());
+        }
         let target_hex = hex::encode(&target_pubkey);
         let path = format!("/members/{target_hex}/ban?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
-            state,
+            Arc::clone(&state),
             Request::builder()
                 .method("DELETE")
                 .uri(&path)
@@ -2612,6 +2773,12 @@ mod postgres_tests {
             StatusCode::NO_CONTENT,
             "unban of an active ban must return 204"
         );
+        // The lift drops the community's cached rows (and, over Redis, every
+        // other pod's); another community's stay.
+        // Mutation: drop `invalidate_restrictions` from the handler → RED.
+        let [lifted, elsewhere] = cached_keys;
+        assert!(state.restriction_cache.entry(&lifted).is_none());
+        assert!(state.restriction_cache.entry(&elsewhere).is_some());
 
         // Ban must be cleared in the target community.
         let ban = db
@@ -2721,11 +2888,19 @@ mod postgres_tests {
         .expect("insert timeout fixture for other community");
 
         let state = nip98_state_with_real_pool(pool.clone()).await;
+        // Restriction rows this pod cached before the lift.
+        let cached_keys = [
+            (community, target_pubkey.clone()),
+            (other_community, target_pubkey.clone()),
+        ];
+        for key in cached_keys.clone() {
+            state.seed_restriction(key, buzz_db::moderation::RestrictionState::default());
+        }
         let target_hex = hex::encode(&target_pubkey);
         let path = format!("/members/{target_hex}/timeout?communityHost={host}");
         let auth = make_nostr_auth_delete(&test_operator_keys(), &path);
         let response = status_for(
-            state,
+            Arc::clone(&state),
             Request::builder()
                 .method("DELETE")
                 .uri(&path)
@@ -2741,6 +2916,12 @@ mod postgres_tests {
             StatusCode::NO_CONTENT,
             "untimeout of an active timeout must return 204"
         );
+        // The lift drops the community's cached rows (and, over Redis, every
+        // other pod's); another community's stay.
+        // Mutation: drop `invalidate_restrictions` from the handler → RED.
+        let [lifted, elsewhere] = cached_keys;
+        assert!(state.restriction_cache.entry(&lifted).is_none());
+        assert!(state.restriction_cache.entry(&elsewhere).is_some());
 
         // Timeout must be cleared in the target community.
         let restriction = db
@@ -2934,7 +3115,7 @@ mod postgres_tests {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
-        // Populate relay_operator_pubkeys so resolve_admin_principal can grant
+        // Populate relay_operator_pubkeys so lookup_admin_principal can grant
         // Operator/Config to the test pubkeys without a DB lookup.
         config.relay_operator_pubkeys = pubkeys;
         // Ensure relay_operator_api_origin is set (required when pubkeys is non-empty).
@@ -2948,9 +3129,7 @@ mod postgres_tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3442,9 +3621,7 @@ mod postgres_tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3520,9 +3697,7 @@ mod postgres_tests {
             .await
             .expect("connect to test DB");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -3647,9 +3822,7 @@ mod postgres_tests {
         drop(state); // not used
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4116,9 +4289,7 @@ mod postgres_tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4189,9 +4360,7 @@ mod postgres_tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -4259,9 +4428,7 @@ mod postgres_tests {
         });
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -5352,7 +5519,7 @@ mod postgres_tests {
             // Kick needs a channel-scoped report.
             sqlx::query(
                 "WITH ch AS (INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
-                 SELECT gen_random_uuid(), community_id, 'staff-guard', 'stream', 'open', $2 \
+                 SELECT gen_random_uuid(), community_id, 'staff-guard-' || $1::uuid::text, 'stream', 'open', $2 \
                  FROM moderation_reports WHERE id = $1 RETURNING id) \
                  UPDATE moderation_reports SET channel_id = (SELECT id FROM ch) WHERE id = $1",
             )
@@ -6061,9 +6228,7 @@ mod postgres_tests {
             web_dir: None,
         });
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -7124,7 +7289,7 @@ mod postgres_tests {
         let channel_id = uuid::Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
-               VALUES ($1, $2, 'event-report-ch', 'stream', 'open', $3)"#,
+               VALUES ($1, $2, 'event-report-ch-' || $1::uuid::text, 'stream', 'open', $3)"#,
         )
         .bind(channel_id)
         .bind(community_id)
@@ -7887,7 +8052,7 @@ mod postgres_tests {
         let _tenant = e2e_tenant(community_id, "worker-midflight-purge.example");
         state
             .membership_cache
-            .insert((cid, channel_id, author.clone()), true);
+            .seed_member((cid, channel_id, author.clone()), true);
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(1);
@@ -7999,7 +8164,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, author.clone()))
+                .cached_member(&(cid, channel_id, author.clone()))
                 .is_none(),
             "crash-recovery must clear membership cache after purged-event kick re-drive"
         );
@@ -9466,6 +9631,190 @@ mod postgres_tests {
 
     // ── Kick live side effects: crash-recovery and re-add race ────────────────
 
+    /// A channel deleted between a committed kick and its recovery leaves no
+    /// roster to refresh. Recovery must treat that as convergence and finalize,
+    /// without running the removal again.
+    #[tokio::test]
+    #[ignore = "requires Postgres — a deleted channel does not strand a committed kick"]
+    async fn crash_recovery_finalizes_kick_after_channel_deleted() {
+        let pool = e2e_pool().await;
+        let (community_id, host) = e2e_community(&pool, "kick-recovery-deleted").await;
+        let cid = buzz_core::CommunityId::from_uuid(community_id);
+        let target = vec![0xAAu8; 32];
+        let actor = vec![0xBBu8; 32];
+
+        // Seed channel + member.
+        let channel_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+               VALUES ($1, $2, 'recovery-deleted-ch', 'stream', 'open', $3)"#,
+        )
+        .bind(channel_id)
+        .bind(community_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) VALUES ($1, $2, $3, 'member')",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(&target)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+
+        // Claim → enforcing → lease → kick + commit marker (simulates process
+        // that committed the kick but crashed before live side effects ran).
+        let action_id = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            cid,
+            report_id,
+            uuid::Uuid::new_v4(),
+            &actor,
+            "operator",
+            "kick",
+            None,
+            None,
+            "resolve:kick",
+            "relay_operator",
+            Some(&target),
+            None,
+            Some(channel_id),
+        )
+        .await
+        .expect("claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a.id,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let _ = buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let lease_token =
+            match buzz_db::relay_admin_actions::acquire_action_lease(&pool, action_id, lease_until)
+                .await
+                .expect("acquire lease")
+            {
+                buzz_db::relay_admin_actions::LeaseResult::Acquired(t) => t,
+                other => panic!("expected Acquired, got {other:?}"),
+            };
+        let kick_result = buzz_db::relay_admin_actions::execute_kick_with_marker(
+            &pool,
+            action_id,
+            lease_token,
+            cid,
+            channel_id,
+            &target,
+            &actor,
+        )
+        .await
+        .expect("execute_kick_with_marker");
+        assert!(
+            matches!(
+                kick_result,
+                buzz_db::relay_admin_actions::KickWithMarkerResult::Removed
+            ),
+            "kick must commit before the simulated crash"
+        );
+
+        // Expire the lease so the recovery worker can re-claim.
+        sqlx::query(
+            "UPDATE relay_admin_actions SET action_lease_expires_at = $2, action_lease_token = NULL WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(300))
+        .execute(&pool)
+        .await
+        .expect("expire lease");
+
+        let removed_at = || async {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+                "SELECT removed_at FROM channel_members WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .bind(&target)
+            .fetch_one(&pool)
+            .await
+            .expect("member row")
+        };
+        let removed_before = removed_at().await.expect("kick removed the member");
+
+        // Discovery published before the delete, which is stale once the
+        // channel is gone; recovery must clean it up before the notice.
+        let state = state_from_pool(pool.clone()).await;
+        let tenant = e2e_tenant(community_id, &host);
+        crate::handlers::side_effects::emit_group_discovery_events(&tenant, &state, channel_id)
+            .await
+            .expect("seed discovery");
+        let live_discovery = || async {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2 \
+                 AND kind IN (39000, 39001, 39002) AND deleted_at IS NULL",
+            )
+            .bind(community_id)
+            .bind(channel_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count discovery")
+        };
+        assert!(live_discovery().await > 0, "stale discovery seeded");
+        assert!(
+            buzz_db::channel::soft_delete_channel(&pool, cid, channel_id)
+                .await
+                .expect("delete channel")
+        );
+        let mut barrier = crate::handlers::side_effects::notice_barrier::install(&target);
+        let batch = buzz_db::relay_admin_actions::claim_stranded_action_batch(
+            &pool,
+            "e2e-kick-recovery-deleted",
+            chrono::Utc::now() + chrono::Duration::seconds(120),
+            1000,
+        )
+        .await
+        .expect("claim_stranded_action_batch");
+        let claim = batch
+            .into_iter()
+            .find(|c| c.record.id == action_id)
+            .expect("stranded action must appear in batch");
+        let recovery = tokio::spawn({
+            let state = state.clone();
+            async move { crate::handlers::admin_action_worker::recover_one(&state, claim).await }
+        });
+        let (noticed, release) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), barrier.next())
+                .await
+                .expect("recovery sent no removal notice")
+                .expect("barrier open");
+        assert_eq!(noticed, channel_id);
+        assert_eq!(
+            live_discovery().await,
+            0,
+            "removal notice sent before discovery cleanup"
+        );
+        release.send(()).expect("recovery waiting");
+        recovery.await.expect("recovery task");
+
+        let final_rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("record must still exist");
+        assert_eq!(
+            final_rec.state, "succeeded",
+            "recovery must finalize the kick"
+        );
+        assert_eq!(
+            removed_at().await,
+            Some(removed_before),
+            "recovery must not run the removal again"
+        );
+    }
+
     /// Recovery seam: commit kick marker, simulate crash, re-drive via the real
     /// recovery worker entry point and assert all three live side effects fire:
     /// membership cache cleared, channel subscription evicted, workflow disabled.
@@ -9578,7 +9927,7 @@ mod postgres_tests {
 
         state
             .membership_cache
-            .insert((cid, channel_id, target.clone()), true);
+            .seed_member((cid, channel_id, target.clone()), true);
 
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -9638,7 +9987,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_some(),
             "pre-condition: membership cache entry must exist before recovery"
         );
@@ -9680,7 +10029,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_none(),
             "crash-recovery re-drive must clear the membership cache"
         );
@@ -10726,7 +11075,7 @@ mod postgres_tests {
 
         state
             .membership_cache
-            .insert((cid, channel_id, target.clone()), true);
+            .seed_member((cid, channel_id, target.clone()), true);
 
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -10774,7 +11123,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_some(),
             "pre-condition: membership cache entry must exist"
         );
@@ -10840,7 +11189,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_none(),
             "recovery must clear the membership cache for legacy kick row"
         );
@@ -10990,7 +11339,7 @@ mod postgres_tests {
 
         state
             .membership_cache
-            .insert((cid, channel_id, target.clone()), true);
+            .seed_member((cid, channel_id, target.clone()), true);
 
         let conn_id = uuid::Uuid::new_v4();
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -11084,7 +11433,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target.clone()))
+                .cached_member(&(cid, channel_id, target.clone()))
                 .is_none(),
             "recovery must clear the membership cache for legacy kick row"
         );
@@ -11183,12 +11532,12 @@ mod postgres_tests {
         // 1. Seed the membership cache.
         state
             .membership_cache
-            .insert((cid, channel_id, target_pubkey.clone()), true);
+            .seed_member((cid, channel_id, target_pubkey.clone()), true);
 
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target_pubkey.clone()))
+                .cached_member(&(cid, channel_id, target_pubkey.clone()))
                 .is_some(),
             "pre-condition: membership cache entry must exist before kick side effects"
         );
@@ -11246,7 +11595,7 @@ mod postgres_tests {
         assert!(
             state
                 .membership_cache
-                .get(&(cid, channel_id, target_pubkey.clone()))
+                .cached_member(&(cid, channel_id, target_pubkey.clone()))
                 .is_none(),
             "membership cache must not contain a stale entry after kick side effects"
         );
@@ -11686,6 +12035,43 @@ mod postgres_tests {
         assert_eq!(live, 0);
     }
 
+    /// An artifact revision is not admin-deletable: open NIP-AR syncs would
+    /// get no live signal (they see `op=delete` and kind 9005). The action
+    /// fails terminally and the head stays. Mutation: drop the kind check in
+    /// `execute_delete_with_marker` → 200 and the head is gone → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_delete_refuses_artifact_revisions() {
+        let (pool, community, host, state) = direct_fixture().await;
+        let id = seed_signed_event(&pool, community, &test_operator_keys()).await;
+        sqlx::query("UPDATE events SET kind = 45010 WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let path = format!("/events/{id}/delete?communityHost={host}");
+        let (status, body) = direct_post(
+            &state,
+            &path,
+            serde_json::json!({ "requestId": Uuid::new_v4() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body.to_string()
+                .contains("artifact revisions cannot be deleted"),
+            "{body}"
+        );
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE community_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live, 1);
+    }
+
     /// F1: attempt B passes the stored-action lookup, attempt A (same request)
     /// accepts and deletes, then B validates against a gone event. B must
     /// replay A (200), and a B carrying a different intent must get 409 —
@@ -11815,7 +12201,7 @@ mod postgres_tests {
             // Retarget to the staff-authored event, channel-scoped so kick is valid.
             sqlx::query(
                 "WITH ch AS (INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
-                 VALUES (gen_random_uuid(), $2, 'staff-guard', 'stream', 'open', $3) RETURNING id) \
+                 VALUES (gen_random_uuid(), $2, 'staff-guard-' || $1::uuid::text, 'stream', 'open', $3) RETURNING id) \
                  UPDATE moderation_reports SET channel_id = (SELECT id FROM ch), target_kind = 'event', \
                  target_pubkey = NULL, target_event_id = $4 WHERE id = $1",
             )
@@ -12262,7 +12648,10 @@ mod postgres_tests {
     }
 
     /// A staff ban closes the target's open socket like a kind-9040 ban; a
-    /// staff timeout leaves the target connected.
+    /// staff timeout leaves the target connected. Both drop the community's
+    /// cached restriction rows, so the next request rereads the restriction.
+    /// Mutation: drop `invalidate_restrictions` from the enforcement
+    /// convergence point → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn direct_ban_disconnects_target_and_timeout_does_not() {
@@ -12270,6 +12659,19 @@ mod postgres_tests {
         let (banned, timed_out) = ([0x41u8; 32], [0x42u8; 32]);
         let banned_socket = live_socket(&state, community, &banned);
         let timed_out_socket = live_socket(&state, community, &timed_out);
+        let cached = |target: [u8; 32]| {
+            state
+                .restriction_cache
+                .entry(&(community, target.to_vec()))
+                .is_some()
+        };
+        let seed = |target: [u8; 32]| {
+            state.seed_restriction(
+                (community, target.to_vec()),
+                buzz_db::moderation::RestrictionState::default(),
+            )
+        };
+        seed(timed_out);
 
         let (status, body) = direct_post(
             &state,
@@ -12285,6 +12687,8 @@ mod postgres_tests {
             !timed_out_socket.is_cancelled(),
             "timeout must not disconnect"
         );
+        assert!(!cached(timed_out), "timeout must drop the cached row");
+        seed(banned);
 
         let (status, body) = direct_post(
             &state,
@@ -12297,6 +12701,7 @@ mod postgres_tests {
             banned_socket.is_cancelled(),
             "ban must close the target's socket"
         );
+        assert!(!cached(banned), "ban must drop the cached row");
         assert!(
             !timed_out_socket.is_cancelled(),
             "ban is scoped to its target"

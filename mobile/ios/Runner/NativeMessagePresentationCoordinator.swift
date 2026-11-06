@@ -1,13 +1,14 @@
 import Flutter
 import UIKit
 
-/// Owns one UIKit message surface and completes its Flutter request on dismissal.
+/// Owns one UIKit reaction-details surface and completes its Flutter request on dismissal.
 final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentationControllerDelegate {
   private let channel: FlutterMethodChannel
   private weak var parent: UIViewController?
   private weak var presented: UIViewController?
   private var pendingResult: FlutterResult?
   private var requestID: String?
+  private var terminalValue: [String: String]?
 
   init(messenger: FlutterBinaryMessenger, parentViewController: UIViewController?) {
     channel = FlutterMethodChannel(name: "buzz/native_message_presentation", binaryMessenger: messenger)
@@ -21,10 +22,6 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     guard let data = call.arguments as? [String: Any] else { result(nil); return }
-    if call.method == "supportsMessage" {
-      result(["supported": true])
-      return
-    }
     if call.method == "updateReactions" {
       if data["requestId"] as? String == requestID,
         let sheet = presented as? NativeReactionDetailsViewController,
@@ -43,7 +40,7 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       result([:])
       return
     }
-    guard call.method == "message" || call.method == "reactions" else {
+    guard call.method == "reactions" else {
       result(FlutterMethodNotImplemented)
       return
     }
@@ -55,38 +52,22 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
       .flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
     guard let parent = root, parent.view.window != nil else { result(nil); return }
     guard parent.presentedViewController == nil else { result(["busy": true]); return }
-    let controller: UIViewController
-    if call.method == "message" {
-      guard let rect = NativeMessageMenuViewController.sourceRect(data),
-        let bytes = data["previewBytes"] as? FlutterStandardTypedData,
-        let image = UIImage(data: bytes.data) else { result(nil); return }
-      // Capture the Flutter message boundary, never the screen behind it.
-      // Its transparent pixels and exclusion of attached reactions are preserved.
-      let snapshot = UIImageView(image: image)
-      snapshot.contentMode = .scaleAspectFit
-      let menu = NativeMessageMenuViewController(data: data, sourceRect: rect, preview: snapshot)
-      menu.onPreviewReady = { [weak self] ready in
-        self?.channel.invokeMethod("messagePresented", arguments: data["requestId"]) { _ in ready() }
-      }
-      menu.onSelect = { [weak self] value in self?.dismiss(value) }
-      menu.modalPresentationStyle = .overFullScreen
-      controller = menu
-    } else {
-      let sheet = NativeReactionDetailsViewController(data: data)
-      sheet.onClose = { [weak self] in self?.dismiss([:]) }
-      sheet.onToggle = { [weak self] emoji in
-        self?.channel.invokeMethod("toggleReaction", arguments: [
-          "requestId": data["requestId"] as? String ?? "", "emoji": emoji,
-        ])
-      }
-      sheet.modalPresentationStyle = .pageSheet
-      if let presentation = sheet.sheetPresentationController {
-        presentation.overrideTraitCollection = UITraitCollection(userInterfaceStyle: sheet.overrideUserInterfaceStyle)
-        presentation.detents = [.medium(), .large()]
-        presentation.prefersGrabberVisible = true
-        presentation.prefersScrollingExpandsWhenScrolledToEdge = true
-      }
-      controller = sheet
+    let controller = NativeReactionDetailsViewController(data: data)
+    controller.onClose = { [weak self] in self?.dismiss([:]) }
+    controller.onAddReaction = { [weak self] in
+      self?.dismiss(["action": "addReaction"])
+    }
+    controller.onToggle = { [weak self] emoji in
+      self?.channel.invokeMethod("toggleReaction", arguments: [
+        "requestId": data["requestId"] as? String ?? "", "emoji": emoji,
+      ])
+    }
+    controller.modalPresentationStyle = .pageSheet
+    if let presentation = controller.sheetPresentationController {
+      presentation.overrideTraitCollection = UITraitCollection(userInterfaceStyle: controller.overrideUserInterfaceStyle)
+      presentation.detents = [.medium(), .large()]
+      presentation.prefersGrabberVisible = true
+      presentation.prefersScrollingExpandsWhenScrolledToEdge = true
     }
     controller.overrideUserInterfaceStyle = data["dark"] as? Bool == true ? .dark : .light
     pendingResult = result
@@ -94,30 +75,32 @@ final class NativeMessagePresentationCoordinator: NSObject, UIAdaptivePresentati
     presented = controller
     controller.presentationController?.delegate = self
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-    parent.present(controller, animated: call.method == "reactions" && !UIAccessibility.isReduceMotionEnabled)
+    parent.present(controller, animated: !UIAccessibility.isReduceMotionEnabled)
   }
 
   private func dismiss(_ value: [String: String]) {
+    guard pendingResult != nil, terminalValue == nil else { return }
+    terminalValue = value
     guard let presented else { complete(value); return }
-    let completion: () -> Void = { [weak self] in self?.complete(value) }
-    if let menu = presented as? NativeMessageMenuViewController {
-      menu.animateOut {
-        menu.dismiss(animated: false, completion: completion)
-      }
-    } else {
-      presented.dismiss(animated: !UIAccessibility.isReduceMotionEnabled, completion: completion)
+    let completion: () -> Void = { [weak self] in
+      guard let self, self.presented === presented else { return }
+      self.complete(value)
     }
+    presented.dismiss(animated: !UIAccessibility.isReduceMotionEnabled, completion: completion)
   }
 
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    guard presented === presentationController.presentedViewController else { return }
     complete([:])
   }
 
   private func complete(_ value: [String: String]) {
     let result = pendingResult
+    let terminal = terminalValue ?? value
+    terminalValue = nil
     pendingResult = nil
     presented = nil
     requestID = nil
-    result?(value)
+    result?(terminal)
   }
 }

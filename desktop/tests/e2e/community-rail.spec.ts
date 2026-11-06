@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
@@ -29,19 +30,24 @@ async function expectContentSurfaceHorizontalGutters(
   page: import("@playwright/test").Page,
   expectedLeftGutter = 1,
 ) {
-  const [mainInsetBox, contentBox] = await Promise.all([
-    page.locator("[data-buzz-glass-inset]").boundingBox(),
-    page.locator("[data-buzz-content-surface]").first().boundingBox(),
-  ]);
-  expect(mainInsetBox).not.toBeNull();
-  expect(contentBox).not.toBeNull();
-  const leftGutter = (contentBox?.x ?? 0) - (mainInsetBox?.x ?? 0);
-  const rightGutter =
-    (mainInsetBox?.x ?? 0) +
-    (mainInsetBox?.width ?? 0) -
-    ((contentBox?.x ?? 0) + (contentBox?.width ?? 0));
-  expect(Math.abs(leftGutter - expectedLeftGutter)).toBeLessThan(0.5);
-  expect(Math.abs(rightGutter - 8)).toBeLessThan(0.5);
+  // Read both edges in one browser frame while the sidebar width transitions.
+  await expect
+    .poll(() =>
+      page.locator("[data-buzz-glass-inset]").evaluate((mainInset) => {
+        const content = mainInset.querySelector("[data-buzz-content-surface]");
+        if (!content) return null;
+        const mainInsetBox = mainInset.getBoundingClientRect();
+        const contentBox = content.getBoundingClientRect();
+        return {
+          left: contentBox.left - mainInsetBox.left,
+          right: mainInsetBox.right - contentBox.right,
+        };
+      }),
+    )
+    .toEqual({
+      left: expect.closeTo(expectedLeftGutter, 0),
+      right: expect.closeTo(8, 0),
+    });
 }
 
 async function seedCommunities(
@@ -298,24 +304,11 @@ test.describe("community rail", () => {
     expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
 
     const menu = page.getByRole("menu", { name: "Community actions" });
+    await waitForAnimations(page);
+    await page.clock.install({ time: new Date("2026-10-23T12:00:00Z") });
+    await page.clock.pauseAt(new Date("2026-10-23T12:00:01Z"));
     await communityTrigger.evaluate((trigger) => {
-      trigger.addEventListener(
-        "mouseenter",
-        () => {
-          trigger.dataset.hoverStartedAt = String(performance.now());
-        },
-        { once: true },
-      );
-      trigger.addEventListener("mouseleave", () => {
-        trigger.dataset.leftAt = String(performance.now());
-      });
       const observer = new MutationObserver((records) => {
-        if (
-          trigger.getAttribute("aria-expanded") === "true" &&
-          !trigger.dataset.expandedAt
-        ) {
-          trigger.dataset.expandedAt = String(performance.now());
-        }
         if (
           records.some(
             (record) =>
@@ -333,17 +326,11 @@ test.describe("community rail", () => {
       });
     });
     await communityTrigger.hover();
-    await expect(menu).toBeVisible({ timeout: 700 });
-    const openDelayMs = await communityTrigger.evaluate((trigger) => {
-      const hoverStartedAt = Number(trigger.dataset.hoverStartedAt);
-      const expandedAt = Number(trigger.dataset.expandedAt);
-      if (!Number.isFinite(hoverStartedAt) || !Number.isFinite(expandedAt)) {
-        throw new Error("Community actions open timing was not recorded");
-      }
-      return expandedAt - hoverStartedAt;
-    });
-    expect(openDelayMs).toBeGreaterThanOrEqual(40);
-    expect(openDelayMs).toBeLessThan(300);
+    await page.clock.runFor(40);
+    await expect(communityTrigger).toHaveAttribute("aria-expanded", "false");
+    await page.clock.runFor(40);
+    await expect(menu).toBeVisible();
+    await page.clock.runFor(150);
 
     const openTriggerBox = await communityTrigger.boundingBox();
     const menuBox = await menu.boundingBox();
@@ -359,25 +346,15 @@ test.describe("community rail", () => {
     );
     await page.mouse.move(triggerExitX, triggerExitY);
     await page.mouse.move(menuBox.x + 8, menuBox.y - 8);
-    await page.waitForTimeout(80);
+    await page.clock.runFor(80);
     await page.mouse.move(menuBox.x + 8, menuBox.y + 8);
-    const bridgeDurationMs = await communityTrigger.evaluate((trigger) => {
-      const leftAt = Number(trigger.dataset.leftAt);
-      if (!Number.isFinite(leftAt)) {
-        throw new Error(
-          "Community actions trigger exit timing was not recorded",
-        );
-      }
-      return performance.now() - leftAt;
-    });
-    expect(bridgeDurationMs).toBeGreaterThanOrEqual(60);
-    expect(bridgeDurationMs).toBeLessThan(140);
-    await page.waitForTimeout(180);
+    await page.clock.runFor(180);
     await expect(menu).toBeVisible();
     await expect(communityTrigger).not.toHaveAttribute(
       "data-closed-after-opening",
       "true",
     );
+    await page.clock.resume();
     await expect(
       menu.getByRole("menuitem", { name: "Copy community URL" }),
     ).toBeVisible();

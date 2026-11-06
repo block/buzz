@@ -2,8 +2,9 @@
 //!
 //! Two pieces of work follow every durable event insert:
 //!
-//! - **Push match enqueue.** Eligible event IDs are staged in memory. Commit
-//!   submits them to a bounded best-effort worker using a dedicated connection.
+//! - **Push match enqueue.** Eligible event IDs and signed timestamps are staged
+//!   in memory. Commit submits them to a bounded best-effort worker using a
+//!   dedicated connection.
 //!   Push errors, delays, overload, and shutdown can drop wakes, never messages.
 //! - **Channel TTL refresh.** A channel-scoped event pushes its ephemeral
 //!   channel's `ttl_deadline` forward. [`AdmittedTx`] records the channel and
@@ -11,15 +12,15 @@
 //!   [`refresh_channel_ttls`]). A refresh failure is logged and counted, and
 //!   the event still commits.
 //!
-//! This is the application-side replacement for the `events_enqueue_push_match`
-//! and `events_refresh_channel_ttl` triggers (migrations 0023, 0024, 0040).
-//! Updated writer connections suppress the surviving push trigger. Legacy
-//! writers retain transactional enqueue until replaced. Every production
+//! This replaced the `events_enqueue_push_match` and `events_refresh_channel_ttl`
+//! triggers (migrations 0023, 0024, 0040; retired by 0063 and 0065), so nothing
+//! in the database does this work any more. Every production
 //! `INSERT INTO events` must call this module, enforced by source-policy tests.
 
 use std::collections::BTreeSet;
 
 use buzz_core::CommunityId;
+use chrono::{DateTime, Utc};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -38,14 +39,17 @@ const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 /// Follow-up for an event row inserted in an admitted transaction.
 ///
 /// Call only when the INSERT affected a row, after releasing any savepoint
-/// that may roll it back. Stages push work for after commit and records TTL work.
+/// that may roll it back. `created_at` must be the signed timestamp bound by
+/// the INSERT, not receipt time. Stages push work for after commit and records
+/// TTL work.
 pub(crate) async fn after_admitted_insert(
     tx: &mut AdmittedTx,
     event_id: &[u8],
+    created_at: DateTime<Utc>,
     kind: i32,
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    tx.record_push_event(event_id, kind);
+    tx.record_push_event(event_id, created_at, kind);
     tx.record_channel_event(channel_id, kind);
     Ok(())
 }

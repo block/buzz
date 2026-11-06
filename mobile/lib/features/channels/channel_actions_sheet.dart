@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -35,6 +36,7 @@ import 'members_sheet.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 part 'channel_details_page.dart';
 
@@ -241,7 +243,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
                       copyToClipboard(
                         context,
                         currentChannel.name,
-                        message: 'Channel name copied to clipboard',
+                        message: 'Channel name copied',
                       );
                     },
                   ),
@@ -253,7 +255,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
                       copyToClipboard(
                         context,
                         channel.id,
-                        message: 'Channel ID copied to clipboard',
+                        message: 'Channel ID copied',
                       );
                     },
                   ),
@@ -503,12 +505,13 @@ Future<void> _confirmAndRun(
     if (pageContext.mounted) Navigator.of(pageContext).pop(true);
   } catch (error) {
     if (!pageContext.mounted) return;
-    ScaffoldMessenger.of(pageContext).showSnackBar(
+    ScaffoldMessenger.of(pageContext).showFeedbackSnackBar(
       SnackBar(
         content: Text(
           'Couldn’t ${confirmLabel.toLowerCase()} channel. Try again.',
         ),
       ),
+      kind: ToastKind.error,
     );
   }
 }

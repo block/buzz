@@ -12,8 +12,9 @@
 use std::sync::Arc;
 
 use axum::extract::ws::Message as WsMessage;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
+use crate::access::{AuthAttempt, AuthResult};
 use crate::connection::{AuthState, ConnectionState};
 use crate::metrics::{AuthOutcome, AuthPostTerminalState};
 use crate::protocol::RelayMessage;
@@ -63,53 +64,192 @@ fn classify_relay_membership(
 /// on the principal blocks it directly; if the principal is clear, a ban on
 /// its proven owner (extracted from the self-proving auth tag) blocks it too.
 ///
-/// `cached` reads the restriction rows through the 30-second ephemeral-path
-/// cache ([`AppState::restriction_state_cached`]); only per-pulse ephemeral
-/// traffic sets it. Socket auth and every other HTTP request read fresh.
-pub(crate) async fn community_ban_outcome(
+/// `cached` reads the restriction rows through
+/// [`AppState::restriction_state_cached`], for per-request gates whose grant
+/// ends with the request (HTTP requests, ephemeral pulses). Socket admission
+/// reads fresh: an admitted socket outlives the cache's staleness bound.
+/// Returns the outcome with the row that decided it.
+pub(crate) async fn community_ban_verdict(
     state: &AppState,
     community: buzz_core::CommunityId,
     pubkey: nostr::PublicKey,
     auth_tag_json: Option<&str>,
     signed_auth_created_at: Option<u64>,
+    token_owner: Option<nostr::PublicKey>,
     cached: bool,
-) -> BanOutcome {
-    async fn lookup(
-        state: &AppState,
-        community: buzz_core::CommunityId,
-        key: &nostr::PublicKey,
-        cached: bool,
-    ) -> BanOutcome {
-        let restriction = if cached {
-            state
-                .restriction_state_cached(community, key.as_bytes())
-                .await
-        } else {
-            state
-                .db
-                .moderation_restriction_state(community, key.as_bytes())
-                .await
+) -> BanVerdict {
+    let verdict = principal_ban_verdict(state, community, &pubkey, cached).await;
+    // A failed read leaves a token owner unchecked too: the refusal is that
+    // owner's unavailable ban state, as shadow's owner read would record.
+    if verdict.outcome == BanOutcome::DbError && token_owner.is_some() {
+        return BanVerdict {
+            source: BanSource::Owner,
+            ..verdict
         };
-        match restriction {
-            Ok(restriction) if restriction.banned => BanOutcome::Banned,
-            Ok(_) => BanOutcome::Clear,
-            Err(e) => {
-                warn!(pubkey = %key.to_hex(), error = %e, "ban-state DB lookup failed, denying (fail-closed)");
-                BanOutcome::DbError
-            }
+    }
+    if verdict.outcome != BanOutcome::Clear {
+        return verdict;
+    }
+    // A NIP-FI agent assertion's verified owner cascades unconditionally,
+    // whether the agent is a member itself or admitted through that owner.
+    let owner = token_owner.or_else(|| {
+        crate::api::relay_members::extract_nip_oa_owner(
+            pubkey.as_bytes(),
+            auth_tag_json,
+            signed_auth_created_at,
+        )
+    });
+    match owner {
+        Some(owner) => BanVerdict {
+            outcome: principal_ban_outcome(state, community, &owner, cached).await,
+            source: BanSource::Owner,
+        },
+        None => verdict,
+    }
+}
+
+/// Whose ban row decided a [`BanOutcome`]: the key's own, or an owner's
+/// (its stored agent owner, or the NIP-OA or token owner checked after it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BanSource {
+    /// The key's own row.
+    Own,
+    /// Its owner's row.
+    Owner,
+}
+
+impl BanSource {
+    /// Whose row decided a banned restriction snapshot.
+    pub(crate) fn of(restriction: &buzz_db::moderation::RestrictionState) -> Self {
+        if restriction.own_banned {
+            Self::Own
+        } else {
+            Self::Owner
         }
     }
-    let outcome = lookup(state, community, &pubkey, cached).await;
-    if outcome != BanOutcome::Clear {
-        return outcome;
+}
+
+/// A ban decision with the row that decided it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BanVerdict {
+    pub(crate) outcome: BanOutcome,
+    pub(crate) source: BanSource,
+}
+
+impl BanVerdict {
+    pub(crate) const CLEAR: Self = Self {
+        outcome: BanOutcome::Clear,
+        source: BanSource::Own,
+    };
+
+    /// Shadow's `owner` reason when an owner's row decided the refusal.
+    pub(crate) fn owner_reason(self) -> Option<&'static str> {
+        match (self.source, self.outcome) {
+            (BanSource::Owner, BanOutcome::Banned) => Some("owner_banned"),
+            (BanSource::Owner, BanOutcome::DbError) => Some("owner_ban_unavailable"),
+            _ => None,
+        }
     }
-    match crate::api::relay_members::extract_nip_oa_owner(
-        pubkey.as_bytes(),
-        auth_tag_json,
-        signed_auth_created_at,
-    ) {
-        Some(owner) => lookup(state, community, &owner, cached).await,
-        None => BanOutcome::Clear,
+}
+
+/// Ban verdict for one key: its own row and its stored agent owner's.
+async fn principal_ban_outcome(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    key: &nostr::PublicKey,
+    cached: bool,
+) -> BanOutcome {
+    principal_ban_verdict(state, community, key, cached)
+        .await
+        .outcome
+}
+
+async fn principal_ban_verdict(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    key: &nostr::PublicKey,
+    cached: bool,
+) -> BanVerdict {
+    let restriction = if cached {
+        state
+            .restriction_state_cached(community, key.as_bytes())
+            .await
+    } else {
+        state
+            .db
+            .moderation_restriction_state(community, key.as_bytes())
+            .await
+    };
+    let (outcome, source) = match restriction {
+        Ok(r) if r.banned && !r.own_banned => (BanOutcome::Banned, BanSource::Owner),
+        Ok(r) if r.banned => (BanOutcome::Banned, BanSource::Own),
+        Ok(_) => (BanOutcome::Clear, BanSource::Own),
+        Err(e) => {
+            warn!(pubkey = %key.to_hex(), error = %e, "ban-state DB lookup failed, denying (fail-closed)");
+            (BanOutcome::DbError, BanSource::Own)
+        }
+    };
+    BanVerdict { outcome, source }
+}
+
+/// Shadow only: the refusal enforce's token-owner rules would give `agent`,
+/// whose verified agent assertion names `owner`. Enforce bans the agent with
+/// its token owner and refuses a token owner other than the stored one.
+/// Reads only: nothing is linked or recorded on the socket.
+pub(crate) async fn token_owner_denial(
+    state: &AppState,
+    community: buzz_core::CommunityId,
+    agent: nostr::PublicKey,
+    owner: nostr::PublicKey,
+) -> Option<(buzz_auth::DenialClass, &'static str)> {
+    let ban = principal_ban_outcome(state, community, &owner, false).await;
+    if let Some(denial) = ban_admission_denial(ban) {
+        let reason = match ban {
+            BanOutcome::Banned => "owner_banned",
+            _ => "owner_ban_unavailable",
+        };
+        return Some((denial.class, reason));
+    }
+    // No stored owner yet: enforce would link this one.
+    let link = crate::api::relay_members::stored_owner_link(state, community, &agent, &owner)
+        .await
+        .unwrap_or(crate::api::relay_members::OwnerLink::Linked);
+    let reason = match link {
+        crate::api::relay_members::OwnerLink::Conflict => "not_stored_owner",
+        _ => "owner_link_unavailable",
+    };
+    owner_link_denial(link, true).map(|denial| (denial.class, reason))
+}
+
+/// Enforce's `owner` refusal of an agent assertion's key, when `denial` was
+/// decided by its owner: the owner's ban or the owner link.
+pub(crate) fn owner_refusal(
+    denial: &AdmissionDenial,
+    assertion: Option<&buzz_auth::VerifiedAssertion>,
+) -> Option<crate::nip_fi_shadow::WouldDeny> {
+    let assertion = assertion.filter(|a| a.owner().is_some())?;
+    let deny = crate::nip_fi_shadow::WouldDeny::new(
+        crate::nip_fi_shadow::Stage::Owner,
+        denial.class,
+        denial.owner_reason?,
+    );
+    Some(deny.by(assertion.asserted_key()))
+}
+
+/// Claim enforce's verdict for a refused socket before its frames are
+/// awaited: an owner-decided refusal of an agent assertion is recorded with
+/// shadow's `owner` reason; any other refusal retires the session unrecorded.
+pub(crate) fn record_enforce_refusal(
+    control: &crate::state::CommunityConnectionControl,
+    denial: Option<&AdmissionDenial>,
+    assertion: Option<&buzz_auth::VerifiedAssertion>,
+) {
+    let Some(session) = control.nip_fi_enforce() else {
+        return;
+    };
+    match denial.and_then(|d| owner_refusal(d, assertion)) {
+        Some(deny) => session.deny(deny),
+        None => session.retire(),
     }
 }
 
@@ -135,6 +275,33 @@ pub(crate) struct AdmissionDenial {
     pub(crate) reason: &'static str,
     pub(crate) outcome: AuthOutcome,
     pub(crate) class: buzz_auth::DenialClass,
+    /// Shadow's `owner` reason when an agent's owner decided the refusal.
+    pub(crate) owner_reason: Option<&'static str>,
+}
+
+/// [`ban_admission_denial`] carrying the deciding owner, if any.
+pub(crate) fn ban_verdict_denial(verdict: BanVerdict) -> Option<AdmissionDenial> {
+    let denial = ban_admission_denial(verdict.outcome)?;
+    Some(AdmissionDenial {
+        owner_reason: verdict.owner_reason(),
+        ..denial
+    })
+}
+
+/// The refusal for a ban outcome other than [`BanOutcome::Clear`].
+pub(crate) fn ban_admission_denial(ban: BanOutcome) -> Option<AdmissionDenial> {
+    let (metric, reason, outcome) = ban_denial(ban)?;
+    let class = match ban {
+        BanOutcome::DbError => buzz_auth::DenialClass::AuthorizationUnavailable,
+        _ => buzz_auth::DenialClass::AuthorizationDenied,
+    };
+    Some(AdmissionDenial {
+        metric,
+        reason,
+        outcome,
+        class,
+        owner_reason: None,
+    })
 }
 
 /// Final ban and relay-membership verdict for an authenticating socket.
@@ -151,27 +318,20 @@ pub(crate) async fn final_admission_denial(
     pubkey: nostr::PublicKey,
     auth_tag_json: Option<&str>,
     signed_auth_created_at: Option<u64>,
+    token_owner: Option<nostr::PublicKey>,
 ) -> Option<AdmissionDenial> {
-    let ban = community_ban_outcome(
+    let ban = community_ban_verdict(
         state,
         community,
         pubkey,
         auth_tag_json,
         signed_auth_created_at,
+        token_owner,
         false,
     )
     .await;
-    if let Some((metric, reason, outcome)) = ban_denial(ban) {
-        let class = match ban {
-            BanOutcome::DbError => buzz_auth::DenialClass::AuthorizationUnavailable,
-            _ => buzz_auth::DenialClass::AuthorizationDenied,
-        };
-        return Some(AdmissionDenial {
-            metric,
-            reason,
-            outcome,
-            class,
-        });
+    if let Some(denial) = ban_verdict_denial(ban) {
+        return Some(denial);
     }
     match crate::api::relay_members::check_relay_membership_authoritative(
         state,
@@ -179,6 +339,7 @@ pub(crate) async fn final_admission_denial(
         pubkey.as_bytes(),
         auth_tag_json,
         signed_auth_created_at,
+        token_owner,
     )
     .await
     {
@@ -187,6 +348,7 @@ pub(crate) async fn final_admission_denial(
             reason: "restricted: not a relay member",
             outcome: AuthOutcome::NotRelayMember,
             class: buzz_auth::DenialClass::AuthorizationDenied,
+            owner_reason: None,
         }),
         Ok(_) => None,
         Err(e) => {
@@ -196,6 +358,7 @@ pub(crate) async fn final_admission_denial(
                 reason: "error: internal error checking relay membership",
                 outcome: AuthOutcome::RelayMembershipCheckError,
                 class: buzz_auth::DenialClass::AuthorizationUnavailable,
+                owner_reason: None,
             })
         }
     }
@@ -233,6 +396,7 @@ pub(crate) async fn admitted_owner(
                 reason: OWNER_LINK_ERROR,
                 outcome: AuthOutcome::RelayMembershipCheckError,
                 class: buzz_auth::DenialClass::AuthorizationUnavailable,
+                owner_reason: None,
             })
         }
     }
@@ -241,6 +405,33 @@ pub(crate) async fn admitted_owner(
 /// Refusal when a proven agent's owner link cannot be recorded. Without the
 /// link, revoking the owner cannot find the agent's live sockets.
 pub(crate) const OWNER_LINK_ERROR: &str = "error: internal error recording agent owner";
+
+/// Socket refusal for an owner link that did not land. A different stored
+/// owner is `authorization denied` only for a NIP-FI token owner; for NIP-OA
+/// it stays the link error it has always been.
+pub(crate) fn owner_link_denial(
+    link: crate::api::relay_members::OwnerLink,
+    token_owner: bool,
+) -> Option<AdmissionDenial> {
+    use crate::api::relay_members::OwnerLink;
+    match link {
+        OwnerLink::Linked => None,
+        OwnerLink::Conflict if token_owner => Some(AdmissionDenial {
+            metric: "agent_owner_mismatch",
+            reason: crate::api::relay_members::OWNER_MISMATCH,
+            outcome: AuthOutcome::NotRelayMember,
+            class: buzz_auth::DenialClass::AuthorizationDenied,
+            owner_reason: Some("not_stored_owner"),
+        }),
+        OwnerLink::Conflict | OwnerLink::Unavailable => Some(AdmissionDenial {
+            metric: "agent_owner_link_error",
+            reason: OWNER_LINK_ERROR,
+            outcome: AuthOutcome::RelayMembershipCheckError,
+            class: buzz_auth::DenialClass::AuthorizationUnavailable,
+            owner_reason: token_owner.then_some("owner_link_unavailable"),
+        }),
+    }
+}
 
 /// NIP-FI class for a failed NIP-42 proof: a bad proof is client evidence
 /// (`evidence rejected`); only a relay-internal verifier failure is
@@ -278,9 +469,19 @@ fn deny_nip_fi_auth(conn: &ConnectionState, class: buzz_auth::DenialClass) {
 /// Refuse a root AUTH that passed the early gates but failed admission: record
 /// the outcome, send the denial (the canonical NOTICE under NIP-FI, else an
 /// OK false on the control channel so it drains before the Close), and close.
-fn deny_admission(conn: &ConnectionState, event_id_hex: &str, denial: AdmissionDenial) {
+fn deny_admission(
+    conn: &ConnectionState,
+    attempt: &AuthAttempt<'_>,
+    event_id_hex: &str,
+    denial: AdmissionDenial,
+) {
+    record_enforce_refusal(
+        &conn.community_control,
+        Some(&denial),
+        conn.nip_fi_assertion.as_ref(),
+    );
     metrics::counter!("buzz_auth_failures_total", "reason" => denial.metric).increment(1);
-    if !conn.reject_auth(denial.outcome) {
+    if !attempt.reject(conn, denial.outcome) {
         return;
     }
     if conn.nip_fi_assertion.is_some() {
@@ -322,6 +523,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             AuthState::Pending { challenge, .. } => (challenge, conn.conn_id),
             AuthState::Authenticated(_) => {
                 debug!(conn_id = %conn.conn_id, "AUTH received but already authenticated");
+                AuthAttempt::nip42(&conn, event.pubkey, false).log_after_decision(
+                    &conn,
+                    AuthResult::Denied(crate::access::AuthReason::AlreadyAuthenticated),
+                );
                 crate::metrics::record_post_terminal_auth_frame(
                     AuthPostTerminalState::Authenticated,
                 );
@@ -334,6 +539,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             AuthState::Failed => {
                 debug!(conn_id = %conn.conn_id, "AUTH received after failed auth");
+                AuthAttempt::nip42(&conn, event.pubkey, false).log_after_decision(
+                    &conn,
+                    AuthResult::Denied(crate::access::AuthReason::AlreadyFailed),
+                );
                 crate::metrics::record_post_terminal_auth_frame(AuthPostTerminalState::Failed);
                 conn.send(RelayMessage::ok(
                     &event_id_hex,
@@ -354,14 +563,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
+    let claimed_pubkey = event.pubkey;
     let signed_auth_created_at = event.created_at.as_secs();
 
     let relay_url =
         crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
     let auth_svc = Arc::clone(&state.auth);
 
-    let _shadow_attempt =
-        crate::nip_fi_shadow_session::AuthAttempt(conn.community_control.nip_fi_shadow());
+    let _shadow_attempt = crate::nip_fi_shadow_session::AuthAttempt::new(&conn.community_control);
     // Pure NIP-42 verification — crypto only, no DB lookups.
     match auth_svc
         .verify_auth_event(event, &challenge, &relay_url)
@@ -369,14 +578,19 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     {
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
+            let attempt = AuthAttempt::nip42(&conn, pubkey, true);
 
+            conn.community_control.prove_nip_fi_line(pubkey);
             let shadow = conn.community_control.nip_fi_shadow();
             if let Some(shadow) = shadow {
                 shadow.observe_pairing(pubkey);
+                shadow
+                    .observe_owner(&state, conn.tenant.community(), pubkey)
+                    .await;
             }
             // NIP-FI key pairing [FI-INV-05]: immediately after successful
             // verify_auth_event, before community-ban/allowlist/membership gates.
-            // Pre-DB positioning means a denied caller pays zero DB cost and the
+            // Running before those gates means a denied caller skips their DB reads and the
             // production call site is falsifiable without live tenant policy.
             // [FI-TRACE-DENIAL-ORACLE post-establishment]
             if crate::nip_fi_session::enforce_nip_fi_key_pairing(
@@ -402,6 +616,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // a ban on its cryptographically-proven owner cascades to the agent
             // (owner ban ⇒ agents banned; agent ban is agent-only). The owner is
             // extracted from the self-proving auth tag with no DB round-trip.
+            // The owner named by a verified NIP-FI agent assertion. It takes
+            // the place of a NIP-OA owner at the ban, membership and owner-link
+            // steps below.
+            let token_owner = conn
+                .nip_fi_assertion
+                .as_ref()
+                .and_then(|assertion| assertion.owner());
             {
                 // Fail closed on a DB error, but distinguish it from a real ban:
                 // a transient blip must deny (never let a banned principal
@@ -409,21 +630,27 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 // pinning `Failed` for the connection's life on a false premise.
                 // `Banned` claims the ban; `DbError` denies with `error: internal`
                 // (mirrors the ingest write-path gate).
-                let outcome = community_ban_outcome(
+                let verdict = community_ban_verdict(
                     &state,
                     conn.tenant.community(),
                     pubkey,
                     auth_tag_json.as_deref(),
                     Some(signed_auth_created_at),
+                    token_owner,
                     false,
                 )
                 .await;
+                let outcome = verdict.outcome;
 
                 if let Some((metric_reason, deny_reason, auth_outcome)) = ban_denial(outcome) {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
+                    record_enforce_refusal(
+                        &conn.community_control,
+                        ban_verdict_denial(verdict).as_ref(),
+                        conn.nip_fi_assertion.as_ref(),
+                    );
                     metrics::counter!("buzz_auth_failures_total", "reason" => metric_reason)
                         .increment(1);
-                    if !conn.reject_auth(auth_outcome) {
+                    if !attempt.reject(&conn, auth_outcome) {
                         return;
                     }
                     // Decision 4: banned ⇒ OK false + immediate WebSocket close.
@@ -466,10 +693,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 match classify_allowlist(allowlist) {
                     PolicyCheck::Allowed(()) => {}
                     PolicyCheck::Denied => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
                         metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
                             .increment(1);
-                        if !conn.reject_auth(AuthOutcome::AllowlistDenied) {
+                        if !attempt.reject(&conn, AuthOutcome::AllowlistDenied) {
                             return;
                         }
                         // Fix 4a: when an FI assertion is present, use the uniform
@@ -491,7 +717,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     PolicyCheck::DependencyError => {
                         metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_check_error")
                             .increment(1);
-                        if !conn.reject_auth(AuthOutcome::AllowlistCheckError) {
+                        if !attempt.reject(&conn, AuthOutcome::AllowlistCheckError) {
                             return;
                         }
                         if conn.nip_fi_assertion.is_some() {
@@ -518,6 +744,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 pubkey.as_bytes(),
                 auth_tag_json.as_deref(),
                 Some(signed_auth_created_at),
+                token_owner,
             )
             .await;
             if let Err(e) = &membership {
@@ -527,10 +754,9 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             let nip_oa_owner = match classify_relay_membership(membership) {
                 PolicyCheck::Allowed(owner) => owner,
                 PolicyCheck::Denied => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
-                    if !conn.reject_auth(AuthOutcome::NotRelayMember) {
+                    if !attempt.reject(&conn, AuthOutcome::NotRelayMember) {
                         return;
                     }
                     // With an FI assertion, membership status must not be
@@ -549,7 +775,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 PolicyCheck::DependencyError => {
                     metrics::counter!("buzz_auth_failures_total", "reason" => "relay_membership_check_error")
                         .increment(1);
-                    if !conn.reject_auth(AuthOutcome::RelayMembershipCheckError) {
+                    if !attempt.reject(&conn, AuthOutcome::RelayMembershipCheckError) {
                         return;
                     }
                     if conn.nip_fi_assertion.is_some() {
@@ -569,7 +795,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // (needed for observer frame auth). Only runs on open relays — on closed
             // relays, enforce_relay_membership already handles NIP-OA delegation.
             // No feature flag needed: NIP-OA is cryptographically self-proving.
-            let nip_oa_owner = nip_oa_owner.or_else(|| {
+            let nip_oa_owner = nip_oa_owner.or(token_owner).or_else(|| {
                 if !state.config.require_relay_membership && auth_tag_json.is_some() {
                     crate::api::relay_members::extract_nip_oa_owner(
                         pubkey.as_bytes(),
@@ -610,38 +836,35 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             crate::nip_fi_test_hooks::before_auth_commit(conn.tenant.community()).await;
             let _auth_permit = match conn.nip_fi_gate.acquire_effect().await {
                 Ok(permit) => permit,
-                Err(crate::nip_fi_gate::SessionExpired) => return,
+                Err(crate::nip_fi_gate::SessionExpired) => {
+                    _shadow_attempt.effect_refused(&conn.nip_fi_gate);
+                    return;
+                }
             };
 
             // Record the NIP-OA owner link before admission: revoking the
             // owner finds the agent's sockets through it, so an agent whose
             // link cannot be recorded is refused rather than admitted
             // unrevocable.
+            // A token owner that differs from the stored owner is refused
+            // (NIP-FI agent keys); an unset stored owner is recorded.
             if let Some(owner) = nip_oa_owner {
-                if !crate::api::relay_members::materialize_nip_oa_owner(
+                let link = crate::api::relay_members::link_agent_owner(
                     &state,
                     &conn.tenant,
                     &pubkey,
                     &owner,
                 )
-                .await
-                {
+                .await;
+                if let Some(denial) = owner_link_denial(link, token_owner.is_some()) {
                     warn!(
                         conn_id = %conn_id,
                         agent = %pubkey.to_hex(),
-                        nip_oa_owner = %owner.to_hex(),
-                        "NIP-OA owner could not be materialized, denying"
+                        owner = %owner.to_hex(),
+                        ?link,
+                        "agent owner could not be linked, denying"
                     );
-                    deny_admission(
-                        &conn,
-                        &event_id_hex,
-                        AdmissionDenial {
-                            metric: "agent_owner_link_error",
-                            reason: OWNER_LINK_ERROR,
-                            outcome: AuthOutcome::RelayMembershipCheckError,
-                            class: buzz_auth::DenialClass::AuthorizationUnavailable,
-                        },
-                    );
+                    deny_admission(&conn, &attempt, &event_id_hex, denial);
                     return;
                 }
                 auth_ctx.agent_owner_pubkey = Some(owner);
@@ -661,30 +884,38 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     .conn_manager
                     .set_admitted_owner(conn_id, owner.to_bytes());
             }
-            // The bind carries the admitting NIP-FI issuer, so a concurrent
-            // `disconnect_nip_fi` scan that sees the pubkey also sees its
-            // issuer; the deny-set check after `authenticate` closes the rest.
+            // The bind carries the admitting NIP-FI issuer and agent owner, so
+            // a concurrent `disconnect_nip_fi` scan that sees the pubkey also
+            // sees its session; the deny-set check after `authenticate` closes
+            // the rest.
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 pubkey.to_bytes().to_vec(),
                 conn.nip_fi_assertion
                     .as_ref()
-                    .map(|a| a.identity().issuer().to_owned()),
+                    .map(crate::nip_fi_core::NipFiSession::from_assertion),
             );
-            match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
-                Ok(Some(owner)) => state.conn_manager.set_admitted_owner(conn_id, owner),
-                Ok(None) => {}
-                Err(denial) => {
-                    deny_admission(&conn, &event_id_hex, denial);
-                    return;
-                }
-            }
+            // An admitted owner (NIP-OA, a NIP-FI agent token, or a stored
+            // `agent_owner_pubkey`) makes this socket an agent's.
+            let admitted_agent =
+                match admitted_owner(&state, conn.tenant.community(), pubkey, nip_oa_owner).await {
+                    Ok(Some(owner)) => {
+                        state.conn_manager.set_admitted_owner(conn_id, owner);
+                        true
+                    }
+                    Ok(None) => false,
+                    Err(denial) => {
+                        deny_admission(&conn, &attempt, &event_id_hex, denial);
+                        return;
+                    }
+                };
             let denial = match final_admission_denial(
                 &state,
                 conn.tenant.community(),
                 pubkey,
                 auth_tag_json.as_deref(),
                 Some(signed_auth_created_at),
+                token_owner,
             )
             .await
             {
@@ -693,21 +924,22 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     reason: "blocked: access revoked",
                     outcome: AuthOutcome::Banned,
                     class: buzz_auth::DenialClass::AuthorizationDenied,
+                    owner_reason: None,
                 }),
                 denial => denial,
             };
             if let Some(denial) = denial {
-                warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = denial.reason, "denied at final admission check");
-                deny_admission(&conn, &event_id_hex, denial);
+                deny_admission(&conn, &attempt, &event_id_hex, denial);
                 return;
             }
 
-            info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
             if !conn.authenticate(auth_ctx) {
                 return;
             }
-            // The permit is held through the deny-set check and the OK send so
-            // the auth commit is atomic with respect to expiry.
+            // The login commits only if the close-reason slot is still empty
+            // when read under its lock (`is_open` below): a disconnect that
+            // chose a reason first wins, one that comes later closes the
+            // admitted socket.
             //
             // The proven key was registered with its NIP-FI issuer before the
             // final admission check: a concurrent disconnect either finds this
@@ -716,24 +948,17 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             crate::nip_fi_test_hooks::before_deny_set_check(conn.tenant.community()).await;
             // [FI-TRACE-DENY-SET]
             if let Some(assertion) = &conn.nip_fi_assertion {
-                if let (Some(asserted_key), Some(deny_map)) =
-                    (assertion.asserted_key(), state.nip_fi_deny_map.as_deref())
-                {
-                    if deny_map.is_denied(
-                        assertion.identity().issuer(),
-                        &asserted_key,
-                        chrono::Utc::now(),
-                    ) {
-                        warn!(
-                            conn_id = %conn_id,
-                            pubkey = %pubkey.to_hex(),
-                            "NIP-FI deny-set hit at post-registration check — denying"
-                        );
+                if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
+                    if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+                    {
+                        attempt.log(AuthResult::Denied(crate::access::AuthReason::DenySet));
                         metrics::counter!(
                             "buzz_nip_fi_admission_denied_total",
                             "reason" => "deny_set_post_registration"
                         )
                         .increment(1);
+                        conn.community_control
+                            .deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
                         deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationDenied);
                         return;
                     }
@@ -748,16 +973,60 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if conn.cancel.is_cancelled() {
                 return;
             }
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::before_auth_decision(&conn);
+            // A disconnect that chose its reply before this point (expiry,
+            // ban, revoke) wins: its refusal is the only answer. One that
+            // lands after closes an admitted socket.
+            if !conn.community_control.is_open() {
+                return;
+            }
+            // Only the frame that won `authenticate` reaches here, once.
+            attempt.log(AuthResult::Success);
             state.conn_manager.mark_admitted(conn_id);
+            if let Some(session) = conn.community_control.nip_fi_enforce() {
+                session.admit(pubkey);
+            }
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            crate::verified_profiles::admitted(
+                &state,
+                &conn.tenant,
+                conn.nip_fi_assertion.as_ref(),
+            );
+            // A community without a membership roster has no roster insert to
+            // join default channels at, so a person is joined on admission to
+            // the ones they have never been in, under this socket's effect
+            // permits. Agents are not.
+            let auto_join = !state.config.require_relay_membership && !admitted_agent;
+            if auto_join {
+                let state = Arc::clone(&state);
+                let tenant = conn.tenant.clone();
+                let gate = Arc::clone(&conn.nip_fi_gate);
+                tokio::spawn(async move {
+                    crate::handlers::side_effects::auto_join_never_joined_channels(
+                        &tenant,
+                        &state,
+                        &pubkey.to_bytes(),
+                        &gate,
+                    )
+                    .await;
+                });
+            }
+            // A test waits on every admission's auto-join outcome, so a skip
+            // reports here as the spawned task does when it finishes.
+            #[cfg(test)]
+            if !auto_join {
+                crate::nip_fi_test_hooks::after_auto_join(conn.tenant.community()).await;
+            }
             // _auth_permit drops here — expiry's write guard may proceed.
         }
         Err(e) => {
-            warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");
             metrics::counter!("buzz_auth_failures_total", "reason" => "nip42_invalid").increment(1);
             if !conn.reject_auth(AuthOutcome::Invalid) {
                 return;
             }
+            AuthAttempt::nip42(&conn, claimed_pubkey, false)
+                .log(AuthResult::Failed(crate::access::auth_error_code(&e)));
             if conn.nip_fi_assertion.is_some() {
                 deny_nip_fi_auth(&conn, nip42_denial_class(&e));
                 return;
@@ -900,9 +1169,7 @@ mod tests {
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -957,6 +1224,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -981,6 +1249,14 @@ mod tests {
         });
 
         let state = auth_test_state().await;
+        conn.community_control
+            .attach_nip_fi_enforce(crate::nip_fi_shadow::EnforceSession::new(
+                "ws",
+                crate::nip_fi_shadow::BOUND.into(),
+                conn.nip_fi_assertion
+                    .as_ref()
+                    .and_then(|a| a.asserted_key()),
+            ));
 
         // relay_url = ws://<tenant.host()> where scheme prefix is from config
         // (default ws://), and host is "test.local".
@@ -991,8 +1267,20 @@ mod tests {
             .sign_with_keys(&key_b)
             .unwrap();
 
-        // Drive the production handle_auth path.
-        handle_auth(auth_event, Arc::clone(&conn), state).await;
+        // Drive the production handle_auth path. Enforce records the
+        // refusal once, naming the proven key, and the deadline that fires
+        // after it records nothing more. Mutation: dropping the pairing
+        // seam's `deny_nip_fi_enforce` call → RED.
+        let ((), lines, counts) = crate::nip_fi_shadow::tests::enforce_records(async {
+            handle_auth(auth_event, Arc::clone(&conn), state).await;
+            conn.community_control.nip_fi_enforce().unwrap().expire();
+        })
+        .await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", key_b.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+        assert_eq!(counts.len(), 1, "{counts:?}");
+        assert_eq!(counts[0][..3], ["ws", "pairing", "denied"]);
 
         assert!(
             cancel.is_cancelled(),
@@ -1086,6 +1374,7 @@ mod tests {
         cancel.cancel();
 
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::tenant::TenantContext::resolved(
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -1148,6 +1437,15 @@ mod tests {
         /// A pending connection whose FI assertion (if any) names `key`, so
         /// pairing always passes and a later gate is the one that denies.
         fn new(with_fi_assertion: bool) -> Self {
+            Self::build(with_fi_assertion, None)
+        }
+
+        /// A pending connection whose FI agent assertion names `owner`.
+        fn new_agent(owner: nostr::PublicKey) -> Self {
+            Self::build(true, Some(owner))
+        }
+
+        fn build(with_fi_assertion: bool, owner: Option<nostr::PublicKey>) -> Self {
             use tokio::sync::mpsc;
             let key = Keys::generate();
             let challenge = format!("fi-invariant-{}", uuid::Uuid::new_v4());
@@ -1156,12 +1454,17 @@ mod tests {
             let (terminal_ctrl_tx, terminal_rx) = mpsc::channel(1);
             let cancel = tokio_util::sync::CancellationToken::new();
             let assertion = with_fi_assertion.then(|| {
-                buzz_auth::VerifiedAssertion::for_test(
+                let assertion = buzz_auth::VerifiedAssertion::for_test(
                     Some(key.public_key()),
                     vec![chrono::Utc::now() + chrono::Duration::hours(1)],
-                )
+                );
+                match owner {
+                    Some(owner) => assertion.with_owner_for_test(owner),
+                    None => assertion,
+                }
             });
             let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
@@ -1282,9 +1585,7 @@ mod tests {
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         configure(&mut config);
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1406,7 +1707,7 @@ mod tests {
         state.conn_manager.set_authenticated_identity(
             conn.conn_id,
             pubkey.clone(),
-            Some("test-issuer".to_owned()),
+            Some(crate::nip_fi_core::NipFiSession::new("test-issuer", None)),
         );
         assert_eq!(
             state.conn_manager.disconnect_nip_fi("test-issuer", &pubkey),
@@ -1456,29 +1757,46 @@ mod tests {
         signer: &Keys,
         lifetime: chrono::Duration,
     ) -> (crate::connection::tests::TestConn, nostr::Event) {
+        let assertion = buzz_auth::VerifiedAssertion::for_test(
+            Some(asserted),
+            vec![chrono::Utc::now() + lifetime],
+        );
+        let nil = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        shadow_root_conn_with(state, nil, assertion, signer, None)
+    }
+
+    /// [`shadow_root_conn`] in `community` observing `assertion`, its AUTH
+    /// event carrying `auth_tag` when given.
+    pub(super) fn shadow_root_conn_with(
+        state: &crate::state::AppState,
+        community: buzz_core::tenant::CommunityId,
+        assertion: buzz_auth::VerifiedAssertion,
+        signer: &Keys,
+        auth_tag: Option<&str>,
+    ) -> (crate::connection::tests::TestConn, nostr::Event) {
         use chrono::Utc;
         let challenge = "shadow-root-challenge".to_owned();
         let pending = AuthState::Pending {
             challenge: challenge.clone(),
             started_at: Instant::now(),
         };
-        let t = crate::connection::tests::test_conn(pending, None);
-        let assertion =
-            buzz_auth::VerifiedAssertion::for_test(Some(asserted), vec![Utc::now() + lifetime]);
-        let headers = axum::http::HeaderMap::new();
+        let t = crate::connection::tests::test_conn_in(pending, None, community);
         let session = crate::nip_fi_shadow_session::ShadowSession::start(
             state,
             "ws",
-            &headers,
+            crate::nip_fi_shadow::BOUND.into(),
             assertion,
             Utc::now(),
         );
         t.conn.community_control.attach_nip_fi_shadow(Some(session));
-        let event = EventBuilder::new(Kind::Authentication, "")
+        let mut builder = EventBuilder::new(Kind::Authentication, "")
             .tag(Tag::parse(["relay", "ws://test.local"]).unwrap())
-            .tag(Tag::parse(["challenge", &challenge]).unwrap())
-            .sign_with_keys(signer)
-            .unwrap();
+            .tag(Tag::parse(["challenge", &challenge]).unwrap());
+        if let Some(tag) = auth_tag {
+            let fields: Vec<String> = serde_json::from_str(tag).unwrap();
+            builder = builder.tag(Tag::parse(fields).unwrap());
+        }
+        let event = builder.sign_with_keys(signer).unwrap();
         (t, event)
     }
 
@@ -1498,6 +1816,104 @@ mod tests {
             handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
         });
         assert_eq!(records, ["pairing/denied"]);
+    }
+
+    // The pairing would-deny names the key AUTH proved, not the one the
+    // token asserts. Mutation: attributing the asserted key, or none, fails.
+    #[test]
+    fn shadow_root_pairing_denial_logs_the_proven_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let signer = Keys::generate();
+        let asserted = Keys::generate().public_key();
+        let (records, lines) = shadow_logged(async {
+            let state = std::sync::Arc::new(shadow_state(None).await);
+            let (t, event) = shadow_root_conn(&state, asserted, &signer, HOUR);
+            handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+        });
+        assert_eq!(records, ["pairing/denied"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("reason=\"key_mismatch\""), "{lines:?}");
+        let proven = format!("pubkey=\"{}\"", signer.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
+    // An upgrade would-deny's line names the key the connection's AUTH
+    // verifies, and is counted once, at the upgrade. Mutation: deleting
+    // root's `prove_nip_fi_line` logs `absent`.
+    #[test]
+    fn shadow_upgrade_would_deny_logs_the_root_auth_key() {
+        use crate::nip_fi_shadow_session::tests::{shadow_logged, shadow_state};
+        let signer = Keys::generate();
+        let (records, lines) = shadow_logged(async {
+            let state = std::sync::Arc::new(shadow_state(None).await);
+            let line = crate::nip_fi_shadow::tests::upgrade_line("ws");
+            let challenge = "upgrade-would-deny-challenge".to_owned();
+            let pending = AuthState::Pending {
+                challenge: challenge.clone(),
+                started_at: Instant::now(),
+            };
+            let nil = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+            let t = crate::connection::tests::test_conn_in(pending, None, nil);
+            t.conn.community_control.attach_nip_fi_line(Some(&line));
+            let event = EventBuilder::new(Kind::Authentication, "")
+                .tag(Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(&signer)
+                .unwrap();
+            handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+        });
+        assert_eq!(records, ["assertion/missing"]);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
+        let proven = format!("pubkey=\"{}\"", signer.public_key().to_hex());
+        assert!(lines[0].contains(&proven), "{lines:?}");
+    }
+
+    // A failed owner read records `owner` as unavailable, as enforce fails
+    // closed, and changes nothing else. The state's database is unreachable.
+    // Mutation: deleting root's `observe_owner` call loses the record.
+    #[test]
+    fn shadow_root_auth_records_unavailable_owner_read() {
+        use crate::nip_fi_shadow_session::tests::{owned_assertion, shadow_records, shadow_state};
+        let records = shadow_records(async {
+            let state = std::sync::Arc::new(shadow_state(None).await);
+            let agent = Keys::generate();
+            let nil = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+            let (t, event) = shadow_root_conn_with(
+                &state,
+                nil,
+                owned_assertion(agent.public_key(), Keys::generate().public_key()),
+                &agent,
+                None,
+            );
+            handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+        });
+        assert_eq!(records, ["owner/unavailable"]);
+    }
+
+    // The deciding row names the reason: an owner's ban or failed lookup is
+    // shadow's `owner` reason, the key's own is none. Mutation: reporting an
+    // own-row ban as the owner's → RED.
+    #[test]
+    fn ban_verdict_owner_reason_follows_the_deciding_row() {
+        use super::{BanSource, BanVerdict};
+        let verdict = |outcome, source| BanVerdict { outcome, source };
+        assert_eq!(
+            verdict(BanOutcome::Banned, BanSource::Owner).owner_reason(),
+            Some("owner_banned")
+        );
+        assert_eq!(
+            verdict(BanOutcome::DbError, BanSource::Owner).owner_reason(),
+            Some("owner_ban_unavailable")
+        );
+        assert_eq!(
+            verdict(BanOutcome::Banned, BanSource::Own).owner_reason(),
+            None
+        );
+        assert_eq!(BanVerdict::CLEAR.owner_reason(), None);
     }
 
     const HOUR: chrono::Duration = chrono::Duration::hours(1);
@@ -1603,6 +2019,370 @@ mod tests {
             assert!(records.is_empty(), "{records:?}");
         }
 
+        /// Shadow judges an agent assertion by the owner enforce uses: the
+        /// token owner, even when the AUTH also carries a NIP-OA tag naming
+        /// another owner. A banned token owner or a stored owner other than
+        /// the token owner records `owner/denied`, while shadow still admits
+        /// as Off; a clean, matching owner records `admit/admit`.
+        /// Mutation: deleting root's `observe_owner` call records
+        /// `admit/admit` for every case.
+        #[test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        fn shadow_root_auth_records_token_owner_refusals() {
+            use crate::nip_fi_shadow_session::tests::{
+                owned_assertion, shadow_records, shadow_state,
+            };
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                CleanOwner,
+                BannedOwner,
+                OtherStoredOwner,
+                BannedOwnerWithCleanNipOa,
+                NipOaOwnerStored,
+            }
+            for (case, expected) in [
+                (Case::CleanOwner, "admit/admit"),
+                (Case::BannedOwner, "owner/denied"),
+                (Case::OtherStoredOwner, "owner/denied"),
+                (Case::BannedOwnerWithCleanNipOa, "owner/denied"),
+                (Case::NipOaOwnerStored, "owner/denied"),
+            ] {
+                let mut ok_true = false;
+                let records = shadow_records(async {
+                    let mut state = (*auth_test_state_real_db_expect().await).clone();
+                    state.nip_fi_deny_map = shadow_state(None).await.nip_fi_deny_map;
+                    let state = std::sync::Arc::new(state);
+                    let (agent, owner, nip_oa) =
+                        (Keys::generate(), Keys::generate(), Keys::generate());
+                    let community = seeded_community(&state).await;
+                    let (mut t, event) = super::shadow_root_conn_with(
+                        &state,
+                        community,
+                        owned_assertion(agent.public_key(), owner.public_key()),
+                        &agent,
+                        matches!(
+                            case,
+                            Case::BannedOwnerWithCleanNipOa | Case::NipOaOwnerStored
+                        )
+                        .then(|| {
+                            buzz_sdk::nip_oa::compute_auth_tag(&nip_oa, &agent.public_key(), "")
+                                .unwrap()
+                        })
+                        .as_deref(),
+                    );
+                    let owner_bytes = owner.public_key().to_bytes();
+                    let stored = match case {
+                        Case::OtherStoredOwner => Some(Keys::generate().public_key()),
+                        Case::NipOaOwnerStored => Some(nip_oa.public_key()),
+                        _ => None,
+                    };
+                    if matches!(case, Case::BannedOwner | Case::BannedOwnerWithCleanNipOa) {
+                        state
+                            .db
+                            .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                            .await
+                            .expect("ban owner");
+                    }
+                    if let Some(stored) = stored {
+                        for key in [agent.public_key(), stored] {
+                            state
+                                .db
+                                .ensure_user(community, key.as_bytes())
+                                .await
+                                .expect("ensure user");
+                        }
+                        assert!(state
+                            .db
+                            .set_agent_owner(
+                                community,
+                                agent.public_key().as_bytes(),
+                                stored.as_bytes()
+                            )
+                            .await
+                            .expect("seed stored owner"));
+                    }
+                    handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+                    while let Ok(WsMessage::Text(text)) = t.send_rx.try_recv() {
+                        ok_true |= is_ok_true(text.as_str());
+                    }
+                });
+                assert!(ok_true, "{case:?}: shadow admits as Off");
+                assert_eq!(records, [expected], "{case:?}");
+            }
+        }
+
+        /// An enforced root socket in `community` under `assertion`, with its
+        /// enforce lifecycle attached as the upgrade attaches it, and an AUTH
+        /// event `signer` signs for it.
+        fn enforce_root_conn(
+            community: buzz_core::tenant::CommunityId,
+            assertion: buzz_auth::VerifiedAssertion,
+            signer: &Keys,
+        ) -> (crate::connection::tests::TestConn, nostr::Event) {
+            enforce_root_conn_gated(community, assertion, signer, None)
+        }
+
+        /// [`enforce_root_conn`] whose effect gate has `deadline`.
+        fn enforce_root_conn_gated(
+            community: buzz_core::tenant::CommunityId,
+            assertion: buzz_auth::VerifiedAssertion,
+            signer: &Keys,
+            deadline: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> (crate::connection::tests::TestConn, nostr::Event) {
+            let challenge = "enforce-root-challenge".to_owned();
+            let pending = AuthState::Pending {
+                challenge: challenge.clone(),
+                started_at: Instant::now(),
+            };
+            let asserted = assertion.asserted_key();
+            let t = crate::connection::tests::test_conn_gated(
+                pending,
+                Some(assertion),
+                community,
+                deadline,
+            );
+            t.conn.community_control.attach_nip_fi_enforce(
+                crate::nip_fi_shadow::EnforceSession::new(
+                    "ws",
+                    crate::nip_fi_shadow::BOUND.into(),
+                    asserted,
+                ),
+            );
+            let event = EventBuilder::new(Kind::Authentication, "")
+                .tag(Tag::parse(["relay", "ws://test.local"]).unwrap())
+                .tag(Tag::parse(["challenge", &challenge]).unwrap())
+                .sign_with_keys(signer)
+                .unwrap();
+            (t, event)
+        }
+
+        /// Runs the production expiry worker for `t`'s socket with its
+        /// deadline already passed, to completion.
+        async fn run_expiry_worker(t: &crate::connection::tests::TestConn) {
+            let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                chrono::Utc::now(),
+                t.conn.cancel.clone(),
+            );
+            crate::nip_fi_session::spawn_nip_fi_expiry_task(
+                chrono::Utc::now(),
+                gate,
+                t.conn.community_control.clone(),
+                t.conn.terminal_ctrl_tx.clone(),
+                crate::nip_fi_session::NipFiWsRoute::Root,
+            )
+            .await
+            .expect("expiry worker");
+        }
+
+        /// Enforce records each root owner refusal once, with shadow's
+        /// reason, from the single ban decision that refused it: a stored
+        /// owner's ban (the agent's own read cascades to it) costs exactly
+        /// one authorization read, so a reread cannot change the reason. An
+        /// admitted session counts one admit and, through the real expiry
+        /// worker, one `expired` end and no pending `deadline`.
+        /// Mutations: deleting root's `session.admit(pubkey)` leaves `Clean`
+        /// with no record (the attempt retires it); reverting to reread the owner
+        /// after the refusal raises `StoredOwnerBanned`'s reads above 1.
+        #[test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        fn enforce_root_auth_records_owner_refusals_from_one_decision() {
+            use crate::nip_fi_shadow_session::tests::owned_assertion;
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                Clean,
+                BannedTokenOwner,
+                StoredOwnerBanned,
+                OtherStoredOwner,
+                BanReadFails,
+            }
+            for (case, expected, reason, reads) in [
+                (
+                    Case::Clean,
+                    &["ws admit/admit", "ws end/expired"][..],
+                    None,
+                    None,
+                ),
+                (
+                    Case::BannedTokenOwner,
+                    &["ws owner/denied"][..],
+                    Some("owner_banned"),
+                    Some(2),
+                ),
+                (
+                    Case::StoredOwnerBanned,
+                    &["ws owner/denied"][..],
+                    Some("owner_banned"),
+                    Some(1),
+                ),
+                (
+                    Case::OtherStoredOwner,
+                    &["ws owner/denied"][..],
+                    Some("not_stored_owner"),
+                    None,
+                ),
+                (
+                    Case::BanReadFails,
+                    &["ws owner/unavailable"][..],
+                    Some("owner_ban_unavailable"),
+                    None,
+                ),
+            ] {
+                let (records, lines, auth_reads, ok_true) =
+                    crate::nip_fi_shadow::tests::enforce_observed(
+                        async {
+                            let state = auth_test_state_real_db_expect().await;
+                            let (agent, owner) = (Keys::generate(), Keys::generate());
+                            let community = seeded_community(&state).await;
+                            let link = |stored: nostr::PublicKey| {
+                                let state = std::sync::Arc::clone(&state);
+                                let agent = agent.public_key();
+                                async move {
+                                    for key in [agent, stored] {
+                                        state
+                                            .db
+                                            .ensure_user(community, key.as_bytes())
+                                            .await
+                                            .expect("ensure user");
+                                    }
+                                    assert!(state
+                                        .db
+                                        .set_agent_owner(
+                                            community,
+                                            agent.as_bytes(),
+                                            stored.as_bytes()
+                                        )
+                                        .await
+                                        .expect("seed stored owner"));
+                                }
+                            };
+                            let ban = |key: nostr::PublicKey| {
+                                let state = std::sync::Arc::clone(&state);
+                                async move {
+                                    let bytes = key.to_bytes();
+                                    state
+                                        .db
+                                        .ban_community_member(community, &bytes, &bytes, None, None)
+                                        .await
+                                        .expect("ban owner");
+                                }
+                            };
+                            match case {
+                                Case::Clean => {}
+                                Case::BannedTokenOwner => ban(owner.public_key()).await,
+                                Case::StoredOwnerBanned => {
+                                    link(owner.public_key()).await;
+                                    ban(owner.public_key()).await;
+                                }
+                                Case::OtherStoredOwner => link(Keys::generate().public_key()).await,
+                                // The agent's own ban read fails: its token
+                                // owner is left unchecked, so the refusal is the
+                                // owner's unavailable ban state.
+                                Case::BanReadFails => state.db.pool().close().await,
+                            }
+                            let conn = enforce_root_conn(
+                                community,
+                                owned_assertion(agent.public_key(), owner.public_key()),
+                                &agent,
+                            );
+                            (state, conn)
+                        },
+                        |(state, (mut t, event))| async move {
+                            handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+                            let mut ok_true = false;
+                            while let Ok(WsMessage::Text(text)) = t.send_rx.try_recv() {
+                                ok_true |= is_ok_true(text.as_str());
+                            }
+                            run_expiry_worker(&t).await;
+                            ok_true
+                        },
+                    );
+                assert_eq!(records, expected, "{case:?}: {lines:?}");
+                assert_eq!(ok_true, reason.is_none(), "{case:?}: admission unchanged");
+                let denials: Vec<_> = lines
+                    .iter()
+                    .filter(|l| l.contains("enforce deny"))
+                    .collect();
+                match reason {
+                    Some(reason) => {
+                        assert_eq!(denials.len(), 1, "{case:?}: {lines:?}");
+                        assert!(
+                            denials[0].contains(&format!("reason=\"{reason}\"")),
+                            "{case:?}: {lines:?}"
+                        );
+                        assert!(
+                            denials[0].contains("stage=\"owner\""),
+                            "{case:?}: {lines:?}"
+                        );
+                        assert!(denials[0].contains("route=\"ws\""), "{case:?}: {lines:?}");
+                    }
+                    None => assert!(denials.is_empty(), "{case:?}: {lines:?}"),
+                }
+                if let Some(reads) = reads {
+                    assert_eq!(auth_reads, reads, "{case:?}: authorization reads");
+                }
+            }
+        }
+
+        /// A deadline the AUTH commit's effect gate sees before the expiry
+        /// worker runs is recorded once, as the pending session's
+        /// `session_deadline` denial: in either order, the attempt's own
+        /// retirement cannot end it unrecorded, and the worker that follows
+        /// adds nothing. Admission is unchanged: no `OK true`.
+        /// Mutation: deleting root's `effect_refused` call records nothing
+        /// for `GateFirst`.
+        #[test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        fn enforce_root_deadline_seen_by_the_gate_first_is_recorded_once() {
+            for worker_first in [false, true] {
+                let (records, lines, _, ok_true) = crate::nip_fi_shadow::tests::enforce_observed(
+                    async {
+                        let state = auth_test_state_real_db_expect().await;
+                        let agent = Keys::generate();
+                        let community = seeded_community(&state).await;
+                        state
+                            .db
+                            .ensure_user(community, agent.public_key().as_bytes())
+                            .await
+                            .expect("ensure user");
+                        let conn = enforce_root_conn_gated(
+                            community,
+                            buzz_auth::VerifiedAssertion::for_test(
+                                Some(agent.public_key()),
+                                vec![chrono::Utc::now() + chrono::Duration::hours(1)],
+                            ),
+                            &agent,
+                            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                        );
+                        (state, conn)
+                    },
+                    |(state, (mut t, event))| async move {
+                        if worker_first {
+                            run_expiry_worker(&t).await;
+                        }
+                        handle_auth(event, std::sync::Arc::clone(&t.conn), state).await;
+                        run_expiry_worker(&t).await;
+                        let mut ok_true = false;
+                        while let Ok(WsMessage::Text(text)) = t.send_rx.try_recv() {
+                            ok_true |= is_ok_true(text.as_str());
+                        }
+                        ok_true
+                    },
+                );
+                assert_eq!(
+                    records,
+                    ["ws deadline/rejected"],
+                    "worker_first={worker_first}: {lines:?}"
+                );
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.contains("reason=\"session_deadline\"")),
+                    "{lines:?}"
+                );
+                assert!(!ok_true, "admission unchanged");
+            }
+        }
+
         /// A community whose row exists, so bans and users can reference it.
         async fn seeded_community(
             state: &crate::state::AppState,
@@ -1636,6 +2416,7 @@ mod tests {
             let backpressure = Arc::new(std::sync::atomic::AtomicU8::new(0));
             let subscriptions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -1831,8 +2612,10 @@ mod tests {
                         &keys.public_key().to_hex(),
                         "member",
                         None,
+                        &nostr::Keys::generate(),
                     )
                     .await
+                    .map(|write| write.outcome)
                     .expect("seed member");
                 }
             }
@@ -1873,8 +2656,13 @@ mod tests {
             // while AUTH is paused.
             state
                 .db
-                .remove_relay_member(removed_community, &member.public_key().to_hex())
+                .remove_relay_member(
+                    removed_community,
+                    &member.public_key().to_hex(),
+                    &nostr::Keys::generate(),
+                )
                 .await
+                .map(|write| write.outcome)
                 .expect("remove member");
             assert!(
                 state
@@ -2061,6 +2849,211 @@ mod tests {
             assert!(!conns[2].cancel.is_cancelled(), "the bystander stays");
         }
 
+        /// Flags `names` as default channels in `community`, oldest first.
+        async fn default_channels(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            owner: &Keys,
+            names: &[&str],
+        ) -> Vec<uuid::Uuid> {
+            use buzz_db::channel::{ChannelType, ChannelUpdate, ChannelVisibility};
+            state
+                .db
+                .ensure_user_for_authorization(community, owner.public_key().as_bytes())
+                .await
+                .expect("seed owner");
+            let mut channels = Vec::new();
+            for name in names {
+                let channel = state
+                    .db
+                    .create_channel(
+                        community,
+                        name,
+                        ChannelType::Stream,
+                        ChannelVisibility::Open,
+                        None,
+                        &owner.public_key().to_bytes(),
+                        None,
+                    )
+                    .await
+                    .expect("create channel")
+                    .id;
+                state
+                    .db
+                    .update_channel(
+                        community,
+                        channel,
+                        ChannelUpdate {
+                            auto_join: Some(true),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("flag channel");
+                channels.push(channel);
+            }
+            channels
+        }
+
+        /// Admits `keys` on a fresh root socket and waits for the admission's
+        /// auto-join outcome: the spawned task finishing, or the skip.
+        /// Panics if neither arrives. Returns the socket.
+        async fn admit_and_settle(
+            state: &std::sync::Arc<crate::state::AppState>,
+            community: buzz_core::tenant::CommunityId,
+            keys: &Keys,
+            challenge: &str,
+            tag: Option<Vec<String>>,
+        ) -> std::sync::Arc<crate::connection::ConnectionState> {
+            use crate::nip_fi_test_hooks::auto_join_done_hook;
+            let (done, release) = auto_join_done_hook::arm(community);
+            let (conn, _ctrl) = registered_pending_conn(state, community, challenge);
+            // A skip reports inside `handle_auth`, so wait alongside it.
+            tokio::join!(
+                handle_auth(
+                    signed_auth(keys, challenge, tag),
+                    std::sync::Arc::clone(&conn),
+                    std::sync::Arc::clone(state),
+                ),
+                async {
+                    tokio::time::timeout(std::time::Duration::from_secs(10), done)
+                        .await
+                        .unwrap_or_else(|_| panic!("{challenge}: no auto-join outcome"))
+                        .expect("auto-join hook dropped");
+                    release.notify_one();
+                },
+            );
+            assert!(
+                matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "{challenge} is admitted"
+            );
+            conn
+        }
+
+        /// On a community without a membership roster, a person's admission
+        /// joins them to the default channels they have never been in. An
+        /// agent's (NIP-OA) admission runs no join, and a person who left is
+        /// not joined back when they are admitted again. Each check waits for
+        /// that admission's own auto-join outcome (skip or finished task).
+        ///
+        /// Mutations: delete the `auto_join_never_joined_channels` spawn →
+        /// no outcome arrives (RED); drop `!admitted_agent` → the agent is
+        /// joined (RED); drop the row check in `put_first_member` → the
+        /// leave is undone (RED).
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn root_auth_joins_people_to_default_channels_without_a_roster() {
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent, person) = (Keys::generate(), Keys::generate(), Keys::generate());
+            let channel = default_channels(&state, community, &owner, &["general"]).await[0];
+            let role = |keys: &Keys| {
+                let state = std::sync::Arc::clone(&state);
+                let pubkey = keys.public_key().to_bytes();
+                async move {
+                    state
+                        .db
+                        .get_member_role(community, channel, &pubkey)
+                        .await
+                        .expect("member role")
+                }
+            };
+            let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let auth_tag: Vec<String> = serde_json::from_str(&auth_tag).expect("tag JSON");
+
+            admit_and_settle(&state, community, &agent, "auto-join-agent", Some(auth_tag)).await;
+            assert_eq!(role(&agent).await, None, "an agent is not joined");
+
+            admit_and_settle(&state, community, &person, "auto-join-person", None).await;
+            assert_eq!(role(&person).await.as_deref(), Some("member"));
+
+            let person_key = person.public_key().to_bytes();
+            state
+                .db
+                .remove_member(community, channel, &person_key, &person_key)
+                .await
+                .expect("leave");
+            admit_and_settle(&state, community, &person, "auto-join-again", None).await;
+            assert_eq!(role(&person).await, None, "a leave stands");
+        }
+
+        /// The admission auto-join holds the socket's effect permit for each
+        /// channel, so a session that ends before a channel's write joins
+        /// nothing more: cancelled before the first channel, nothing; between
+        /// the two channels, only the first. The next admission then joins
+        /// the channel that was skipped.
+        ///
+        /// Mutation: drop the per-channel `acquire_effect` → the cancelled
+        /// session is joined anyway (RED).
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn admission_auto_join_stops_when_the_session_ends() {
+            use crate::nip_fi_test_hooks::{auto_join_channel_hook, auto_join_done_hook};
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let owner = Keys::generate();
+            let channels =
+                default_channels(&state, community, &owner, &["general", "announcements"]).await;
+            let roles = |keys: &Keys| {
+                let state = std::sync::Arc::clone(&state);
+                let pubkey = keys.public_key().to_bytes();
+                let channels = channels.clone();
+                async move {
+                    let mut roles = Vec::new();
+                    for channel in channels {
+                        roles.push(
+                            state
+                                .db
+                                .get_member_role(community, channel, &pubkey)
+                                .await
+                                .expect("member role"),
+                        );
+                    }
+                    roles
+                }
+            };
+            let member = Some("member".to_string());
+
+            // `stop_before` channels pass, then the socket is cancelled.
+            for (stop_before, expected) in [(0, [None, None]), (1, [member.clone(), None])] {
+                let person = Keys::generate();
+                let (done, done_release) = auto_join_done_hook::arm(community);
+                let (mut reached, mut release) = auto_join_channel_hook::arm(community);
+                let (conn, _ctrl) = registered_pending_conn(&state, community, "auto-join-stop");
+                handle_auth(
+                    signed_auth(&person, "auto-join-stop", None),
+                    std::sync::Arc::clone(&conn),
+                    std::sync::Arc::clone(&state),
+                )
+                .await;
+                assert!(matches!(
+                    conn.auth_state_snapshot(),
+                    AuthState::Authenticated(_)
+                ));
+                for _ in 0..stop_before {
+                    reached.await.expect("task reaches a channel");
+                    // Re-arm before the task can run again: this task does
+                    // not yield between the release and the arm.
+                    release.notify_one();
+                    (reached, release) = auto_join_channel_hook::arm(community);
+                }
+                reached.await.expect("task reaches the stop channel");
+                conn.cancel.cancel();
+                release.notify_one();
+                done.await.expect("task finishes");
+                done_release.notify_one();
+                assert_eq!(roles(&person).await, expected, "stop before {stop_before}");
+
+                admit_and_settle(&state, community, &person, "auto-join-resume", None).await;
+                assert_eq!(
+                    roles(&person).await,
+                    [member.clone(), member.clone()],
+                    "the next admission joins what was skipped"
+                );
+            }
+        }
+
         /// AUTH with NIP-OA records a previously ownerless agent's owner. That
         /// closes the agent's earlier ownerless socket so it reconnects with
         /// the owner attached, but not the socket being admitted, even when
@@ -2173,6 +3166,18 @@ mod tests {
             );
         }
 
+        async fn insert_test_community(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+        ) {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community.as_uuid())
+                .bind(format!("w-deny-{}.example", community.as_uuid().simple()))
+                .execute(state.db.pool())
+                .await
+                .expect("insert community");
+        }
+
         async fn auth_test_state_real_db_expect() -> std::sync::Arc<crate::state::AppState> {
             use std::sync::Arc;
             let db_url = crate::test_support::database_url();
@@ -2186,9 +3191,7 @@ mod tests {
             config.database_url = db_url.clone();
             config.redis_url = "redis://127.0.0.1:1".to_string();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -2221,7 +3224,22 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught() {
-            w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body().await;
+            w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body(None)
+                .await;
+        }
+
+        // The owner's disconnect in the same window: the close scan finds the
+        // agent's socket by its recorded owner, and the check refuses it on
+        // the owner's entry. Mutation: dropping the owner in
+        // `NipFiSession::from_assertion`, or the owner arm of the root
+        // registry's match, leaves the scan at 0.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_deny_owner_straddle_closes_agent_and_refuses_admission() {
+            w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body(Some(
+                Keys::generate(),
+            ))
+            .await;
         }
 
         // ── W_deny_straddle: deny entry inserted in window between registration and check
@@ -2249,7 +3267,9 @@ mod tests {
         //      Causally falsifies the registration-before-check invariant.
         //
         // Runs in PG lane on wrapper DB (same constraint as W1: ban-check is fail-closed).
-        async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body() {
+        async fn w_deny_straddle_entry_inserted_between_registration_and_check_is_caught_body(
+            owner: Option<Keys>,
+        ) {
             use buzz_auth::{IssuerCapacity, NipFiDenyMap, VerifiedAssertion};
             use chrono::{Duration, Utc};
             use std::collections::HashMap;
@@ -2262,7 +3282,12 @@ mod tests {
             let key = Keys::generate();
             let deadline = Utc::now() + Duration::hours(1);
             // `for_test` produces issuer = "test-issuer".
-            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            // The deny and the close scan target the owner when there is one.
+            let target = owner.as_ref().map_or(key.public_key(), Keys::public_key);
+            if owner.is_some() {
+                assertion = assertion.with_owner_for_test(target);
+            }
 
             let challenge = "w-deny-straddle-challenge".to_string();
             let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
@@ -2279,6 +3304,7 @@ mod tests {
                 crate::state::CommunityConnectionControl::new(cancel.clone());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2319,6 +3345,9 @@ mod tests {
             let deny_map_for_insert = Arc::clone(&deny_map);
             state.nip_fi_deny_map = Some(deny_map);
             let state = Arc::new(state);
+            // An agent assertion's owner is linked before the deny-set check,
+            // and that link needs the community row.
+            insert_test_community(&state, community).await;
 
             // Register the connection with conn_manager so set_authenticated_pubkey
             // (called by handle_auth after NIP-42 succeeds) stores the pubkey — the
@@ -2364,12 +3393,8 @@ mod tests {
             // Handler is now AFTER set_authenticated_pubkey (registered) and BEFORE
             // the deny check. Insert the deny entry into the live map.
             let until = Utc::now() + Duration::seconds(3600);
-            let merge = deny_map_for_insert.merge_cross_pod_deny(
-                "test-issuer",
-                &key.public_key(),
-                until,
-                Utc::now(),
-            );
+            let merge =
+                deny_map_for_insert.merge_cross_pod_deny("test-issuer", &target, until, Utc::now());
             assert!(
                 matches!(merge, buzz_auth::CrossPodMergeResult::Merged),
                 "W_deny_straddle: deny entry must be inserted during the hook window"
@@ -2380,7 +3405,7 @@ mod tests {
             // to the concurrent close scan — the normative invariant [FI-TRACE-DENY-SET].
             // With the deny entry live, the scan finds exactly one session matching this
             // pubkey and closes it.
-            let pubkey_bytes = key.public_key().to_bytes().to_vec();
+            let pubkey_bytes = target.to_bytes().to_vec();
             let closed = state
                 .conn_manager
                 .disconnect_nip_fi("test-issuer", &pubkey_bytes);
@@ -2486,6 +3511,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2620,13 +3646,22 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w_deny_pre_registration_denied_by_handler_check() {
-            w_deny_pre_registration_body(true).await;
+            w_deny_pre_registration_body(true, None).await;
+        }
+
+        // An owner-only deny entry refuses the agent at the handler's check.
+        // Mutation: dropping the owner arm of `assertion_denied` admits the
+        // agent with OK(true).
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn w_deny_pre_registration_owner_denied_by_handler_check() {
+            w_deny_pre_registration_body(true, Some(Keys::generate())).await;
         }
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
         async fn w_deny_pre_registration_clean_key_admitted() {
-            w_deny_pre_registration_body(false).await;
+            w_deny_pre_registration_body(false, None).await;
         }
 
         // ── W_deny_pre_registration: the deny entry exists BEFORE the connection
@@ -2638,7 +3673,7 @@ mod tests {
         //
         // Mutation: bypass the `[FI-TRACE-DENY-SET]` check in `handle_auth` →
         // the denied case sends OK(true), stays uncancelled, enqueues no frame.
-        async fn w_deny_pre_registration_body(deny_self: bool) {
+        async fn w_deny_pre_registration_body(deny_self: bool, owner: Option<Keys>) {
             use buzz_auth::{IssuerCapacity, NipFiDenyMap, VerifiedAssertion};
             use chrono::{Duration, Utc};
             use std::collections::HashMap;
@@ -2650,7 +3685,12 @@ mod tests {
             let key = Keys::generate();
             let deadline = Utc::now() + Duration::hours(1);
             // `for_test` produces issuer = "test-issuer".
-            let assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            let mut assertion = VerifiedAssertion::for_test(Some(key.public_key()), vec![deadline]);
+            // An agent assertion's deny entry targets its owner.
+            let target = owner.as_ref().map_or(key.public_key(), Keys::public_key);
+            if owner.is_some() {
+                assertion = assertion.with_owner_for_test(target);
+            }
 
             let challenge = "w-deny-pre-registration-challenge".to_string();
             let (send_tx, mut send_rx) = mpsc::channel::<WsMessage>(8);
@@ -2661,6 +3701,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2694,7 +3735,7 @@ mod tests {
                 }],
             ));
             let denied_key = if deny_self {
-                key.public_key()
+                target
             } else {
                 Keys::generate().public_key()
             };
@@ -2707,6 +3748,9 @@ mod tests {
             assert!(matches!(merge, buzz_auth::CrossPodMergeResult::Merged));
             state.nip_fi_deny_map = Some(deny_map);
             let state = Arc::new(state);
+            // An agent assertion's owner is linked before the deny-set check,
+            // and that link needs the community row.
+            insert_test_community(&state, community).await;
 
             state.conn_manager.register(
                 conn.conn_id,
@@ -2836,6 +3880,7 @@ mod tests {
             let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -2954,6 +3999,7 @@ mod tests {
             let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel::<WsMessage>(1);
             let cancel = CancellationToken::new();
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -3064,9 +4110,7 @@ mod tests {
             config.database_url = db_url.clone();
             config.redis_url = "redis://127.0.0.1:1".to_string();
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3109,6 +4153,7 @@ mod tests {
             let cancel = CancellationToken::new();
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
@@ -3244,6 +4289,127 @@ mod tests {
                     harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
                 } else {
                     harness.assert_off_mode_ok("restricted: not a relay member");
+                }
+            }
+        }
+
+        /// Root WS AUTH of a NIP-FI agent on a closed relay, with no NIP-OA:
+        /// a member token owner admits a non-member agent and records the
+        /// stored owner; a non-member owner, a banned owner (even for an agent
+        /// that is itself a member) and a different stored owner are each
+        /// refused with `authorization denied`.
+        /// The banned-owner case is also caught by the stored owner link
+        /// admission records, so the ban helper's own token-owner arm is
+        /// isolated on HTTP (`token_owner_ban_refuses_direct_member_agent_on_http`).
+        /// Mutations: drop the token-owner arm of `check_membership`, or treat
+        /// `OwnerLink::Conflict` as linked → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_token_owner_decides_agent_admission_on_root_ws() {
+            #[derive(Clone, Copy, Debug)]
+            enum Case {
+                MemberOwner,
+                NonMemberOwner,
+                BannedOwnerOfMemberAgent,
+                OtherStoredOwner,
+            }
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let state = state_with_pool(pool, |c| c.require_relay_membership = true).await;
+            for case in [
+                Case::MemberOwner,
+                Case::NonMemberOwner,
+                Case::BannedOwnerOfMemberAgent,
+                Case::OtherStoredOwner,
+            ] {
+                let owner = Keys::generate();
+                let mut harness = AuthHarness::new_agent(owner.public_key());
+                let tenant = harness.conn.tenant.clone();
+                let community = tenant.community();
+                sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                    .bind(community.as_uuid())
+                    .bind(format!(
+                        "fi-token-owner-{}.example",
+                        community.as_uuid().simple()
+                    ))
+                    .execute(state.db.pool())
+                    .await
+                    .expect("insert community");
+                let agent = harness.key.public_key();
+                if !matches!(case, Case::NonMemberOwner) {
+                    state
+                        .db
+                        .add_relay_member(
+                            community,
+                            &owner.public_key().to_hex(),
+                            "member",
+                            None,
+                            &nostr::Keys::generate(),
+                        )
+                        .await
+                        .map(|write| write.outcome)
+                        .expect("add owner");
+                }
+                match case {
+                    Case::BannedOwnerOfMemberAgent => {
+                        state
+                            .db
+                            .add_relay_member(
+                                community,
+                                &agent.to_hex(),
+                                "member",
+                                None,
+                                &nostr::Keys::generate(),
+                            )
+                            .await
+                            .map(|write| write.outcome)
+                            .expect("add agent");
+                        let owner_bytes = owner.public_key().to_bytes();
+                        state
+                            .db
+                            .ban_community_member(community, &owner_bytes, &owner_bytes, None, None)
+                            .await
+                            .expect("ban owner");
+                    }
+                    Case::OtherStoredOwner => {
+                        let prior = Keys::generate().public_key();
+                        for key in [&agent, &prior] {
+                            state
+                                .db
+                                .ensure_user(community, key.as_bytes())
+                                .await
+                                .expect("ensure user");
+                        }
+                        assert!(state
+                            .db
+                            .set_agent_owner(community, agent.as_bytes(), prior.as_bytes())
+                            .await
+                            .expect("seed prior owner"));
+                    }
+                    Case::MemberOwner | Case::NonMemberOwner => {}
+                }
+
+                harness.run(harness.auth_event(), state.clone()).await;
+
+                if matches!(case, Case::MemberOwner) {
+                    let mut ok_true = false;
+                    while let Ok(WsMessage::Text(t)) = harness.send_rx.try_recv() {
+                        let frame: serde_json::Value = serde_json::from_str(&t).unwrap();
+                        ok_true |= frame[0] == "OK" && frame[2] == true;
+                    }
+                    assert!(ok_true, "{case:?}: agent must receive OK(true)");
+                    assert!(matches!(
+                        harness.conn.auth_state_snapshot(),
+                        AuthState::Authenticated(_)
+                    ));
+                    assert!(state
+                        .db
+                        .is_agent_owner(community, agent.as_bytes(), owner.public_key().as_bytes())
+                        .await
+                        .expect("read stored owner"));
+                } else {
+                    harness.assert_fi_terminal(buzz_auth::DenialClass::AuthorizationDenied);
                 }
             }
         }
@@ -3488,7 +4654,7 @@ mod tests {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _recorder_guard = metrics::set_default_local_recorder(&recorder);
-        let state = crate::state::tests::test_state_with_database_url(
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
             "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
         )
         .await;
@@ -3529,5 +4695,38 @@ mod tests {
             metric_counter(&snapshot, "buzz_auth_attempts_total", None),
             1
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeat_auth_after_a_terminal_logs_one_denial() {
+        let state = auth_test_state().await;
+        for (auth, reason) in [
+            (
+                crate::connection::tests::authenticated_state(),
+                "already_authenticated",
+            ),
+            (AuthState::Failed, "already_failed"),
+        ] {
+            let (conn, _rx) = test_conn_with_auth(auth);
+            let event = EventBuilder::new(Kind::Authentication, "")
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            handle_auth(
+                event,
+                std::sync::Arc::clone(&conn),
+                std::sync::Arc::clone(&state),
+            )
+            .await;
+            drop(guard);
+            let lines: Vec<_> = out
+                .lines()
+                .into_iter()
+                .filter(|l| l["event"] == "auth")
+                .collect();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(lines[0]["outcome"], "denied");
+            assert_eq!(lines[0]["reason"], reason);
+        }
     }
 }

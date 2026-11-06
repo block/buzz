@@ -1,9 +1,13 @@
 import UIKit
 import ImageIO
+import CoreText
 
 /// Native reaction toggles above the complete list of reactors.
 final class NativeReactionDetailsViewController: UIViewController, UITableViewDataSource {
   var onClose: (() -> Void)?
+  var onAddReaction: (() -> Void)?
+  private let canAddReaction: Bool
+  private let addReactionIconCodePoint: Int
   var onToggle: ((String) -> Void)?
   private let sheetColor: UIColor
   private let foregroundColor: UIColor
@@ -32,6 +36,8 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
     sheetColor = color("sheetColor", fallback: .systemGroupedBackground)
     foregroundColor = color("foregroundColor", fallback: .label)
+    canAddReaction = data["canAddReaction"] as? Bool == true
+    addReactionIconCodePoint = data["addReactionIconCodePoint"] as? Int ?? 0
     outlineColor = color("outlineColor", fallback: .separator)
     reactions = data["reactions"] as? [[String: Any]] ?? []
     profiles = data["profiles"] as? [String: [String: Any]] ?? [:]
@@ -66,8 +72,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
       configuration.baseBackgroundColor = .secondarySystemBackground
     }
     configuration.cornerStyle = .capsule
-    configuration.image = UIImage(systemName: "xmark",
-      withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold))
+    configuration.image = NativeTabler.image("xmark", size: 24)
     configuration.baseForegroundColor = foregroundColor
     close.configuration = configuration
     close.tintColor = foregroundColor
@@ -130,8 +135,43 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     }
   }
 
+  // Use the exact bundled Tabler font that backs BuzzIcons in Flutter.
+  private static let tablerFont: UIFont? = {
+    guard let frameworks = Bundle.main.privateFrameworksURL,
+      let provider = CGDataProvider(url: frameworks.appendingPathComponent(
+        "App.framework/flutter_assets/assets/fonts/TablerIcons.ttf") as CFURL),
+      let font = CGFont(provider), let name = font.postScriptName else { return nil }
+    CTFontManagerRegisterGraphicsFont(font, nil)
+    return UIFont(name: name as String, size: 24)
+  }()
+
+  private var addReactionImage: UIImage? {
+    guard let font = Self.tablerFont,
+      let scalar = UnicodeScalar(addReactionIconCodePoint) else { return nil }
+    let glyph = NSAttributedString(string: String(scalar), attributes: [.font: font])
+    let size = glyph.size()
+    return UIGraphicsImageRenderer(size: CGSize(width: 28, height: 28)).image { _ in
+      glyph.draw(at: CGPoint(x: (28 - size.width) / 2, y: (28 - size.height) / 2))
+    }.withRenderingMode(.alwaysTemplate)
+  }
+
   private func rebuildFilters() {
     for child in filters.arrangedSubviews { child.removeFromSuperview() }
+    if canAddReaction {
+      let add = UIButton(type: .system)
+      var config = UIButton.Configuration.gray()
+      config.image = addReactionImage
+      if config.image == nil { config.title = "Add reaction" }
+      config.cornerStyle = .capsule
+      config.baseForegroundColor = foregroundColor
+      add.configuration = config
+      add.accessibilityLabel = "Add reaction"
+      add.accessibilityIdentifier = "reaction-sheet-add"
+      add.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+      add.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+      add.addAction(UIAction { [weak self] _ in self?.onAddReaction?() }, for: .touchUpInside)
+      filters.addArrangedSubview(add)
+    }
     for reaction in reactions {
       guard let emoji = reaction["emoji"] as? String else { continue }
       addFilter(title: "\(reaction["count"] as? Int ?? 0)", emoji: emoji, reaction: reaction)

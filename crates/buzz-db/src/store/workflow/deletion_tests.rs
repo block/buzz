@@ -174,7 +174,10 @@ async fn workflow_deletion_preserves_newer_definition_and_cleans_legacy_orphan()
     assert_present(&db, &query, id).await;
 
     // Old relay releases deleted the executable row, but not the definition.
-    db.delete_workflow_for_owner(community, id, &owner)
+    sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid())
+        .bind(id)
+        .execute(&db.pool)
         .await
         .expect("legacy deletion");
     assert_eq!(
@@ -359,4 +362,278 @@ async fn quiescing_community_rejects_workflow_deletion_at_admission_before_repla
             .await
             .expect("count deletion request");
     assert_eq!(stored, 0, "a rejected deletion request must not be stored");
+}
+
+async fn count_where(db: &Db, table: &str, column: &str, community: CommunityId, id: Uuid) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {table} WHERE community_id = $1 AND {column} = $2"
+    )))
+    .bind(community.as_uuid())
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count children")
+}
+
+/// With every foreign-key delete action retired, the coordinate delete must
+/// remove approvals (of the workflow or of its runs), fires and runs itself,
+/// in an order the remaining constraints accept.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_removes_children_without_cascades() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    let query = seed(&db, community, &keys, id, &d_tag, now).await;
+    let other = Uuid::new_v4();
+    seed(&db, community, &keys, other, &other.to_string(), now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+    sqlx::query(
+        "INSERT INTO scheduled_workflow_fires \
+        (community_id, workflow_id, scheduled_for, workflow_run_id) VALUES ($1, $2, NOW(), $3)",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .bind(run_id)
+    .execute(&db.pool)
+    .await
+    .expect("scheduled claim linked to run");
+    // One approval hangs off the workflow; the other names a different
+    // workflow but this workflow's run, so only the run_id branch reaches it.
+    for (token, workflow_id) in [("workflow-approval", id), ("run-approval", other)] {
+        crate::workflow::create_approval(
+            &db.pool,
+            crate::workflow::CreateApprovalParams {
+                community_id: community,
+                token,
+                workflow_id,
+                run_id,
+                step_id: "gate",
+                step_index: 0,
+                approver_spec: "@anyone",
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .await
+        .expect("approval");
+    }
+
+    let outcome = db
+        .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+        .await
+        .expect("delete without cascades");
+    assert!(outcome.changed);
+    assert_absent(&db, &query, id).await;
+    for (table, column, key) in [
+        ("workflow_approvals", "workflow_id", id),
+        ("workflow_approvals", "run_id", run_id),
+        ("scheduled_workflow_fires", "workflow_id", id),
+        ("workflow_runs", "workflow_id", id),
+    ] {
+        assert_eq!(
+            count_where(&db, table, column, community, key).await,
+            0,
+            "{table} rows by {column} must be deleted explicitly"
+        );
+    }
+    assert!(get_workflow(&db.pool, community, other).await.is_ok());
+}
+
+/// A run inserted concurrently with the delete holds the workflow's key-share
+/// lock. The delete must wait for it at its row lock and then remove the run;
+/// with no cascade, a delete that took its child snapshot first would fail the
+/// foreign-key check on the workflow.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    seed(&db, community, &keys, id, &d_tag, now).await;
+
+    let mut inserter = db.pool.begin().await.expect("begin run insert");
+    sqlx::query(
+        "INSERT INTO workflow_runs (community_id, id, workflow_id, status, current_step, execution_trace) \
+         VALUES ($1, $2, $3, 'pending', 0, '[]')",
+    )
+    .bind(community.as_uuid())
+    .bind(Uuid::new_v4())
+    .bind(id)
+    .execute(&mut *inserter)
+    .await
+    .expect("insert concurrent run");
+
+    let name = format!("workflow-delete-{}", Uuid::new_v4().simple());
+    let deleter = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let deletion = tokio::spawn(async move {
+        deleter
+            .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+            .await
+    });
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    inserter.commit().await.expect("commit concurrent run");
+
+    let outcome = deletion
+        .await
+        .expect("join deletion")
+        .expect("delete after concurrent run");
+    assert!(outcome.changed);
+    assert_eq!(
+        count_where(&db, "workflow_runs", "workflow_id", community, id).await,
+        0
+    );
+}
+
+/// An approval naming another workflow but one of this workflow's runs only
+/// key-share locks that run, so the workflow lock does not exclude it. The
+/// delete must lock the runs, wait for the insert, and then remove it; with no
+/// cascade, committing it between the approval and run deletes would fail the
+/// run delete's foreign-key check.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_approval() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    seed(&db, community, &keys, id, &d_tag, now).await;
+    let other = Uuid::new_v4();
+    seed(&db, community, &keys, other, &other.to_string(), now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+
+    let mut inserter = db.pool.begin().await.expect("begin approval insert");
+    sqlx::query(
+        "INSERT INTO workflow_approvals (community_id, token, workflow_id, run_id, step_id, \
+         step_index, approver_spec, status, expires_at) \
+         VALUES ($1, $2, $3, $4, 'gate', 0, '@anyone', 'pending', NOW() + INTERVAL '1 hour')",
+    )
+    .bind(community.as_uuid())
+    .bind(Uuid::new_v4().as_bytes().to_vec())
+    .bind(other)
+    .bind(run_id)
+    .execute(&mut *inserter)
+    .await
+    .expect("insert concurrent cross-workflow approval");
+
+    let name = format!("workflow-delete-{}", Uuid::new_v4().simple());
+    let deleter = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let deletion = tokio::spawn(async move {
+        deleter
+            .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+            .await
+    });
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    inserter.commit().await.expect("commit concurrent approval");
+
+    let outcome = deletion
+        .await
+        .expect("join deletion")
+        .expect("delete after concurrent approval");
+    assert!(outcome.changed);
+    for (table, column, key) in [
+        ("workflow_approvals", "run_id", run_id),
+        ("workflow_runs", "workflow_id", id),
+    ] {
+        assert_eq!(
+            count_where(&db, table, column, community, key).await,
+            0,
+            "{table}"
+        );
+    }
+    assert!(get_workflow(&db.pool, community, other).await.is_ok());
+}
+
+/// Attaching a run to a scheduled fire locks the fire row, then key-share
+/// locks the run for its foreign key. The delete must take those two in the
+/// same order (fire before run), so an attach in flight when the delete
+/// starts completes and is then removed, rather than deadlocking with it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
+    let (db, community) = setup().await;
+    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let d_tag = id.to_string();
+    let now = Timestamp::now().as_secs();
+    seed(&db, community, &keys, id, &d_tag, now).await;
+    let run_id = create_workflow_run(&db.pool, community, id, None, None)
+        .await
+        .expect("run");
+    let scheduled_for: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO scheduled_workflow_fires (community_id, workflow_id, scheduled_for) \
+         VALUES ($1, $2, date_trunc('second', NOW())) RETURNING scheduled_for",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("unlinked scheduled claim");
+
+    // Hold the fire row as an attach does before its foreign-key check runs.
+    let mut attacher = db.pool.begin().await.expect("begin fire attach");
+    sqlx::query(
+        "SELECT 1 FROM scheduled_workflow_fires \
+         WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .bind(scheduled_for)
+    .execute(&mut *attacher)
+    .await
+    .expect("lock fire row");
+
+    let name = format!("workflow-delete-{}", Uuid::new_v4().simple());
+    let deleter = Db::from_pool(crate::test_support::named_pool(&name).await);
+    let deletion = tokio::spawn(async move {
+        deleter
+            .delete_workflow_by_coordinate(community, &owner, &d_tag, now as i64)
+            .await
+    });
+    crate::test_support::wait_for_lock_wait(&db.pool, &name).await;
+    let attached = sqlx::query(
+        "UPDATE scheduled_workflow_fires SET workflow_run_id = $4 \
+         WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3",
+    )
+    .bind(community.as_uuid())
+    .bind(id)
+    .bind(scheduled_for)
+    .bind(run_id)
+    .execute(&mut *attacher)
+    .await
+    .expect("attach run to fire without deadlock");
+    assert_eq!(attached.rows_affected(), 1);
+    attacher.commit().await.expect("commit fire attach");
+
+    let outcome = deletion
+        .await
+        .expect("join deletion")
+        .expect("delete after concurrent fire attach");
+    assert!(outcome.changed);
+    for (table, column, key) in [
+        ("scheduled_workflow_fires", "workflow_id", id),
+        ("workflow_runs", "workflow_id", id),
+    ] {
+        assert_eq!(
+            count_where(&db, table, column, community, key).await,
+            0,
+            "{table}"
+        );
+    }
 }

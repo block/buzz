@@ -693,7 +693,7 @@ class _Avatar extends StatelessWidget {
     return AvatarImage(
       imageUrl: avatarUrl,
       radius: radius,
-      backgroundColor: context.colors.primaryContainer,
+      backgroundColor: context.controlSurface,
       fallback: Text(
         initial,
         style: TextStyle(

@@ -243,6 +243,15 @@ IosNavigationAction _huddleNavigationAction(
               );
               return;
             }
+            // The header button is easy to hit by accident, so a new call asks first.
+            final confirmed = await showConfirmation(
+              context: context,
+              title: 'Start a Huddle?',
+              message:
+                  'Your microphone will turn on, and others in this conversation can join.',
+              confirmLabel: 'Start Huddle',
+            );
+            if (!confirmed || !context.mounted) return;
             try {
               await ref
                   .read(mobileHuddleControllerProvider.notifier)
@@ -263,8 +272,9 @@ IosNavigationAction _huddleNavigationAction(
               );
             } catch (error) {
               if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context).showFeedbackSnackBar(
                 SnackBar(content: Text(_huddleActionError(error))),
+                kind: ToastKind.error,
               );
             }
           },
@@ -330,15 +340,13 @@ class _HuddleJoinSurface extends ConsumerWidget {
           };
 
     return Padding(
-      padding: const EdgeInsets.only(
-        left: messageAvatarSize + messageAvatarContentGap,
-        top: Grid.xxs,
-      ),
+      padding: const EdgeInsets.only(top: Grid.xxs),
       child: Container(
+        key: ValueKey('huddle-card-${message.id}'),
         padding: const EdgeInsets.all(Grid.twelve),
         decoration: BoxDecoration(
           color: context.colors.primary.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(Radii.md),
+          borderRadius: conversationAttachmentCorners,
           border: Border.all(
             color: context.colors.primary.withValues(alpha: 0.18),
           ),
@@ -444,9 +452,10 @@ Future<void> _startMobileHuddleFromChannel({
     );
   } catch (error) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(content: Text(_huddleActionError(error))),
+      kind: ToastKind.error,
+    );
   }
 }
 
@@ -458,8 +467,9 @@ void _openMobileHuddle({
   final config = ref.read(relayConfigProvider);
   final nsec = config.nsec;
   if (nsec == null || nsec.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
       const SnackBar(content: Text('A paired identity is required.')),
+      kind: ToastKind.generic,
     );
     return;
   }
@@ -557,9 +567,10 @@ Future<void> _startReplacementHuddle({
     );
   } catch (error) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text(_huddleActionError(error))));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      SnackBar(content: Text(_huddleActionError(error))),
+      kind: ToastKind.error,
+    );
   }
 }
 
@@ -772,10 +783,13 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                               )
                               .catchError((Object error) {
                                 if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(
+                                  context,
+                                ).showFeedbackSnackBar(
                                   const SnackBar(
                                     content: Text('Reaction failed'),
                                   ),
+                                  kind: ToastKind.error,
                                 );
                               }),
                         );

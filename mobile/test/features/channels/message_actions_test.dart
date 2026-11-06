@@ -21,6 +21,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/thread_ids.dart';
+
 const _channelId = 'chan-1';
 
 TimelineMessage _message({
@@ -474,7 +476,7 @@ void main() {
   });
 
   testWidgets(
-    'message long press keeps taps and scrolling while repeated holds win',
+    'message long press keeps taps and delayed scrolling while repeated holds win',
     (tester) async {
       var parentTaps = 0;
       var nestedTaps = 0;
@@ -534,6 +536,8 @@ void main() {
       final drag = await tester.startGesture(
         tester.getCenter(find.byKey(const ValueKey('parent-gesture-target'))),
       );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(longPresses, 5);
       await drag.moveBy(const Offset(0, -30));
       await tester.pump();
       await drag.moveBy(const Offset(0, -70));
@@ -545,9 +549,13 @@ void main() {
       expect(longPresses, 5);
       expect(scrollController.offset, greaterThan(0));
     },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
   );
 
-  testWidgets('iOS message long press recognizes at 200 ms', (tester) async {
+  testWidgets('iOS message long press recognizes at 500 ms', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     try {
       var longPresses = 0;
@@ -569,7 +577,7 @@ void main() {
       final gesture = await tester.startGesture(
         tester.getCenter(find.byKey(const ValueKey('ios-long-press-target'))),
       );
-      await tester.pump(const Duration(milliseconds: 199));
+      await tester.pump(const Duration(milliseconds: 499));
       expect(longPresses, 0);
       await tester.pump(const Duration(milliseconds: 2));
       expect(longPresses, 1);
@@ -1142,7 +1150,7 @@ void main() {
       final prefs = await _mockPrefs();
       await _pumpSheet(
         tester,
-        message: _message(rootId: 'root-9'),
+        message: _message(rootId: threadIdRootDash9),
         prefs: prefs,
       );
 
@@ -1152,7 +1160,9 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.text('open')),
       );
-      expect(container.read(threadFollowsProvider).followedRootIds, {'root-9'});
+      expect(container.read(threadFollowsProvider).followedRootIds, {
+        threadIdRootDash9,
+      });
 
       // Re-open: the row now offers Unfollow.
       await tester.tap(find.text('open'));
@@ -1226,10 +1236,10 @@ void main() {
     test('builds a canonical link with thread context', () {
       expect(
         messageLinkFor(
-          message: _message(rootId: 'root-1'),
+          message: _message(rootId: threadIdRootDash1),
           channelId: _channelId,
         ),
-        'buzz://message?channel=chan-1&id=msg-1&thread=root-1',
+        'buzz://message?channel=chan-1&id=msg-1&thread=$threadIdRootDash1',
       );
     });
 

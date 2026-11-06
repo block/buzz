@@ -309,7 +309,7 @@ class _CameraCloseButton extends StatelessWidget {
           ),
           foregroundColor: Colors.white,
         ),
-        icon: Icon(BuzzIcons.arrowLeft, size: emphasized ? 24 : 18),
+        icon: Icon(BuzzIcons.arrowLeft, size: 24),
       ),
     );
   }

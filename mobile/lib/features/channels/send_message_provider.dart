@@ -6,6 +6,7 @@ import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
+import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
 import 'local_message_send_animation_provider.dart';
@@ -256,7 +257,15 @@ class SendMessage {
   }
 }
 
-final sendMessageProvider = Provider<SendMessage>((ref) {
+final sendMessageProvider = Provider<SendMessage>((ref) => _sender(ref));
+
+/// Shares signing and delivery with channels, with Me's flat optimistic reader.
+final meSendMessageProvider = Provider<SendMessage>(
+  (ref) => _sender(ref, personal: true),
+);
+
+SendMessage _sender(Ref ref, {bool personal = false}) {
+  final messages = personal ? meMessagesProvider : channelMessagesProvider;
   final config = ref.watch(relayConfigProvider);
   return SendMessage(
     signedEventRelay: SignedEventRelay(
@@ -266,22 +275,19 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
     readUserCache: () => ref.read(userCacheProvider),
-    addLocalMessage: (channelId, event) => ref
-        .read(channelMessagesProvider(channelId).notifier)
-        .addLocalMessage(event),
+    addLocalMessage: (channelId, event) =>
+        ref.read(messages(channelId).notifier).addLocalMessage(event),
     markLocalMessageForAnimation: (channelId, eventId) => ref
         .read(localMessageSendAnimationProvider(channelId).notifier)
         .mark(eventId),
-    completeLocalMessage: (channelId, eventId) => ref
-        .read(channelMessagesProvider(channelId).notifier)
-        .completeLocalMessage(eventId),
-    removeLocalMessage: (channelId, eventId) => ref
-        .read(channelMessagesProvider(channelId).notifier)
-        .removeLocalMessage(eventId),
+    completeLocalMessage: (channelId, eventId) =>
+        ref.read(messages(channelId).notifier).completeLocalMessage(eventId),
+    removeLocalMessage: (channelId, eventId) =>
+        ref.read(messages(channelId).notifier).removeLocalMessage(eventId),
     isDeliveryValid: () {
       final currentConfig = ref.read(relayConfigProvider);
       return currentConfig.baseUrl == config.baseUrl &&
           currentConfig.nsec == config.nsec;
     },
   );
-});
+}

@@ -4,6 +4,7 @@
 //! request signing and replay protection, but they do not run through event
 //! ingest, relay membership, channel scoping, storage, or fan-out.
 
+use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
 
 use axum::{
@@ -41,6 +42,12 @@ pub struct ListCommunitiesQuery {
     owner_pubkey: String,
 }
 
+/// Query parameters for joined-community discovery by an authenticated operator.
+#[derive(Debug, Deserialize)]
+pub struct JoinedCommunitiesQuery {
+    member_pubkey: String,
+}
+
 /// Query parameters for `GET /operator/communities/availability`.
 #[derive(Debug, Deserialize)]
 pub struct CommunityAvailabilityQuery {
@@ -70,6 +77,17 @@ struct ListenerPubkeysRequest {
     pubkeys: Vec<String>,
 }
 
+/// Registration body: one proof signed by each target pubkey.
+#[derive(Debug, Deserialize)]
+struct ListenerRegistrationRequest {
+    registrations: Vec<nostr::Event>,
+}
+
+const MAX_LISTENER_PUBKEYS: usize = 1_000;
+const LISTENER_PUBKEYS_PATH: &str = "/operator/listener/pubkeys";
+/// Matches the NIP-98 request window: proofs are signed just before sending.
+const REGISTRATION_PROOF_MAX_SKEW_SECS: u64 = 60;
+
 fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
     let request: ListenerPubkeysRequest = serde_json::from_slice(body).map_err(|e| {
         api_error(
@@ -77,7 +95,7 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
             &format!("invalid operator-listener pubkeys JSON: {e}"),
         )
     })?;
-    if request.pubkeys.is_empty() || request.pubkeys.len() > 1_000 {
+    if request.pubkeys.is_empty() || request.pubkeys.len() > MAX_LISTENER_PUBKEYS {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "pubkeys must contain between 1 and 1000 entries",
@@ -103,11 +121,81 @@ fn parse_listener_pubkeys(body: &[u8]) -> Result<Vec<Vec<u8>>, (StatusCode, Json
         .collect()
 }
 
+/// Parse a registration body and return the target pubkeys whose proofs
+/// verify for `listener` at `url`.
+fn parse_listener_registrations(
+    body: &[u8],
+    listener: &nostr::PublicKey,
+    url: &str,
+    now: u64,
+) -> Result<Vec<Vec<u8>>, (StatusCode, Json<Value>)> {
+    let request: ListenerRegistrationRequest = serde_json::from_slice(body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid operator-listener registration JSON: {e}"),
+        )
+    })?;
+    if request.registrations.is_empty() || request.registrations.len() > MAX_LISTENER_PUBKEYS {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "registrations must contain between 1 and 1000 entries",
+        ));
+    }
+    request
+        .registrations
+        .iter()
+        .map(|proof| verify_registration_proof(proof, listener, url, now))
+        .collect::<Result<_, _>>()
+        .map_err(|reason| api_error(StatusCode::BAD_REQUEST, reason))
+}
+
+/// Verify one target-signed registration proof and return the target pubkey.
+///
+/// The proof binds the target's consent to this listener (`p`) and this
+/// deployment's registration endpoint (`u`). The outer NIP-98 request is
+/// replay-checked; within the skew window a proof can only re-register the
+/// pair it was signed for.
+fn verify_registration_proof(
+    proof: &nostr::Event,
+    listener: &nostr::PublicKey,
+    url: &str,
+    now: u64,
+) -> Result<Vec<u8>, &'static str> {
+    if u32::from(proof.kind.as_u16()) != buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION {
+        return Err("registration proof has the wrong kind");
+    }
+    if proof.verify().is_err() {
+        return Err("registration proof signature is invalid");
+    }
+    if proof.created_at.as_secs().abs_diff(now) > REGISTRATION_PROOF_MAX_SKEW_SECS {
+        return Err("registration proof is outside the timestamp window");
+    }
+    let listener_hex = listener.to_hex();
+    let tag_values = |name: &str| {
+        proof
+            .tags
+            .iter()
+            .filter_map(|tag| match tag.as_slice() {
+                [tag_name, value, ..] if tag_name == name => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    if tag_values("p") != [listener_hex.as_str()] {
+        return Err("registration proof must name exactly this listener in one p tag");
+    }
+    if tag_values("u") != [url] {
+        return Err("registration proof must name this endpoint in one u tag");
+    }
+    Ok(proof.pubkey.to_bytes().to_vec())
+}
+
 /// Shared deployment-global operator auth prelude. The canonical management
 /// origin and replay namespace are configuration, never tenant registry state
 /// or an inbound proxy `Host` header.
 async fn authorize_operator_request(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -128,8 +216,9 @@ async fn authorize_operator_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_operator(headers, method, &url, body)?;
-    check_operator_replay(state, event_id_bytes).await?;
+    } = bridge::verify_nip98_exempt_operator(slot, headers, method, &url, body)?;
+    slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    check_operator_replay(state, event_id_bytes, slot).await?;
 
     let pubkey_hex = pubkey.to_hex();
     if !state
@@ -138,12 +227,13 @@ async fn authorize_operator_request(
         .iter()
         .any(|pk| pk == &pubkey_hex)
     {
+        slot.finish(AuthResult::Denied(crate::access::AuthReason::NotOperator));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a relay operator",
         ));
     }
-
+    slot.finish(AuthResult::Success);
     Ok(pubkey)
 }
 
@@ -151,6 +241,7 @@ async fn authorize_operator_request(
 /// identity and a NIP-98 request signature.
 async fn authorize_operator_listener_request(
     state: &Arc<AppState>,
+    slot: &AccessSlot,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -166,36 +257,53 @@ async fn authorize_operator_listener_request(
         pubkey,
         event_id_bytes,
         ..
-    } = bridge::verify_nip98_exempt_operator(headers, method, &url, Some(body))?;
-    check_operator_replay(state, event_id_bytes).await?;
+    } = bridge::verify_nip98_exempt_operator(slot, headers, method, &url, Some(body))?;
+    slot.attempt(AuthMethod::Nip98, Some(pubkey), true);
+    check_operator_replay(state, event_id_bytes, slot).await?;
     if !state
         .config
         .operator_listener_delivery_urls
         .contains_key(&pubkey.to_hex())
     {
+        slot.finish(AuthResult::Denied(
+            crate::access::AuthReason::NotOperatorListener,
+        ));
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "actor not authorized: not a configured operator listener",
         ));
     }
+    slot.finish(AuthResult::Success);
     Ok(pubkey)
 }
 
 /// Register target pubkeys for the authenticated operator listener.
 pub async fn register_listener_pubkeys(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let listener = authorize_operator_listener_request(
         &state,
+        &slot,
         &headers,
         "POST",
-        "/operator/listener/pubkeys",
+        LISTENER_PUBKEYS_PATH,
         &body,
     )
     .await?;
-    let target_pubkeys = parse_listener_pubkeys(&body)?;
+    let origin = state
+        .config
+        .relay_operator_api_origin
+        .as_deref()
+        .ok_or_else(|| internal_error("operator API origin is not configured"))?;
+    let target_pubkeys = parse_listener_registrations(
+        &body,
+        &listener,
+        &format!("{origin}{LISTENER_PUBKEYS_PATH}"),
+        nostr::Timestamp::now().as_secs(),
+    )?;
     state
         .db
         .register_operator_listener_pubkeys(listener.as_bytes(), &target_pubkeys)
@@ -207,14 +315,16 @@ pub async fn register_listener_pubkeys(
 /// Remove target pubkeys for the authenticated operator listener.
 pub async fn remove_listener_pubkeys(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let listener = authorize_operator_listener_request(
         &state,
+        &slot,
         &headers,
         "DELETE",
-        "/operator/listener/pubkeys",
+        LISTENER_PUBKEYS_PATH,
         &body,
     )
     .await?;
@@ -230,6 +340,7 @@ pub async fn remove_listener_pubkeys(
 async fn check_operator_replay(
     state: &AppState,
     event_id_bytes: [u8; 32],
+    slot: &AccessSlot,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let event_id = nostr::EventId::from_byte_array(event_id_bytes);
     match state
@@ -242,11 +353,17 @@ async fn check_operator_replay(
         .await
     {
         Ok(true) => Ok(()),
-        Ok(false) => Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "NIP-98: replay detected",
-        )),
+        Ok(false) => {
+            slot.finish(AuthResult::Failed("nip98_replay"));
+            Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                "NIP-98: replay detected",
+            ))
+        }
         Err(error) => {
+            slot.finish(AuthResult::Denied(
+                crate::access::AuthReason::ReplayCheckUnavailable,
+            ));
             tracing::warn!(
                 scope = OPERATOR_REPLAY_SCOPE,
                 error = %error,
@@ -274,11 +391,13 @@ async fn check_operator_replay(
 /// authority for this deployment-root control-plane surface.
 pub async fn provision_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let pubkey = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities",
@@ -317,6 +436,9 @@ pub async fn provision_community(
             tracing::error!(error = %msg, "operator community persistence failed");
             Err(internal_error("operator community persistence failed"))
         }
+        Err(msg) if msg == buzz_auth::BindRefusal::ReservedHost.to_string() => Err(
+            coded_api_error(StatusCode::BAD_REQUEST, "reserved_host", &msg),
+        ),
         Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
     }
 }
@@ -341,11 +463,12 @@ pub struct DeleteCommunityRequest {
 /// Idempotently archive a community owned by the asserted end-user identity.
 pub async fn archive_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/archive";
-    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -374,6 +497,7 @@ pub async fn archive_community(
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
     let tenant = TenantContext::resolved(record.id, &record.host);
+    state.invalidate_community_host(&tenant);
     let closed = match state
         .disconnect_community_clusterwide(&tenant, record.archived_at)
         .await
@@ -406,11 +530,12 @@ pub async fn archive_community(
 /// Idempotently restore an archived community owned by the asserted end-user identity.
 pub async fn unarchive_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/unarchive";
-    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body)).await?;
     let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -444,6 +569,7 @@ pub async fn unarchive_community(
         }
     };
     tracing::info!(community = %record.id, host = %record.host, "community unarchived");
+    state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     Ok(Json(serde_json::json!({
         "community_id": record.id.to_string(),
         "host": record.host,
@@ -492,12 +618,14 @@ pub async fn unarchive_community(
 /// that upstream ceremony, not verified as cryptographic owner consent.
 pub async fn delete_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     const PATH: &str = "/operator/communities/delete";
     let operator =
-        authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+        authorize_operator_request(&state, &slot, &headers, "POST", PATH, None, Some(&body))
+            .await?;
     let request: DeleteCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
         coded_api_error(
             StatusCode::BAD_REQUEST,
@@ -600,15 +728,55 @@ pub async fn delete_community(
     ))
 }
 
+/// Return active memberships for an operator-supplied pubkey.
+/// The operator is trusted to select the identity; this route does not bind it to a user session.
+pub async fn list_joined_communities(
+    State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<JoinedCommunitiesQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &slot,
+        &headers,
+        "GET",
+        "/operator/communities/joined",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+    let pubkey = validate_pubkey_hex(&query.member_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid member_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let communities = state
+        .db
+        .list_communities_joined_by(&pubkey)
+        .await
+        .map_err(|e| internal_error(&format!("list joined communities: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "member_pubkey": pubkey,
+        "communities": communities.into_iter().map(|row| serde_json::json!({
+            "community_id": row.id.to_string(), "host": row.host,
+        })).collect::<Vec<_>>()
+    })))
+}
+
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<ListCommunitiesQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities",
@@ -658,11 +826,13 @@ pub async fn list_owned_communities(
 /// NIP-43 membership list is best-effort, matching the provision path.
 pub async fn transfer_community(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let _pubkey = authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "POST",
         "/operator/communities/transfer",
@@ -702,13 +872,41 @@ pub async fn transfer_community(
 
     let community = CommunityId::from_uuid(community_uuid);
 
-    let result = state
+    let write = state
         .db
-        .transfer_ownership(community, &new_owner_pubkey, &expected_owner_pubkey)
+        .transfer_ownership(
+            community,
+            &new_owner_pubkey,
+            &expected_owner_pubkey,
+            &state.relay_keypair,
+        )
         .await
         .map_err(|e| internal_error(&format!("transfer ownership: {e}")))?;
 
-    let (status, previous_owner) = match result {
+    // The transfer committed the NIP-43 membership list with it; deliver it
+    // to live subscribers. A delivery failure must not turn a success into an
+    // HTTP error, and the next fetch is already correct.
+    if write.snapshot.is_some() {
+        match state.db.lookup_community_host(community).await {
+            Ok(Some(host)) => {
+                let tenant = TenantContext::resolved(community, host);
+                crate::handlers::side_effects::fan_out_nip43_membership_list(
+                    &tenant,
+                    &state,
+                    write.snapshot,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                community = %community,
+                error = %error,
+                "ownership transferred but the community host lookup for list delivery failed"
+            ),
+        }
+    }
+
+    let (status, previous_owner) = match write.outcome {
         buzz_db::relay_members::TransferResult::Transferred { previous_owner } => {
             ("transferred", previous_owner)
         }
@@ -747,29 +945,6 @@ pub async fn transfer_community(
         }
     };
 
-    // Best-effort NIP-43 membership snapshot publication — same pattern as
-    // provision_community. The DB mutation is already committed; a publication
-    // failure must not turn a success into an HTTP error.
-    if state.config.require_relay_membership {
-        if let Some(host) = state
-            .db
-            .lookup_community_host(community)
-            .await
-            .map_err(|e| internal_error(&format!("lookup community host: {e}")))?
-        {
-            let tenant = TenantContext::resolved(community, host);
-            if let Err(error) =
-                crate::handlers::side_effects::publish_nip43_membership_list(&tenant, &state).await
-            {
-                tracing::warn!(
-                    community = %community,
-                    error = %error,
-                    "ownership transferred but NIP-43 membership snapshot publication failed"
-                );
-            }
-        }
-    }
-
     let response = TransferCommunityResponse {
         community_id: request.community_id,
         new_owner_pubkey,
@@ -786,12 +961,14 @@ pub async fn transfer_community(
 /// normalized authority used by create.
 pub async fn community_availability(
     State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(query): Query<CommunityAvailabilityQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     authorize_operator_request(
         &state,
+        &slot,
         &headers,
         "GET",
         "/operator/communities/availability",
@@ -807,13 +984,405 @@ pub async fn community_availability(
         .lookup_community_by_host_for_management(&normalized_host)
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
+    // A reserved host (a NIP-FI command audience) is refused by create.
+    let reserved = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .is_some_and(|policy| policy.is_reserved(&normalized_host));
 
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "host": query.host,
         "normalized_host": normalized_host,
-        "available": existing.is_none(),
+        "available": existing.is_none() && !reserved,
         "community_id": existing.map(|record| record.id.to_string()),
+    });
+    if reserved {
+        body["error"] = "reserved_host".into();
+    }
+    Ok(Json(body))
+}
+
+/// Query parameters for `GET /operator/communities/nip-fi-binding`.
+#[derive(Debug, Deserialize)]
+pub struct CommunityNipFiBindingQuery {
+    host: String,
+}
+
+/// Read a community's NIP-FI issuer binding from the database. Only issuers
+/// that could authorize are reported: none unless the host is bindable under
+/// the provisioning policy (one label under the suffix, not reserved), and
+/// only issuers configured in `BUZZ_NIP_FI_ISSUERS`.
+///
+/// Contract relied on by kgoose:
+/// - `host` is the host stored on the community row, not the queried text.
+/// - A community in any lifecycle state answers 200. Archived or deletion
+///   quiesced communities, including tombstones, report `active: false`.
+/// - An unset provisioning policy, or no binding, reports `issuers: []`.
+/// - 404 means no community row has this host.
+pub async fn community_nip_fi_binding(
+    State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<CommunityNipFiBindingQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize_operator_request(
+        &state,
+        &slot,
+        &headers,
+        "GET",
+        "/operator/communities/nip-fi-binding",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+
+    let normalized_host = normalize_candidate_host(&query.host)
+        .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
+    let record = state
+        .db
+        .lookup_nip_fi_binding_by_host(&normalized_host)
+        .await
+        .map_err(|e| internal_error(&format!("look up NIP-FI binding: {e}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
+    let issuers = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .map_or_else(Vec::new, |policy| {
+            policy.effective_issuers(&record.host, record.issuers)
+        });
+
+    Ok(Json(serde_json::json!({
+        "host": record.host,
+        "active": record.active,
+        "issuers": issuers,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
+
+    use super::*;
+
+    const URL: &str = "https://operator.example/operator/listener/pubkeys";
+    const NOW: u64 = 1_800_000_000;
+
+    fn proof(target: &Keys, kind: u16, created_at: u64, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(target)
+            .expect("sign registration proof")
+    }
+
+    fn proof_tags(listener: &Keys, url: &str) -> Vec<Tag> {
+        vec![
+            Tag::public_key(listener.public_key()),
+            Tag::custom(TagKind::custom("u"), [url]),
+        ]
+    }
+
+    const PROOF_KIND: u16 = buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16;
+
+    #[test]
+    fn registration_proof_returns_signing_target() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let valid = proof(&target, PROOF_KIND, NOW - 30, proof_tags(&listener, URL));
+
+        assert_eq!(
+            verify_registration_proof(&valid, &listener.public_key(), URL, NOW),
+            Ok(target.public_key().to_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn registration_proof_rejects_unbound_or_forged_consent() {
+        let listener = Keys::generate();
+        let other_listener = Keys::generate();
+        let target = Keys::generate();
+        let mut forged = proof(&target, PROOF_KIND, NOW, proof_tags(&listener, URL));
+        forged.pubkey = Keys::generate().public_key();
+        let mut two_listeners = proof_tags(&listener, URL);
+        two_listeners.push(Tag::public_key(other_listener.public_key()));
+
+        for (case, event) in [
+            ("forged signer", forged),
+            (
+                "wrong kind",
+                proof(&target, 27235, NOW, proof_tags(&listener, URL)),
+            ),
+            (
+                "stale",
+                proof(&target, PROOF_KIND, NOW - 61, proof_tags(&listener, URL)),
+            ),
+            (
+                "future",
+                proof(&target, PROOF_KIND, NOW + 61, proof_tags(&listener, URL)),
+            ),
+            (
+                "other listener",
+                proof(&target, PROOF_KIND, NOW, proof_tags(&other_listener, URL)),
+            ),
+            (
+                "ambiguous listener",
+                proof(&target, PROOF_KIND, NOW, two_listeners),
+            ),
+            (
+                "other endpoint",
+                proof(
+                    &target,
+                    PROOF_KIND,
+                    NOW,
+                    proof_tags(&listener, "https://other.example/operator/listener/pubkeys"),
+                ),
+            ),
+            (
+                "missing endpoint",
+                proof(
+                    &target,
+                    PROOF_KIND,
+                    NOW,
+                    vec![Tag::public_key(listener.public_key())],
+                ),
+            ),
+        ] {
+            assert!(
+                verify_registration_proof(&event, &listener.public_key(), URL, NOW).is_err(),
+                "{case} proof was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_body_requires_signed_proofs() {
+        let listener = Keys::generate();
+        let target = Keys::generate();
+        let valid = proof(&target, PROOF_KIND, NOW, proof_tags(&listener, URL));
+        let parse = |body: serde_json::Value| {
+            parse_listener_registrations(
+                body.to_string().as_bytes(),
+                &listener.public_key(),
+                URL,
+                NOW,
+            )
+        };
+
+        assert_eq!(
+            parse(serde_json::json!({"registrations": [valid]})).expect("signed registration"),
+            vec![target.public_key().to_bytes().to_vec()]
+        );
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"registrations": []}),
+            serde_json::json!({"pubkeys": [target.public_key().to_hex()]}),
+        ] {
+            assert!(parse(body.clone()).is_err(), "accepted {body}");
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunityAuthUpgradeRequest {
+    operation_id: Uuid,
+    community_id: Uuid,
+    expected_host: String,
+    actor_pubkey: String,
+    expected_owner_pubkey: String,
+    expected_issuer: String,
+}
+
+/// Query for operator-scoped upgrade receipt recovery.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommunityAuthUpgradeQuery {
+    operation_id: Uuid,
+}
+
+fn upgrade_configured_trust(
+    state: &AppState,
+    host: &str,
+    issuer: &str,
+) -> Result<(), &'static str> {
+    let policy = state
+        .config
+        .nip_fi_provision_binding
+        .as_ref()
+        .ok_or("authorization_unavailable")?;
+    let [configured_issuer] = policy.authorized_issuers() else {
+        return Err("authorization_unavailable");
+    };
+    if !policy.is_bindable(host) || configured_issuer != issuer {
+        return Err("issuer_conflict");
+    }
+    if state
+        .config
+        .nip_fi
+        .registry
+        .policy_for_issuer(issuer)
+        .is_none()
+    {
+        return Err("authorization_unavailable");
+    }
+    Ok(())
+}
+
+fn upgrade_response(
+    state: &AppState,
+    mut record: buzz_db::community_auth::UpgradeRecord,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if upgrade_configured_trust(state, &record.expected_host, &record.expected_issuer).is_err() {
+        record.state = "unavailable".to_owned();
+    }
+    Json(record).into_response()
+}
+
+/// Accept or recover a monotonic FI upgrade through the existing operator plane.
+/// The NIP-98 principal is the trusted mediator; the request actor is the owner
+/// authenticated by that mediator. No public user credential can select it.
+pub async fn enable_community_nip_fi(
+    State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let operator = authorize_operator_request(
+        &state,
+        &slot,
+        &headers,
+        "POST",
+        "/operator/communities/nip-fi-upgrade",
+        None,
+        Some(&body),
+    )
+    .await?;
+    let request: CommunityAuthUpgradeRequest = serde_json::from_slice(&body).map_err(|_| {
+        coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "invalid upgrade request",
+        )
+    })?;
+    let invalid = || {
+        coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "invalid upgrade request",
+        )
+    };
+    if request.operation_id.is_nil() || request.community_id.is_nil() {
+        return Err(invalid());
+    }
+    let host = normalize_candidate_host(&request.expected_host).map_err(|_| invalid())?;
+    let actor = validate_pubkey_hex(&request.actor_pubkey).ok_or_else(invalid)?;
+    let owner = validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(invalid)?;
+    let trust = if state.config.nip_fi_upgrades_enabled {
+        upgrade_configured_trust(&state, &host, &request.expected_issuer)
+    } else {
+        Err("upgrades_disabled")
+    };
+    let tuple = buzz_db::community_auth::UpgradeRequest {
+        operation_id: request.operation_id,
+        community_id: request.community_id,
+        expected_host: host,
+        actor_pubkey: actor,
+        expected_owner_pubkey: owner,
+        expected_issuer: request.expected_issuer,
+        operator_pubkey: operator.to_hex(),
+    };
+    let outcome = state
+        .db
+        .enable_community_nip_fi(&tuple, trust)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "community auth upgrade unavailable");
+            coded_api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable",
+                "authorization unavailable",
+            )
+        })?;
+    match outcome {
+        buzz_db::community_auth::UpgradeOutcome::Accepted(record) => {
+            state.invalidate_community_host(&TenantContext::resolved(
+                buzz_core::CommunityId::from_uuid(record.community_id),
+                &record.expected_host,
+            ));
+            Ok(upgrade_response(&state, record))
+        }
+        buzz_db::community_auth::UpgradeOutcome::Refused(code) => {
+            let status = match code {
+                "community_not_found" => StatusCode::NOT_FOUND,
+                "authorization_unavailable" | "upgrades_disabled" => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::CONFLICT,
+            };
+            Err(coded_api_error(status, code, code))
+        }
+    }
+}
+
+/// Recover the original operator's exact durable tuple with truthful state.
+/// A fresh NIP-98 signature is required for every status read and POST retry.
+pub async fn community_nip_fi_upgrade_status(
+    State(state): State<Arc<AppState>>,
+    slot: AccessSlot,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<CommunityAuthUpgradeQuery>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let operator = authorize_operator_request(
+        &state,
+        &slot,
+        &headers,
+        "GET",
+        "/operator/communities/nip-fi-upgrade",
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+    let record = state
+        .db
+        .community_auth_upgrade_status(query.operation_id, &operator.to_hex())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "community auth upgrade status unavailable");
+            coded_api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorization_unavailable",
+                "authorization unavailable",
+            )
+        })?
+        .ok_or_else(|| {
+            coded_api_error(
+                StatusCode::NOT_FOUND,
+                "operation_not_found",
+                "operation not found",
+            )
+        })?;
+    Ok(upgrade_response(&state, record))
+}
+
+/// Keep all upgrade responses, including auth and dependency errors, out of caches.
+pub async fn no_store_upgrade_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let upgrade = request.uri().path() == "/operator/communities/nip-fi-upgrade";
+    let mut response = next.run(request).await;
+    if upgrade {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    response
 }
 
 #[cfg(test)]
@@ -910,7 +1479,15 @@ mod postgres_tests {
     }
 
     async fn operator_test_state(operator_keys: &[Keys]) -> Option<Arc<AppState>> {
+        operator_test_state_with_policy(operator_keys, None).await
+    }
+
+    async fn operator_test_state_with_policy(
+        operator_keys: &[Keys],
+        nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
+    ) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+        config.nip_fi_provision_binding = nip_fi_provision_binding;
         config.database_url = crate::test_support::database_url();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.relay_url = "wss://tenant.example".to_string();
@@ -926,9 +1503,7 @@ mod postgres_tests {
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1109,6 +1684,35 @@ mod postgres_tests {
                 "missing {role} snapshot tag for {pubkey}"
             );
         }
+    }
+
+    /// An operator request dropped while its replay check is in flight
+    /// still writes one `aborted` line.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn operator_request_dropped_during_replay_logs_one_aborted_line() {
+        let operator = Keys::generate();
+        let state = operator_test_state(std::slice::from_ref(&operator))
+            .await
+            .expect("local Postgres");
+        let mut state = (*state).clone();
+        let replay = Arc::new(crate::access::tests::StallingReplayGuard::default());
+        state.nip98_replay = replay.clone();
+        // The query string is required, or extraction refuses before auth.
+        let path = format!(
+            "/operator/communities?owner_pubkey={}",
+            operator.public_key().to_hex()
+        );
+        let (guard, out) = crate::access::tests::capture_scoped();
+        tokio::select! {
+            _ = signed_operator_request(Arc::new(state), &operator, "GET", &path, None) => {
+                panic!("the replay check must stall");
+            }
+            () = replay.arrived.notified() => {}
+        }
+        drop(guard);
+        let line = crate::access::tests::assert_one_aborted_line(&out, &operator.public_key());
+        assert_eq!(line["route"], "/operator/communities");
     }
 
     #[tokio::test]
@@ -2200,7 +2804,28 @@ mod postgres_tests {
             .iter()
             .map(|target| target.public_key().to_hex())
             .collect::<Vec<_>>();
-        let register_body = serde_json::json!({"pubkeys": target_hex}).to_string();
+        let registration_proof = |target: &Keys, listener: &Keys| {
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_OPERATOR_LISTENER_REGISTRATION as u16),
+                "",
+            )
+            .tags([
+                Tag::public_key(listener.public_key()),
+                Tag::custom(
+                    nostr::TagKind::custom("u"),
+                    [format!("http://{INGRESS_HOST}/operator/listener/pubkeys")],
+                ),
+            ])
+            .sign_with_keys(target)
+            .expect("sign registration proof")
+        };
+        let register_body = serde_json::json!({
+            "registrations": targets
+                .iter()
+                .map(|target| registration_proof(target, &listener))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
         let response = signed_operator_request(
             Arc::clone(&state),
             &listener,
@@ -2227,6 +2852,26 @@ mod postgres_tests {
         .expect("count other listener targets");
         assert_eq!(listener_count, 2);
         assert_eq!(other_listener_count, 0);
+
+        // A proof signed for another listener, and the old unsigned form.
+        for rejected_body in [
+            serde_json::json!({"registrations": [registration_proof(&targets[1], &other_listener)]}),
+            serde_json::json!({"pubkeys": [target_hex[1]]}),
+        ] {
+            let rejected = signed_operator_request(
+                Arc::clone(&state),
+                &listener,
+                "POST",
+                "/operator/listener/pubkeys",
+                Some(rejected_body.to_string()),
+            )
+            .await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "{rejected_body}"
+            );
+        }
 
         let body = serde_json::json!({"pubkeys": [target_hex[0]]}).to_string();
         let missing_payload_auth = nip98_auth_header_without_payload(
@@ -2259,7 +2904,7 @@ mod postgres_tests {
             &listener,
             "POST",
             "/operator/listener/pubkeys",
-            Some(r#"{"pubkeys":["not-a-pubkey"]}"#.to_string()),
+            Some(r#"{"registrations":["not-an-event"]}"#.to_string()),
         )
         .await;
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
@@ -2320,6 +2965,741 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("clean up listener registrations");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_binding_route_reads_bound_issuers_and_404s_unknown_hosts() {
+        let operator = Keys::generate();
+        let (policy, _, host) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        let issuer = NIP_FI_ISSUER.to_string();
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(
+                &host,
+                &[issuer.clone(), "https://unconfigured.example".to_string()],
+            )
+            .await
+            .expect("seed bound community");
+        let router = build_router(state);
+
+        for (query_host, expected) in [
+            (host.to_uppercase(), StatusCode::OK),
+            (format!("missing-{host}"), StatusCode::NOT_FOUND),
+        ] {
+            let query = format!("host={query_host}");
+            let url = format!("http://{INGRESS_HOST}/operator/communities/nip-fi-binding?{query}");
+            let auth = nip98_auth_header(&operator, &url, "GET", None);
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/operator/communities/nip-fi-binding?{query}"))
+                        .header(header::HOST, INGRESS_HOST)
+                        .header(header::AUTHORIZATION, auth)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{query_host}");
+            if expected == StatusCode::OK {
+                let json = read_json(response).await;
+                assert_eq!(json["host"], host);
+                assert_eq!(json["active"], true);
+                // The unconfigured issuer is stored but never reported.
+                assert_eq!(json["issuers"], serde_json::json!([issuer]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_binding_route_reports_no_issuers_outside_the_suffix() {
+        let operator = Keys::generate();
+        let (policy, _, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        let nested = format!("a.{control}");
+        let elsewhere = format!("community-{}.example", Uuid::new_v4().simple());
+        for host in [&nested, &elsewhere] {
+            state
+                .db
+                .ensure_configured_community_with_nip_fi_issuers(host, &[NIP_FI_ISSUER.to_string()])
+                .await
+                .expect("seed raw binding");
+            let lookup = nip_fi_lookup(Arc::clone(&state), &operator, host).await;
+            assert_eq!(lookup["issuers"], serde_json::json!([]), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn availability_reports_a_reserved_host_unavailable() {
+        let operator = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+        for (host, available) in [(&reserved, false), (&control, true)] {
+            let response = signed_operator_request(
+                Arc::clone(&state),
+                &operator,
+                "GET",
+                &format!("/operator/communities/availability?host={host}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{host}");
+            let json = read_json(response).await;
+            assert_eq!(json["available"], available, "{host}");
+            let error = (!available).then_some("reserved_host");
+            assert_eq!(json["error"].as_str(), error, "{host}");
+        }
+    }
+
+    const NIP_FI_ISSUER: &str = "https://issuer.example/api/goose";
+
+    /// A provisioning policy under a fresh suffix whose `cmd.<suffix>` host is
+    /// a command audience. Returns the policy, the reserved host and a normal
+    /// one-label control host.
+    fn reserved_host_policy() -> (buzz_auth::ProvisionBindingPolicy, String, String) {
+        let suffix = format!("{}.example", Uuid::new_v4().simple());
+        let reserved = format!("cmd.{suffix}");
+        let policy = buzz_auth::ProvisionBindingPolicy::parse(
+            &serde_json::json!({"host_suffix": suffix, "authorized_issuers": [NIP_FI_ISSUER]})
+                .to_string(),
+            &serde_json::json!([{
+                "issuer": NIP_FI_ISSUER,
+                "command_audiences": [format!("https://{reserved}")],
+            }])
+            .to_string(),
+        )
+        .expect("valid policy");
+        (policy, reserved, format!("acme.{suffix}"))
+    }
+
+    fn fresh_upgrade_auth(keys: &Keys, url: &str, method: &str, body: Option<&[u8]>) -> String {
+        let mut tags = vec![
+            Tag::parse(["u", url]).unwrap(),
+            Tag::parse(["method", method]).unwrap(),
+            Tag::parse(["nonce", &Uuid::new_v4().to_string()]).unwrap(),
+        ];
+        if let Some(body) = body {
+            tags.push(Tag::parse(["payload", &hex::encode(Sha256::digest(body))]).unwrap());
+        }
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap();
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event).unwrap())
+        )
+    }
+
+    async fn fresh_upgrade_request(
+        state: Arc<AppState>,
+        keys: &Keys,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> axum::response::Response {
+        let auth = fresh_upgrade_auth(
+            keys,
+            &format!("http://{INGRESS_HOST}{path}"),
+            method,
+            body.as_deref().map(str::as_bytes),
+        );
+        operator_request_with_auth(state, method, path, body, auth).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn upgrade_operator_http_contract_recovers_pending_and_scopes_auth() {
+        let operator = Keys::generate();
+        let other_operator = Keys::generate();
+        let owner = Keys::generate();
+        let (policy, _, host) = reserved_host_policy();
+        let Some(mut state) = operator_test_state_with_policy(
+            &[operator.clone(), other_operator.clone()],
+            Some(policy),
+        )
+        .await
+        else {
+            panic!("test database unavailable");
+        };
+        Arc::get_mut(&mut state).unwrap().nip98_replay =
+            Arc::new(SeenOnceReplayGuard(Mutex::new(HashSet::new())));
+        let issuer_policy = buzz_auth::IssuerPolicy::new(
+            NIP_FI_ISSUER.to_owned(),
+            vec!["https://commands.example".to_owned()],
+            buzz_auth::TokenClass::DedicatedNipFi,
+            buzz_auth::FreshnessClass::OfflineJwt,
+            vec![jsonwebtoken::Algorithm::ES256],
+            30,
+            3600,
+            None,
+            buzz_auth::JwksSourceContract::new(format!("{NIP_FI_ISSUER}/jwks"), 300, 86400)
+                .unwrap(),
+        )
+        .unwrap();
+        Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique test state").config)
+            .nip_fi
+            .registry
+            .insert(issuer_policy);
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
+            false;
+        assert!(!state.config.nip_fi_upgrades_enabled);
+
+        assert_eq!(
+            provision_community(state.clone(), &operator, &host, &owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = Uuid::new_v4();
+        let body = serde_json::json!({
+            "operation_id": id, "community_id": community.id.to_string(),
+            "expected_host": host.to_uppercase(), "actor_pubkey": owner.public_key().to_hex(),
+            "expected_owner_pubkey": owner.public_key().to_hex(), "expected_issuer": NIP_FI_ISSUER,
+        })
+        .to_string();
+        let path = "/operator/communities/nip-fi-upgrade";
+        // The cache guard also surrounds router/middleware rejections, not only
+        // responses produced inside the authenticated upgrade handler.
+        let oversized = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::CONTENT_LENGTH, (2 * 1024 * 1024).to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(oversized.headers()[header::CACHE_CONTROL], "no-store");
+        let unsupported = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(path)
+                    .header(header::HOST, INGRESS_HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unsupported.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(unsupported.headers()[header::CACHE_CONTROL], "no-store");
+        let disabled =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(disabled.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(read_json(disabled).await["code"], "upgrades_disabled");
+        assert!(
+            !state
+                .db
+                .community_auth_policy(community.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .requires_nip_fi
+        );
+        assert!(state
+            .db
+            .community_auth_upgrade_status(id, &operator.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+        let response =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let record = read_json(response).await;
+        assert_eq!(record["expected_host"], host);
+        assert_eq!(record["operator_pubkey"], operator.public_key().to_hex());
+        assert_eq!(record["policy_generation"], 1);
+        assert_eq!(record["state"], "pending");
+        assert_eq!(
+            record["pending_reasons"],
+            serde_json::json!(["connection_closure_unverified"])
+        );
+        // A fresh signed retry recovers the same tuple despite the lost response.
+        let retry =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        assert_eq!(read_json(retry).await, record);
+        let status_path = format!("{path}?operation_id={id}");
+        let status =
+            fresh_upgrade_request(state.clone(), &operator, "GET", &status_path, None).await;
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(read_json(status).await, record);
+        let other =
+            fresh_upgrade_request(state.clone(), &other_operator, "GET", &status_path, None).await;
+        assert_eq!(other.status(), StatusCode::NOT_FOUND);
+        assert_eq!(other.headers()[header::CACHE_CONTROL], "no-store");
+        let reuse = fresh_upgrade_request(
+            state.clone(),
+            &other_operator,
+            "POST",
+            path,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(reuse.status(), StatusCode::CONFLICT);
+        assert_eq!(reuse.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(read_json(reuse).await["code"], "idempotency_conflict");
+        let outsider = fresh_upgrade_request(
+            state.clone(),
+            &Keys::generate(),
+            "POST",
+            path,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(outsider.status(), StatusCode::FORBIDDEN);
+        assert_eq!(outsider.headers()[header::CACHE_CONTROL], "no-store");
+        let url = format!("http://{INGRESS_HOST}{path}");
+        let auth = fresh_upgrade_auth(&operator, &url, "POST", Some(body.as_bytes()));
+        let raw = || {
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::HOST, INGRESS_HOST)
+                .header(header::AUTHORIZATION, &auth)
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        let first = build_router(state.clone()).oneshot(raw()).await.unwrap();
+        // Repeat the exact signature: transport replay protection remains independent of operation idempotency.
+        let second = build_router(state.clone()).oneshot(raw()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(second.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            state
+                .db
+                .community_auth_policy(community.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .policy_generation,
+            1
+        );
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled =
+            false;
+        let while_off =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(while_off.status(), StatusCode::OK);
+        assert_eq!(read_json(while_off).await, record);
+        let while_off =
+            fresh_upgrade_request(state.clone(), &operator, "GET", &status_path, None).await;
+        assert_eq!(while_off.status(), StatusCode::OK);
+        assert_eq!(read_json(while_off).await, record);
+        let denied =
+            fresh_upgrade_request(state.clone(), &other_operator, "GET", &status_path, None).await;
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let reuse_off = fresh_upgrade_request(
+            state.clone(),
+            &other_operator,
+            "POST",
+            path,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(reuse_off.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(reuse_off).await["code"], "idempotency_conflict");
+        let new_id = Uuid::new_v4();
+        let new_body = body.replace(&id.to_string(), &new_id.to_string());
+        let disabled_after_acceptance =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(new_body)).await;
+        assert_eq!(
+            disabled_after_acceptance.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            disabled_after_acceptance.headers()[header::CACHE_CONTROL],
+            "no-store"
+        );
+        assert_eq!(
+            read_json(disabled_after_acceptance).await["code"],
+            "upgrades_disabled"
+        );
+        assert!(state
+            .db
+            .community_auth_upgrade_status(new_id, &operator.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+
+        // Exercise the real HTTP-to-config-to-transaction seam: no raw trust
+        // precondition can bypass the deployment's configured issuer selection.
+        for invalid in [
+            "{".to_owned(),
+            "{}".to_owned(),
+            body.replace(&id.to_string(), "not-a-uuid"),
+        ] {
+            let response =
+                fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(invalid)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(read_json(response).await["code"], "invalid_request");
+        }
+        let mut changed: Value = serde_json::from_str(&body).unwrap();
+        let mismatched_id = Uuid::new_v4();
+        changed["operation_id"] = serde_json::json!(mismatched_id);
+        changed["expected_issuer"] = serde_json::json!("https://unapproved.example");
+        let mismatch = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
+        assert_eq!(mismatch.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(read_json(mismatch).await["code"], "issuer_conflict");
+        assert!(state
+            .db
+            .community_auth_upgrade_status(mismatched_id, &operator.public_key().to_hex())
+            .await
+            .unwrap()
+            .is_none());
+
+        for bad_host in [
+            "outside.example".to_owned(),
+            host.replacen("acme.", "cmd.", 1),
+        ] {
+            changed["operation_id"] = serde_json::json!(Uuid::new_v4());
+            changed["expected_host"] = serde_json::json!(bad_host);
+            changed["expected_issuer"] = serde_json::json!(NIP_FI_ISSUER);
+            let response = fresh_upgrade_request(
+                state.clone(),
+                &operator,
+                "POST",
+                path,
+                Some(changed.to_string()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(read_json(response).await["code"], "issuer_conflict");
+        }
+        changed["expected_host"] = serde_json::json!(host);
+        let original_policy = state.config.nip_fi_provision_binding.clone();
+        let suffix = host.split_once('.').unwrap().1;
+        let multiple = buzz_auth::ProvisionBindingPolicy::parse(
+            &serde_json::json!({"host_suffix": suffix, "authorized_issuers": [NIP_FI_ISSUER, "https://second.example"]}).to_string(),
+            &serde_json::json!([
+                {"issuer": NIP_FI_ISSUER, "command_audiences": [format!("https://cmd.{suffix}")]},
+                {"issuer": "https://second.example", "command_audiences": ["https://commands.example"]}
+            ]).to_string()).unwrap();
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+            Some(multiple);
+        changed["operation_id"] = serde_json::json!(Uuid::new_v4());
+        let ambiguous = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(ambiguous.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ambiguous.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            read_json(ambiguous).await["code"],
+            "authorization_unavailable"
+        );
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+            original_policy;
+
+        assert_eq!(
+            state
+                .db
+                .unbind_nip_fi_issuer(community.id, NIP_FI_ISSUER, true)
+                .await
+                .unwrap(),
+            buzz_db::NipFiUnbind::RequiredIssuer
+        );
+        // Simulate out-of-band trust loss to exercise receipt recovery and
+        // configured-trust refusal independently of the operator removal guard.
+        sqlx::query("DELETE FROM community_nip_fi_issuers WHERE community_id = $1")
+            .bind(community.id.as_uuid())
+            .execute(state.db.pool())
+            .await
+            .unwrap();
+        let missing_id = Uuid::new_v4();
+        changed["operation_id"] = serde_json::json!(missing_id);
+        changed["expected_issuer"] = serde_json::json!(NIP_FI_ISSUER);
+        let missing = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::CONFLICT);
+        assert_eq!(read_json(missing).await["code"], "issuer_conflict");
+        state
+            .db
+            .bind_nip_fi_issuers(community.id, &[NIP_FI_ISSUER.to_owned()])
+            .await
+            .unwrap();
+
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config)
+            .nip_fi
+            .registry = buzz_auth::IssuerRegistry::new();
+        let inactive_id = Uuid::new_v4();
+        changed["operation_id"] = serde_json::json!(inactive_id);
+        let inactive = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(inactive.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(inactive.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            read_json(inactive).await["code"],
+            "authorization_unavailable"
+        );
+        let recovered =
+            fresh_upgrade_request(state.clone(), &operator, "POST", path, Some(body.clone())).await;
+        assert_eq!(recovered.status(), StatusCode::OK);
+        let recovered = read_json(recovered).await;
+        assert_eq!(recovered["operation_id"], record["operation_id"]);
+        assert_eq!(recovered["policy_generation"], record["policy_generation"]);
+        assert_eq!(recovered["state"], "unavailable");
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
+            None;
+        let unconfigured = fresh_upgrade_request(
+            state.clone(),
+            &operator,
+            "POST",
+            path,
+            Some(changed.to_string()),
+        )
+        .await;
+        assert_eq!(unconfigured.status(), StatusCode::SERVICE_UNAVAILABLE);
+        for operation in [missing_id, inactive_id] {
+            assert!(state
+                .db
+                .community_auth_upgrade_status(operation, &operator.public_key().to_hex())
+                .await
+                .unwrap()
+                .is_none());
+        }
+        assert!(
+            state
+                .db
+                .community_auth_policy(community.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .requires_nip_fi
+        );
+    }
+
+    async fn nip_fi_lookup(state: Arc<AppState>, operator: &Keys, host: &str) -> Value {
+        let response = signed_operator_request(
+            state,
+            operator,
+            "GET",
+            &format!("/operator/communities/nip-fi-binding?host={host}"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{host}");
+        read_json(response).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_provisioning_never_binds_a_reserved_host() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy)).await
+        else {
+            return;
+        };
+
+        for create_only in [true, false] {
+            let control = control.replacen("acme.", &format!("acme-{create_only}."), 1);
+            // create_only refuses a reserved host; the legacy branch creates
+            // its row but binds nothing.
+            for (host, bindable) in [(reserved.as_str(), false), (control.as_str(), true)] {
+                let created = bindable || !create_only;
+                let body = serde_json::json!({
+                    "host": host,
+                    "initial_owner_pubkey": owner.public_key().to_hex(),
+                    "create_only": create_only,
+                })
+                .to_string();
+                let response = signed_operator_request(
+                    Arc::clone(&state),
+                    &operator,
+                    "POST",
+                    "/operator/communities",
+                    Some(body),
+                )
+                .await;
+                assert_eq!(
+                    response.status().is_success(),
+                    created,
+                    "create_only={create_only} {host}"
+                );
+                if !created {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    assert_eq!(read_json(response).await["code"], "reserved_host");
+                }
+                let row = state
+                    .db
+                    .lookup_community_by_host(host)
+                    .await
+                    .expect("lookup");
+                assert_eq!(row.is_some(), created, "create_only={create_only} {host}");
+                let bound = state
+                    .db
+                    .nip_fi_bound_hosts(&[host.to_string()])
+                    .await
+                    .expect("bound hosts");
+                assert_eq!(
+                    !bound.is_empty(),
+                    bindable,
+                    "create_only={create_only} {host}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_bootstrap_leaves_reserved_host_unbound_across_restarts() {
+        let (policy, reserved, control) = reserved_host_policy();
+        let Ok(pool) = sqlx::PgPool::connect(&crate::test_support::database_url()).await else {
+            return;
+        };
+        let db = buzz_db::Db::from_pool(pool);
+        for start in 0..2 {
+            for (host, bound) in [(&reserved, false), (&control, true)] {
+                let record = crate::handlers::community_provisioning::ensure_deployment_community(
+                    &db,
+                    Some(&policy),
+                    host,
+                )
+                .await
+                .expect("startup")
+                .expect("community");
+                assert_eq!(&record.host, host);
+                let issuers = db
+                    .nip_fi_bound_hosts(std::slice::from_ref(host))
+                    .await
+                    .expect("bound hosts");
+                assert_eq!(!issuers.is_empty(), bound, "start {start}: {host}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_fi_raw_reserved_binding_refuses_startup_and_reports_no_issuers() {
+        let operator = Keys::generate();
+        let (policy, reserved, control) = reserved_host_policy();
+        let Some(state) =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(policy.clone()))
+                .await
+        else {
+            return;
+        };
+        let startup = || {
+            crate::handlers::community_provisioning::verify_reserved_hosts_unbound(
+                &state.db, &policy,
+            )
+        };
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(&control, &[NIP_FI_ISSUER.to_string()])
+            .await
+            .expect("bound control community");
+        startup()
+            .await
+            .expect("control: startup with no reserved binding");
+
+        // Bind the reserved host with raw SQL, bypassing every policy check.
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect");
+        state
+            .db
+            .ensure_configured_community_for_bootstrap(&reserved, &[])
+            .await
+            .expect("reserved community");
+        sqlx::query(
+            "INSERT INTO community_nip_fi_issuers (community_id, issuer) \
+             SELECT id, $2 FROM communities WHERE host = $1",
+        )
+        .bind(&reserved)
+        .bind(NIP_FI_ISSUER)
+        .execute(&pool)
+        .await
+        .expect("raw reserved binding");
+
+        let refusal = startup()
+            .await
+            .expect_err("reserved binding refuses startup");
+        assert!(matches!(
+            refusal,
+            crate::handlers::community_provisioning::ReservedHostsError::Bound(ref hosts)
+                if hosts == std::slice::from_ref(&reserved)
+        ));
+        assert!(
+            refusal
+                .to_string()
+                .contains("buzz-admin nip-fi unbind --host"),
+            "{refusal}"
+        );
+        let lookup = nip_fi_lookup(Arc::clone(&state), &operator, &reserved).await;
+        assert_eq!(lookup["issuers"], serde_json::json!([]));
+        let lookup = nip_fi_lookup(Arc::clone(&state), &operator, &control).await;
+        assert_eq!(lookup["issuers"], serde_json::json!([NIP_FI_ISSUER]));
+
+        sqlx::query(
+            "DELETE FROM community_nip_fi_issuers \
+             WHERE community_id = (SELECT id FROM communities WHERE host = $1)",
+        )
+        .bind(&reserved)
+        .execute(&pool)
+        .await
+        .expect("remove raw binding so later startups in this database pass");
     }
 
     #[tokio::test]
@@ -3562,9 +4942,7 @@ mod postgres_tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await

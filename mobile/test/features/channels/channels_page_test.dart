@@ -1,12 +1,32 @@
+import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/hosted/browser_auth.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/organization_sign_in.dart';
+import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/agents/agents_page.dart';
+
+import 'dart:convert';
+
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/read_state/read_state_storage.dart';
+import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
+
 import 'dart:async';
+
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
-import 'dart:math';
+
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:buzz/shared/widgets/buzz_sheet_header.dart';
 import 'package:flutter/rendering.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
@@ -26,10 +46,10 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
-import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -40,24 +60,35 @@ import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
-import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
+
+import '../../helpers/recipient_directory_session.dart';
+import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/native_creation_tests.dart';
+part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
+part 'channels_page_test/home_community_flight.dart';
+part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
   setUpAll(() async {
-    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS')) {
+    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS') ||
+        Platform.environment.containsKey('CREATE_SHEET_SCREENSHOTS')) {
       for (final font in {
         'Inter': 'assets/fonts/InterVariable.ttf',
         'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
+        'MaterialIcons': 'fonts/MaterialIcons-Regular.otf',
       }.entries) {
         await (FontLoader(
           font.key,
@@ -67,7 +98,6 @@ void main() {
   });
   Widget buildTestable({
     required List<Override> overrides,
-    bool previewDirectory = false,
     Brightness brightness = Brightness.light,
     double keyboardInset = 0,
     bool disableAnimations = false,
@@ -80,6 +110,8 @@ void main() {
     ValueChanged<double>? onSettingsTransitionProgress,
     ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
+    bool realHome = false,
+    Widget? soloSliver,
   }) {
     return ProviderScope(
       overrides: [
@@ -93,13 +125,11 @@ void main() {
           if (loadCommunityIcon != null) return loadCommunityIcon(relayUrl);
           return communityIcons[relayUrl];
         }),
-        dmDirectoryPreviewEnabledProvider.overrideWith(
-          (ref) => previewDirectory,
-        ),
         appLifecycleProvider.overrideWith(() => _CommunitySettingsLifecycle()),
         ...overrides,
       ],
       child: MaterialApp(
+        navigatorObservers: [appRouteObserver],
         theme: brightness == Brightness.dark
             ? AppTheme.dark()
             : AppTheme.light(topSectionGradient: topSectionGradient),
@@ -112,35 +142,33 @@ void main() {
           ),
           child: child!,
         ),
-        home: Stack(
-          children: [
-            ChannelsPage(
-              settingsPageBuilder: _buildSettingsPage,
-              communityInvitePageBuilder: (_) =>
-                  const Scaffold(body: Text('Invite destination')),
-              communityAppearancePageBuilder: (_) =>
-                  const Scaffold(body: Text('Appearance destination')),
-              onSettingsTransitionProgress:
-                  onSettingsTransitionProgress ?? (_) {},
-              tabReselection: tabReselection,
-            ),
-            const Positioned.fill(
-              child: ChannelQuickActionsLauncher(
-                visible: true,
-                navigationBarHeight: 60,
-                navigationBarBottomGap: 12,
-                navigationBarWidth: 218,
-                systemBottomInset: 0,
-                rightInset: 16,
+        home: realHome
+            ? HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context),
+                ),
+                settingsPageBuilder: _buildSettingsPage,
+              )
+            : ChannelsPage(
+                settingsPageBuilder: _buildSettingsPage,
+                communityInvitePageBuilder: (_) =>
+                    const Scaffold(body: Text('Invite destination')),
+                communityAppearancePageBuilder: (_) =>
+                    const Scaffold(body: Text('Appearance destination')),
+                onSettingsTransitionProgress:
+                    onSettingsTransitionProgress ?? (_) {},
+                tabReselection: tabReselection,
+                soloSliver: soloSliver,
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
 
+  _homeCommunityFlightTests(buildTestable);
   _communityUnreadLandingTests(buildTestable);
+  _readSeedJourney(buildTestable);
+  _communityCachedLandingTests(buildTestable);
 
   final testChannels = [
     Channel(
@@ -236,6 +264,135 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  for (final label in ['Channels options', 'Design options']) {
+    testWidgets('$label exposes a labeled button and tap action', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+              channelSectionsProvider.overrideWith(
+                () => _FakeChannelSectionsNotifier(
+                  const ChannelSectionStore(
+                    sections: [
+                      ChannelSection(
+                        id: 'section-1',
+                        name: 'Design',
+                        icon: '🎨',
+                        order: 0,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final control = find.bySemanticsLabel(label);
+        expect(control, findsOneWidget);
+        final node = tester.getSemantics(control);
+        expect(node.flagsCollection.isButton, isTrue);
+        expect(
+          node.getSemanticsData().hasAction(ui.SemanticsAction.tap),
+          isTrue,
+        );
+        node.owner!.performAction(node.id, ui.SemanticsAction.tap);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(
+            ValueKey(
+              label == 'Channels options'
+                  ? 'sort-popover-Channels'
+                  : 'section-popover-section-1',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        semantics.dispose();
+      }
+    });
+  }
+
+  testWidgets('section ellipsis aligns with temporary channel icon', (
+    tester,
+  ) async {
+    final temporary = Channel(
+      id: 'temporary',
+      name: 'temporary',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'abc',
+      createdAt: DateTime(2025),
+      memberCount: 1,
+      isMember: true,
+      ttlSeconds: 3600,
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier([temporary])),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final ellipsis = find.descendant(
+      of: find.byTooltip('Channels options'),
+      matching: find.byIcon(BuzzIcons.ellipsis),
+    );
+    expect(
+      tester.getCenter(ellipsis).dx,
+      closeTo(
+        tester
+            .getCenter(find.byKey(const Key('channel-ephemeral-temporary')))
+            .dx,
+        0.01,
+      ),
+    );
+  });
+
+  testWidgets('shows channel visibility icons and excludes Solo chats', (
+    tester,
+  ) async {
+    final channels = [
+      testChannels.first,
+      for (final type in ['stream', 'solo'])
+        Channel(
+          id: 'private-$type',
+          name: 'private-$type',
+          channelType: type,
+          visibility: 'private',
+          description: '',
+          createdBy: 'aabb',
+          createdAt: DateTime(2025),
+          memberCount: 1,
+          isMember: true,
+        ),
+    ];
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final publicIcon = find.byKey(const ValueKey('channel-icon-1'));
+    final privateIcon = find.byKey(
+      const ValueKey('channel-icon-private-stream'),
+    );
+    expect(tester.widget<Icon>(publicIcon).icon, BuzzIcons.hash);
+    expect(tester.widget<Icon>(privateIcon).icon, BuzzIcons.lock);
+    expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
+    expect(find.text('private-solo'), findsNothing);
+  });
+
   testWidgets('shows grouped channel list when data loads', (tester) async {
     // Valid fixture keys whose npub encodings were verified against the
     // NIP-19 codec independently of the code under test.
@@ -286,10 +443,10 @@ void main() {
     expect(find.text('Channels'), findsOneWidget);
     expect(find.text('FORUMS'), findsNothing);
     expect(find.text('DMs'), findsOneWidget);
-    expect(find.text('Community'), findsOneWidget);
-    expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+    expect(find.text('Community'), findsNothing);
+    expect(find.byTooltip('Create'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
-    expect(find.byIcon(BuzzIcons.ellipsisVertical), findsWidgets);
+    expect(find.byIcon(BuzzIcons.ellipsis), findsWidgets);
     expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
     expect(find.byTooltip('DMs options'), findsOneWidget);
 
@@ -313,6 +470,20 @@ void main() {
       findsOneWidget,
     );
 
+    expect(
+      tester
+          .getTopRight(
+            find.descendant(
+              of: find.byTooltip('Channels options'),
+              matching: find.byIcon(BuzzIcons.ellipsis),
+            ),
+          )
+          .dx,
+      closeTo(
+        tester.getTopRight(find.byTooltip('Channels options')).dx - 3,
+        0.01,
+      ),
+    );
     await tester.tap(find.byTooltip('Channels options'));
     await tester.pumpAndSettle();
     expect(find.text('Sort: Recent'), findsOneWidget);
@@ -332,27 +503,14 @@ void main() {
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));
-      expect(text.style?.fontSize, contentListTitleTextStyle.fontSize);
-      expect(text.style?.height, contentListTitleTextStyle.height);
-      expect(
-        text.style?.color,
-        Theme.of(
-          tester.element(find.text(label)),
-        ).colorScheme.onSurface.withValues(alpha: 0.8),
-      );
+      expect(text.style?.fontSize, navigationChatTitleTextStyle.fontSize);
+      expect(text.style?.height, navigationChatTitleTextStyle.height);
+      expect(text.style?.color, const Color(0xFF404040));
     }
-    final channelIcon = tester.widget<Icon>(
-      find.byKey(const ValueKey('channel-icon-1')),
-    );
-    expect(
-      channelIcon.color,
-      Theme.of(
-        tester.element(find.byKey(const ValueKey('channel-icon-1'))),
-      ).colorScheme.onSurface.withValues(alpha: 0.8),
-    );
+    expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
-    expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
-    expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+    expect(sectionTitle.style?.fontSize, navigationSectionTextStyle.fontSize);
+    expect(sectionTitle.style?.fontWeight, FontWeight.w500);
   });
 
   testWidgets('keys DM tile fallback avatars to the non-self counterpart', (
@@ -479,11 +637,10 @@ void main() {
           .height,
       closeTo(
         frostedAppBarHeight(
-              tester.element(find.byType(FrostedAppBar).last),
-              titleStyle: titleStyle,
-              bottomHeight: appBar.bottomHeight,
-            ) -
-            1,
+          tester.element(find.byType(FrostedAppBar).last),
+          titleStyle: titleStyle,
+          bottomHeight: appBar.bottomHeight,
+        ),
         0.01,
       ),
     );
@@ -539,49 +696,31 @@ void main() {
     await interruptingDrag.up();
   });
 
-  testWidgets('keeps the last channel above the floating tab bar', (
-    tester,
-  ) async {
-    const footerClearance = 102.0;
+  testWidgets('pull to refresh restarts the Solo reader', (tester) async {
+    var soloReads = 0;
     await tester.pumpWidget(
       buildTestable(
-        bottomPadding: footerClearance,
+        soloSliver: const SliverToBoxAdapter(child: Text('Solo inventory')),
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          meGroupsProvider.overrideWith((ref) {
+            soloReads++;
+            return Stream.value(const MeGroups());
+          }),
         ],
       ),
     );
     await tester.pumpAndSettle();
+    final before = soloReads;
 
-    final padding = tester.widget<SliverPadding>(
-      find.descendant(
-        of: find.byType(CustomScrollView),
-        matching: find.byType(SliverPadding),
-      ),
-    );
-    expect((padding.padding as EdgeInsets).bottom, footerClearance);
-  });
-
-  testWidgets('balances an expanded section around its following divider', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
+    await tester.timedDrag(
+      find.byType(CustomScrollView),
+      const Offset(0, 320),
+      const Duration(milliseconds: 500),
     );
     await tester.pumpAndSettle();
 
-    final lastChannel = tester.getRect(find.text('general'));
-    final divider = tester.getRect(find.byType(Divider).last);
-    final nextSectionHeader = tester.getRect(find.text('DMs'));
-
-    expect(
-      divider.top - lastChannel.bottom,
-      closeTo(nextSectionHeader.top - divider.bottom, 0.01),
-    );
+    expect(soloReads, before + 1);
   });
 
   testWidgets('keeps the Buzz background fixed behind the channels list', (
@@ -618,9 +757,7 @@ void main() {
       find.byType(FrostedAppBar).last,
     );
     expect(appBar.frosted, isFalse);
-    expect(appBar.frostedSurfaceOpacity, 0);
-    expect(appBar.frostedBlurSigma, 0);
-    expect(appBar.showBottomDivider, isFalse);
+
     expect(appBar.bottomHeight, Grid.xxs);
   });
 
@@ -656,15 +793,211 @@ void main() {
     await tester.pump();
     var appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
     expect(appBar.frosted, isTrue);
-    expect(appBar.frostedSurfaceOpacity, 0);
-    expect(appBar.frostedBlurSigma, closeTo(8.67, 0.001));
 
     scrollable.position.jumpTo(Grid.xxl);
     await tester.pump();
     appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
-    expect(appBar.frostedSurfaceOpacity, 0);
-    expect(appBar.frostedBlurSigma, 23.12);
+    expect(appBar.frosted, isTrue);
   });
+
+  testWidgets('Home keeps header blur after returning from search', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    tester.view.physicalSize = const Size(320, 320);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      buildTestable(
+        realHome: true,
+        topSectionGradient: const LinearGradient(
+          colors: [Colors.yellow, Colors.blue],
+        ),
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final position = tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(CustomScrollView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    final header = find.byType(FrostedAppBar).first;
+    expect(
+      find.descendant(of: header, matching: find.byType(BackdropFilter)),
+      findsOneWidget,
+    );
+    final offset = position.pixels;
+    await tester.tap(find.byTooltip('Search'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('search-close')));
+    await tester.pumpAndSettle();
+    expect(position.pixels, offset);
+    expect(
+      find.descendant(of: header, matching: find.byType(BackdropFilter)),
+      findsOneWidget,
+    );
+  });
+
+  for (final routeKind in ['material', 'custom']) {
+    testWidgets(
+      'Channels replays native scroll state on return: route=$routeKind',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        tester.view.physicalSize = const Size(390, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final messenger = tester.binding.defaultBinaryMessenger;
+        final calls = <int, List<MethodCall>>{};
+        messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+          call,
+        ) async {
+          if (call.method == 'create') {
+            final args = call.arguments as Map;
+            if (args['viewType'] == IosNavigationBar.viewType) {
+              final id = args['id'] as int;
+              calls[id] = [];
+              messenger.setMockMethodCallHandler(
+                MethodChannel('${IosNavigationBar.viewType}/$id'),
+                (call) async {
+                  calls[id]!.add(call);
+                  return null;
+                },
+              );
+            }
+          }
+          return null;
+        });
+        addTearDown(() {
+          messenger.setMockMethodCallHandler(
+            SystemChannels.platform_views,
+            null,
+          );
+          for (final id in calls.keys) {
+            messenger.setMockMethodCallHandler(
+              MethodChannel('${IosNavigationBar.viewType}/$id'),
+              null,
+            );
+          }
+        });
+        await tester.pumpWidget(
+          buildTestable(
+            realHome: false,
+            overrides: [
+              channelsProvider.overrideWith(
+                () => _FakeNotifier(
+                  List.generate(
+                    40,
+                    (i) => Channel(
+                      id: 'channel-$i',
+                      description: '',
+                      createdBy: 'test',
+                      createdAt: DateTime(2026),
+                      memberCount: 1,
+                      visibility: 'open',
+                      name: 'channel-$i',
+                      channelType: 'stream',
+                      isMember: true,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final homeCalls = calls.values.single;
+        final position = tester
+            .state<ScrollableState>(
+              find
+                  .descendant(
+                    of: find.byType(CustomScrollView),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
+            )
+            .position;
+        position.jumpTo(200);
+        await tester.pumpAndSettle();
+        final scrolledOffset =
+            homeCalls.where((call) => call.method == 'scroll').last.arguments
+                as double;
+        expect(scrolledOffset, greaterThan(0));
+        final navigator = tester.state<NavigatorState>(
+          find.byType(Navigator).first,
+        );
+        void openCoveringRoute() {
+          unawaited(
+            navigator.push<void>(
+              routeKind == 'custom'
+                  ? PageRouteBuilder<void>(
+                      opaque: true,
+                      pageBuilder: (_, _, _) =>
+                          const Scaffold(body: Text('Custom route')),
+                    )
+                  : MaterialPageRoute<void>(
+                      builder: (_) => const Scaffold(body: Text('Channel')),
+                    ),
+            ),
+          );
+        }
+
+        openCoveringRoute();
+        await tester.pumpAndSettle();
+        homeCalls.clear();
+        navigator.pop();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+        final earlyRestores = homeCalls
+            .where((call) => call.method == 'prepareForReveal')
+            .length;
+        expect(earlyRestores, greaterThan(0));
+        await tester.pumpAndSettle();
+        expect(
+          homeCalls.where((call) => call.method == 'prepareForReveal').length,
+          greaterThan(earlyRestores),
+          reason:
+              'Replay again after the outgoing route and Home transform settle.',
+        );
+        expect(position.pixels, 200);
+        expect(
+          homeCalls
+              .where((call) => call.method == 'scroll')
+              .map((call) => call.arguments),
+          contains(scrolledOffset),
+        );
+        expect(homeCalls.last.method, 'prepareForReveal');
+        // The replay must use the live offset, including returning at the top.
+        position.jumpTo(0);
+        await tester.pumpAndSettle();
+        openCoveringRoute();
+        await tester.pumpAndSettle();
+        homeCalls.clear();
+        navigator.pop();
+        await tester.pumpAndSettle();
+        expect(
+          homeCalls
+              .where((call) => call.method == 'scroll')
+              .map((call) => call.arguments),
+          contains(0.0),
+        );
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
 
   testWidgets('scrolls Home to the top when its tab is selected again', (
     tester,
@@ -747,7 +1080,12 @@ void main() {
             () => _FakeChannelSectionsNotifier(
               const ChannelSectionStore(
                 sections: [
-                  ChannelSection(id: 'section-1', name: 'Design', order: 0),
+                  ChannelSection(
+                    id: 'section-1',
+                    name: 'Design',
+                    icon: '🎨',
+                    order: 0,
+                  ),
                 ],
               ),
             ),
@@ -757,6 +1095,40 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.text('🎨'), findsNothing);
+    final sectionRow = find
+        .ancestor(of: find.text('Design'), matching: find.byType(Row))
+        .first;
+    final chevron = find.descendant(
+      of: sectionRow,
+      matching: find.byIcon(BuzzIcons.chevronDown),
+    );
+    expect(
+      tester.getTopLeft(chevron).dx -
+          tester.getTopRight(find.text('Design')).dx,
+      closeTo(Grid.quarter, 0.01),
+    );
+    for (final divider in tester.widgetList<Divider>(find.byType(Divider))) {
+      expect(
+        divider.color,
+        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.07),
+      );
+    }
+    expect(
+      tester
+          .getTopRight(
+            find.descendant(
+              of: find.byKey(const Key('section-menu-section-1')),
+              matching: find.byIcon(BuzzIcons.ellipsis),
+            ),
+          )
+          .dx,
+      closeTo(
+        tester.getTopRight(find.byKey(const Key('section-menu-section-1'))).dx -
+            3,
+        0.01,
+      ),
+    );
     await tester.tap(find.byKey(const Key('section-menu-section-1')));
     await tester.pumpAndSettle();
 
@@ -834,13 +1206,14 @@ void main() {
     relaySession.connect();
     await tester.pumpAndSettle();
 
-    final topLabelX = tester.getTopLeft(find.text('Community')).dx;
+    expect(find.text('Community'), findsNothing);
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    // The community title shares the leading row with its avatar. Channel
-    // labels stay aligned below it.
-    expect(topLabelX, Grid.twelve + 40 + Grid.xxs);
-    expect(sectionLabelX, rowLabelX);
+    final rowIconX = tester
+        .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
+        .dx;
+    expect(sectionLabelX, rowIconX);
+    expect(rowLabelX, greaterThan(rowIconX));
 
     relaySession.setReconnecting();
     await tester.pump();
@@ -857,43 +1230,30 @@ void main() {
           find.byKey(const Key('channels-skeleton-row-label-0')).first,
         )
         .dx;
-    expect(skeletonSectionLabelX, skeletonRowLabelX);
+    expect(skeletonRowLabelX, rowLabelX);
     expect(skeletonSectionLabelX, sectionLabelX);
   });
 
-  testWidgets('centers the smaller profile avatar beside the community', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final appBar = find.byType(FrostedAppBar).last;
-    final communityAvatar = find.descendant(
-      of: appBar,
-      matching: find.byType(ClipRSuperellipse),
-    );
-    final profileAvatar = find.descendant(
-      of: appBar,
-      matching: find.byType(MaskedAvatarBadge),
-    );
-
-    expect(tester.getSize(communityAvatar), const Size.square(40));
-    expect(tester.getSize(profileAvatar), const Size.square(36));
-    expect(
-      tester.widget<MaskedAvatarBadge>(profileAvatar).badge,
-      isNull,
-      reason: 'The current user does not need an online dot on Home.',
-    );
-    final communityRect = tester.getRect(communityAvatar);
-    final profileRect = tester.getRect(profileAvatar);
-    expect(profileRect.center.dy, communityRect.center.dy);
-  });
+  testWidgets(
+    'community avatar remains in Home while profile moves out of header',
+    (tester) async {
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final appBar = find.byType(FrostedAppBar).last;
+      final community = find.descendant(
+        of: appBar,
+        matching: find.byType(ClipRSuperellipse),
+      );
+      expect(tester.getSize(community), const Size.square(36));
+      expect(find.byTooltip('Create'), findsOneWidget);
+    },
+  );
 
   testWidgets('keeps cached channels visible while reconnecting', (
     tester,
@@ -984,178 +1344,6 @@ void main() {
     );
   });
 
-  testWidgets('opens the settings page supplied by the app layer', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(Hero), findsNothing);
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Injected settings'), findsOneWidget);
-    final route = ModalRoute.of(tester.element(find.text('Injected settings')));
-    expect(route, isNot(isA<MaterialPageRoute<void>>()));
-    expect(route?.opaque, isFalse);
-    expect(route?.allowSnapshotting, isFalse);
-    expect(route?.transitionDuration, const Duration(milliseconds: 150));
-    expect(route?.reverseTransitionDuration, const Duration(milliseconds: 150));
-  });
-
-  testWidgets('reports monotonic Settings route progress', (tester) async {
-    final progress = <double>[];
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-        onSettingsTransitionProgress: progress.add,
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-    expect(progress, [0]);
-    await tester.pump(const Duration(milliseconds: 16));
-    expect(progress.last, inExclusiveRange(0, 1));
-    await tester.pump(const Duration(milliseconds: 95));
-    expect(progress.last, inExclusiveRange(0, 1));
-    await tester.pumpAndSettle();
-    expect(progress.last, 1);
-    for (var index = 1; index < progress.length; index++) {
-      expect(progress[index], greaterThanOrEqualTo(progress[index - 1]));
-    }
-
-    Navigator.of(tester.element(find.text('Injected settings'))).pop();
-    await tester.pump();
-    final reverseStart = progress.length;
-    await tester.pump(const Duration(milliseconds: 95));
-    expect(progress.last, inExclusiveRange(0, 1));
-    await tester.pumpAndSettle();
-    expect(progress.last, 0);
-    for (var index = reverseStart + 1; index < progress.length; index++) {
-      expect(progress[index], lessThanOrEqualTo(progress[index - 1]));
-    }
-  });
-
-  testWidgets('scales and fully fades Settings into view', (tester) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pump();
-
-    final transition = find.byKey(
-      const ValueKey('settings-transition-opacity'),
-      skipOffstage: false,
-    );
-    final scaleTransition = find.byKey(
-      const ValueKey('settings-transition-scale'),
-      skipOffstage: false,
-    );
-    expect(transition, findsOneWidget);
-    expect(scaleTransition, findsOneWidget);
-    expect(
-      find.descendant(
-        of: transition,
-        matching: find.byKey(
-          const ValueKey('settings-transition-layer'),
-          skipOffstage: false,
-        ),
-      ),
-      findsOneWidget,
-    );
-    expect(tester.widget<FadeTransition>(transition).opacity.value, 0);
-
-    await tester.pump(const Duration(milliseconds: 95));
-    final forwardOpacity = tester
-        .widget<FadeTransition>(transition)
-        .opacity
-        .value;
-    final forwardScale = tester
-        .widget<ScaleTransition>(scaleTransition)
-        .scale
-        .value;
-    final forwardScaleProgress = (1.04 - forwardScale) / 0.04;
-    expect(
-      forwardOpacity,
-      closeTo(Curves.easeOutQuad.transform(95 / 150), 0.02),
-    );
-    expect(forwardScaleProgress, closeTo(forwardOpacity, 0.001));
-    await tester.pumpAndSettle();
-    expect(tester.widget<FadeTransition>(transition).opacity.value, 1);
-
-    Navigator.of(tester.element(find.text('Injected settings'))).pop();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 95));
-    final reverseOpacity = tester
-        .widget<FadeTransition>(transition)
-        .opacity
-        .value;
-    final reverseScale = tester
-        .widget<ScaleTransition>(scaleTransition)
-        .scale
-        .value;
-    final reverseScaleProgress = (1.04 - reverseScale) / 0.04;
-    expect(
-      reverseOpacity,
-      inExclusiveRange(0, 1),
-      reason: 'The complete Settings layer still fades out on exit.',
-    );
-    expect(reverseScaleProgress, closeTo(reverseOpacity, 0.001));
-  });
-
-  testWidgets('gives feedback for the profile and community controls', (
-    tester,
-  ) async {
-    final hapticCalls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
-          if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(SystemChannels.platform, null),
-    );
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(ProfileAvatar));
-    await tester.pumpAndSettle();
-    expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
-
-    Navigator.of(tester.element(find.text('Injected settings'))).pop();
-    await tester.pumpAndSettle();
-    final communityAvatar = find.descendant(
-      of: find.byType(FrostedAppBar).last,
-      matching: find.byType(ClipRSuperellipse),
-    );
-    await tester.tap(communityAvatar);
-    await tester.pump();
-    expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
-  });
-
   for (final brightness in Brightness.values) {
     testWidgets('community settings opens destinations in ${brightness.name}', (
       tester,
@@ -1196,7 +1384,13 @@ void main() {
       } finally {
         semantics.dispose();
       }
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       expect(find.byType(BuzzSheetHeader), findsNothing);
       expect(find.text('Community settings'), findsOneWidget);
@@ -1228,7 +1422,13 @@ void main() {
       expect(find.text('Community settings'), findsNothing);
       Navigator.of(tester.element(find.text('Appearance destination'))).pop();
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Invite'));
       await tester.pumpAndSettle();
@@ -1269,7 +1469,13 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(lookups, 1);
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       final appearanceBefore = tester.getRect(find.text('Appearance'));
       expect(find.text('Invite'), findsNothing);
@@ -1279,7 +1485,13 @@ void main() {
       expect(tester.getRect(find.text('Appearance')), appearanceBefore);
       Navigator.of(tester.element(find.text('Appearance'))).pop();
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       expect(
         find.text('Invite'),
@@ -1401,7 +1613,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Invite'), findsNothing);
     expect(find.text('Appearance'), findsOneWidget);
@@ -1413,7 +1631,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('community-switcher-page')), findsNothing);
     expect(find.byKey(const Key('community-switcher-sheet')), findsNothing);
-    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Alpha'), findsNothing);
   });
 
   testWidgets('community switcher separates selection from edit removal', (
@@ -1433,8 +1651,9 @@ void main() {
       ),
       Community(
         id: 'bravo',
-        name: 'Bravo',
-        relayUrl: 'wss://bravo.example.com',
+        // Hosted communities without relay metadata store their host.
+        name: 'bravo.communities.buzz.xyz',
+        relayUrl: 'wss://bravo.communities.buzz.xyz',
         addedAt: DateTime(2025),
       ),
     ];
@@ -1458,7 +1677,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('Community settings'), findsOneWidget);
     expect(find.text('Switch communities'), findsNothing);
@@ -1475,14 +1700,15 @@ void main() {
 
     expect(find.byTooltip('Close community switcher'), findsOneWidget);
     expect(find.text('alpha.example.com'), findsNothing);
-    expect(find.text('bravo.example.com'), findsNothing);
+    expect(find.text('bravo.communities.buzz.xyz'), findsNothing);
+    expect(
+      find.descendant(of: options, matching: find.text('bravo')),
+      findsOneWidget,
+    );
 
     expect(find.text('Rename'), findsNothing);
     expect(
-      find.descendant(
-        of: options,
-        matching: find.byIcon(BuzzIcons.ellipsisVertical),
-      ),
+      find.descendant(of: options, matching: find.byIcon(BuzzIcons.ellipsis)),
       findsNothing,
     );
     expect(find.text('Edit'), findsOneWidget);
@@ -1551,13 +1777,13 @@ void main() {
     expect(activeSelection, findsNothing);
     expect(inactiveSelection, findsNothing);
 
-    await tester.tap(find.byTooltip('Remove Bravo'));
+    await tester.tap(find.byTooltip('Remove bravo'));
     await tester.pumpAndSettle();
 
     expect(find.text('Remove community?'), findsOneWidget);
     expect(
       find.text(
-        'Are you sure you want to remove “Bravo”? '
+        'Are you sure you want to remove “bravo”? '
         'You can pair with it again later.',
       ),
       findsOneWidget,
@@ -1568,7 +1794,7 @@ void main() {
 
     expect(communityNotifier.removedIds, ['bravo']);
     expect(find.text('Switch Community'), findsOneWidget);
-    expect(find.text('Bravo'), findsNothing);
+    expect(find.text('bravo'), findsNothing);
     expect(find.text('Done'), findsOneWidget);
 
     await tester.tap(find.text('Done'));
@@ -1607,7 +1833,13 @@ void main() {
     await tester.pumpAndSettle();
     final initialIconLoads = iconLoads;
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -1639,7 +1871,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -1677,7 +1915,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('alpha'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('community-menu-switch')));
       await tester.pumpAndSettle();
@@ -1753,7 +1997,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -1951,7 +2201,11 @@ void main() {
           if (nativeHeader) {
             destinationRect = const Rect.fromLTWH(16, 68, 36, 36);
             final bar = tester.widget<FrostedAppBar>(
-              find.byType(FrostedAppBar),
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is FrostedAppBar &&
+                    widget.onNativeReadyChanged != null,
+              ),
             );
             bar.nativeLeading!.onAvatarBoundsChanged!(destinationRect);
             bar.nativeLeading!.onPressed!();
@@ -1961,7 +2215,13 @@ void main() {
               matching: find.byType(ClipRSuperellipse),
             );
             destinationRect = tester.getRect(headerAvatar);
-            await tester.tap(find.text('Alpha'));
+            await tester.tap(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is Semantics &&
+                    widget.properties.label == 'Community settings',
+              ),
+            );
           }
           final destination = destinationRect.center;
           await tester.pumpAndSettle();
@@ -1993,11 +2253,18 @@ void main() {
           );
           await tester.pump();
           final flyingAvatar = find.byKey(const Key('community-flying-avatar'));
-          expect(notifier.switchedIds, reduceMotion ? ['bravo'] : isEmpty);
+          // The switch starts with the centering motion, not after it.
+          expect(notifier.switchedIds, ['bravo']);
           if (nativeHeader) {
             expect(
               tester
-                  .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+                  .widget<FrostedAppBar>(
+                    find.byWidgetPredicate(
+                      (widget) =>
+                          widget is FrostedAppBar &&
+                          widget.onNativeReadyChanged != null,
+                    ),
+                  )
                   .nativeLeading!
                   .avatarHidden,
               isTrue,
@@ -2006,7 +2273,6 @@ void main() {
           final origin = tester.getCenter(flyingAvatar);
           await tester.pump(const Duration(milliseconds: 105));
           if (!reduceMotion) {
-            expect(notifier.switchedIds, isEmpty);
             final inFlight = tester.getCenter(flyingAvatar);
             const center = Offset(195, 422);
             expect(
@@ -2113,7 +2379,11 @@ void main() {
             // hold, and use fresh bounds rather than the old community's slot.
             expect(tester.getCenter(flyingAvatar), const Offset(195, 422));
             final header = tester.widget<FrostedAppBar>(
-              find.byType(FrostedAppBar),
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is FrostedAppBar &&
+                    widget.onNativeReadyChanged != null,
+              ),
             );
             header.nativeLeading!.onAvatarBoundsChanged!(
               const Rect.fromLTWH(24, 76, 36, 36),
@@ -2151,13 +2421,13 @@ void main() {
           await tester.pump();
           expect(
             tester.widget<Text>(find.text('general')).style!.fontWeight,
-            FontWeight.w700,
+            FontWeight.w600,
           );
           expect(find.text('Alice ready'), findsOneWidget);
           expect(progress.last, 0);
           if (!reduceMotion) {
             await tester.pump(const Duration(milliseconds: 65));
-            expect(tester.getCenter(flyingAvatar).dx, greaterThan(195));
+            expect(tester.getCenter(flyingAvatar).dx, lessThan(195));
             await tester.pump(const Duration(milliseconds: 195));
             expect(tester.getCenter(flyingAvatar).dy, lessThan(422));
             expect(
@@ -2207,12 +2477,17 @@ void main() {
           );
           if (nativeHeader) {
             final bar = tester.widget<FrostedAppBar>(
-              find.byType(FrostedAppBar),
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is FrostedAppBar &&
+                    widget.onNativeReadyChanged != null,
+              ),
             );
-            expect(bar.nativeTitle, 'Bravo');
+            expect(bar.nativeTitle, '');
+            expect(bar.nativeLargeTitle, isFalse);
             expect(bar.nativeLeading!.avatarHidden, isFalse);
           } else {
-            expect(find.text('Bravo'), findsOneWidget);
+            expect(find.text('Bravo'), findsNothing);
           }
           expect(progress.last, 0);
           expect(tester.takeException(), isNull);
@@ -2253,7 +2528,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Alpha'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -2277,6 +2558,173 @@ void main() {
     expect(find.byKey(const Key('community-switcher-page')), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('organization sign-in is reachable before content loads', (
+    tester,
+  ) async {
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+    final notifier = _FakeCommunityListNotifier(communities);
+    final pending = Completer<List<Channel>>();
+    final account = BuilderlabAccountClient();
+    final signIn = OrganizationSignIn(
+      account: account,
+      browser: BrowserAuth(),
+      reconnect: () async {},
+    )..status = OrganizationSessionStatus.signedOut;
+    final auth = HostedRelayAuth(
+      BuilderlabAccountClient(),
+      organization: account,
+      organizationRelay: (uri) => uri.host == 'bravo.example.com',
+    );
+    addTearDown(() {
+      signIn.dispose();
+      auth.dispose();
+      account.dispose();
+    });
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          organizationSignInProvider.overrideWithValue(signIn),
+          hostedRelayAuthProvider.overrideWithValue(auth),
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              testChannels,
+              load: () => notifier.activeId == 'alpha'
+                  ? Future.value(testChannels)
+                  : pending.future,
+            ),
+          ),
+          communityListProvider.overrideWith(() => notifier),
+          activeCommunityProvider.overrideWith((ref) async {
+            await ref.watch(communityListProvider.future);
+            return communities.firstWhere(
+              (community) => community.id == notifier.activeId,
+            );
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+    expect(notifier.switchedIds, ['bravo']);
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(find.textContaining('taking longer to load'), findsNothing);
+    pending.complete(testChannels);
+  });
+
+  testWidgets(
+    'a refused organization key closes the switcher before content loads',
+    (tester) async {
+      final communities = [
+        Community(
+          id: 'alpha',
+          name: 'Alpha',
+          relayUrl: 'wss://alpha.example.com',
+          addedAt: DateTime(2025),
+        ),
+        Community(
+          id: 'bravo',
+          name: 'Bravo',
+          relayUrl: 'wss://bravo.example.com',
+          addedAt: DateTime(2025),
+        ),
+      ];
+      final notifier = _FakeCommunityListNotifier(communities);
+      final pending = Completer<List<Channel>>();
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedIn;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (uri) => uri.host == 'bravo.example.com',
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            organizationSignInProvider.overrideWithValue(signIn),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                testChannels,
+                load: () => notifier.activeId == 'alpha'
+                    ? Future.value(testChannels)
+                    : pending.future,
+              ),
+            ),
+            communityListProvider.overrideWith(() => notifier),
+            activeCommunityProvider.overrideWith((ref) async {
+              await ref.watch(communityListProvider.future);
+              return communities.firstWhere(
+                (community) => community.id == notifier.activeId,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-menu-switch')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(notifier.switchedIds, ['bravo']);
+      // Signed in with no refusal yet: keep waiting for content.
+      expect(find.byKey(const Key('community-switcher-page')), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byKey(const Key('community-switcher-page'))),
+      );
+      auth.rejected(
+        container.read(relayConfigProvider),
+        'Bearer refused',
+        terminal: true,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+      expect(find.textContaining('taking longer to load'), findsNothing);
+      pending.complete(testChannels);
+    },
+  );
 
   for (final timeout in [false, true]) {
     testWidgets(
@@ -2324,7 +2772,13 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.text('Alpha'));
+        await tester.tap(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Community settings',
+          ),
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('community-menu-switch')));
         await tester.pumpAndSettle();
@@ -2362,7 +2816,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(notifier.switchedIds, ['bravo', 'bravo']);
         expect(find.byKey(const Key('community-switcher-page')), findsNothing);
-        expect(find.text('Bravo'), findsOneWidget);
+        expect(find.text('Bravo'), findsNothing);
         expect(tester.takeException(), isNull);
       },
     );
@@ -2400,7 +2854,13 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text(count == 0 ? 'Community' : 'Community 0'));
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
       await tester.pumpAndSettle();
       final switchRow = find.byKey(const Key('community-menu-switch'));
       await tester.ensureVisible(switchRow);
@@ -2441,7 +2901,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Community'));
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('community-menu-switch')));
     await tester.pumpAndSettle();
@@ -2456,696 +2922,456 @@ void main() {
     expect(find.byType(PairingPage), findsOneWidget);
     expect(find.byType(FallbackPairingQrScanner), findsNothing);
     expect(find.text('Scan a QR code'), findsOneWidget);
-    expect(find.text('Use pairing code'), findsOneWidget);
+    expect(find.text('Use pairing code'), findsNothing);
+    expect(find.text('Use a pairing code'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });
 
-  testWidgets('quick actions slide behind navigation when leaving home', (
-    tester,
-  ) async {
-    Widget buildLauncher({required bool visible}) {
-      return ProviderScope(
-        overrides: [profileProvider.overrideWith(() => _FakeProfileNotifier())],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: Stack(
-            children: [
-              Positioned.fill(
-                child: ChannelQuickActionsLauncher(
-                  visible: visible,
-                  navigationBarHeight: 60,
-                  navigationBarBottomGap: 12,
-                  navigationBarWidth: 218,
-                  systemBottomInset: 0,
-                  rightInset: 16,
-                ),
-              ),
-            ],
-          ),
+  registerNativeCreationTests(
+    (overrides) => buildTestable(overrides: overrides),
+  );
+
+  testWidgets(
+    'create channel sheet uses checked menus and a validated header action',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final actions = _CreateSheetActions();
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            channelActionsProvider.overrideWith((ref) => actions),
+          ],
         ),
       );
-    }
+      await tester.pumpAndSettle();
 
-    await tester.pumpWidget(buildLauncher(visible: true));
-    await tester.pumpAndSettle();
-    Transform motionTransform() => tester.widget<Transform>(
-      find.byKey(const Key('channel-quick-actions-transform')),
-    );
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New channel'));
+      await tester.pumpAndSettle();
+      final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
+      expect(createSheetRect.top, 0);
+      expect(createSheetRect.height, 800);
+      tester.testTextInput.hide();
+      await tester.pumpAndSettle();
 
-    expect(motionTransform().transform.getTranslation().x, 0);
+      if (Platform.environment['CREATE_SHEET_SCREENSHOTS']
+          case final directory?) {
+        final boundary = tester
+            .element(find.byType(BottomSheet).last)
+            .findAncestorRenderObjectOfType<RenderRepaintBoundary>()!;
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 2);
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          await Directory(directory).create(recursive: true);
+          await File(
+            '$directory/new-channel.png',
+          ).writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+      }
 
-    await tester.pumpWidget(buildLauncher(visible: false));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 110));
-    final midpoint = motionTransform().transform.getTranslation().x;
-    expect(midpoint, lessThan(0));
-    expect(midpoint, greaterThan(-279));
+      expect(find.text('New channel'), findsOneWidget);
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(find.text('Name'), findsOneWidget);
+      expect(find.text('Description  Optional'), findsOneWidget);
+      void expectSingleFieldLabels() {
+        final nodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          nodes.add(node);
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
 
-    await tester.pumpAndSettle();
-    expect(motionTransform().transform.getTranslation().x, closeTo(-279, 0.01));
-    final hiddenOpacity = tester.widget<Opacity>(
-      find.byKey(const Key('channel-quick-actions-opacity')),
-    );
-    expect(hiddenOpacity.opacity, 0);
-    final hiddenPointerGate = tester.widget<IgnorePointer>(
-      find
-          .ancestor(
-            of: find.byKey(const Key('channel-quick-actions-transform')),
-            matching: find.byType(IgnorePointer),
-          )
-          .first,
-    );
-    expect(hiddenPointerGate.ignoring, isTrue);
-  });
+        collect(tester.getSemantics(find.byType(BottomSheet).last));
+        for (final label in ['Name', 'Description']) {
+          final matches = nodes.where((node) => node.label.contains(label));
+          expect(matches, hasLength(1));
+          expect(matches.single.flagsCollection.isTextField, isTrue);
+        }
+      }
 
-  testWidgets('quick actions spring into spaced muted cards', (tester) async {
+      expectSingleFieldLabels();
+      expect(find.text('Channel type'), findsOneWidget);
+      expect(find.text('Ongoing'), findsOneWidget);
+      expect(find.text('Temporary'), findsNothing);
+      expect(find.text('Visibility'), findsOneWidget);
+      expect(find.text('Public'), findsOneWidget);
+      expect(find.text('Private'), findsNothing);
+      final submit = find.byKey(const Key('create-channel-submit'));
+      expect(tester.widget<TextButton>(submit).onPressed, isNull);
+      await tester.enterText(
+        find.byKey(const Key('create-channel-name')),
+        'release-notes',
+      );
+      await tester.pump();
+      expect(tester.widget<TextButton>(submit).onPressed, isNotNull);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.single, {
+        'name': 'release-notes',
+        'type': 'stream',
+        'visibility': 'open',
+        'description': '',
+        'ttl': null,
+      });
+      expect(find.text('Bad state: Try again'), findsOneWidget);
+      expectSingleFieldLabels();
+
+      final nameField = tester.widget<TextField>(
+        find.byKey(const Key('create-channel-name')),
+      );
+      final descriptionField = tester.widget<TextField>(
+        find.byKey(const Key('create-channel-description')),
+      );
+      expect(nameField.textInputAction, TextInputAction.done);
+      expect(nameField.onSubmitted, isNotNull);
+      expect(descriptionField.textInputAction, TextInputAction.done);
+      expect(descriptionField.onSubmitted, isNotNull);
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-name'))).height,
+        greaterThanOrEqualTo(52),
+      );
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-type'))).height,
+        greaterThanOrEqualTo(48),
+      );
+
+      await tester.tap(find.byKey(const Key('create-channel-type')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('create-channel-type-temporary')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Expires after'), findsOneWidget);
+      expect(find.text('7 days'), findsOneWidget);
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-ttl'))).height,
+        greaterThanOrEqualTo(51),
+      );
+
+      await tester.tap(find.byKey(const Key('create-channel-visibility')));
+      await tester.pumpAndSettle();
+      final privateVisibility = find.byKey(
+        const Key('create-channel-visibility-private'),
+      );
+      await tester.ensureVisible(privateVisibility);
+      await tester.pumpAndSettle();
+      await tester.tap(privateVisibility);
+      await tester.pumpAndSettle();
+      expect(find.text('Private'), findsOneWidget);
+      expect(find.text('Public'), findsNothing);
+      await tester.enterText(
+        find.byKey(const Key('create-channel-description')),
+        'Release updates',
+      );
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.last, {
+        'name': 'release-notes',
+        'type': 'stream',
+        'visibility': 'private',
+        'description': 'Release updates',
+        'ttl': 7 * 24 * 60 * 60,
+      });
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('create-channel-name')), findsNothing);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('create channel sheet shows a taken-name refusal as plain text', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       buildTestable(
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final surface = find.byKey(const Key('quick-actions-surface'));
-    expect(tester.getSize(surface), const Size.square(56));
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-
-    var largestHeight = tester.getSize(surface).height;
-    for (var frame = 0; frame < 20; frame++) {
-      await tester.pump(const Duration(milliseconds: 16));
-      largestHeight = max(largestHeight, tester.getSize(surface).height);
-    }
-    await tester.pumpAndSettle();
-
-    expect(largestHeight, greaterThan(216));
-    expect(tester.getSize(surface).height, closeTo(216, 0.01));
-    final screenWidth = MediaQuery.sizeOf(tester.element(surface)).width;
-    final surfaceRect = tester.getRect(surface);
-    expect(surfaceRect.left, closeTo(20, 0.01));
-    expect(surfaceRect.right, closeTo(screenWidth - 20, 0.01));
-
-    final menuRect = tester.getRect(
-      find.byKey(const Key('quick-actions-menu')),
-    );
-    final createCard = find.byKey(
-      const Key('quick-action-create-channel-card'),
-    );
-    final dmCard = find.byKey(const Key('quick-action-new-dm-card'));
-    final browseCard = find.byKey(
-      const Key('quick-action-browse-channels-card'),
-    );
-    final createRect = tester.getRect(createCard);
-    final dmRect = tester.getRect(dmCard);
-    final browseRect = tester.getRect(browseCard);
-
-    expect(createRect.left - menuRect.left, closeTo(8, 0.01));
-    expect(menuRect.right - createRect.right, closeTo(8, 0.01));
-    expect(dmRect.left - menuRect.left, closeTo(8, 0.01));
-    expect(menuRect.right - dmRect.right, closeTo(8, 0.01));
-    expect(browseRect.left - menuRect.left, closeTo(8, 0.01));
-    expect(menuRect.right - browseRect.right, closeTo(8, 0.01));
-    expect(dmRect.top - createRect.bottom, closeTo(8, 0.01));
-    expect(browseRect.top - dmRect.bottom, closeTo(8, 0.01));
-    expect(dmRect.width, createRect.width);
-    expect(browseRect.width, createRect.width);
-    expect(dmRect.width, closeTo(menuRect.width - 16, 0.01));
-
-    final cardScheme = Theme.of(tester.element(createCard)).colorScheme;
-    final expectedCardColor = Color.alphaBlend(
-      cardScheme.onPrimary.withValues(alpha: 0.1),
-      cardScheme.primary,
-    );
-    final createMaterial = tester.widget<Material>(
-      find.descendant(of: createCard, matching: find.byType(Material)).first,
-    );
-    final dmMaterial = tester.widget<Material>(
-      find.descendant(of: dmCard, matching: find.byType(Material)).first,
-    );
-    final browseMaterial = tester.widget<Material>(
-      find.descendant(of: browseCard, matching: find.byType(Material)).first,
-    );
-    expect(createMaterial.color, expectedCardColor);
-    expect(dmMaterial.color, expectedCardColor);
-    expect(browseMaterial.color, expectedCardColor);
-    expect(
-      (createMaterial.borderRadius as BorderRadius).topLeft.x,
-      closeTo(12, 0.01),
-    );
-    expect(
-      (dmMaterial.borderRadius as BorderRadius).topLeft.x,
-      closeTo(12, 0.01),
-    );
-
-    expect(find.text('Start a new stream channel'), findsNothing);
-    expect(
-      tester.widget<Text>(find.text('Create channel')).style?.fontSize,
-      16,
-    );
-    expect(
-      tester.widget<Text>(find.text('New direct message')).style?.fontSize,
-      16,
-    );
-    expect(
-      tester.widget<Text>(find.text('Browse channels')).style?.fontSize,
-      16,
-    );
-    expect(find.text('Message one or more people'), findsNothing);
-  });
-
-  testWidgets('browse action lists only channels eligible to join', (
-    tester,
-  ) async {
-    final channels = [
-      ...testChannels,
-      Channel(
-        id: 'open-to-join',
-        name: 'announcements',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'Community announcements',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 8,
-      ),
-      Channel(
-        id: 'private-channel',
-        name: 'private-planning',
-        channelType: 'stream',
-        visibility: 'private',
-        description: 'Private planning',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 4,
-      ),
-      Channel(
-        id: 'archived-channel',
-        name: 'old-announcements',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'Archived announcements',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 3,
-        archivedAt: DateTime(2025, 1, 2),
-      ),
-      Channel(
-        id: 'unjoined-dm',
-        name: 'Hidden DM',
-        channelType: 'dm',
-        visibility: 'open',
-        description: 'Direct message',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-      ),
-    ];
-
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const Key('browse-channel-open-to-join')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const Key('browse-channel-1')), findsNothing);
-    expect(
-      find.byKey(const Key('browse-channel-private-channel')),
-      findsNothing,
-    );
-    expect(
-      find.byKey(const Key('browse-channel-archived-channel')),
-      findsNothing,
-    );
-    expect(find.byKey(const Key('browse-channel-unjoined-dm')), findsNothing);
-  });
-
-  testWidgets('browse action explains when no channels are discoverable', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('No open channels available to join.'), findsOneWidget);
-  });
-
-  testWidgets('browse action retries an initial directory request problem', (
-    tester,
-  ) async {
-    final joinable = Channel(
-      id: 'retry-discovery',
-      name: 'community-help',
-      channelType: 'stream',
-      visibility: 'open',
-      description: 'Help from the community',
-      createdBy: 'abc',
-      createdAt: DateTime(2025),
-      memberCount: 0,
-    );
-    late _RetryingDirectoryNotifier notifier;
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(
-            () => notifier = _RetryingDirectoryNotifier(
-              initialChannels: testChannels,
-              retriedChannels: [...testChannels, joinable],
-            ),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Couldn’t load open channels.'), findsOneWidget);
-    expect(find.text('No open channels available to join.'), findsNothing);
-    expect(find.byKey(const Key('browse-channels-retry')), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('browse-channels-retry')));
-    await tester.pumpAndSettle();
-
-    expect(notifier.retryCount, 1);
-    expect(find.text('Couldn’t load open channels.'), findsNothing);
-    expect(
-      find.byKey(const Key('browse-channel-retry-discovery')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('browse action exposes retry when refresh supersedes loading', (
-    tester,
-  ) async {
-    final joinable = Channel(
-      id: 'superseded-directory',
-      name: 'community-help',
-      channelType: 'stream',
-      visibility: 'open',
-      description: 'Help from the community',
-      createdBy: 'abc',
-      createdAt: DateTime(2025),
-      memberCount: 0,
-    );
-    late _SupersededDirectoryNotifier notifier;
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(
-            () => notifier = _SupersededDirectoryNotifier(
-              initialChannels: testChannels,
-              retriedChannels: [...testChannels, joinable],
-            ),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
-
-    notifier.supersedeLoadingDirectory();
-    await tester.pumpAndSettle();
-
-    expect(find.byType(BuzzLoadingIndicator), findsNothing);
-    expect(find.text('Couldn’t load open channels.'), findsOneWidget);
-    expect(find.byKey(const Key('browse-channels-retry')), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('browse-channels-retry')));
-    await tester.pumpAndSettle();
-
-    expect(notifier.retryCount, 1);
-    expect(
-      find.byKey(const Key('browse-channel-superseded-directory')),
-      findsOneWidget,
-    );
-  });
-
-  testWidgets('browse action scrolls and joins an offscreen channel', (
-    tester,
-  ) async {
-    final channels = List.generate(
-      500,
-      (index) => Channel(
-        id: 'directory-$index',
-        name: 'channel-${index.toString().padLeft(3, '0')}',
-        channelType: 'stream',
-        visibility: 'open',
-        description: '',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 0,
-      ),
-    );
-    late _RecordingChannelActions actions;
-    await tester.pumpWidget(
-      buildTestable(
-        disableAnimations: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+          // Same shape relay_session completes a refused publish with.
           channelActionsProvider.overrideWith(
-            (ref) => actions = _RecordingChannelActions(ref),
+            (ref) => _RefusingCreateActions(
+              Exception(
+                'invalid: an open channel named "Launch" already exists',
+              ),
+            ),
           ),
         ],
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pump();
-    await tester.tap(
-      find.byKey(const Key('quick-action-browse-channels-card')),
-    );
+    await tester.tap(find.byTooltip('Create'));
     await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const Key('browse-channel-directory-0')),
-      findsAtLeast(1),
-    );
-    expect(find.byKey(const Key('browse-channel-directory-499')), findsNothing);
-
-    final sheet = find.byType(BottomSheet).last;
-    final scrollable = find
-        .descendant(of: sheet, matching: find.byType(Scrollable))
-        .last;
-    expect(
-      tester.state<ScrollableState>(scrollable).position.maxScrollExtent,
-      greaterThan(0),
-    );
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('browse-channel-directory-499')),
-      500,
-      scrollable: scrollable,
-      maxScrolls: 100,
-    );
+    await tester.tap(find.text('New channel'));
     await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const Key('browse-channel-directory-499')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const Key('browse-channel-directory-0')), findsNothing);
-
-    await tester.tap(
-      find.byKey(const Key('browse-channel-join-directory-499')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(actions.joinedChannelIds, ['directory-499']);
-    expect(find.byType(BottomSheet), findsNothing);
-  });
-
-  testWidgets('create channel sheet lists type and visibility radio options', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Create channel'));
-    await tester.pumpAndSettle();
-    final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(createSheetRect.top, greaterThanOrEqualTo(24));
-    tester.testTextInput.hide();
-    await tester.pumpAndSettle();
-
-    expect(find.text('Create a new channel'), findsOneWidget);
-    expect(find.text('Name'), findsOneWidget);
-    expect(find.text('Description  Optional'), findsOneWidget);
-    expect(find.text('Channel type'), findsOneWidget);
-    expect(find.text('Ongoing'), findsOneWidget);
-    expect(find.text('Temporary'), findsOneWidget);
-    expect(find.text('Visibility'), findsOneWidget);
-    expect(find.text('Public'), findsOneWidget);
-    expect(find.text('Private'), findsOneWidget);
-    expect(find.byKey(const Key('create-channel-submit')), findsNothing);
-    final nameField = tester.widget<TextField>(
+    await tester.enterText(
       find.byKey(const Key('create-channel-name')),
+      'Launch',
     );
-    final descriptionField = tester.widget<TextField>(
-      find.byKey(const Key('create-channel-description')),
-    );
-    expect(nameField.textInputAction, TextInputAction.done);
-    expect(nameField.onSubmitted, isNotNull);
-    expect(descriptionField.textInputAction, TextInputAction.done);
-    expect(descriptionField.onSubmitted, isNotNull);
+    await tester.pump();
+    // The sheet submits from the keyboard's done action.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
     expect(
-      tester.getSize(find.byKey(const Key('create-channel-name'))).height,
-      greaterThanOrEqualTo(52),
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const Key('create-channel-type-ongoing')))
-          .height,
-      greaterThanOrEqualTo(56),
-    );
-
-    await tester.tap(find.byKey(const Key('create-channel-type-temporary')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Expires after'), findsOneWidget);
-    expect(find.text('7 days'), findsOneWidget);
-    expect(
-      tester.getSize(find.byKey(const Key('create-channel-ttl'))).height,
-      greaterThanOrEqualTo(51),
-    );
-
-    final privateVisibility = find.byKey(
-      const Key('create-channel-visibility-private'),
-    );
-    await tester.ensureVisible(privateVisibility);
-    await tester.pumpAndSettle();
-    await tester.tap(privateVisibility);
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<RadioGroup<String>>(find.byType(RadioGroup<String>))
-          .groupValue,
-      'private',
-    );
-  });
-
-  testWidgets('new message sheet lists and selects relay members', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(390, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    const directoryUsers = [
-      DirectoryUser(
-        pubkey: 'alice',
-        displayName: 'Alice',
-        nip05Handle: 'alice@example.com',
-      ),
-      DirectoryUser(pubkey: 'bob', displayName: 'Bob'),
-      DirectoryUser(pubkey: 'charlie', displayName: 'Charlie'),
-      DirectoryUser(pubkey: 'danielle', displayName: 'Danielle'),
-    ];
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => directoryUsers,
-          ),
-          relayDirectorySearchProvider.overrideWith((ref, query) async {
-            return directoryUsers
-                .where(
-                  (user) =>
-                      user.label.toLowerCase().contains(query.toLowerCase()),
-                )
-                .toList();
-          }),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('New direct message'));
-    await tester.pumpAndSettle();
-
-    final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(dmSheetRect.top, greaterThanOrEqualTo(24));
-    expect(find.text('New message'), findsOneWidget);
-    expect(find.text('To:'), findsOneWidget);
-    expect(find.text('Search for a person'), findsOneWidget);
-    final recipientField = find.byKey(const Key('new-dm-recipient-field'));
-    final initialRecipientWidth = tester.getSize(recipientField).width;
-    expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
-    expect(find.byKey(const Key('new-dm-person-alice')), findsOneWidget);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byKey(const Key('new-dm-person-alice')),
-        matching: find.byType(AvatarImage),
-      ),
+      find.text('An open channel named "Launch" already exists'),
       findsOneWidget,
     );
-
-    await tester.enterText(find.byKey(const Key('new-dm-search')), 'bob');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('new-dm-person-alice')), findsNothing);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-
-    await tester.enterText(find.byKey(const Key('new-dm-search')), '');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-dm-person-alice')));
-    await tester.pump();
-
-    final aliceChip = find.byKey(const Key('new-dm-selected-alice'));
-    final inlineSearch = find.byKey(const Key('new-dm-search'));
-    final aliceRect = tester.getRect(aliceChip);
-    final inlineSearchRect = tester.getRect(inlineSearch);
-    expect(inlineSearchRect.left, greaterThan(aliceRect.right));
-    expect(
-      (inlineSearchRect.center.dy - aliceRect.center.dy).abs(),
-      lessThan(1),
-    );
-    expect(find.text('Search for a person'), findsNothing);
-    expect(tester.widget<TextField>(inlineSearch).focusNode?.hasFocus, isTrue);
-    expect(tester.getSize(recipientField).width, initialRecipientWidth);
-    expect(tester.getSize(aliceChip).height, 40);
-    expect(tester.getSize(aliceChip).width, lessThanOrEqualTo(224));
-    final aliceChipMaterial = tester.widget<Material>(
-      find.descendant(of: aliceChip, matching: find.byType(Material)).first,
-    );
-    expect(aliceChipMaterial.shape, isA<StadiumBorder>());
-    expect(
-      aliceChipMaterial.color,
-      Theme.of(tester.element(aliceChip)).colorScheme.surfaceContainerHighest,
-    );
-    expect(
-      tester
-          .widget<AvatarImage>(
-            find.descendant(of: aliceChip, matching: find.byType(AvatarImage)),
-          )
-          .radius,
-      16,
-    );
-    expect(
-      tester
-          .widget<Text>(
-            find.descendant(of: aliceChip, matching: find.text('Alice')),
-          )
-          .style
-          ?.fontSize,
-      16,
-    );
-    expect(
-      find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
-      findsNothing,
-    );
-    expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('new-dm-person-bob')));
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('new-dm-person-charlie')));
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('new-dm-person-danielle')));
-    await tester.pump();
-
-    expect(aliceChip, findsOneWidget);
-    expect(find.byKey(const Key('new-dm-selected-bob')), findsOneWidget);
-    expect(find.byKey(const Key('new-dm-selected-charlie')), findsOneWidget);
-    final danielleChip = find.byKey(const Key('new-dm-selected-danielle'));
-    expect(danielleChip, findsOneWidget);
-    expect(tester.getSize(recipientField).width, initialRecipientWidth);
-    expect(
-      tester.getRect(danielleChip).top,
-      greaterThan(tester.getRect(aliceChip).top),
-    );
-    final recipientScrollViews = tester.widgetList<SingleChildScrollView>(
-      find.ancestor(
-        of: aliceChip,
-        matching: find.byType(SingleChildScrollView),
-      ),
-    );
-    expect(
-      recipientScrollViews.every(
-        (scrollView) => scrollView.scrollDirection == Axis.vertical,
-      ),
-      isTrue,
-    );
-    expect(
-      find.ancestor(
-        of: aliceChip,
-        matching: find.byKey(const Key('new-dm-recipient-wrap')),
-      ),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const Key('new-dm-selected-bob')));
-    await tester.pump();
-    expect(find.byKey(const Key('new-dm-selected-bob')), findsNothing);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-    expect(tester.widget<TextField>(inlineSearch).focusNode?.hasFocus, isTrue);
-    expect(find.text('Cancel'), findsNothing);
-    expect(find.text('Open DM'), findsNothing);
-    final searchField = tester.widget<TextField>(
-      find.byKey(const Key('new-dm-search')),
-    );
-    expect(searchField.textInputAction, TextInputAction.done);
-    expect(searchField.onSubmitted, isNotNull);
+    expect(find.textContaining('Exception'), findsNothing);
+    expect(find.textContaining('invalid:'), findsNothing);
+    // The sheet stays open so the user can pick another name.
+    expect(find.text('New channel'), findsOneWidget);
   });
+
+  dmRecipientLayoutTests(
+    (overrides) => buildTestable(
+      keyboardInset: 300,
+      overrides: [
+        channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ...overrides,
+      ],
+    ),
+  );
+
+  testWidgets(
+    'new DM sheet finds and selects people like mention autocomplete',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final waits = <bool>[];
+      final alice = _dmKey(0);
+      final bob = _dmKey(1);
+      final charlie = _dmKey(2);
+      final danielle = _dmKey(3);
+      final session = RecipientDirectorySession({
+        alice: 'Alice',
+        bob: 'Bob',
+        charlie: 'Charlie',
+        danielle: 'Danielle',
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            relaySessionProvider.overrideWith(() => session),
+            channelActionsProvider.overrideWith(
+              (ref) => _PendingDmActions(waits),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New DM'));
+      await tester.pumpAndSettle();
+
+      final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
+      expect(dmSheetRect.top, 0);
+      expect(dmSheetRect.height, 800);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet).last,
+          matching: find.text('New DM'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+            .onPressed,
+        isNull,
+      );
+      expect(find.text('To:'), findsOneWidget);
+      expect(find.text('Search for people or agents'), findsOneWidget);
+      final recipientField = find.byKey(const Key('new-dm-recipient-field'));
+      final initialRecipientWidth = tester.getSize(recipientField).width;
+      expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
+      // No directory dump: people are found by name, as with `@`.
+      expect(
+        find.text('Type a name to find people or agents.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('new-dm-search')))
+            .autofocus,
+        isTrue,
+      );
+
+      await _searchDm(tester, 'b');
+      expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(Key('new-dm-person-$bob')),
+          matching: find.byType(AvatarImage),
+        ),
+        findsOneWidget,
+      );
+      // A longer query keeps the shown rows while its own search runs.
+      await tester.enterText(find.byKey(const Key('new-dm-search')), 'bo');
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      // A query searched before shows its people at once.
+      await tester.enterText(find.byKey(const Key('new-dm-search')), 'b');
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(session.searches, ['b', 'bo']);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+
+      await _searchDm(tester, 'al');
+      await tester.tap(find.byKey(Key('new-dm-person-$alice')));
+      await tester.pump();
+
+      final aliceChip = find.byKey(Key('new-dm-selected-$alice'));
+      final inlineSearch = find.byKey(const Key('new-dm-search'));
+      final aliceRect = tester.getRect(aliceChip);
+      final inlineSearchRect = tester.getRect(inlineSearch);
+      expect(inlineSearchRect.left, greaterThan(aliceRect.right));
+      expect(
+        (inlineSearchRect.center.dy - aliceRect.center.dy).abs(),
+        lessThan(1),
+      );
+      expect(find.text('Search for people or agents'), findsNothing);
+      expect(
+        tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,
+        isTrue,
+      );
+      expect(tester.getSize(recipientField).width, initialRecipientWidth);
+      expect(tester.getSize(aliceChip).height, 40);
+      expect(tester.getSize(aliceChip).width, lessThanOrEqualTo(224));
+      final aliceChipMaterial = tester.widget<Material>(
+        find.descendant(of: aliceChip, matching: find.byType(Material)).first,
+      );
+      expect(aliceChipMaterial.shape, isA<StadiumBorder>());
+      expect(
+        aliceChipMaterial.color,
+        Theme.of(tester.element(aliceChip)).colorScheme.surfaceContainerHighest,
+      );
+      expect(
+        tester
+            .widget<AvatarImage>(
+              find.descendant(
+                of: aliceChip,
+                matching: find.byType(AvatarImage),
+              ),
+            )
+            .radius,
+        16,
+      );
+      expect(
+        tester
+            .widget<Text>(
+              find.descendant(of: aliceChip, matching: find.text('Alice')),
+            )
+            .style
+            ?.fontSize,
+        16,
+      );
+      expect(
+        find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
+        findsNothing,
+      );
+      expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
+
+      for (final (query, key) in [
+        ('bob', bob),
+        ('ch', charlie),
+        ('da', danielle),
+      ]) {
+        await _searchDm(tester, query);
+        await tester.tap(find.byKey(Key('new-dm-person-$key')));
+        await tester.pump();
+      }
+
+      expect(aliceChip, findsOneWidget);
+      expect(find.byKey(Key('new-dm-selected-$bob')), findsOneWidget);
+      expect(find.byKey(Key('new-dm-selected-$charlie')), findsOneWidget);
+      final danielleChip = find.byKey(Key('new-dm-selected-$danielle'));
+      expect(danielleChip, findsOneWidget);
+      expect(tester.getSize(recipientField).width, initialRecipientWidth);
+      expect(
+        tester.getRect(danielleChip).top,
+        greaterThan(tester.getRect(aliceChip).top),
+      );
+      final recipientScrollViews = tester.widgetList<SingleChildScrollView>(
+        find.ancestor(
+          of: aliceChip,
+          matching: find.byType(SingleChildScrollView),
+        ),
+      );
+      expect(
+        recipientScrollViews.every(
+          (scrollView) => scrollView.scrollDirection == Axis.vertical,
+        ),
+        isTrue,
+      );
+      expect(
+        find.ancestor(
+          of: aliceChip,
+          matching: find.byKey(const Key('new-dm-recipient-wrap')),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(Key('new-dm-selected-$bob')));
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-selected-$bob')), findsNothing);
+      // A Space never picks here: a full name with edge spaces still finds.
+      await _searchDm(tester, ' Bob ');
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(
+        tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,
+        isTrue,
+      );
+      expect(find.text('Cancel'), findsNothing);
+      expect(find.text('Open DM'), findsNothing);
+      final searchField = tester.widget<TextField>(
+        find.byKey(const Key('new-dm-search')),
+      );
+      expect(searchField.textInputAction, TextInputAction.done);
+      expect(searchField.onSubmitted, isNotNull);
+
+      // The header action opens the DM without waiting on the full channel list.
+      await tester.tap(find.byKey(const Key('new-dm-submit')));
+      await tester.pump();
+      expect(waits, [false]);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byWidgetPredicate(
+                (widget) => widget is IconButton && widget.tooltip == 'Close',
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+    },
+  );
 
   testWidgets('wraps many recipients without overflowing above the keyboard', (
     tester,
@@ -3155,34 +3381,32 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    final directoryUsers = [
-      for (var index = 0; index < 8; index++)
-        DirectoryUser(
-          pubkey: 'person-$index',
-          displayName: 'Long recipient name number $index',
-        ),
-    ];
+    final people = {
+      for (var index = 0; index < 9; index++)
+        _dmKey(index): 'Long recipient name number $index',
+    };
 
     await tester.pumpWidget(
       buildTestable(
         keyboardInset: 300,
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => directoryUsers,
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession(people),
           ),
         ],
       ),
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create or start conversation'));
+    await tester.tap(find.byTooltip('Create'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('New direct message'));
+    await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
 
-    for (final user in directoryUsers) {
-      final result = find.byKey(Key('new-dm-person-${user.pubkey}'));
+    for (var index = 0; index < 8; index++) {
+      await _searchDm(tester, 'Long recipient name number $index');
+      final result = find.byKey(Key('new-dm-person-${_dmKey(index)}'));
       await tester.ensureVisible(result);
       await tester.pumpAndSettle();
       await tester.tap(result);
@@ -3198,54 +3422,33 @@ void main() {
       find.text('DMs support up to nine people, including you.'),
       findsOneWidget,
     );
+    await _searchDm(tester, 'Long recipient name number 8');
+    expect(find.byKey(Key('new-dm-person-${_dmKey(8)}')), findsNothing);
+    final lastChip = find.byKey(Key('new-dm-selected-${_dmKey(7)}'));
+    await tester.ensureVisible(lastChip);
+    await tester.pumpAndSettle();
+    await tester.tap(lastChip);
+    await tester.pumpAndSettle();
+    expect(find.byKey(Key('new-dm-selected-${_dmKey(7)}')), findsNothing);
+    final ninthRecipient = find.byKey(Key('new-dm-person-${_dmKey(8)}'));
+    final listScroll = find
+        .descendant(
+          of: find.byType(BottomSheet).last,
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Scrollable &&
+                widget.axisDirection == AxisDirection.down,
+          ),
+        )
+        .last;
+    await tester.scrollUntilVisible(
+      ninthRecipient,
+      100,
+      scrollable: listScroll,
+    );
+    await tester.pumpAndSettle();
+    expect(ninthRecipient.hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('shows local preview people when the relay is offline', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(390, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(
-      buildTestable(
-        previewDirectory: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create or start conversation'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('New direct message'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Could not load people from this relay.'), findsNothing);
-    expect(find.text('Maya Chen'), findsOneWidget);
-    expect(find.text('Jordan Brooks'), findsOneWidget);
-    expect(find.text('Priya Shah'), findsOneWidget);
-
-    await tester.tap(
-      find.byKey(
-        const Key(
-          'new-dm-person-'
-          '1111111111111111111111111111111111111111111111111111111111111111',
-        ),
-      ),
-    );
-    await tester.pump();
-    expect(find.text('Maya Chen'), findsWidgets);
-
-    await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pump();
-    expect(
-      find.text('Preview only — mock people cannot be messaged.'),
-      findsOneWidget,
-    );
   });
 
   testWidgets('hides unjoined and archived channels from the main list', (
@@ -3373,6 +3576,7 @@ void main() {
 
     await tester.pumpWidget(
       buildTestable(
+        brightness: Brightness.dark,
         overrides: [
           channelsProvider.overrideWith(
             () => _FakeNotifier(
@@ -3390,13 +3594,26 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w700,
+      FontWeight.w600,
     );
     expect(
       tester.widget<Text>(find.text('general')).style?.color,
-      Theme.of(tester.element(find.text('general'))).colorScheme.onSurface,
+      const Color(0xFFFFFFFF),
     );
 
+    expect(
+      tester.widget<Text>(find.text('Channels')).style?.color,
+      const Color(0xFFC7C7C7),
+    );
+    final options = find.descendant(
+      of: find.byTooltip('Channels options'),
+      matching: find.byIcon(BuzzIcons.ellipsis),
+    );
+    expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));
+    expect(
+      tester.widget<Icon>(find.byKey(const ValueKey('channel-icon-1'))).color,
+      const Color(0xFFC7C7C7),
+    );
     readState.markContextRead('1', 20);
     await tester.pump();
 
@@ -3404,74 +3621,110 @@ void main() {
       tester.widget<Text>(find.text('general')).style?.fontWeight,
       FontWeight.w400,
     );
-  });
-
-  testWidgets('bolds channels with unread thread activity without a badge', (
-    tester,
-  ) async {
-    final channels = [
-      Channel(
-        id: '1',
-        name: 'general',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'General discussion',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 10,
-        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-          30 * 1000,
-          isUtc: true,
-        ),
-        isMember: true,
-      ),
-    ];
-    final readState = _FakeReadStateNotifier(
-      const ReadStateState(
-        isReady: true,
-        pubkey: 'pk',
-        contexts: {'1': 10},
-        version: 0,
-      ),
-    );
-
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(
-            () => _FakeNotifier(
-              channels,
-              observedEventsByChannel: {
-                '1': [
-                  _observed(
-                    id: 'reply-1',
-                    createdAt: 20,
-                    rootId: 'root',
-                    isThreadedReply: true,
-                  ),
-                  _observed(
-                    id: 'reply-2',
-                    createdAt: 30,
-                    rootId: 'root',
-                    isThreadedReply: true,
-                  ),
-                ],
-              },
-            ),
-          ),
-          readStateProvider.overrideWith(() => readState),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
     expect(
-      tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w700,
+      tester.widget<Text>(find.text('general')).style?.color,
+      const Color(0xFFC7C7C7),
     );
   });
 
-  for (final (label, events, bold) in [
+  for (final viaMenu in [false, true]) {
+    testWidgets('dots, not bolds, channels with only unread thread replies '
+        '(cleared ${viaMenu ? 'by Mark read' : 'by reading the thread'})', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final channels = [
+        Channel(
+          id: '1',
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'General discussion',
+          createdBy: 'abc',
+          createdAt: DateTime(2025),
+          memberCount: 10,
+          lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+            30 * 1000,
+            isUtc: true,
+          ),
+          isMember: true,
+        ),
+      ];
+      final readState = _FakeReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'pk',
+          contexts: {'1': 10},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                channels,
+                observedEventsByChannel: {
+                  '1': [
+                    _observed(
+                      id: 'reply-1',
+                      createdAt: 20,
+                      rootId: threadIdRoot,
+                      isThreadedReply: true,
+                    ),
+                    _observed(
+                      id: 'reply-2',
+                      createdAt: 30,
+                      rootId: threadIdRoot,
+                      isThreadedReply: true,
+                    ),
+                  ],
+                },
+              ),
+            ),
+            readStateProvider.overrideWith(() => readState),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Text>(find.text('general')).style?.fontWeight,
+        FontWeight.w400,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp(r'general[\s\S]*Needs your attention')),
+        findsOneWidget,
+      );
+
+      if (viaMenu) {
+        await tester.longPress(find.text('general'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mark Read'));
+        await tester.pumpAndSettle();
+      } else {
+        readState.markContextRead('thread-activity:$threadIdRoot', 30);
+        await tester.pump();
+      }
+
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        findsNothing,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp('Needs your attention')),
+        findsNothing,
+      );
+      semantics.dispose();
+    });
+  }
+
+  for (final (label, events, bold, dot) in [
     (
       'catch-up marks read ordinary messages and thread replies',
       [
@@ -3479,15 +3732,26 @@ void main() {
         _observed(
           id: 'reply-1',
           createdAt: 30,
-          rootId: 'root',
+          rootId: threadIdRoot,
           isThreadedReply: true,
         ),
       ],
       false,
+      false,
     ),
     (
-      'channel catch-up does not read a mention',
+      'channel catch-up leaves a mention as a dot',
       [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      false,
+      true,
+    ),
+    (
+      'unread backlog bolds alongside a mention dot',
+      [
+        _observed(id: 'msg-1', createdAt: 28),
+        _observed(id: 'mention-1', createdAt: 20, highPriority: true),
+      ],
+      true,
       true,
     ),
   ]) {
@@ -3513,7 +3777,11 @@ void main() {
         const ReadStateState(
           isReady: true,
           pubkey: 'pk',
-          contexts: {'1': 10, 'activity:1': 25, 'thread-activity:root': 30},
+          contexts: {
+            '1': 10,
+            'activity:1': 25,
+            'thread-activity:$threadIdRoot': 30,
+          },
           version: 0,
         ),
       );
@@ -3535,55 +3803,14 @@ void main() {
 
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
-        bold ? FontWeight.w700 : FontWeight.w400,
+        bold ? FontWeight.w600 : FontWeight.w400,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-attention-dot-1')),
+        dot ? findsOneWidget : findsNothing,
       );
     });
   }
-
-  testWidgets('seeds first loaded channels as read', (tester) async {
-    final channels = [
-      Channel(
-        id: '1',
-        name: 'general',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'General discussion',
-        createdBy: 'abc',
-        createdAt: DateTime(2025),
-        memberCount: 10,
-        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
-          20 * 1000,
-          isUtc: true,
-        ),
-        isMember: true,
-      ),
-    ];
-    final readState = _FakeReadStateNotifier(
-      const ReadStateState(
-        isReady: true,
-        pubkey: 'pk',
-        contexts: {},
-        version: 0,
-      ),
-    );
-
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
-          readStateProvider.overrideWith(() => readState),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(readState.seededContexts, {'1': 20});
-    expect(readState.markedContexts, isEmpty);
-    expect(
-      tester.widget<Text>(find.text('general')).style?.fontWeight,
-      FontWeight.w400,
-    );
-  });
 
   testWidgets('waits for read-state readiness before initial seeding', (
     tester,
@@ -3667,7 +3894,7 @@ class _FakeNotifier extends ChannelsNotifier {
   }
 
   @override
-  Future<void> ensureDirectoryLoaded() async {
+  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
     ref
         .read(channelDirectoryLoadStatusProvider.notifier)
         .markLoaded(_activeDirectoryScope(ref));
@@ -3687,104 +3914,10 @@ class _FakeNotifier extends ChannelsNotifier {
   get observedUnreadEventsByChannel => _observedEventsByChannel;
 }
 
-class _RetryingDirectoryNotifier extends ChannelsNotifier {
-  _RetryingDirectoryNotifier({
-    required this.initialChannels,
-    required this.retriedChannels,
-  });
-
-  final List<Channel> initialChannels;
-  final List<Channel> retriedChannels;
-  int retryCount = 0;
-
-  @override
-  Future<List<Channel>> build() async => initialChannels;
-
-  @override
-  Future<void> ensureDirectoryLoaded() async {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markError(_activeDirectoryScope(ref));
-  }
-
-  @override
-  Future<void> retryDirectory() async {
-    retryCount++;
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoading(_activeDirectoryScope(ref));
-    await Future<void>.delayed(Duration.zero);
-    state = AsyncData(retriedChannels);
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoaded(_activeDirectoryScope(ref));
-  }
-}
-
-class _SupersededDirectoryNotifier extends ChannelsNotifier {
-  _SupersededDirectoryNotifier({
-    required this.initialChannels,
-    required this.retriedChannels,
-  });
-
-  final List<Channel> initialChannels;
-  final List<Channel> retriedChannels;
-  final _directoryCompletion = Completer<void>();
-  int retryCount = 0;
-
-  @override
-  Future<List<Channel>> build() async => initialChannels;
-
-  @override
-  Future<void> ensureDirectoryLoaded() async {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoading(_activeDirectoryScope(ref));
-    await _directoryCompletion.future;
-  }
-
-  /// Mirrors an ordinary refresh invalidating the active directory request.
-  void supersedeLoadingDirectory() {
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markError(_activeDirectoryScope(ref));
-    _directoryCompletion.complete();
-  }
-
-  @override
-  Future<void> retryDirectory() async {
-    retryCount++;
-    state = AsyncData(retriedChannels);
-    ref
-        .read(channelDirectoryLoadStatusProvider.notifier)
-        .markLoaded(_activeDirectoryScope(ref));
-  }
-}
-
 String _activeDirectoryScope(Ref ref) => channelDirectoryScope(
   ref.read(relayConfigProvider).baseUrl,
   ref.read(myPubkeyProvider),
 );
-
-class _RecordingChannelActions extends ChannelActions {
-  _RecordingChannelActions(Ref ref)
-    : super(
-        ref: ref,
-        session: ref.read(relaySessionProvider.notifier),
-        signedEventRelay: SignedEventRelay(
-          session: ref.read(relaySessionProvider.notifier),
-          nsec: null,
-        ),
-        currentPubkey: 'self',
-      );
-
-  final List<String> joinedChannelIds = [];
-
-  @override
-  Future<void> joinChannel(String channelId) async {
-    joinedChannelIds.add(channelId);
-  }
-}
 
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
@@ -3914,6 +4047,13 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
+  void seedContextsRead(Map<String, int> contexts) {
+    for (final entry in contexts.entries) {
+      seedContextRead(entry.key, entry.value);
+    }
+  }
+
+  @override
   void seedContextRead(String contextId, int unixTimestamp) {
     seededContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
@@ -3990,4 +4130,71 @@ class _SwitchingUserCache extends UserCacheNotifier {
 class _CompletedPairingNotifier extends PairingNotifier {
   @override
   PairingState build() => const PairingState(status: PairingStatus.success);
+}
+
+class _PendingDmActions implements ChannelActions {
+  _PendingDmActions(this.waits);
+
+  final List<bool> waits;
+
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) {
+    waits.add(waitForChannelList);
+    return Completer<Channel>().future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _CreateSheetActions implements ChannelActions {
+  final creations = <Map<String, Object?>>[];
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async {
+    creations.add({
+      'name': name,
+      'type': channelType,
+      'visibility': visibility,
+      'description': description,
+      'ttl': ttlSeconds,
+    });
+    throw StateError('Try again');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _RefusingCreateActions implements ChannelActions {
+  _RefusingCreateActions(this.error);
+
+  final Object error;
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async => throw error;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

@@ -290,6 +290,8 @@ SELECT s.community_id, m.pubkey, m.display_name
 FROM seeded s JOIN seed_member m ON m.n = ANY (s.members)
 ON CONFLICT (community_id, pubkey) DO UPDATE SET display_name = EXCLUDED.display_name;
 
+-- Raw rows bypass the NIP-43 member list; run `buzz-admin republish-members`
+-- per community to rebuild it.
 INSERT INTO relay_members (community_id, pubkey, role, added_by)
 SELECT s.community_id, encode(m.pubkey, 'hex'), 'member', NULL
 FROM seeded s JOIN seed_member m ON m.n = ANY (s.members)
