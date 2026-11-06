@@ -2803,7 +2803,7 @@ mod tests {
     // isolated postgres lane so it has a real DB. It is gated `#[ignore]` so it
     // does not run in the unit-test lane where no DB is available.
     #[path = "policy_sweep_postgres_tests.rs"]
-    mod policy_sweep_postgres_tests;
+    mod policy_sweep;
 
     mod postgres_tests {
         use super::*;
