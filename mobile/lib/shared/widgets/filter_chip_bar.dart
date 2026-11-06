@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'ios_glass_navigation_button.dart';
@@ -46,6 +48,12 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
+  /// Sizes native glass filters equally to fit the widest label.
+  final bool equalNativeWidths;
+
+  /// Minimum visible capsule height; the hit target may be larger.
+  final double minControlHeight;
+
   /// Material density applied to each chip.
   final VisualDensity visualDensity;
 
@@ -65,6 +73,8 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
+    this.equalNativeWidths = false,
+    this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
     this.barVerticalPadding = Grid.xxs,
@@ -77,8 +87,10 @@ class FilterChipBar<T> extends StatelessWidget {
       final textStyle = filterChipTextStyle.copyWith(
         fontWeight: FontWeight.w600,
       );
-      final height = (MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16)
-          .clamp(48.0, double.infinity);
+      final height = math.max(
+        MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16,
+        math.max(48.0, minControlHeight),
+      );
       final widths = [
         for (final item in items)
           (TextPainter(
@@ -88,6 +100,10 @@ class FilterChipBar<T> extends StatelessWidget {
               )..layout()).width +
               32,
       ];
+      if (equalNativeWidths && widths.isNotEmpty) {
+        final widest = widths.reduce(math.max);
+        widths.fillRange(0, widths.length, widest);
+      }
       return LayoutBuilder(
         builder: (context, constraints) {
           final available = constraints.maxWidth - horizontalPadding * 2;
@@ -122,7 +138,9 @@ class FilterChipBar<T> extends StatelessWidget {
                       isSelected: selected == items[index].id,
                       width: widths[index] + extra,
                       height: height,
-                      controlSize: height - 8,
+                      controlSize: math
+                          .max(height - 8, minControlHeight)
+                          .toDouble(),
                       fillWidth: true,
                       foregroundColor: context.colors.primary,
                     ),
@@ -207,11 +225,22 @@ class FilterChipBar<T> extends StatelessWidget {
             textAlign: fillWidth ? TextAlign.center : TextAlign.start,
             style: labelStyle,
           );
+    final sizedLabel = minControlHeight > 0
+        ? ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: math.max(
+                0,
+                minControlHeight - chipVerticalPadding * 2,
+              ),
+            ),
+            child: Center(widthFactor: 1, heightFactor: 1, child: label),
+          )
+        : label;
     final centeredLabel = Align(
       alignment: Alignment.center,
       widthFactor: fillWidth ? null : 1,
       heightFactor: 1,
-      child: label,
+      child: sizedLabel,
     );
     final chip = FilterChip(
       selected: isSelected,
@@ -231,13 +260,21 @@ class FilterChipBar<T> extends StatelessWidget {
         horizontal: fillWidth ? Grid.quarter : Grid.twelve,
         vertical: chipVerticalPadding,
       ),
-      visualDensity: visualDensity,
+      visualDensity: minControlHeight > 0
+          ? VisualDensity.standard
+          : visualDensity,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
 
-    final control = fillWidth
-        ? SizedBox(width: double.infinity, child: chip)
+    final sizedChip = minControlHeight > 0
+        ? ConstrainedBox(
+            constraints: BoxConstraints(minHeight: minControlHeight),
+            child: chip,
+          )
         : chip;
+    final control = fillWidth
+        ? SizedBox(width: double.infinity, child: sizedChip)
+        : sizedChip;
     if (!item.hasUnread) return control;
     return Semantics(
       label: '$text, unread',

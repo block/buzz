@@ -31,9 +31,11 @@ class MeSection extends HookWidget {
             borderRadius: BorderRadius.circular(Radii.md),
             onTap: () => expanded.value = !expanded.value,
             child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: Grid.xxs,
-                vertical: Grid.xxs,
+              padding: const EdgeInsets.fromLTRB(
+                Grid.xxs,
+                Grid.twelve,
+                Grid.xxs,
+                Grid.half,
               ),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(minHeight: 28),

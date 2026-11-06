@@ -6,14 +6,17 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/theme/buzz_icons.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/community/community_icon_provider.dart';
 import '../../shared/community/community_avatar.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/bottom_up_page_route.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
+import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'messages_filters.dart';
@@ -56,6 +59,8 @@ class HomePage extends HookConsumerWidget {
 
     final communitySurfaceProgress = useState(0.0);
     final filter = useState('All');
+    final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
+    final inboxLabel = hasUnreadInbox ? 'Inbox, unread items' : 'Inbox';
     final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
     final newWorkspace = useValueNotifier<VoidCallback?>(null);
@@ -85,14 +90,14 @@ class HomePage extends HookConsumerWidget {
     void openPage(WidgetBuilder builder) =>
         Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
     final solo = mePageBuilder?.call(context, newChat, newWorkspace);
+    void openInbox() => Navigator.of(context).push(
+      BottomUpPageRoute<void>(
+        builder: (_) => const ActivityPage(),
+        reducedMotion: reducedMotion,
+      ),
+    );
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      onInbox: () => Navigator.of(context).push(
-        BottomUpPageRoute<void>(
-          builder: (_) => const ActivityPage(),
-          reducedMotion: reducedMotion,
-        ),
-      ),
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           (
@@ -120,6 +125,57 @@ class HomePage extends HookConsumerWidget {
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [
+          if (defaultTargetPlatform == TargetPlatform.iOS &&
+              !nativeControlsVisible)
+            const SizedBox(width: 44, height: 44)
+          else
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                defaultTargetPlatform == TargetPlatform.iOS
+                    ? IosGlassNavigationButton(
+                        icon: IosGlassNavigationIcon.bell,
+                        semanticLabel: inboxLabel,
+                        width: 44,
+                        height: 44,
+                        controlSize: 44,
+                        foregroundColor: context.colors.onSurface,
+                        onPressed: openInbox,
+                      )
+                    : IconButton.filledTonal(
+                        tooltip: inboxLabel,
+                        style: IconButton.styleFrom(
+                          backgroundColor: context.controlSurface,
+                          foregroundColor: context.colors.onSurface,
+                          minimumSize: const Size.square(48),
+                        ),
+                        icon: const Icon(BuzzIcons.bell),
+                        onPressed: openInbox,
+                      ),
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: ExcludeSemantics(
+                      child: Center(
+                        child: AnimatedOpacity(
+                          opacity: hasUnreadInbox ? 1 : 0,
+                          duration: reducedMotion
+                              ? Duration.zero
+                              : const Duration(milliseconds: 150),
+                          curve: Curves.easeOut,
+                          child: Badge(
+                            key: const Key('home-inbox-badge'),
+                            backgroundColor: context.colors.primary,
+                            smallSize: 6,
+                            child: const SizedBox.square(dimension: 24),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          const SizedBox(width: Grid.xs),
           SizedBox(
             key: avatarKey,
             child: defaultTargetPlatform == TargetPlatform.iOS
