@@ -7,9 +7,10 @@ mod postgres_tests {
         let operator = Keys::generate();
         let owner = Keys::generate();
         let (binding, _, host) = reserved_host_policy();
-        let mut state = operator_test_state_with_policy(&[operator.clone()], Some(binding))
-            .await
-            .unwrap();
+        let mut state =
+            operator_test_state_with_policy(std::slice::from_ref(&operator), Some(binding))
+                .await
+                .unwrap();
         Arc::get_mut(&mut state).unwrap().nip98_replay =
             Arc::new(SeenOnceReplayGuard(Mutex::new(HashSet::new())));
         let issuer_policy = buzz_auth::IssuerPolicy::new(
