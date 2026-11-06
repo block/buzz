@@ -4078,27 +4078,29 @@ void main() {
       expect(controller.text, full.replaceRange(secondEnd, secondEnd + 1, ''));
       expect(controller.selection.baseOffset, secondEnd);
 
-      // A caret placed inside a chip moves to its nearer edge, and a
-      // selection that covers part of a chip grows to cover all of it.
+      // A chip draws as one glyph at its first offset. A tap on its left
+      // half lands before it, and one on its right half (just after the
+      // glyph) goes after it, wherever the caret was.
       await setValue(full, full.length);
-      controller.selection = const TextSelection.collapsed(offset: 3);
-      await tester.pump();
-      expect(controller.selection, const TextSelection.collapsed(offset: 0));
-      // From the chip's start, a tap still goes to the nearer edge, while an
-      // arrow key steps over the chip.
-      controller.selection = TextSelection.collapsed(
-        offset: urls[0].length - 3,
-      );
+      controller.selection = const TextSelection.collapsed(offset: 1);
       await tester.pump();
       expect(controller.selection.baseOffset, urls[0].length);
       controller.selection = const TextSelection.collapsed(offset: 0);
       await tester.pump();
+      controller.selection = const TextSelection.collapsed(offset: 1);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      // A move left into the hidden source, such as a word left, steps over
+      // the chip to its start, and an arrow right from its start steps over
+      // it to its end.
+      await setValue(full, full.length);
       controller.selection = const TextSelection.collapsed(offset: 3);
       await tester.pump();
-      expect(controller.selection.baseOffset, 0);
+      expect(controller.selection, const TextSelection.collapsed(offset: 0));
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
       await tester.pump();
       expect(controller.selection.baseOffset, urls[0].length);
+      // A selection that covers part of a chip grows to cover all of it.
       await setValue(full, full.length);
       controller.selection = TextSelection(
         baseOffset: urls[0].length - 3,
@@ -4112,6 +4114,19 @@ void main() {
           extentOffset: urls[0].length + 1 + urls[1].length,
         ),
       );
+
+      // A word delete that runs from past a chip into it removes the whole
+      // chip, not just the end of its hidden URL.
+      await setValue('a ${urls[1]} b', 3 + urls[1].length);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'a ${urls[1].substring(0, urls[1].length - 4)}b',
+          selection: TextSelection.collapsed(offset: urls[1].length - 2),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'a b');
+      expect(controller.selection.baseOffset, 2);
 
       // Forward delete before a chip removes it whole, and stays forward
       // when the character before the caret matches the chip's first
@@ -5164,6 +5179,70 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsNothing,
         );
+
+        // A word left from after the chip steps over it, and a word delete
+        // that runs past it removes the whole mention.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot typing',
+          selection: TextSelection.collapsed(offset: 11),
+        );
+        await tester.pump();
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 8,
+        );
+        await tester.pump();
+        expect(textField.controller!.selection.baseOffset, 0);
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 12,
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper typing',
+            selection: TextSelection.collapsed(offset: 8),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, 'typing');
+        expect(textField.controller!.selection.baseOffset, 0);
+
+        // Gboard composes the word before the caret, here the chip's hidden
+        // label. The chip still draws, and backspace still removes it whole.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot ',
+          selection: TextSelection.collapsed(offset: 12),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot',
+            selection: TextSelection.collapsed(offset: 11),
+            composing: TextRange(start: 8, end: 11),
+          ),
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo',
+            selection: TextSelection.collapsed(offset: 10),
+            composing: TextRange(start: 8, end: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '');
+        expect(textField.controller!.value.composing, TextRange.empty);
 
         // A selection covering part of a chip grows to cover all of it, and
         // edits over a selection replace exactly the selection, so typed

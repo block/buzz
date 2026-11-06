@@ -97,16 +97,20 @@ class _MarkdownEditingController extends TextEditingController {
     for (final chip in chips) {
       if (selection.isCollapsed) {
         if (chip.start < start && start < chip.end) {
-          // A one-character step in from an edge is an arrow key, so keep
-          // going and step over the chip; anything else (a tap) goes to the
-          // nearer edge.
+          // The chip draws as one glyph at its first offset, so a tap on its
+          // right half (or an arrow right from its start) lands just after
+          // that glyph and goes to the chip's end. Arrow or word moves left
+          // into the hidden source step over the chip to its start.
           final from = value.selection.isCollapsed
               ? value.selection.baseOffset
               : -1;
-          final towardEnd = from == chip.start && start == chip.start + 1
+          final arrowLeftFromEnd = from == chip.end && start == chip.end - 1;
+          final towardEnd = start == chip.start + 1 && !arrowLeftFromEnd
               ? true
-              : from == chip.end && start == chip.end - 1
+              : from >= chip.end
               ? false
+              : from >= 0 && from <= chip.start
+              ? true
               : start - chip.start > chip.end - start;
           start = end = towardEnd ? chip.end : chip.start;
         }
@@ -259,19 +263,28 @@ class _MarkdownEditingController extends TextEditingController {
             _cachedSurface == colors.surface) {
       return cached;
     }
-    _pendingChipRanges.clear();
-    _pendingRevealedChip = null;
     _revealedLinkStart = revealedLinkStart;
-    final span = TextSpan(
-      style: baseStyle,
-      children: _buildMarkdownSpans(
+    List<InlineSpan> buildChildren(TextRange composing) {
+      _pendingChipRanges.clear();
+      _pendingRevealedChip = null;
+      return _buildMarkdownSpans(
         context,
         text,
         baseStyle,
         sourceOffset: 0,
-        composingRange: composingRange,
-      ),
-    );
+        composingRange: composing,
+      );
+    }
+
+    // An IME such as Gboard can compose the hidden source of a chip (the
+    // word before the caret). That composition stays invisible, so it must
+    // not split the chip back into raw text.
+    var children = buildChildren(TextRange.empty);
+    if (!composingRange.isCollapsed &&
+        !_withinChip(composingRange, _pendingChipRanges)) {
+      children = buildChildren(composingRange);
+    }
+    final span = TextSpan(style: baseStyle, children: children);
     _cachedText = text;
     _cachedComposingRange = composingRange;
     _cachedBaseStyle = baseStyle;
@@ -363,8 +376,8 @@ class _MarkdownEditingController extends TextEditingController {
         _chipRangesText != oldValue.text ||
         !oldSelection.isValid ||
         !oldSelection.isCollapsed ||
-        (oldValue.composing.isValid && !oldValue.composing.isCollapsed) ||
-        (newValue.composing.isValid && !newValue.composing.isCollapsed)) {
+        !_withinChip(oldValue.composing, _chipRanges) ||
+        !_withinChip(newValue.composing, _chipRanges)) {
       return newValue;
     }
     final newSelection = newValue.selection;
@@ -383,12 +396,11 @@ class _MarkdownEditingController extends TextEditingController {
     var expandedEnd = deleted.end;
     for (final chip in _chipRanges) {
       if (chip == revealed) continue;
-      // Only a deletion inside one chip widens. A run reaching past the chip
-      // is not a key press (Undo can restore a shorter link this way), and
-      // leaves the rest as visible text.
-      if (chip.start <= deleted.start && deleted.end <= chip.end) {
-        expandedStart = chip.start;
-        expandedEnd = chip.end;
+      // A deletion reaching into a chip, such as backspace or a word delete
+      // that runs past it, takes the whole chip.
+      if (deleted.start < chip.end && chip.start < deleted.end) {
+        expandedStart = math.min(expandedStart, chip.start);
+        expandedEnd = math.max(expandedEnd, chip.end);
       }
     }
     if (expandedStart == deleted.start && expandedEnd == deleted.end) {
@@ -399,6 +411,15 @@ class _MarkdownEditingController extends TextEditingController {
       selection: TextSelection.collapsed(offset: expandedStart),
     );
   }
+
+  /// Whether [composing] is empty or lies inside one of [chips], where it
+  /// is invisible and must not keep the chip from acting as one unit.
+  static bool _withinChip(TextRange composing, List<TextRange> chips) =>
+      !composing.isValid ||
+      composing.isCollapsed ||
+      chips.any(
+        (chip) => chip.start <= composing.start && composing.end <= chip.end,
+      );
 
   /// The run a collapsed caret deleted: one ending at it (backspace, which
   /// moves the caret back) or starting at it (forward delete, which leaves
