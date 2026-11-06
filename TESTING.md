@@ -222,6 +222,44 @@ invitation admission paused, using the same traffic/writer controls if needed.
 It also requires `BUZZ_AUTO_MIGRATE` off: with auto-migration on (the Helm
 default), the old binary fails at startup with SQLx `VersionMissing(75)`. See
 [docs/database.md](docs/database.md) Rule 5.
+The separately approved companion provides the operator command:
+
+```bash
+psql -X -v ON_ERROR_STOP=1 -f scripts/maintenance/backfill_invite_revocations.sql
+```
+
+Run it as a top-level script, outside any caller transaction. The final query
+must report `0` unrepaired invites in active communities. Run it twice; the
+second run must keep zero and leave revocation timestamps and markers unchanged.
+The default two-minute statement timeout covers the entire repair invocation,
+not each batch. A timeout preserves committed batches, rolls back the current
+batch and skips the final query; it is not a successful zero check. Keep the
+same writer controls in place and rerun. If scanning already repaired rows
+exhausts that budget, pass a larger finite budget, for example
+`psql -X -v ON_ERROR_STOP=1 -v invite_repair_timeout=10min -f scripts/maintenance/backfill_invite_revocations.sql`.
+Review fenced communities separately and keep their admission closed until they
+can be repaired under the same controls.
+
+Use a **fresh disposable database through migration 0074**, the complete
+pre-change schema including channel join roles, for upgrade testing. Do not reuse
+an older database that applied an invitation migration under an earlier number
+or a different 0075 checksum; reconcile it separately without resetting a user's
+database. Seed legacy links for a restricted issuer and an unrelated issuer;
+lift the first restriction before
+upgrade. Apply schema-only 0075 and confirm it rewrites no invite rows. Before
+repair, signed claims reject historical legacy candidates lazily. Run the actual
+repair script twice, checking selective revocation, cleared markers, zero
+remaining active-community legacy rows and idempotence. The populated automated
+fixtures also exercise real `bin/pgschema apply --file schema/schema.sql`, then
+`scripts/reconcile-schema-after-pgschema.sql` twice, for outcome parity.
+
+After repair, a newly applied timeout/mute must temporarily block claims without
+durable revocation; after expiry the same link works. Ban via the authorized
+owner path and verify permanent rejection, even after unban and relay restart.
+A fresh replacement minted by an unrestricted issuer must work. Include current
+owner restrictions, noncanonical issuers, community/deletion fences, and the
+marker-clearing lock-serialization tests in the full PostgreSQL lane.
+
 Legacy owner attribution uses the agent's currently recorded
 `agent_owner_pubkey`; deleting an owner user row out of band clears that link
 through its foreign key, so a later repair cannot recover the former
