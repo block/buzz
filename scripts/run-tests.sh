@@ -165,6 +165,9 @@ run_unit_tests() {
   run_test_step "buzz-admin NIP-FI binding command tests" \
     cargo test -p buzz-admin nip_fi::tests -- --nocapture
 
+  run_test_step "buzz-admin NIP-FI policy command tests" \
+    cargo test -p buzz-admin nip_fi_policy::tests -- --nocapture
+
   run_test_step "buzz-admin user-deletion intake command tests" \
     cargo test -p buzz-admin user_deletions::tests -- --nocapture
 

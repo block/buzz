@@ -969,6 +969,8 @@ name = "buzz-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "buzz-audit",
  "buzz-auth",
  "buzz-core",
@@ -981,10 +983,13 @@ dependencies = [
  "clap",
  "hex",
  "nostr 0.44.7",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "url",

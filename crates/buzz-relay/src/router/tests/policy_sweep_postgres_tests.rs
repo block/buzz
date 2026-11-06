@@ -116,12 +116,12 @@ mod postgres_tests {
         use crate::nip_fi_core::test_support::{
             assertion_verifier, sign_assertion, TEST_COMMUNITY_URI, TEST_ISSUER,
         };
-        use buzz_db::community_auth::{UpgradeOutcome, UpgradeRequest};
+        use buzz_db::community_auth::{PolicyOutcome, PolicyRequest, UpgradeRequest};
         let base = real_db_state().await.unwrap();
         let mut configured = (*base).clone();
         let config = Arc::make_mut(&mut configured.config);
         config.nip_fi.mode = buzz_auth::NipFiMode::Shadow;
-        config.nip_fi_upgrades_enabled = false;
+        config.nip_fi_changes = false;
         config.nip_fi.max_connection_lifetime_secs = 3600;
         config.nip_fi.communities = crate::nip_fi_config::NipFiCommunities::for_test_any_host(
             TEST_COMMUNITY_URI,
@@ -223,9 +223,17 @@ mod postgres_tests {
             expected_issuer: TEST_ISSUER.into(),
             operator_pubkey: owner,
         };
-        let UpgradeOutcome::Accepted(record) = state
+        let PolicyOutcome::Accepted(record) = state
             .db
-            .enable_community_nip_fi(&request, Ok(()))
+            .set_community_nip_fi_policy(
+                &PolicyRequest {
+                    tuple: request.clone(),
+                    requires_nip_fi: true,
+                    expected_policy_generation: 0,
+                    expected_requires_nip_fi: false,
+                },
+                Ok(()),
+            )
             .await
             .unwrap()
         else {
@@ -311,13 +319,13 @@ mod postgres_tests {
         }
         let status = state
             .db
-            .community_auth_upgrade_status(record.operation_id, &request.operator_pubkey)
+            .community_auth_policy_status(record.acceptance.operation_id, &request.operator_pubkey)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(status.state, "pending");
+        assert_eq!(status.acceptance.state, "pending");
         assert_eq!(
-            status.pending_reasons,
+            status.acceptance.pending_reasons,
             vec!["connection_closure_unverified"]
         );
         drop((compliant, compliant_audio, free));
