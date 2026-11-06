@@ -4177,6 +4177,23 @@ void main() {
       );
       await tester.pump();
       expect(controller.text, 'buzz://repo?x=1');
+      // A selection that leaves a revealed link, which turns it back into a
+      // chip, still covers the whole chip.
+      final revealedText = 'see ${urls[1]} end';
+      await setValue(revealedText, 4 + urls[1].length);
+      await setValue(revealedText, 14);
+      expect(linkChips(), findsNothing);
+      controller.selection = TextSelection(
+        baseOffset: 14,
+        extentOffset: revealedText.length,
+      );
+      await tester.pump();
+      expect(
+        controller.selection,
+        TextSelection(baseOffset: 4, extentOffset: revealedText.length),
+      );
+      expect(linkChips(), findsOneWidget);
+
       await setValue('see ${urls[2]} ', 5 + urls[2].length);
 
       // Undo after typing at the end of a revealed link restores it rather
@@ -5180,6 +5197,34 @@ void main() {
           'x',
         );
         expect(textField.controller!.text, 'xyping');
+
+        // Undo after typing the last letter of a mention restores the
+        // partial mention instead of removing the whole chip.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot @Helper Bo',
+          selection: TextSelection.collapsed(offset: 22),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot @Helper Bot',
+            selection: TextSelection.collapsed(offset: 23),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNWidgets(2),
+        );
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+        expect(textField.controller!.text, '@Helper Bot @Helper Bo');
 
         // Text that is not drawn as a chip still deletes one character.
         await tester.enterText(find.byType(TextField), '`@Helper Bot`');

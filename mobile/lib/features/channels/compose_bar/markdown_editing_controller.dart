@@ -33,6 +33,11 @@ class _MarkdownEditingController extends TextEditingController {
   /// Start of the link [buildTextSpan] last drew as raw text for the caret.
   int? _revealedLinkStart;
 
+  /// The revealed link's range when it is otherwise a chip, so a selection
+  /// that stops revealing it still snaps to its edges.
+  TextRange? _revealedChip;
+  TextRange? _pendingRevealedChip;
+
   /// Where the composer's Buzz links sit in [text] (URL only, without
   /// trailing punctuation), computed once per text.
   String? _linkRangesText;
@@ -71,15 +76,23 @@ class _MarkdownEditingController extends TextEditingController {
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     final selection = next.selection;
-    if (_chipRanges.isEmpty ||
+    if ((_chipRanges.isEmpty && _revealedChip == null) ||
         next.text != _chipRangesText ||
         !selection.isValid ||
         (next.composing.isValid && !next.composing.isCollapsed)) {
       return next;
     }
+    // A revealed link turns back into a chip once the selection leaves it,
+    // so it snaps like one when this selection reaches past it.
+    final revealedChip = _revealedChip;
+    final chips =
+        revealedChip != null &&
+            _revealedLinkFor(next.text, selection) != revealedChip
+        ? [..._chipRanges, revealedChip]
+        : _chipRanges;
     var start = selection.start;
     var end = selection.end;
-    for (final chip in _chipRanges) {
+    for (final chip in chips) {
       if (selection.isCollapsed) {
         if (chip.start < start && start < chip.end) {
           // A one-character step in from an edge is an arrow key, so keep
@@ -202,6 +215,7 @@ class _MarkdownEditingController extends TextEditingController {
       return cached;
     }
     _pendingChipRanges.clear();
+    _pendingRevealedChip = null;
     _revealedLinkStart = revealedLinkStart;
     final span = TextSpan(
       style: baseStyle,
@@ -221,6 +235,7 @@ class _MarkdownEditingController extends TextEditingController {
     _cachedTextSpan = span;
     _chipRangesText = text;
     _chipRanges = List.unmodifiable(_pendingChipRanges);
+    _revealedChip = _pendingRevealedChip;
     return span;
   }
 
@@ -228,7 +243,14 @@ class _MarkdownEditingController extends TextEditingController {
   TextEditingValue formatUserEdit(
     TextEditingValue oldValue,
     TextEditingValue newValue,
-  ) => _spaceAfterPastedLink(oldValue, expandChipDeletion(oldValue, newValue));
+  ) {
+    // Undo and Redo restore an earlier value exactly, and must stay exact.
+    if (_recentValues.contains(newValue)) return newValue;
+    return _spaceAfterPastedLink(
+      oldValue,
+      expandChipDeletion(oldValue, newValue),
+    );
+  }
 
   /// Adds a space after a link pasted on its own, so it becomes a chip
   /// straight away. Pasted text with anything besides one link that renders
@@ -241,8 +263,7 @@ class _MarkdownEditingController extends TextEditingController {
   ) {
     final oldSelection = oldValue.selection;
     if (!oldSelection.isValid ||
-        (newValue.composing.isValid && !newValue.composing.isCollapsed) ||
-        _recentValues.contains(newValue)) {
+        (newValue.composing.isValid && !newValue.composing.isCollapsed)) {
       return newValue;
     }
     final oldText = oldValue.text;
@@ -628,9 +649,15 @@ class _MarkdownEditingController extends TextEditingController {
       // A link shows as raw text while the caret sits at its end, so it can
       // be edited. The match runs to whitespace or the end of the text, so
       // everywhere else a boundary follows it and it is a chip.
-      final presentation = linkStart == _revealedLinkStart
-          ? null
-          : _composerLinkPresentation(url);
+      final chipPresentation = _composerLinkPresentation(url);
+      final revealed = linkStart == _revealedLinkStart;
+      if (revealed && chipPresentation != null) {
+        _pendingRevealedChip = TextRange(
+          start: linkStart,
+          end: linkStart + url.length,
+        );
+      }
+      final presentation = revealed ? null : chipPresentation;
       if (presentation == null) {
         spans.add(TextSpan(text: raw, style: style));
       } else {
