@@ -547,23 +547,30 @@ mod postgres_tests {
 
                 // Both enabling and disabling the default leave existing rows
                 // intact. Missing current bindings must not refuse a retry.
-                if create_only {
-                    let _write = db
-                        .create_community_with_owner_and_nip_fi_policy(
-                            &host,
-                            &owner,
-                            &[],
-                            !required,
-                            &keys,
-                        )
-                        .await
-                        .expect("retry");
-                } else {
-                    let again = db
-                        .ensure_configured_community_with_nip_fi_policy(&host, &[], !required)
-                        .await
-                        .expect("converge");
-                    assert!(!again.created);
+                let changed_issuers = ["https://other.example".to_owned()];
+                for retry_issuers in [&[][..], changed_issuers.as_slice()] {
+                    if create_only {
+                        let _write = db
+                            .create_community_with_owner_and_nip_fi_policy(
+                                &host,
+                                &owner,
+                                retry_issuers,
+                                !required,
+                                &keys,
+                            )
+                            .await
+                            .expect("retry");
+                    } else {
+                        let again = db
+                            .ensure_configured_community_with_nip_fi_policy(
+                                &host,
+                                retry_issuers,
+                                !required,
+                            )
+                            .await
+                            .expect("converge");
+                        assert!(!again.created);
+                    }
                 }
                 assert_eq!(db.community_auth_policy(id).await.unwrap().unwrap(), before);
                 assert_eq!(bound(&db, &host).await, Some(issuers()));
@@ -586,7 +593,7 @@ mod postgres_tests {
                     .await
                     .map(|_| ())
             };
-            assert!(refused.is_err());
+            assert!(matches!(refused, Err(crate::DbError::NipFiBindingRequired)));
             assert!(!community_exists(&db, &host).await);
         }
 

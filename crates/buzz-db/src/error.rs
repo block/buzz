@@ -42,6 +42,10 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// A new required community has no issuer binding in its creation policy.
+    #[error("required community creation needs NIP-FI issuer bindings")]
+    NipFiBindingRequired,
+
     /// Invitation admission or minting was denied by authoritative restrictions.
     #[error("invitation principal is restricted")]
     InviteRestricted,
@@ -172,6 +176,7 @@ impl DbError {
             E::InvalidData(_) => "invalid_data",
             E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
             E::AccessDenied(_) => "access_denied",
+            E::NipFiBindingRequired => "nip_fi_binding_required",
             _ => "other",
         };
         kind.to_owned()

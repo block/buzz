@@ -512,7 +512,9 @@ impl Db {
 
     /// Like [`Db::ensure_configured_community`], binding `nip_fi_issuers` to
     /// the community in the same transaction when this call creates its row.
-    /// An existing row keeps its bindings unchanged.
+    /// An existing row keeps its bindings unchanged. Operator tenant creation
+    /// must use [`Db::ensure_configured_community_with_nip_fi_policy`] to apply
+    /// the configured creation requirement.
     #[datastore_span(
         name = "ensure_configured_community_with_nip_fi_issuers",
         system = "postgresql"
@@ -602,9 +604,7 @@ impl Db {
         let created: bool = row.try_get("created")?;
         if created {
             if requires_nip_fi && nip_fi_issuers.is_empty() {
-                return Err(DbError::AccessDenied(
-                    "required community creation needs NIP-FI issuer bindings".into(),
-                ));
+                return Err(DbError::NipFiBindingRequired);
             }
             self.insert_nip_fi_issuers_in_transaction(&mut connection, id, nip_fi_issuers)
                 .await?;
@@ -637,7 +637,9 @@ impl Db {
 
     /// Like [`Db::create_community_with_owner`], binding `nip_fi_issuers` to
     /// the new community in the same transaction. Identical retries return the
-    /// original record without touching its bindings.
+    /// original record without touching its bindings. Operator tenant creation
+    /// must use [`Db::create_community_with_owner_and_nip_fi_policy`] to apply
+    /// the configured creation requirement.
     #[datastore_span(
         name = "create_community_with_owner_and_nip_fi_issuers",
         system = "postgresql"
@@ -708,9 +710,7 @@ impl Db {
 
         if let Some(row) = row {
             if requires_nip_fi && nip_fi_issuers.is_empty() {
-                return Err(DbError::AccessDenied(
-                    "required community creation needs NIP-FI issuer bindings".into(),
-                ));
+                return Err(DbError::NipFiBindingRequired);
             }
             let id: Uuid = row.try_get("id")?;
             let host: String = row.try_get("host")?;

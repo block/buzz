@@ -51,7 +51,9 @@ Both operator provisioning modes create new tenant rows with
 `requires_nip_fi=true` and `policy_generation=1`, in the same transaction as
 their issuer bindings (and the initial owner for `create_only`). A new host
 outside the binding policy, including a reserved host, is refused without
-leaving a community row. Existing rows and idempotent retries retain their
+leaving a community row, including in `off` mode. The refusal returns HTTP 400
+with code `nip_fi_binding_required` (`reserved_host` for a reserved `create_only`
+request). Existing rows and idempotent retries retain their
 policy, generation and bindings, even if the creation default changes.
 
 Deployment-host startup bootstrap is excluded: it keeps the existing behavior,

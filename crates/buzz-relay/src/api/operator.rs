@@ -423,6 +423,11 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
+        Err(msg) if msg.starts_with("nip_fi_binding_required:") => Err(coded_api_error(
+            StatusCode::BAD_REQUEST,
+            "nip_fi_binding_required",
+            &msg,
+        )),
         Err(msg) if msg.starts_with("limit_reached:") => {
             Err(coded_api_error(StatusCode::CONFLICT, "limit_reached", &msg))
         }
@@ -1387,6 +1392,27 @@ pub async fn no_store_upgrade_response(
 
 #[cfg(test)]
 mod postgres_tests {
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
+
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Request, StatusCode},
+    };
+    use base64::Engine;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use buzz_core::{kind::KIND_NIP43_MEMBERSHIP_LIST, CommunityId};
+    use buzz_db::event::EventQuery;
+
+    use crate::router::build_router;
+    use crate::state::AppState;
 
     fn set_default(state: &mut Arc<AppState>, required: bool) {
         Arc::make_mut(&mut Arc::get_mut(state).unwrap().config).nip_fi_require_new_communities =
@@ -1473,7 +1499,7 @@ mod postgres_tests {
                 .is_success());
             assert_eq!(stored_policy(&state, &required).await, born);
 
-            // A changed suffix now makes both hosts unbindable. Retrying or
+            // Removing the binding selection makes both hosts unbindable. Retrying or
             // converging existing rows still succeeds without changing bindings.
             set_default(&mut state, true);
             Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
@@ -1488,6 +1514,28 @@ mod postgres_tests {
             assert_eq!(stored_policy(&state, &required).await, born);
             Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_provision_binding =
                 Some(policy.clone());
+        }
+
+        // New reserved hosts are refused by both operator paths, before
+        // startup separately creates the control row under its exception.
+        let owner = Keys::generate();
+        for create_only in [true, false] {
+            let refusal = provision(&state, &operator, &owner, &reserved, create_only).await;
+            assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                read_json(refusal).await["code"],
+                if create_only {
+                    "reserved_host"
+                } else {
+                    "nip_fi_binding_required"
+                }
+            );
+            assert!(state
+                .db
+                .lookup_community_by_host(&reserved)
+                .await
+                .unwrap()
+                .is_none());
         }
 
         // The flag is on while the reserved deployment host is first bootstrapped.
@@ -1515,10 +1563,9 @@ mod postgres_tests {
         let owner = Keys::generate();
         for create_only in [true, false] {
             let outside = format!("outside-{}.example", Uuid::new_v4().simple());
-            assert!(!provision(&state, &operator, &owner, &outside, create_only)
-                .await
-                .status()
-                .is_success());
+            let refusal = provision(&state, &operator, &owner, &outside, create_only).await;
+            assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(read_json(refusal).await["code"], "nip_fi_binding_required");
             assert!(state
                 .db
                 .lookup_community_by_host(&outside)
@@ -1539,28 +1586,6 @@ mod postgres_tests {
             }
         }
     }
-
-    use std::{
-        collections::HashSet,
-        sync::{Arc, Mutex},
-    };
-
-    use axum::{
-        body::{to_bytes, Body},
-        http::{header, Request, StatusCode},
-    };
-    use base64::Engine;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
-    use serde_json::Value;
-    use sha2::{Digest, Sha256};
-    use tower::ServiceExt;
-    use uuid::Uuid;
-
-    use buzz_core::{kind::KIND_NIP43_MEMBERSHIP_LIST, CommunityId};
-    use buzz_db::event::EventQuery;
-
-    use crate::router::build_router;
-    use crate::state::AppState;
 
     struct AlwaysFreshReplayGuard;
 

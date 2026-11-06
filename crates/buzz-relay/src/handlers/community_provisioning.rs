@@ -222,6 +222,13 @@ pub(crate) fn record_binding_creation(
     }
 }
 
+fn creation_error(error: buzz_db::DbError) -> String {
+    match error {
+        buzz_db::DbError::NipFiBindingRequired => format!("nip_fi_binding_required: {error}"),
+        other => format!("failed to create community: {other}"),
+    }
+}
+
 /// Validate and execute a relay-operator community provisioning request.
 ///
 /// The caller is an HTTP operator endpoint, not the Nostr event ingest path.
@@ -286,7 +293,7 @@ pub async fn provision_community(
                 &state.relay_keypair,
             )
             .await
-            .map_err(|e| format!("failed to create community: {e}"))?;
+            .map_err(creation_error)?;
         let record = match write.outcome {
             buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
             buzz_db::CreateCommunityWithOwnerResult::HostExists => {
@@ -330,7 +337,7 @@ pub async fn provision_community(
             state.config.nip_fi_require_new_communities,
         )
         .await
-        .map_err(|e| format!("failed to create community: {e}"))?;
+        .map_err(creation_error)?;
     state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     if record.created {
         record_binding_creation(
