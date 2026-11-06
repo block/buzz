@@ -420,19 +420,22 @@ async fn migration_schema_expansion_preserves_existing_optional_rows_with_and_wi
         .await
         .unwrap();
     let db = Db::from_pool(pool.clone());
-    let free = db
-        .ensure_configured_community("free-before.example")
+    // Model rows written by the pre-expansion relay. Today's creation writer
+    // also sets policy columns that this historical schema does not have yet.
+    let free = CommunityId::from_uuid(Uuid::new_v4());
+    let bound = CommunityId::from_uuid(Uuid::new_v4());
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, 'free-before.example'), ($2, 'bound-before.example')")
+        .bind(free.as_uuid())
+        .bind(bound.as_uuid())
+        .execute(&pool)
         .await
-        .unwrap()
-        .id;
-    let bound = db
-        .ensure_configured_community_with_nip_fi_issuers(
-            "bound-before.example",
-            &[ISSUER.to_owned()],
-        )
+        .unwrap();
+    sqlx::query("INSERT INTO community_nip_fi_issuers (community_id, issuer) VALUES ($1, $2)")
+        .bind(bound.as_uuid())
+        .bind(ISSUER)
+        .execute(&pool)
         .await
-        .unwrap()
-        .id;
+        .unwrap();
     crate::migration::run_migrations(&pool).await.unwrap();
     for community in [free, bound] {
         assert_eq!(
