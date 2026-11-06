@@ -2055,7 +2055,7 @@ impl AppState {
 
     /// Drop the community's cached restriction rows on this pod and, best
     /// effort, on every other pod. Call after every ban, unban, timeout or
-    /// untimeout write commits.
+    /// untimeout write commits, and after an agent's owner is recorded.
     ///
     /// The drop is community-wide because an agent's row also carries its
     /// owner's restriction, and the cache does not know which agents a
@@ -2335,11 +2335,16 @@ impl AppState {
     /// is first recorded: those sockets reconnect with the owner attached, so
     /// revoking the owner reaches them with no database read. Sockets that
     /// already carry the owner, including one being admitted with it, stay up.
+    ///
+    /// The agent's cached restriction row predates the link and lacks the
+    /// owner's restriction, so the community's rows are dropped too (see
+    /// [`Self::invalidate_restrictions`]).
     pub fn disconnect_unowned_agent_clusterwide(
         &self,
         tenant: &TenantContext,
         agent: &[u8],
     ) -> usize {
+        self.invalidate_restrictions(tenant);
         self.disconnect_clusterwide(
             tenant,
             agent,

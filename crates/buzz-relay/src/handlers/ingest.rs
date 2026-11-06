@@ -8138,6 +8138,42 @@ mod postgres_tests {
         );
     }
 
+    /// Recording an agent's owner drops the agent's cached restriction row.
+    /// HTTP admission caches the agent's row before it links the token
+    /// owner, and only checks bans, so the owner's timeout must still reach
+    /// the agent's first write.
+    /// Mutation: drop `invalidate_restrictions` from
+    /// `disconnect_unowned_agent_clusterwide` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_link_drops_the_agents_cached_restriction_row() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = token_owner_fixture(&state, "owner-link-timeout").await;
+        state
+            .db
+            .timeout_community_member(
+                tenant.community(),
+                owner.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                Utc::now() + chrono::Duration::hours(1),
+                None,
+            )
+            .await
+            .expect("timeout owner");
+
+        http_membership(&state, &tenant, &agent, Some(owner.public_key()))
+            .await
+            .expect("a timeout does not refuse HTTP admission");
+        match enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key()).await
+        {
+            Err(IngestError::AuthFailed(msg)) => assert!(
+                msg.starts_with("restricted: you are timed out until "),
+                "got {msg:?}"
+            ),
+            other => panic!("a timed-out owner's newly linked agent must not write: {other:?}"),
+        }
+    }
+
     /// The token owner's ban reaches an agent that is itself a member, on a
     /// closed and an open relay, with no stored owner link.
     /// Mutation: ignore `token_owner` in `community_ban_outcome` → RED.
