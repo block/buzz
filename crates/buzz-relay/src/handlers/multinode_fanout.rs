@@ -21,18 +21,24 @@
 //! - A fence is immediate and atomic with the live send path, so after it no
 //!   newer frame is queued to the connection. Frames queued before it were
 //!   produced no later than the fence.
-//! - Every event a worker withholds or drops was read from Redis at most
-//!   [`MAX_QUEUE_DELAY`] before the fence lands, even when other workers or
-//!   local fan-out are ahead.
+//! - [`MAX_QUEUE_DELAY`] is the cutoff for attempting delivery: no event is
+//!   delivered, and so none moves a cursor, later than that after this node
+//!   read it from Redis. A worker that has not delivered an event by then
+//!   fences its recipients at once.
 //!
 //! So a missed event is replayed as long as `MAX_QUEUE_DELAY`, plus its
 //! writer's clock skew and its publish-to-Redis delay, stays under the
-//! client's slack. The relay accepts `created_at` far outside that, and an
-//! ordinary reconnect has the same limit: only a client-side rewind can recover
-//! an event whose writer's clock is further behind. Dispatcher lag, where the
-//! skipped events are never seen, is not bounded either. The socket close
-//! itself goes through one paced closer so a hot channel cannot turn into a
-//! reconnect storm (Review-Proven Rule 9).
+//! client's slack. Three cases fall outside that bound:
+//! - The relay accepts `created_at` far outside the slack, and an ordinary
+//!   reconnect has the same limit. Only a client-side rewind can recover an
+//!   event whose writer's clock is further behind.
+//! - A dispatcher that falls behind without overflowing the broadcast detects
+//!   the loss late: the event is still never delivered, but its fence lands
+//!   only when the dispatcher reaches it.
+//! - Dispatcher lag, where the skipped events are never seen.
+//!
+//! The socket close itself goes through one paced closer so a hot channel
+//! cannot turn into a reconnect storm (Review-Proven Rule 9).
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -54,7 +60,8 @@ use buzz_core::event::StoredEvent;
 pub const WORKERS: usize = 16;
 /// Events each worker may hold before the dispatcher drops new ones.
 pub const WORKER_QUEUE: usize = 1024;
-/// The longest an event may wait in a worker queue before it counts as lost.
+/// The cutoff for delivering an event, from when this node read it from Redis.
+/// An event not delivered by then counts as lost.
 /// It must stay well under the clients' replay slack (5 s), so a client whose
 /// cursor moved on through faster paths still replays what it missed.
 pub const MAX_QUEUE_DELAY: Duration = Duration::from_secs(2);
