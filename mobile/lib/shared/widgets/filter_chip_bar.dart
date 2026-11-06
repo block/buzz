@@ -48,6 +48,9 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
+  /// Sizes native glass filters equally to fit the widest label.
+  final bool equalNativeWidths;
+
   /// Minimum visible capsule height; the hit target may be larger.
   final double minControlHeight;
 
@@ -70,6 +73,7 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
+    this.equalNativeWidths = false,
     this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
@@ -96,6 +100,10 @@ class FilterChipBar<T> extends StatelessWidget {
               )..layout()).width +
               32,
       ];
+      if (equalNativeWidths && widths.isNotEmpty) {
+        final widest = widths.reduce(math.max);
+        widths.fillRange(0, widths.length, widest);
+      }
       return LayoutBuilder(
         builder: (context, constraints) {
           final available = constraints.maxWidth - horizontalPadding * 2;

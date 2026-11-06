@@ -422,6 +422,7 @@ void main() {
       expect(find.text('Inbox'), findsNothing);
       final inboxButton = tester.widget<IosGlassNavigationButton>(inbox);
       expect(inboxButton.icon, IosGlassNavigationIcon.bell);
+      double? filterWidth;
       for (final label in ['All', 'Solo', 'Team']) {
         final chip = tester.widget<IosGlassNavigationButton>(
           find.descendant(
@@ -432,6 +433,8 @@ void main() {
           ),
         );
         expect(chip.controlSize, inboxButton.controlSize);
+        filterWidth ??= chip.width;
+        expect(chip.width, filterWidth);
       }
       expect(tester.getSize(inbox), const Size(44, 44));
       final communityTrigger = find.byWidgetPredicate(
