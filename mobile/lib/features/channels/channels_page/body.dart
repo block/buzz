@@ -50,18 +50,33 @@ class _ChannelsBody extends StatelessWidget {
             horizontal: _kChannelSectionInset,
             vertical: _kChannelRowVerticalPadding,
           ),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Inbox',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: navigationSectionTextStyle.copyWith(
-                fontSize: 17,
-                height: 22 / 17,
-                color: navigationPrimaryForeground(context),
+          child: Row(
+            children: [
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(
+                    BuzzIcons.bell,
+                    size: _kChannelIconSize,
+                    color: navigationPrimaryForeground(context),
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: _kChannelLabelGap),
+              Expanded(
+                child: Text(
+                  'Inbox',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: navigationSectionTextStyle.copyWith(
+                    fontSize: 17,
+                    height: 22 / 17,
+                    color: navigationPrimaryForeground(context),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -97,7 +112,7 @@ class _ChannelsBody extends StatelessWidget {
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(
                         Grid.gutter,
-                        Grid.xs,
+                        Grid.lg,
                         Grid.gutter,
                         0,
                       ),
