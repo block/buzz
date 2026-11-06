@@ -61,8 +61,9 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         super::super::media_access::MediaReadMode::Enforce,
     )
     .await;
-    // Each PostgreSQL test has its own database, so this host is test-local.
-    let host = "127.0.0.1";
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host_string = http_listener.local_addr().unwrap().to_string();
+    let host = host_string.as_str();
     state.db.ensure_configured_community(host).await.unwrap();
     let tenant = crate::tenant::bind_community(&state.db, host)
         .await
@@ -143,8 +144,7 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
     post(&state, &tenant, &owner, original.clone())
         .await
         .unwrap();
-    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", http_listener.local_addr().unwrap());
+    let url = format!("http://{host}");
     let http_app = crate::router::build_router(state.clone());
     let http_server = tokio::spawn(async move {
         axum::serve(http_listener, http_app).await.unwrap();
@@ -237,6 +237,127 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         &[StatusCode::NOT_FOUND; 2],
     )
     .await;
+
+    // Mixed-case removal must stay removed from this message even when a
+    // second live reference would authorize republication of the same bytes.
+    let second = EventBuilder::new(Kind::Custom(9), "another reference")
+        .tags(
+            std::iter::once(Tag::parse(["h", &channel.to_string()]).unwrap())
+                .chain(media[..1].iter().map(|t| Tag::parse(t.clone()).unwrap())),
+        )
+        .sign_with_keys(&owner)
+        .unwrap();
+    post(&state, &tenant, &owner, second.clone()).await.unwrap();
+    let restored = buzz_sdk::build_edit_with_media(channel, original.id, "both", &media)
+        .unwrap()
+        .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 30))
+        .sign_with_keys(&owner)
+        .unwrap();
+    post(&state, &tenant, &owner, restored).await.unwrap();
+    let mixed = original
+        .id
+        .to_hex()
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if i % 2 == 0 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect::<String>();
+    let removal = EventBuilder::new(Kind::Custom(40003), "only second")
+        .tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::parse(["e", &mixed]).unwrap(),
+            Tag::parse(media[1].clone()).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 31))
+        .sign_with_keys(&owner)
+        .unwrap();
+    post(&state, &tenant, &owner, removal).await.unwrap();
+    cli_edit(&url, &owner, original.id, false, "after mixed-case removal").await;
+    let current = state
+        .db
+        .message_edit_state(
+            tenant.community(),
+            channel,
+            original.id.as_bytes(),
+            owner.public_key().as_bytes(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .edit
+        .unwrap();
+    let carried: Vec<_> = current
+        .tags
+        .iter()
+        .filter(|t| t.as_slice()[0] == "imeta")
+        .map(|t| t.as_slice().to_vec())
+        .collect();
+    assert_eq!(
+        carried,
+        vec![media[1].clone()],
+        "must not resurrect the first file"
+    );
+    readable(
+        &state,
+        host,
+        &hashes,
+        &[&owner, &member],
+        &[StatusCode::OK; 2],
+    )
+    .await;
+    state
+        .db
+        .soft_delete_event_and_update_thread(tenant.community(), second.id.as_bytes(), None, None)
+        .await
+        .unwrap();
+    readable(
+        &state,
+        host,
+        &hashes,
+        &[&owner, &member],
+        &[StatusCode::NOT_FOUND, StatusCode::OK],
+    )
+    .await;
+
+    // An agent owner outside this private channel has no attachment read or
+    // publication authority. A direct retaining edit must also be rejected.
+    state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            owner.public_key().as_bytes(),
+            outsider.public_key().as_bytes(),
+        )
+        .await
+        .unwrap();
+    let owner_edit =
+        buzz_sdk::build_edit_with_media(channel, original.id, "owner edit", &media[1..])
+            .unwrap()
+            .sign_with_keys(&outsider)
+            .unwrap();
+    assert!(post(&state, &tenant, &outsider, owner_edit).await.is_err());
+    assert_ne!(
+        buzz_cli::run_from_args(vec![
+            "buzz".to_string(),
+            "--relay".into(),
+            url.clone(),
+            "--private-key".into(),
+            outsider.secret_key().to_secret_hex(),
+            "messages".into(),
+            "edit".into(),
+            "--event".into(),
+            original.id.to_hex(),
+            "--content".into(),
+            "owner edit".into()
+        ])
+        .await,
+        0
+    );
 
     // Knowing a private hash never lets another member attach it to their own
     // message/edit. This exercises the common publication check on kind 40003.

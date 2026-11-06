@@ -19,6 +19,10 @@ fn edit_target(alias: &str) -> String {
     MEDIA_EDIT_TARGET_SQL.replacen("(tags,", &format!("({alias}.tags,"), 1)
 }
 
+pub(super) fn latest_message_edit_sql() -> String {
+    format!("SELECT e.* FROM events e WHERE e.community_id=$1 AND e.channel_id=$2 AND e.kind=40003 AND e.deleted_at IS NULL AND {}=$3 ORDER BY e.created_at DESC,e.id DESC LIMIT 1", edit_target("e"))
+}
+
 /// Result of a complete live-reference lookup, for bounded denial metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaAccess {
@@ -32,7 +36,62 @@ pub enum MediaAccess {
     Restricted,
 }
 
+/// Original message and its latest live edit in one primary-database snapshot.
+#[derive(Debug)]
+pub struct MessageEditState {
+    /// Live original, authorized for the reader's explicitly named channel.
+    pub original: nostr::Event,
+    /// Complete replacement, if a live edit exists.
+    pub edit: Option<nostr::Event>,
+}
+
 impl Db {
+    /// Read effective message attachment state using the normalized-target
+    /// index. Channel membership, source liveness and edit selection share a
+    /// repeatable-read primary snapshot; no replica or membership cache is used.
+    pub async fn message_edit_state(
+        &self,
+        community: CommunityId,
+        channel: uuid::Uuid,
+        target: &[u8],
+        reader: &[u8],
+    ) -> Result<Option<MessageEditState>> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql(MEDIA_LOOKUP_SETTINGS_SQL)
+            .execute(&mut *tx)
+            .await?;
+        // The channel is explicitly named by this read, so open unlisted and
+        // named-only channels follow the normal explicit-channel read policy.
+        let original = sqlx::query("SELECT e.* FROM events e JOIN channels c ON c.community_id=e.community_id AND c.id=e.channel_id WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3 AND e.kind IN (9,40002) AND e.deleted_at IS NULL AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.community_id=c.community_id AND cm.channel_id=c.id AND cm.pubkey=$4 AND cm.removed_at IS NULL))")
+            .bind(community.as_uuid()).bind(channel).bind(target).bind(reader)
+            .fetch_optional(&mut *tx).await?;
+        let Some(original) = original else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let original = super::event::row_to_stored_event(original)?
+            .ok_or_else(|| DbError::InvalidData("unreadable original message row".into()))?
+            .event;
+        let sql = latest_message_edit_sql();
+        let edit = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(target)
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|row| {
+                super::event::row_to_stored_event(row)?
+                    .map(|stored| stored.event)
+                    .ok_or_else(|| DbError::InvalidData("unreadable latest edit row".into()))
+            })
+            .transpose()?;
+        tx.commit().await?;
+        Ok(Some(MessageEditState { original, edit }))
+    }
+
     /// Record possession after the upload pipeline verified the actual bytes.
     /// Independent of optional audit and moderation records; admission fences deletion.
     #[datastore_span(name = "record_media_upload", system = "postgresql")]

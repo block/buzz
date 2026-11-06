@@ -90,17 +90,41 @@ media access through the ordinary media endpoint.
 4. Repair unsupported/historical URLs or republish them through an authorized
    uploader before restarting every serving pod in `enforce`.
 
-**Enforce blocker: SDK/CLI attachment edits remain unsupported.**
-`buzz_sdk::build_edit` and `buzz messages edit` currently omit attachment imeta.
-Editing an attachment message through these clients can make its file unreadable,
-including to its sender. This review item is deferred, not fixed. Enforce stays blocked unless the operator can rule out SDK/CLI attachment edits
-in the community. The agent harness edit producer is unverified and remains
-inside this blocker until its metadata behavior is traced and tested. To remove
-the blocker, update both SDK/CLI paths to preserve the
-latest effective attachment metadata across successive edits without restoring
-files removed by an earlier edit. Require an upload → successive edits → GET/HEAD
-regression proving retained files stay readable and removed files stay denied.
-Keeping a URL in the edited body does not preserve access.
+**Enforce prerequisite: upgrade every edit producer.** The updated
+`buzz messages edit` resolves the latest live attachment state on the primary
+and carries its complete imeta set. `--clear-attachments` explicitly removes
+all attachments; later text edits preserve that empty set. SDK integrations
+must use `buzz_sdk::build_edit_with_media` with the latest effective metadata.
+The compatibility `build_edit` helper still emits an empty attachment set and
+therefore removes attachments. A URL in the body does not retain access.
+
+Deploy the relay with the [versioned effective-edit lookup](effective-message-edits.md)
+before releasing the new CLI. A new CLI against an older relay aborts without
+publishing; an old CLI against a new relay keeps its previous attachment-removing
+behavior. The `buzz-dev-mcp` multicall named `buzz` delegates to the same CLI
+entrypoint. The PostgreSQL regression
+`cli_successive_edits_preserve_and_revoke_attachments` exercises that entrypoint
+through HTTP and checks GET/HEAD, removal, and mixed-case edit targets.
+
+**Remaining enforce blocker: the separate `block/buzz-app` MCP edit producer.**
+Its direct publisher at `src/buzz-mcp/tools.ts` copies the original event's
+imeta rather than resolving successive edits. It must adopt effective state
+and pass the same removal regression before enabling enforce for its users.
+Audit other third-party SDK/direct publishers too; upgrading the CLI alone
+cannot change their signed events.
+
+The relay rejects a retaining edit when its signer cannot publish any carried
+attachment. Agent ownership does not grant private-channel media access: an
+owner outside that channel cannot retain its files. Restore access or explicitly
+remove the attachments with `--clear-attachments`; the CLI itself also requires
+read access to the original. Concurrent edits remain ordered by `(created_at,id)`;
+coordinate writers when attachment changes overlap. There is no compare-and-swap
+precondition on message edits.
+
+This client change has no feature flag. Observe
+`buzz_media_publication_access_total{mode="shadow",reason="denied"}` before
+enforcement. Roll back the CLI by reverting its release; retain the additive
+relay lookup. Rolling the relay back first causes new CLI edits to abort.
 
 There is no grant backfill: existing stored references are evaluated directly,
 and signed event tags are never rewritten. Legacy unreferenced/orphan blobs

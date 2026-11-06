@@ -425,6 +425,9 @@ pub fn build_diff_message(
 }
 
 /// Build an edit event targeting an existing message (kind 40003).
+///
+/// This compatibility helper removes all attachments. Use
+/// [`build_edit_with_media`] with the latest effective imeta to retain them.
 pub fn build_edit(
     channel_id: Uuid,
     target_event_id: nostr::EventId,

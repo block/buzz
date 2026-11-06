@@ -3,6 +3,7 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod effective_edit;
 mod membership_snapshot;
 mod read_state_snapshot;
 pub(crate) mod search_slots;
@@ -1787,6 +1788,9 @@ async fn query_member_events(
             )
         })?
         .map(|events| Json(Value::Array(events)));
+    }
+    if effective_edit::requested(&raw_filters) {
+        return effective_edit::query(state, tenant, &pubkey, &raw_filters).await;
     }
     if read_state_snapshot::requested(&raw_filters) {
         return read_state_snapshot::query(state, tenant, &pubkey, &raw_filters).await;

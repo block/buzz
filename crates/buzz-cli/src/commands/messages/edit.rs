@@ -7,9 +7,6 @@ use crate::{
 };
 use nostr::{Event, Timestamp};
 
-// Exhaustion must abort, never fall back to the original's attachments.
-const EDIT_HISTORY_BOUND: u32 = 10_000;
-
 pub(super) async fn edit_message(
     client: &BuzzClient,
     event_id: &str,
@@ -28,25 +25,43 @@ pub(super) async fn edit_message(
             "edit requires the original message's event ID (kind 9 or 40002)".into(),
         ));
     }
-    // Query live edits in this channel. An exact #e filter would miss mixed-case
-    // hex targets that the relay accepts, and author filtering would miss edits
-    // made by the agent's human owner. query_all_bounded fails on truncation.
-    let history = client
-        .query_all_bounded(
-            serde_json::json!({
-                "kinds": [40003], "#h": [channel.to_string()],
-            }),
-            EDIT_HISTORY_BOUND,
-        )
+    let raw = client
+        .query(&serde_json::json!({
+            "kinds": [9,40002], "ids": [target.to_hex()], "#h": [channel.to_string()],
+            "effective_edit": 1, "consistency": "strong",
+        }))
         .await?;
-    let edits: Vec<Event> = history
-        .into_iter()
-        .map(|value| {
-            serde_json::from_value(value)
-                .map_err(|e| CliError::Other(format!("invalid edit history: {e}")))
-        })
-        .collect::<Result<_, _>>()?;
+    let snapshot: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid effective edit response: {e}")))?;
+    if snapshot.get("effective_edit") != Some(&serde_json::json!(1))
+        || snapshot.get("edit").is_none()
+    {
+        return Err(CliError::Other(
+            "relay does not support effective_edit v1; upgrade the relay before editing".into(),
+        ));
+    }
+    let original: Event = serde_json::from_value(snapshot["original"].clone())
+        .map_err(|e| CliError::Other(format!("invalid effective original: {e}")))?;
+    if original.id != target
+        || !matches!(original.kind.as_u16(), 9 | 40002)
+        || channel_id_from_event(event_id, &snapshot["original"])? != channel
+    {
+        return Err(CliError::Other(
+            "effective edit response has the wrong original".into(),
+        ));
+    }
+    let edits: Vec<Event> = if snapshot["edit"].is_null() {
+        vec![]
+    } else {
+        vec![serde_json::from_value(snapshot["edit"].clone())
+            .map_err(|e| CliError::Other(format!("invalid effective edit: {e}")))?]
+    };
     let effective = latest_edit(&original, &edits);
+    if !edits.is_empty() && effective.id == original.id {
+        return Err(CliError::Other(
+            "effective edit response has the wrong replacement".into(),
+        ));
+    }
     let media = if clear_attachments {
         Vec::new()
     } else {

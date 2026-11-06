@@ -112,18 +112,28 @@ struct Relay {
     events: Arc<Mutex<Vec<Event>>>,
     submitted: Arc<Mutex<Vec<Event>>>,
     fail_history: bool,
+    ignore_extension: Arc<std::sync::atomic::AtomicBool>,
 }
 async fn relay(events: Vec<Event>, fail_history: bool) -> (String, Relay) {
     let state = Relay {
         events: Arc::new(Mutex::new(events)),
         submitted: Default::default(),
         fail_history,
+        ignore_extension: Default::default(),
     };
     let app = Router::new()
         .route("/query", post(|State(state): State<Relay>, Json(filters): Json<Vec<serde_json::Value>>| async move {
             let filter = &filters[0];
             if state.fail_history && filter.get("kinds").is_some() {
                 return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"denied"})));
+            }
+            if filter.get("effective_edit").is_some() && !state.ignore_extension.load(std::sync::atomic::Ordering::SeqCst) {
+                assert_eq!(filter["consistency"], "strong");
+                let events = state.events.lock().unwrap();
+                let original = events.iter().find(|event| serde_json::json!(event.id.to_hex()) == filter["ids"][0]).unwrap();
+                let latest = events.iter().filter(|event| event.kind.as_u16() == 40003 && buzz_core::media::first_edit_target(event).as_deref() == Some(original.id.as_bytes().as_slice()))
+                    .max_by_key(|event| (event.created_at,event.id));
+                return (axum::http::StatusCode::OK, Json(serde_json::json!({"effective_edit":1,"original":original,"edit":latest})));
             }
             let events: Vec<Event> = state.events.lock().unwrap().iter().filter(|event| {
                 filter["ids"].as_array().is_none_or(|ids| ids.contains(&serde_json::json!(event.id.to_hex())))
@@ -211,4 +221,20 @@ async fn command_aborts_on_unreadable_history_or_future_head() {
             .is_err());
         assert!(state.submitted.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn command_refuses_an_older_relay_that_ignores_the_extension() {
+    let keys = Keys::generate();
+    let original = message(&keys, Uuid::new_v4(), &[imeta("kept")]);
+    let (url, state) = relay(vec![original.clone()], false).await;
+    state
+        .ignore_extension
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let client = client(url, keys);
+    let error = edit_message(&client, &original.id.to_hex(), "new", false)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("upgrade the relay"));
+    assert!(state.submitted.lock().unwrap().is_empty());
 }
