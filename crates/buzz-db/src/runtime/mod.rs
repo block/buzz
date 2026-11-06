@@ -306,7 +306,7 @@ pub struct Db {
     /// Concurrency cap on replica-served subscription-history reads, sized
     /// from [`Db::read_max_connections`] (see [`history_reads`]). Shared
     /// across `Db` clones.
-    pub(crate) history_reads: history_reads::HistoryReadGate,
+    pub(crate) history_reads: crate::concurrency_gate::ConcurrencyGate,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -827,7 +827,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
-            history_reads: history_reads::HistoryReadGate::for_read_pool(read_max_connections),
+            history_reads: history_reads::gate_for_read_pool(read_max_connections),
         })
     }
 
@@ -1380,9 +1380,7 @@ impl Db {
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
             read_max_connections: pool.options().get_max_connections(),
-            history_reads: history_reads::HistoryReadGate::for_read_pool(
-                pool.options().get_max_connections(),
-            ),
+            history_reads: history_reads::gate_for_read_pool(pool.options().get_max_connections()),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
@@ -1404,7 +1402,7 @@ impl Db {
             max_connections: pool.options().get_max_connections(),
             read_max_connections: read_pool.options().get_max_connections(),
             pool,
-            history_reads: history_reads::HistoryReadGate::for_read_pool(
+            history_reads: history_reads::gate_for_read_pool(
                 read_pool.options().get_max_connections(),
             ),
             read_pool: Some(read_pool),
@@ -1480,6 +1478,13 @@ impl Db {
     /// Whether a distinct read-replica pool is configured.
     pub fn has_read_pool(&self) -> bool {
         self.read_pool.is_some()
+    }
+
+    /// The cap on concurrent subscription-history reads (see
+    /// [`history_reads`]). Its ceiling is the share of the reader pool that
+    /// leaves room for authorization reads; operators may lower it at runtime.
+    pub fn history_read_gate(&self) -> &crate::concurrency_gate::ConcurrencyGate {
+        &self.history_reads
     }
 
     /// Open a reader request transaction and complete the connection-local
@@ -1862,7 +1867,7 @@ impl Db {
     /// [`history_reads`] permit for as long as their reader transaction, so
     /// they never fill the reader pool, and they are never moved to the
     /// writer merely because the reader is busy: a history read that waits
-    /// out its permit ([`history_reads::HistoryReadGate::PERMIT_WAIT`]) or
+    /// out its permit ([`history_reads::PERMIT_WAIT`]) or
     /// its reader acquire ([`Db::READER_ACQUIRE_TIMEOUT`]) on a saturated
     /// reader pool ([`Db::reader_saturated`]) is rejected with
     /// [`sqlx::Error::PoolTimedOut`], which the relay answers with its
@@ -1922,7 +1927,7 @@ impl Db {
         }
         let history = operation == observability::ReaderOperation::SubscriptionHistory;
         let permit = if history {
-            let Some(permit) = self.history_reads.admit().await else {
+            let Some(permit) = self.history_reads.admit(history_reads::PERMIT_WAIT).await else {
                 return Err(Self::reject_history_read(path, "history_read_cap"));
             };
             Some(permit)

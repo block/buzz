@@ -517,6 +517,13 @@ run_unit_tests() {
   run_test_step "buzz-relay invitation cutoff configuration" \
     cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
 
+  run_test_step "buzz-relay runtime concurrency caps" \
+    cargo test -p buzz-relay --lib concurrency_limits::tests:: -- --nocapture
+  run_test_step "buzz-relay feature-flag provider selection" \
+    cargo test -p buzz-relay --lib feature_flags::tests:: -- --nocapture
+  run_test_step "buzz-relay AUTH concurrency shed" \
+    cargo test -p buzz-relay --lib handlers::auth::tests::auth_cap_sheds_a_verified_login_with_a_bare_close -- --exact --nocapture
+
   run_test_step "buzz-relay mesh receive lifetime regression" \
     cargo test -p buzz-relay --lib mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks -- --exact --nocapture
 

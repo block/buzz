@@ -27,6 +27,8 @@ pub(crate) mod nip_fi_upgrade;
 pub mod api;
 /// WebSocket audio relay for huddle voice channels.
 pub mod audio;
+/// Operator-tunable concurrency caps, re-read from feature flags at runtime.
+pub mod concurrency_limits;
 /// Relay configuration from environment variables.
 pub mod config;
 /// Runtime conformance harness — abstract trace emission at the
@@ -38,6 +40,8 @@ pub mod conformance;
 pub mod connection;
 /// Relay error types.
 pub mod error;
+/// The feature-flag provider, chosen once at startup.
+pub mod feature_flags;
 /// WebSocket message handlers for NIP-01 client commands.
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).

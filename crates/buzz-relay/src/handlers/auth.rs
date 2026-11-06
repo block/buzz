@@ -511,6 +511,10 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
     serde_json::to_string(first.as_slice()).ok()
 }
 
+/// How long a verified AUTH waits for an [`AppState::auth_gate`] permit before
+/// it is shed. Well inside every client's own AUTH timeout.
+const AUTH_PERMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Handle a NIP-42 AUTH message: verify the challenge response and transition
 /// the connection to authenticated state.
 ///
@@ -579,6 +583,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
             let attempt = AuthAttempt::nip42(&conn, pubkey, true);
+            // Concurrency cap (`relay.concurrency.auth`, unbounded unless set).
+            // The signature is proven, so only real logins queue for the
+            // database checks below, and the permit is held through them. A
+            // shed login gets a bare close, as an auth timeout does: clients
+            // reconnect from that on their jittered backoff, while an `OK
+            // false` parks some clients and retries others in lockstep.
+            let Some(_auth_permit) = state.auth_gate.admit(AUTH_PERMIT_WAIT).await else {
+                metrics::counter!("buzz_auth_failures_total", "reason" => "concurrency_limit")
+                    .increment(1);
+                if attempt.reject(&conn, AuthOutcome::ConcurrencyLimit) {
+                    conn.cancel.cancel();
+                }
+                return;
+            };
 
             conn.community_control.prove_nip_fi_line(pubkey);
             let shadow = conn.community_control.nip_fi_shadow();
@@ -1082,6 +1100,59 @@ mod tests {
                 Some(*value)
             })
             .unwrap_or_default()
+    }
+
+    /// The AUTH cap sheds a verified login with a bare close once its bounded
+    /// wait runs out; a free permit lets the next login through to its
+    /// database checks.
+    #[tokio::test]
+    async fn auth_cap_sheds_a_verified_login_with_a_bare_close() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+        let state = auth_test_state().await;
+        assert_eq!(state.auth_gate.set_limit(1), 1);
+        let held = state
+            .auth_gate
+            .admit(super::AUTH_PERMIT_WAIT)
+            .await
+            .expect("the only permit");
+
+        let mut shed = AuthHarness::new(false);
+        let started = std::time::Instant::now();
+        shed.run(shed.auth_event(), std::sync::Arc::clone(&state))
+            .await;
+        assert!(
+            started.elapsed() >= super::AUTH_PERMIT_WAIT,
+            "a login waits for a permit before it is shed"
+        );
+        assert!(matches!(shed.conn.auth_state_snapshot(), AuthState::Failed));
+        assert!(
+            shed.send_rx.try_recv().is_err(),
+            "no OK on the data channel"
+        );
+        assert!(
+            shed.ctrl_rx.try_recv().is_err(),
+            "no OK on the ctrl channel"
+        );
+        assert_eq!(
+            shed.wire_frames().await,
+            vec![WsMessage::Close(None)],
+            "a shed login sees only a bare close, as on an auth timeout"
+        );
+
+        drop(held);
+        let admitted = AuthHarness::new(false);
+        admitted.run(admitted.auth_event(), state).await;
+        assert_eq!(
+            metric_counter(
+                &snapshotter.snapshot().into_vec(),
+                "buzz_auth_outcomes_total",
+                Some("concurrency_limit"),
+            ),
+            1,
+            "the first login is shed, the second with a free permit is not"
+        );
     }
 
     fn pending(challenge: &str) -> AuthState {

@@ -1426,6 +1426,11 @@ pub struct AppState {
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
     pub handler_semaphore: Arc<Semaphore>,
+    /// Cap on NIP-42 AUTH frames past signature verification and into their
+    /// database checks at once. Unbounded until an operator sets a limit
+    /// through the `relay.concurrency.auth` flag (see
+    /// [`crate::concurrency_limits`]).
+    pub auth_gate: buzz_db::ConcurrencyGate,
     /// Semaphore limiting concurrent git subprocess operations across
     /// the whole relay. Bounds resource use; **not** writer
     /// serialization — that's the CAS at the manifest pointer (spec
@@ -1786,6 +1791,7 @@ impl AppState {
             community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
+            auth_gate: buzz_db::ConcurrencyGate::unbounded(),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
             media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,

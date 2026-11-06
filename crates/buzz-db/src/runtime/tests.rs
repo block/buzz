@@ -1616,7 +1616,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     let cap = db.history_reads.available();
     assert_eq!(
         cap,
-        super::history_reads::HistoryReadGate::cap(db.read_max_connections) as usize
+        super::history_reads::cap(db.read_max_connections) as usize
     );
 
     let head = db
@@ -1638,7 +1638,12 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     // Fill the gate: every remaining permit is held elsewhere.
     let mut others = Vec::new();
     for _ in 1..cap {
-        others.push(db.history_reads.admit().await.expect("free permit"));
+        others.push(
+            db.history_reads
+                .admit(super::history_reads::PERMIT_WAIT)
+                .await
+                .expect("free permit"),
+        );
     }
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
@@ -1655,7 +1660,7 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
         "the rejection must be the retryable pool timeout; got {rejected:?}"
     );
     assert!(
-        started.elapsed() >= super::history_reads::HistoryReadGate::PERMIT_WAIT,
+        started.elapsed() >= super::history_reads::PERMIT_WAIT,
         "the read must wait out the bounded permit wait before rejecting"
     );
     let decisions: Vec<(String, String)> = snapshotter
@@ -1684,12 +1689,36 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     drop(session);
     assert_eq!(db.history_reads.available(), 1);
     let (_window, session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
         .await
         .expect("a released permit admits the next read");
     assert!(session.is_replica());
     drop(session);
     drop(others);
+    assert_eq!(db.history_reads.available(), cap);
+
+    // An operator lowering the cap at runtime holds new reads to the new
+    // limit while one is in flight, and raising it readmits them.
+    let (_window, held) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .expect("routed cursor window");
+    assert_eq!(db.history_read_gate().set_limit(1), 1);
+    let rejected = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .await
+        .err()
+        .expect("a lowered cap must reject the next history read");
+    assert!(
+        matches!(rejected, DbError::Sqlx(sqlx::Error::PoolTimedOut)),
+        "a lowered cap sheds as retryable; got {rejected:?}"
+    );
+    assert_eq!(db.history_read_gate().set_limit(cap), cap);
+    let (_window, second) = db
+        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .await
+        .expect("a raised cap admits the next read");
+    drop((held, second));
     assert_eq!(db.history_reads.available(), cap);
 }
 
