@@ -389,21 +389,40 @@ enum DesktopAuthCmd {
 /// `http://localhost:3000`. Local-only unpairing never asks the desktop.
 async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<String, CliError> {
     #[cfg(unix)]
+    let (inherited, paired) = (
+        desktop_provider::inherited_relay(),
+        desktop_provider::paired_relay(),
+    );
+    #[cfg(not(unix))]
+    let (inherited, paired) = (async { Ok(None) }, async { Ok(None) });
+    default_relay_with(command, explicit_key, inherited, paired).await
+}
+
+/// [`default_relay`], with the agent and paired-person selectors (each
+/// awaited only when needed) parameters so a test can run it against a fake
+/// desktop.
+pub(crate) async fn default_relay_with(
+    command: &Cmd,
+    explicit_key: bool,
+    inherited: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+    paired: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+) -> Result<String, CliError> {
+    #[cfg(unix)]
     if !matches!(
         command,
         Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Unpair { .. }))
     ) {
-        if let Some(relay) = desktop_provider::inherited_relay().await? {
+        if let Some(relay) = inherited.await? {
             return Ok(relay);
         }
         if !explicit_key {
-            if let Some(relay) = desktop_provider::paired_relay().await? {
+            if let Some(relay) = paired.await? {
                 return Ok(relay);
             }
         }
     }
     #[cfg(not(unix))]
-    let _ = (command, explicit_key);
+    let _ = (command, explicit_key, inherited, paired);
     Ok("http://localhost:3000".to_owned())
 }
 

@@ -3262,6 +3262,8 @@ mod federated_identity_route_tests {
 
         // With a source configured, a 401 is the relay's verdict, not a hint.
         let (base, _) = origin(Some(StatusCode::UNAUTHORIZED)).await;
+        #[cfg(unix)]
+        let reads = paired_for(&base);
         let err = client(&base, true)
             .query(&serde_json::json!({}))
             .await
@@ -3270,6 +3272,31 @@ mod federated_identity_route_tests {
             matches!(err, CliError::Relay { status: 401, .. }),
             "{err:?}"
         );
+        // A key with evidence configured still notes the pairing it overrode.
+        #[cfg(unix)]
+        {
+            assert!(err.to_string().contains(OVERRODE), "{err}");
+            assert_eq!(reads(), 1);
+            let (base, _) = origin(None).await;
+            let reads = paired_for(&base);
+            client(&base, true)
+                .query(&serde_json::json!({}))
+                .await
+                .unwrap();
+            assert_eq!(reads(), 0, "a success never reads the pairings");
+        }
+    }
+
+    #[cfg(unix)]
+    const OVERRODE: &str = "took precedence over this CLI's Buzz desktop pairing";
+
+    /// Store a pairing for `base` for this thread, returning its read count.
+    #[cfg(unix)]
+    fn paired_for(base: &str) -> impl Fn() -> usize {
+        use crate::desktop_provider::tests::PAIRED_RELAYS;
+        let relay = crate::desktop_provider::provider_relay_url(base).unwrap();
+        PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec![relay], 0));
+        || PAIRED_RELAYS.with(|p| p.borrow().1)
     }
 
     /// The paths a failed mint must stop before anything reaches the relay:

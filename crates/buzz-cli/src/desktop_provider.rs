@@ -1129,9 +1129,7 @@ async fn accepted_relay(
             Probe::NotAccepted | Probe::NotRunning => {}
             // A desktop that answered with a refusal has decided.
             Probe::Refused(e) => return Err(e),
-            Probe::Unconfirmed(e) | Probe::Throttled(e) => {
-                transient.get_or_insert(e);
-            }
+            Probe::Unconfirmed(e) | Probe::Throttled(e) => keep_transient(&mut transient, e),
         }
     }
     match (accepted.len(), transient) {
@@ -1140,6 +1138,17 @@ async fn accepted_relay(
         // rather than fall back to a relay this person is not paired for.
         (0, Some(e)) => Err(e),
         _ => Ok(None),
+    }
+}
+
+/// Keep the first transient failure, except that a retryable one replaces an
+/// identity mismatch: the command may succeed once that desktop answers.
+fn keep_transient(kept: &mut Option<CliError>, e: CliError) {
+    let better = kept.as_ref().is_none_or(|k| {
+        !crate::error::is_retryable_error(k) && crate::error::is_retryable_error(&e)
+    });
+    if better {
+        *kept = Some(e);
     }
 }
 
@@ -2480,6 +2489,60 @@ pub(crate) mod tests {
         let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
         let ads = vec![("a".into(), good), ("b".into(), throttled)];
         assert!(accepted_relay(&store, ads).await.unwrap().is_some());
+    }
+
+    /// With no usable relay, a retryable failure is reported over an
+    /// identity mismatch, in either order.
+    #[test]
+    fn a_retryable_failure_outranks_an_identity_mismatch() {
+        let mismatch = || ProviderError::OtherUser.into_cli("describe");
+        let timeout = || ProviderError::Unconfirmed.into_cli("describe");
+        for order in [[mismatch(), timeout()], [timeout(), mismatch()]] {
+            let mut kept = None;
+            for e in order {
+                keep_transient(&mut kept, e);
+            }
+            assert_eq!(crate::error::exit_code(&kept.unwrap()), 2);
+        }
+        let mut kept = None;
+        keep_transient(&mut kept, mismatch());
+        assert_eq!(crate::error::exit_code(&kept.unwrap()), 3);
+    }
+
+    /// Through the command's relay selection with no `--relay`: a desktop's
+    /// refusal and a retryable failure both fail the command.
+    #[tokio::test]
+    async fn a_command_given_no_relay_reports_desktop_failures() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["buzz", "users", "get"]).unwrap();
+        assert!(cli.relay.is_none());
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let (denied, _) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "denied", "message": "locked"}),
+        )
+        .await;
+        let paired = accepted_relay(&store, vec![("a".into(), denied)]);
+        let err = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"), "{err}");
+
+        let (good, _) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let paired = accepted_relay(&store, vec![("a".into(), good.clone())]);
+        let err = SAME_USER_HANGS
+            .scope(
+                (),
+                crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:?}");
+
+        let paired = accepted_relay(&store, vec![("a".into(), good)]);
+        let relay = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
+            .await
+            .unwrap();
+        assert_eq!(relay, "wss://community.example/");
     }
 
     /// A crashed desktop's leftover advertisement reads as not running, and
