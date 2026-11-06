@@ -54,7 +54,7 @@ pub(crate) async fn send_if_owner(
     #[cfg(test)]
     test_seam::pause_at(&test_seam::SEND_PAUSE).await;
     let subs = conn.subscriptions.lock().await;
-    subs.get(sub_id) == Some(&owner) && conn.send(frame)
+    owns(&subs, sub_id, owner) && conn.send(frame)
 }
 
 /// Monotonic source of subscription owner tokens. Each REQ takes its sub ID
@@ -64,6 +64,46 @@ static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn next_owner() -> u64 {
     NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// What the lifecycle map holds for a subscription ID: the token of the
+/// newest admitted request, and whether that request has claimed the ID.
+/// Until it claims, whatever is registered for the ID belongs to an older
+/// request it is replacing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubOwner {
+    /// The request's token from `next_owner`.
+    pub owner: u64,
+    /// The request has claimed the ID: what is registered for it is its own.
+    pub claimed: bool,
+}
+
+/// Whether the request holding `owner` still owns `sub_id`. The caller holds
+/// the lifecycle lock.
+pub(crate) fn owns(subs: &HashMap<String, SubOwner>, sub_id: &str, owner: u64) -> bool {
+    subs.get(sub_id).is_some_and(|held| held.owner == owner)
+}
+
+/// Claim `sub_id` for the request holding `owner`: `false` once the
+/// connection is closing or a `CLOSE` or newer same-ID REQ superseded it.
+/// The caller holds the lifecycle lock and, on `true`, replaces whatever is
+/// registered for the ID in the same critical section.
+pub(crate) fn claim_locked(
+    subs: &mut HashMap<String, SubOwner>,
+    sub_id: &str,
+    owner: u64,
+    conn: &ConnectionState,
+) -> bool {
+    if conn.cancel.is_cancelled() {
+        return false;
+    }
+    match subs.get_mut(sub_id) {
+        Some(held) if held.owner == owner => {
+            held.claimed = true;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Why `admit` did not admit a request.
@@ -98,7 +138,13 @@ pub(crate) async fn admit(sub_id: &str, conn: &ConnectionState) -> Result<u64, N
         return Err(NotAdmitted::TooManySubscriptions);
     }
     let owner = next_owner();
-    subs.insert(sub_id.to_owned(), owner);
+    subs.insert(
+        sub_id.to_owned(),
+        SubOwner {
+            owner,
+            claimed: false,
+        },
+    );
     Ok(owner)
 }
 
@@ -106,13 +152,13 @@ pub(crate) async fn admit(sub_id: &str, conn: &ConnectionState) -> Result<u64, N
 // connection's subscription state — map token, registry entry, topic
 // retention, and the terminal CLOSED frame. Neither the registry nor pubsub
 // takes it, so holding it across their awaits cannot invert lock order. The
-// map holds, per ID, the token of the newest admitted request, whether it has
+// map holds, per ID, the newest admitted request's `SubOwner`, whether it has
 // claimed (registered) yet or is still pending.
 
 /// Drop `sub_id` from the map, the fan-out index, and its topic retention.
 /// The caller holds the lifecycle lock (`subs`).
 pub(crate) async fn retire_locked(
-    subs: &mut HashMap<String, u64>,
+    subs: &mut HashMap<String, SubOwner>,
     sub_id: &str,
     conn: &ConnectionState,
     state: &AppState,
@@ -172,7 +218,7 @@ async fn close_owned(
     state: &AppState,
 ) -> bool {
     let mut subs = conn.subscriptions.lock().await;
-    if subs.get(sub_id) != Some(&owner) {
+    if !owns(&subs, sub_id, owner) {
         return false;
     }
     if let Some(notice) = notice {

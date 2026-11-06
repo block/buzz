@@ -1772,8 +1772,8 @@ pub(crate) async fn claim_admitted_live(
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
-    let subs = conn.subscriptions.lock().await;
-    if conn.cancel.is_cancelled() || subs.get(sub_id) != Some(&owner) {
+    let mut subs = conn.subscriptions.lock().await;
+    if !super::close::claim_locked(&mut subs, sub_id, owner, conn) {
         return None;
     }
     // A sync that held the ID stops; the registry entry and topics below are
@@ -1826,8 +1826,8 @@ async fn claim_admitted_search(
     conn: &ConnectionState,
     state: &AppState,
 ) -> Option<u64> {
-    let subs = conn.subscriptions.lock().await;
-    if conn.cancel.is_cancelled() || subs.get(sub_id) != Some(&owner) {
+    let mut subs = conn.subscriptions.lock().await;
+    if !super::close::claim_locked(&mut subs, sub_id, owner, conn) {
         return None;
     }
     super::close::retire_holder_locked(sub_id, conn, state).await;
@@ -2210,6 +2210,15 @@ mod tests {
             .collect()
     }
 
+    /// The owner token the lifecycle map holds for `sub_id`.
+    async fn token(conn: &ConnectionState, sub_id: &str) -> Option<u64> {
+        conn.subscriptions
+            .lock()
+            .await
+            .get(sub_id)
+            .map(|held| held.owner)
+    }
+
     fn registered(state: &AppState, conn: &ConnectionState, sub_id: &str) -> bool {
         state
             .sub_registry
@@ -2374,7 +2383,7 @@ mod tests {
 
         close_timed_out_subscription("x", old, &conn, &state).await;
 
-        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&new));
+        assert_eq!(token(&conn, "x").await, Some(new));
         assert!(
             registered(&state, &conn, "x"),
             "replacement must stay registered"
@@ -2426,7 +2435,7 @@ mod tests {
         .expect("claim");
         close_timed_out_subscription("x", search, &conn, &state).await;
 
-        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&live));
+        assert_eq!(token(&conn, "x").await, Some(live));
         assert!(registered(&state, &conn, "x"));
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
         assert!(closed_frames(&mut send_rx).is_empty());
@@ -2546,10 +2555,13 @@ mod tests {
                     _ = pause.reached.notified() => {}
                 }
                 if case == "replaced" {
-                    conn.subscriptions
-                        .lock()
-                        .await
-                        .insert("s".to_string(), owner + 1_000_000);
+                    conn.subscriptions.lock().await.insert(
+                        "s".to_string(),
+                        crate::handlers::close::SubOwner {
+                            owner: owner + 1_000_000,
+                            claimed: false,
+                        },
+                    );
                 }
                 pause.resume.notify_one();
                 search.await;
@@ -2604,7 +2616,13 @@ mod tests {
             task.await.expect("task");
         }
 
-        let owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
+        let owner = conn
+            .subscriptions
+            .lock()
+            .await
+            .get("x")
+            .expect("x owned")
+            .owner;
         assert_ne!(owner, stale);
         assert!(registered(&state, &conn, "x"));
         assert_eq!(state.pubsub.topic_refcount(&conn.tenant, topic).await, 1);
@@ -2677,7 +2695,7 @@ mod tests {
             closed_frames(&mut send_rx),
             vec![format!(r#"["CLOSED","x","{QUERY_TIMED_OUT_CLOSED}"]"#)]
         );
-        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&new));
+        assert_eq!(token(&conn, "x").await, Some(new));
         assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
         let refcount = |c| {
             state
@@ -2739,7 +2757,7 @@ mod tests {
         revoke.await;
         let new = replacement.await.expect("claim");
 
-        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&new));
+        assert_eq!(token(&conn, "x").await, Some(new));
         assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
         let refcount = |c| {
             state
@@ -2751,6 +2769,66 @@ mod tests {
             closed_frames(&mut send_rx),
             vec![r#"["CLOSED","x","restricted: channel access revoked"]"#.to_string()]
         );
+        state.conn_manager.deregister(conn.conn_id);
+    }
+
+    /// A revoke that evicts a holder a newer same-ID REQ is already replacing
+    /// retires the holder only: the client replaced it, so no `CLOSED` names
+    /// the ID, and the pending replacement keeps its token and still claims.
+    /// Mutation: drop the `replaced` check from the eviction → the
+    /// replacement's token is removed, its claim fails, and a `CLOSED` is
+    /// sent → RED.
+    #[tokio::test]
+    async fn revoke_of_a_replaced_holder_spares_the_pending_replacement() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, mut send_rx) = lifecycle_conn();
+        let conn = Arc::new(conn);
+        state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            tokio::sync::mpsc::channel(1).0,
+            None,
+            conn.cancel.clone(),
+            conn.tenant.community(),
+            Arc::clone(&conn.backpressure_count),
+            Arc::clone(&conn.subscriptions),
+            3,
+            crate::state::CommunityConnectionControl::new(conn.cancel.clone()),
+        );
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        claim_live_subscription("x", scoped(&text_filters(), Some(&[a])), &conn, &state)
+            .await
+            .expect("claim");
+        // The replacement is admitted and still in its access checks.
+        let pending = super::super::close::admit("x", &conn).await.expect("admit");
+
+        crate::handlers::side_effects::evict_conn_channel_subscriptions(
+            &conn.tenant,
+            &state,
+            a,
+            conn.conn_id,
+        )
+        .await;
+
+        let refcount = |c| {
+            state
+                .pubsub
+                .topic_refcount(&conn.tenant, EventTopic::Channel(c))
+        };
+        assert!(
+            !registered(&state, &conn, "x"),
+            "the revoked holder retires"
+        );
+        assert_eq!(refcount(a).await, 0);
+        assert_eq!(token(&conn, "x").await, Some(pending));
+        assert!(closed_frames(&mut send_rx).is_empty());
+
+        let claimed =
+            claim_admitted_live("x", pending, scoped(&text_filters(), Some(&[b])), &conn, &state).await;
+        assert_eq!(claimed, Some(pending));
+        assert!(subscribed(&state, &conn, b));
+        assert_eq!(refcount(b).await, 1);
         state.conn_manager.deregister(conn.conn_id);
     }
 
@@ -2779,7 +2857,7 @@ mod tests {
         let stale =
             claim_admitted_live("x", older, scoped(&text_filters(), Some(&[a])), &conn, &state).await;
         assert_eq!(stale, None);
-        assert_eq!(conn.subscriptions.lock().await.get("x"), Some(&newer));
+        assert_eq!(token(&conn, "x").await, Some(newer));
         assert!(subscribed(&state, &conn, b) && !subscribed(&state, &conn, a));
         assert_eq!((refcount(a).await, refcount(b).await), (0, 1));
 

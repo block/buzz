@@ -10827,7 +10827,6 @@ pub(crate) mod postgres_tests {
             .expect("lock replica events");
         let search: nostr::Filter =
             serde_json::from_value(fx.search_filter()).expect("search filter");
-        let live_owner = *conn.subscriptions.lock().await.get("x").expect("x owned");
         let task = tokio::spawn(handle_req(
             "x".into(),
             vec![search],
@@ -10835,18 +10834,26 @@ pub(crate) mod postgres_tests {
             conn.clone(),
             fx.state.clone(),
         ));
-        // Once search has claimed `x` its hydrate blocks on the lock. The old
-        // live fan-out must already be retired then, not only at final cleanup.
-        while conn.subscriptions.lock().await.get("x") == Some(&live_owner) {
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            fx.state
+        // Search takes the ID's token when it is admitted, before its access
+        // checks, so the token alone does not show it has claimed. Its claim
+        // retires the live fan-out under the lifecycle lock, and then its
+        // hydrate blocks on the table lock: the live entry must be gone while
+        // search is still running, not only at final cleanup.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while fx
+                .state
                 .sub_registry
                 .get_filters(conn.conn_id, "x")
-                .is_none(),
-            "accepting search must retire live fan-out"
-        );
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepting search must retire live fan-out");
+        // The claim's critical section, topic release included, is over once
+        // the lifecycle lock is free again.
+        drop(conn.subscriptions.lock().await);
         assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
         task.await.expect("search task");
         locker.rollback().await.expect("unlock");
