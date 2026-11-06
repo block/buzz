@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 86);
+        assert_eq!(migrations.len(), 87);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -915,6 +915,15 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE media_uploaders"));
+        // Default-channel index (0087): bounded inline build, plain index in
+        // the desired schema.
+        let auto_join_index = strip_sql_comments(migrations[86].sql.as_str());
+        assert!(auto_join_index.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(auto_join_index.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(auto_join_index.contains("CREATE INDEX idx_channels_auto_join"));
+        assert!(!auto_join_index.contains("CONCURRENTLY"));
+        assert!(crate::test_support::desired_state_schema_sql()
+            .contains("CREATE INDEX idx_channels_auto_join ON channels (community_id)"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3090,20 +3099,24 @@ mod postgres_tests {
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
         );
-        // The listed-name index (0083) is compared on its own for that reason.
-        let listed_name = |shapes: Vec<(String, String, String)>| {
+        // The listed-name (0083) and default-channel (0087) indexes are
+        // compared on their own for that reason.
+        let checked_channel_indexes = |shapes: Vec<(String, String, String)>| {
             shapes
                 .into_iter()
-                .filter(|(name, _, _)| name == "idx_channels_listed_name")
+                .filter(|(name, _, _)| {
+                    name == "idx_channels_listed_name" || name == "idx_channels_auto_join"
+                })
                 .collect::<Vec<_>>()
         };
-        let desired_listed_name = listed_name(index_shapes(&desired, "channels").await);
-        assert_eq!(desired_listed_name.len(), 1, "desired state has the index");
+        let desired_channel_indexes =
+            checked_channel_indexes(index_shapes(&desired, "channels").await);
+        assert_eq!(desired_channel_indexes.len(), 2, "desired state has both indexes");
         assert_eq!(
-            desired_listed_name,
-            listed_name(index_shapes(&migrated, "channels").await),
-            "idx_channels_listed_name parity mismatch: update \
-             schema/tables/public/channels.sql to match migration 0083"
+            desired_channel_indexes,
+            checked_channel_indexes(index_shapes(&migrated, "channels").await),
+            "channels index parity mismatch: update schema/tables/public/channels.sql \
+             to match migrations 0083 and 0087"
         );
         assert_eq!(
             events_key_defs(&desired).await,

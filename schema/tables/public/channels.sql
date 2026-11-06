@@ -70,3 +70,10 @@ CREATE INDEX idx_channels_id_live ON channels (id) INCLUDE (community_id)
 CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))
     WHERE visibility = 'open' AND NOT unlisted
       AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL;
+-- Effective default channels (open, unarchived, flagged streams), read on every
+-- AUTH to a community that does not require relay membership. Partial, so it
+-- holds only flagged rows. Created by migration 0087; must match
+-- list_never_joined_auto_join_channels in crates/buzz-db/src/store/channel.rs.
+CREATE INDEX idx_channels_auto_join ON channels (community_id)
+    WHERE auto_join AND channel_type = 'stream' AND visibility = 'open'
+      AND archived_at IS NULL AND deleted_at IS NULL;

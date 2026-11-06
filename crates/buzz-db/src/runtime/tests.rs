@@ -2178,6 +2178,62 @@ async fn pending_default_channel_join_routed_reads_the_bounded_replica() {
     assert_eq!(token(pending.expect("entry too old")), writer_token);
 }
 
+/// The per-AUTH never-joined default-channel read is bounded-routed like the
+/// pending-join read. A different flagged channel on each pool proves which
+/// pool answered.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn never_joined_auto_join_channels_routed_reads_the_bounded_replica() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "autojoin_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "autojoin_r").await;
+
+    let community = Uuid::new_v4();
+    let person = [0xddu8; 32];
+    let (writer_channel, replica_channel) = (Uuid::new_v4(), Uuid::new_v4());
+    for (pool, channel) in [(&writer, writer_channel), (&replica, replica_channel)] {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("autojoin-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO channels \
+             (id, community_id, name, channel_type, visibility, created_by, auto_join) \
+             VALUES ($1, $2, $3, 'stream', 'open', $4, true)",
+        )
+        .bind(channel)
+        .bind(community)
+        .bind(format!("autojoin-routing-{channel}"))
+        .bind([0xeeu8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect("seed flagged channel");
+    }
+    let cid = CommunityId::from_uuid(community);
+
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+
+    // Budget unset ⇒ writer.
+    let ids = db.list_never_joined_auto_join_channels_routed(cid, &person).await;
+    assert_eq!(ids.expect("gate off"), vec![writer_channel]);
+
+    // Budget set + fresh entry ⇒ replica.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+    let ids = db.list_never_joined_auto_join_channels_routed(cid, &person).await;
+    assert_eq!(ids.expect("gate on"), vec![replica_channel]);
+
+    // Entry older than the budget ⇒ fail closed to the writer.
+    db.fence().close();
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    );
+    let ids = db.list_never_joined_auto_join_channels_routed(cid, &person).await;
+    assert_eq!(ids.expect("entry too old"), vec![writer_channel]);
+}
+
 /// Community separation across every routed seam, verified on
 /// REPLICA-SERVED reads.
 ///
