@@ -288,18 +288,7 @@ PopupMenuItem<String> _sortMenuItem({
   required String value,
   required String label,
   required bool selected,
-}) => PopupMenuItem(
-  value: value,
-  child: Row(
-    children: [
-      Expanded(child: Text(label)),
-      if (selected)
-        const Icon(BuzzIcons.check, key: ValueKey('sort-selected-check'))
-      else
-        const SizedBox(width: 24),
-    ],
-  ),
-);
+}) => CheckedPopupMenuItem(value: value, checked: selected, child: Text(label));
 
 List<PopupMenuEntry<String>> _sortMenuItems(
   ChannelSortMode current, {
