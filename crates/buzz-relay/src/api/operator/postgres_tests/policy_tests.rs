@@ -195,6 +195,27 @@ mod postgres_tests {
             .await;
             assert_eq!(current["effective_required"], mode.restricts());
         }
+        // Enforce remains a global floor even after a stored disable.
+        Arc::make_mut(&mut Arc::get_mut(&mut state).unwrap().config).nip_fi_upgrades_enabled = true;
+        body["operation_id"] = Uuid::new_v4().to_string().into();
+        body["requires_nip_fi"] = false.into();
+        body["expected_policy_generation"] = 3.into();
+        body["expected_requires_nip_fi"] = true.into();
+        body.as_object_mut().unwrap().remove("expected_issuer");
+        let response = read_json(
+            fresh_upgrade_request(
+                state.clone(),
+                &operator,
+                "POST",
+                path,
+                Some(body.to_string()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(response["receipt"]["state"], "applied");
+        assert_eq!(response["receipt"]["current_requires_nip_fi"], false);
+        assert_eq!(response["effective_required"], true);
         let invalid = fresh_upgrade_request(
             state.clone(),
             &operator,

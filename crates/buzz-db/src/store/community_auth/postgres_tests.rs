@@ -659,6 +659,17 @@ async fn policy_enable_disable_reenable_history_and_identity() {
         );
     }
     assert_eq!(policy(&db, &tuple).await.policy_generation, 3);
+    // Reasserting required policy fences an earlier uncommitted disable too.
+    let stale_disable = intent(&tuple, false, 3, true);
+    let reassert = intent(&tuple, true, 3, true);
+    assert_eq!(apply(&db, &reassert).await.acceptance.policy_generation, 4);
+    assert_eq!(
+        db.set_community_nip_fi_policy(&stale_disable, Ok(()))
+            .await
+            .unwrap(),
+        PolicyOutcome::Refused("policy_conflict")
+    );
+    assert!(policy(&db, &tuple).await.requires_nip_fi);
 }
 
 #[tokio::test]

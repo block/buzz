@@ -3234,12 +3234,6 @@ mod postgres_tests {
             .expect("second post-apply reconciliation");
     }
 
-    /// Migrations 0076 and 0078 refuse a populated table whose index was not
-    /// prebuilt concurrently. A relay that auto-migrated through earlier
-    /// releases and holds artifact data must still boot through every migration. When a
-    /// bounded inline build cannot take its lock it must fail closed without
-    /// recording that migration, keeping earlier migrations and each index
-    /// already built in its own transaction.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn policy_receipt_expand_preserves_populated_rows_and_legacy_inserts() {
@@ -3279,6 +3273,12 @@ mod postgres_tests {
         }
     }
 
+    /// Migrations 0076 and 0078 refuse a populated table whose index was not
+    /// prebuilt concurrently. A relay that auto-migrated through earlier
+    /// releases and holds artifact data must still boot through every migration. When a
+    /// bounded inline build cannot take its lock it must fail closed without
+    /// recording that migration, keeping earlier migrations and each index
+    /// already built in its own transaction.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn populated_artifact_tables_auto_migrate_through_every_migration() {

@@ -102,15 +102,16 @@ pub struct UpgradeRecord {
     pub actor_pubkey: String,
     /// Owner precondition at acceptance.
     pub expected_owner_pubkey: String,
-    /// Issuer precondition at acceptance.
+    /// Issuer precondition at acceptance; omitted for disable.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub expected_issuer: String,
     /// Operator authorized to recover this receipt.
     pub operator_pubkey: String,
-    /// Accepted generation; concurrent enables converge on this value.
+    /// Immutable generation accepted for this operation.
     pub policy_generation: i64,
     /// Receipt proves acceptance; availability does not undo this fact.
     pub requires_nip_fi: bool,
-    /// Pending until BUZZ-512 supplies applied-and-drained evidence.
+    /// Current availability, with no certification of fleet-wide socket closure.
     pub state: String,
     /// Extensible activation obligations; unknown reasons must remain pending.
     pub pending_reasons: Vec<String>,
