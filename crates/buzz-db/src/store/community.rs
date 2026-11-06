@@ -1671,8 +1671,23 @@ mod postgres_tests {
         let first = first.expect("first concurrent create");
         let second = second.expect("second concurrent create");
 
-        assert!(matches!(first, CreateCommunityWithOwnerResult::Created(_)));
-        assert_eq!(first, second, "conflict loser re-reads the winning row");
+        let (
+            CreateCommunityWithOwnerResult::Created(first),
+            CreateCommunityWithOwnerResult::Created(second),
+        ) = (first, second)
+        else {
+            panic!("both concurrent callers must receive the stored community");
+        };
+        assert_eq!(
+            first.id, second.id,
+            "conflict loser re-reads the winning row"
+        );
+        assert_eq!(first.host, second.host);
+        assert_eq!(first.requires_nip_fi, second.requires_nip_fi);
+        assert_ne!(
+            first.created, second.created,
+            "exactly one caller inserted the row"
+        );
     }
 
     #[tokio::test]
