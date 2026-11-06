@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:buzz/features/channels/composer_send_origin.dart';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -2159,8 +2160,56 @@ void main() {
 
         await tester.testTextInput.receiveAction(TextInputAction.newline);
         await tester.pumpAndSettle();
-
         expect(sent, isEmpty);
+
+        // Android IMEs may send KEYCODE_ENTER (66) with scan code zero.
+        // Flutter maps it onto the Android physical-key plane, not USB Enter.
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          for (final down in [true, false]) {
+            ServicesBinding.instance.keyEventManager.handleKeyData(
+              ui.KeyData(
+                type: down ? ui.KeyEventType.down : ui.KeyEventType.up,
+                physical: 0x1100000042,
+                logical: LogicalKeyboardKey.enter.keyId,
+                timeStamp: Duration.zero,
+                character: null,
+                synthesized: false,
+              ),
+            );
+            await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+              SystemChannels.keyEvent.name,
+              SystemChannels.keyEvent.codec.encodeMessage({
+                'type': down ? 'keydown' : 'keyup',
+                'keymap': 'android',
+                'keyCode': 66,
+                'scanCode': 0,
+                'metaState': 0,
+                'flags': 2,
+                'source': 257,
+                'deviceId': -1,
+              }),
+              (_) {},
+            );
+          }
+          await tester.pumpAndSettle();
+          expect(sent, isEmpty);
+          expect(
+            tester.widget<TextField>(find.byType(TextField)).controller!.text,
+            'hello',
+          );
+
+          await tester.sendKeyEvent(
+            LogicalKeyboardKey.enter,
+            platform: 'android',
+            physicalKey: PhysicalKeyboardKey.enter,
+          );
+          await tester.pumpAndSettle();
+          expect(sent, ['hello']);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
       });
     });
 

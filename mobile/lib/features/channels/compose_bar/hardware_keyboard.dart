@@ -30,6 +30,13 @@ KeyEventResult _handleComposerHardwareKey(
       !controller.value.composing.isCollapsed) {
     return KeyEventResult.ignored;
   }
+  // Android IMEs can emit Enter KeyEvents without a physical scan code.
+  // Flutter gives those synthetic Android-plane keys, not USB Enter keys.
+  if (defaultTargetPlatform == TargetPlatform.android &&
+      event.physicalKey != PhysicalKeyboardKey.enter &&
+      event.physicalKey != PhysicalKeyboardKey.numpadEnter) {
+    return KeyEventResult.ignored;
+  }
   if (event is KeyDownEvent) unawaited(send());
   return KeyEventResult.handled;
 }
