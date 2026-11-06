@@ -43,7 +43,15 @@ export type ObservedUnreadPersistence = {
   ) => void;
   advanceLatest: (channelId: string, createdAt: number) => void;
   latestForChannel: (channelId: string) => number | undefined;
-  clearAll: () => void;
+  /**
+   * Clear the persisted cache (mark-all-read path).
+   *
+   * `retainChannelIds` keeps those channels' observed events and latest
+   * timestamps: mark-all-read repairs an implausible marker to the present, so
+   * a future-dated observed event stays uncovered and is genuinely still
+   * unread. Dropping its evidence here would lose its unread dot for good.
+   */
+  clearAll: (retainChannelIds?: ReadonlySet<string>) => void;
 };
 
 type Options = {
@@ -627,15 +635,62 @@ export function useObservedUnreadPersistence(
     [currentScope, mutateClear],
   );
   // biome-ignore lint/correctness/useExhaustiveDependencies: mutable storage refs are stable containers
-  const clearAll = React.useCallback(() => {
-    if (scopeLoadedRef.current !== currentScope) return;
-    projectionsRef.current = new Map();
-    if (!mutateClear([], true)) {
-      observedUnreadEventsByChannelRef.current = new Map();
-      latestByChannelRef.current = new Map();
-      clearObservedUnreadStorage(normalizedPubkey ?? "", normalizedRelayUrl);
-    }
-  }, [currentScope, mutateClear, normalizedPubkey, normalizedRelayUrl]);
+  const clearAll = React.useCallback(
+    (retainChannelIds?: ReadonlySet<string>) => {
+      // Reject if the loaded scope has drifted — a stale callback must not
+      // clear the wrong bucket.
+      if (scopeLoadedRef.current !== currentScope) return;
+
+      if (retainChannelIds && retainChannelIds.size > 0) {
+        // Partial clear: keep channels whose repaired marker does not cover a
+        // future-dated observed event. Prefer native clearChannels when available.
+        if (timerRef.current !== null) {
+          clearTimeout(timerRef.current);
+          timerRef.current = null;
+        }
+        const clearChannels = [
+          ...new Set([
+            ...projectionsRef.current.keys(),
+            ...observedUnreadEventsByChannelRef.current.keys(),
+            ...latestByChannelRef.current.keys(),
+          ]),
+        ].filter((channelId) => !retainChannelIds.has(channelId));
+
+        projectionsRef.current = new Map(
+          [...projectionsRef.current].filter(([channelId]) =>
+            retainChannelIds.has(channelId),
+          ),
+        );
+
+        if (mutateClear(clearChannels, false)) {
+          return;
+        }
+
+        // Assigning fresh Maps is safe — `persistRefs` holds the ref objects,
+        // not the Maps.
+        observedUnreadEventsByChannelRef.current = new Map(
+          [...observedUnreadEventsByChannelRef.current].filter(([channelId]) =>
+            retainChannelIds.has(channelId),
+          ),
+        );
+        latestByChannelRef.current = new Map(
+          [...latestByChannelRef.current].filter(([channelId]) =>
+            retainChannelIds.has(channelId),
+          ),
+        );
+        scheduleObservedUnreadWrite(currentScope, persistRefs.current);
+        return;
+      }
+
+      projectionsRef.current = new Map();
+      if (!mutateClear([], true)) {
+        observedUnreadEventsByChannelRef.current = new Map();
+        latestByChannelRef.current = new Map();
+        clearObservedUnreadStorage(normalizedPubkey ?? "", normalizedRelayUrl);
+      }
+    },
+    [currentScope, mutateClear, normalizedPubkey, normalizedRelayUrl],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: mutable projection/storage refs are stable containers
   const latestForChannel = React.useCallback(
     (channelId: string) =>
