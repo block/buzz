@@ -5,21 +5,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use buzz_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_PRESENCE_UPDATE, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_TYPING_INDICATOR,
+    KIND_AGENT_OBSERVER_FRAME, KIND_DELETION, KIND_GIT_REPO_ANNOUNCEMENT, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_METADATA, KIND_PRESENCE_UPDATE,
+    KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TYPING_INDICATOR,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY,
 };
 use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag, Timestamp};
+use nostr::{
+    Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag, Timestamp,
+};
 use serde_json::{json, Value};
 use tokio::sync::{watch, Mutex};
 
 use super::desktop;
 use super::identity::{self, Role};
 use super::net::{http_reason, Net};
-use super::scenario::{Community, HumanProfile, Members, Scenario, WideSplit};
+use super::scenario::{AgentTurn, Community, HumanProfile, Members, Scenario, WideSplit};
 use super::seed::{find_roots, hot_root_keys, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX};
 use super::stats::{abort_reason, ops_json, Op, Stats};
 
@@ -1035,8 +1040,76 @@ fn subscription_of(message: &RelayMessage) -> Option<&str> {
     }
 }
 
-/// An agent client: NIP-OA authenticated socket, HTTP `/query` polling,
-/// HTTP `/events` posts and encrypted observer frames to its owner.
+/// Kinds an agent harness subscribes to for its mentions in each channel.
+const AGENT_MENTION_KINDS: [u32; 4] = [
+    KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_EDIT,
+    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_REMINDER,
+];
+/// Kinds a turn reads as channel context and tool reads.
+const AGENT_READ_KINDS: [u32; 2] = [KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2];
+/// Reactions a turn adds to the event it answers and removes at its end:
+/// "seen" and "working".
+const TURN_REACTIONS: [&str; 2] = ["👀", "💬"];
+
+/// An agent's turn under way: the channel it works in, the event it
+/// answers, and when its next typing indicator, observer frame and tool
+/// reads are due.
+struct Turn {
+    channel: String,
+    target: Option<Event>,
+    ends: Instant,
+    next_typing: Option<Instant>,
+    next_frame: Option<Instant>,
+    /// Due times of the tool reads still to make, latest first.
+    reads: Vec<Instant>,
+}
+
+/// What a turn does next.
+enum TurnStep {
+    Typing(String),
+    Frame,
+    Read(String),
+    End,
+}
+
+impl Turn {
+    fn due(&self) -> Option<Instant> {
+        [self.next_typing, self.next_frame, self.reads.last().copied()]
+            .into_iter()
+            .flatten()
+            .chain([self.ends])
+            .min()
+    }
+
+    /// The step due at `now`, if any, with its next one scheduled. Typing,
+    /// frames and reads run before the end, so none is lost to a late wakeup.
+    fn step(&mut self, now: Instant, profile: &AgentTurn) -> Option<TurnStep> {
+        let due = |t: Option<Instant>| t.is_some_and(|t| t <= now);
+        if due(self.next_typing) {
+            self.next_typing = every(profile.typing_secs, now).filter(|t| *t < self.ends);
+            Some(TurnStep::Typing(self.channel.clone()))
+        } else if due(self.next_frame) {
+            self.next_frame = every(profile.frame_secs, now).filter(|t| *t < self.ends);
+            Some(TurnStep::Frame)
+        } else if due(self.reads.last().copied()) {
+            self.reads.pop();
+            Some(TurnStep::Read(self.channel.clone()))
+        } else {
+            (self.ends <= now).then_some(TurnStep::End)
+        }
+    }
+}
+
+/// `Some(now + secs)`, or `None` for an interval of 0 (off).
+fn every(secs: f64, from: Instant) -> Option<Instant> {
+    (secs > 0.0).then(|| from + Duration::from_secs_f64(secs))
+}
+
+/// An agent client: NIP-OA authenticated socket with its mentions, then
+/// either HTTP polling, posts and observer frames on Poisson schedules, or
+/// turns of work (see [`AgentTurn`]), or both.
 async fn agent(shared: Arc<Shared>, global: usize) {
     let scenario = &shared.scenario;
     let profile = &scenario.agent;
@@ -1053,6 +1126,18 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     let mut rng = Rng::new(u64::MAX - global as u64);
     let mut backoff = Backoff::new();
     let mut last_message = None;
+    let query_per_hour = if profile.query_interval_secs > 0.0 {
+        3600.0 / profile.query_interval_secs
+    } else {
+        0.0
+    };
+    let mut next_query = rng.after(query_per_hour);
+    let mut next_post = rng.after(profile.events_per_hour);
+    let mut next_frame = rng.after(profile.observer_frames_per_hour);
+    let mut next_turn = rng.after(profile.turn.per_hour);
+    // A turn outlives a dropped socket, as a harness keeps working while it
+    // reconnects.
+    let mut turn: Option<Turn> = None;
 
     while let Some(mut conn) = connect(
         &shared,
@@ -1066,31 +1151,49 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     {
         let since = Timestamp::now();
         let subscribed = Instant::now();
-        let mut ok = match send_req(
-            &mut conn,
-            "mentions",
+        let mut reqs = vec![(
+            "mentions".to_string(),
             mentions_filter(keys.public_key(), since),
-        )
-        .await
-        {
-            Ok(()) => true,
-            Err(e) => {
+        )];
+        if profile.channel_subscriptions {
+            reqs.extend(channels.iter().enumerate().map(|(i, channel)| {
+                let filter = Filter::new()
+                    .kinds(AGENT_MENTION_KINDS.map(kind))
+                    .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()])
+                    .pubkey(keys.public_key())
+                    .since(since);
+                (format!("ch-{i}"), filter)
+            }));
+        }
+        let mut ok = true;
+        for (id, filter) in reqs {
+            if let Err(e) = send_req(&mut conn, &id, filter).await {
                 shared
                     .stats
                     .err(Op::WsConnect, &format!("disconnected: {e}"));
-                false
+                ok = false;
+                break;
             }
-        };
-        let query_per_hour = 3600.0 / profile.query_interval_secs;
-        let mut next_query = rng.after(query_per_hour);
-        let mut next_post = rng.after(profile.events_per_hour);
-        let mut next_frame = rng.after(profile.observer_frames_per_hour);
+        }
+        // Presence starts at a random point of its interval, so a fleet that
+        // connects together does not heartbeat together.
+        let mut next_presence = every(
+            profile.presence_interval_secs * rng.unit(),
+            Instant::now(),
+        )
+        .or_else(|| every(profile.presence_interval_secs, Instant::now()));
 
         while ok && !stopped(&shared) {
-            let due = [next_query, next_post, next_frame]
-                .into_iter()
-                .flatten()
-                .min();
+            let due = [
+                next_query,
+                next_post,
+                next_frame,
+                next_presence,
+                turn.as_ref().map_or(next_turn, Turn::due),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let wait = due
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(MAX_IDLE)
@@ -1112,9 +1215,49 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 }
             }
             let now = Instant::now();
-            let channel = &channels[rng.below(channels.len())];
-            if next_query.is_some_and(|t| t <= now) {
+            // One action per wakeup; anything else due runs on the next pass.
+            let sent = if next_presence.is_some_and(|t| t <= now) {
+                next_presence = every(profile.presence_interval_secs, now);
+                let event =
+                    EventBuilder::new(kind(KIND_PRESENCE_UPDATE), "online").sign_with_keys(&keys);
+                send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
+            } else if let Some(step) = turn.as_mut().and_then(|t| t.step(now, &profile.turn)) {
+                match step {
+                    TurnStep::Typing(channel) => {
+                        let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
+                            .tags([tag(["h", &channel])])
+                            .sign_with_keys(&keys);
+                        send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
+                    }
+                    TurnStep::Frame => {
+                        let frame = observer_frame(&keys, &owner, profile.turn.frame_bytes);
+                        publish_frame(&shared.stats, &mut conn, frame).await
+                    }
+                    TurnStep::Read(channel) => {
+                        let filters = json!([{
+                            "kinds": AGENT_READ_KINDS,
+                            "#h": [channel],
+                            "limit": 50,
+                        }]);
+                        query(&shared, Op::HttpQuery, &keys, community, &filters, &auth).await;
+                        Ok(true)
+                    }
+                    TurnStep::End => {
+                        if let Some(t) = turn.take() {
+                            end_turn(&shared, community, &keys, &auth, t).await;
+                        }
+                        next_turn = rng.after(profile.turn.per_hour);
+                        Ok(true)
+                    }
+                }
+            } else if turn.is_none() && next_turn.is_some_and(|t| t <= now) {
+                next_turn = None;
+                let channel = channels[rng.below(channels.len())].clone();
+                turn = Some(start_turn(&shared, community, &keys, &auth, channel, &mut rng).await);
+                Ok(true)
+            } else if next_query.is_some_and(|t| t <= now) {
                 next_query = rng.after(query_per_hour);
+                let channel = &channels[rng.below(channels.len())];
                 let window = Timestamp::now().as_secs().saturating_sub(3600);
                 let filters = json!([
                     { "kinds": [KIND_STREAM_MESSAGE], "#h": [channel], "since": window, "limit": 20 },
@@ -1130,60 +1273,29 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     Some(&auth),
                 )
                 .await;
+                Ok(true)
             } else if next_post.is_some_and(|t| t <= now) {
                 next_post = rng.after(profile.events_per_hour);
+                let channel = &channels[rng.below(channels.len())];
                 let event = EventBuilder::new(
                     kind(KIND_STREAM_MESSAGE),
                     format!("{TIMED_PREFIX}{} {me}", now_micros()),
                 )
-                .tags([tag(["h", channel])])
-                .sign_with_keys(&keys);
-                match event {
-                    Ok(event) => {
-                        let pending = shared.stats.begin(Op::HttpEvents);
-                        match shared
-                            .net
-                            .submit(&keys, community, &event, Some(&auth))
-                            .await
-                        {
-                            Ok(()) => pending.ok(),
-                            Err(e) => pending.err(&e.to_string()),
-                        }
-                    }
-                    Err(e) => shared.stats.err(Op::HttpEvents, &format!("sign: {e}")),
-                }
+                .tags([tag(["h", channel])]);
+                submit(&shared, community, &keys, &auth, event, Op::HttpEvents).await;
+                Ok(true)
             } else if next_frame.is_some_and(|t| t <= now) {
                 next_frame = rng.after(profile.observer_frames_per_hour);
-                let payload = json!({ "type": "loadgen", "sent_micros": now_micros().to_string() });
-                let event = encrypt_observer_payload(&keys, &owner.public_key(), &payload)
-                    .map_err(|e| e.to_string())
-                    .and_then(|content| {
-                        EventBuilder::new(kind(KIND_AGENT_OBSERVER_FRAME), content)
-                            .tags([
-                                tag(["p", &owner.public_key().to_hex()]),
-                                tag([OBSERVER_AGENT_TAG, &me]),
-                                tag([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]),
-                            ])
-                            .sign_with_keys(&keys)
-                            .map_err(|e| e.to_string())
-                    });
-                let result = match event {
-                    Ok(event) => {
-                        publish(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
-                    }
-                    Err(e) => {
-                        shared
-                            .stats
-                            .err(Op::PublishEphemeral, &format!("observer: {e}"));
-                        Ok(false)
-                    }
-                };
-                if let Err(e) = result {
-                    shared
-                        .stats
-                        .err(Op::WsConnect, &format!("disconnected: {e}"));
-                    ok = false;
-                }
+                let frame = observer_frame(&keys, &owner, 0);
+                publish_frame(&shared.stats, &mut conn, frame).await
+            } else {
+                Ok(true)
+            };
+            if let Err(e) = sent {
+                shared
+                    .stats
+                    .err(Op::WsConnect, &format!("disconnected: {e}"));
+                ok = false;
             }
         }
         let _ = conn.disconnect().await;
@@ -1195,6 +1307,167 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         } else {
             backoff.wait(&shared, &mut rng).await;
         }
+    }
+}
+
+/// Starts a turn in `channel` the way an agent harness starts a prompt:
+/// HTTP `/query` reads of the channel's newest messages, its metadata, its
+/// project home (two reads) and the newest author's profile, then two
+/// reactions on the newest message. The reads are `turn_context`.
+async fn start_turn(
+    shared: &Shared,
+    community: &Community,
+    keys: &Keys,
+    auth: &Tag,
+    channel: String,
+    rng: &mut Rng,
+) -> Turn {
+    let profile = &shared.scenario.agent.turn;
+    let context = json!([{ "kinds": AGENT_READ_KINDS, "#h": [channel], "limit": 13 }]);
+    let newest: Option<Event> = query(shared, Op::TurnContext, keys, community, &context, auth)
+        .await
+        .and_then(|body| serde_json::from_str::<Vec<Event>>(&body).ok())
+        .and_then(|events| events.into_iter().max_by_key(|e| e.created_at));
+    let author = newest.as_ref().map(|e| e.pubkey.to_hex());
+    let reads = [
+        json!([{ "kinds": [KIND_NIP29_GROUP_METADATA], "#d": [channel], "limit": 1 }]),
+        json!([{ "kinds": [KIND_PROJECT], "#buzz-channel": [channel] }]),
+        json!([{ "kinds": [KIND_GIT_REPO_ANNOUNCEMENT], "#buzz-channel": [channel] }]),
+        json!([{ "kinds": [KIND_PROFILE], "authors": [author.unwrap_or_else(|| keys.public_key().to_hex())] }]),
+    ];
+    // Each request checks the stop, so a turn starting at the stop sends
+    // nothing more than the request under way.
+    for filters in reads {
+        if stopped(shared) {
+            break;
+        }
+        query(shared, Op::TurnContext, keys, community, &filters, auth).await;
+    }
+    if let Some(target) = newest.as_ref().filter(|_| !stopped(shared)) {
+        for emoji in TURN_REACTIONS {
+            let event = EventBuilder::new(kind(KIND_REACTION), emoji)
+                .tags([tag(["h", &channel]), tag(["e", &target.id.to_hex()])]);
+            submit(shared, community, keys, auth, event, Op::HttpEvents).await;
+        }
+    }
+    let now = Instant::now();
+    let length = Duration::from_secs_f64(profile.mean_secs * (0.5 + rng.unit()));
+    let mut reads: Vec<Instant> = (0..profile.reads)
+        .map(|_| now + length.mul_f64(rng.unit()))
+        .collect();
+    reads.sort_unstable_by(|a, b| b.cmp(a));
+    Turn {
+        channel,
+        target: newest,
+        ends: now + length,
+        next_typing: every(profile.typing_secs, now).map(|_| now),
+        next_frame: every(profile.frame_secs, now).map(|_| now),
+        reads,
+    }
+}
+
+/// Ends a turn: a timed reply in the answered message's thread (or the
+/// channel), then each reaction's removal, which reads the agent's
+/// reactions on the target and deletes them, as the harness does.
+async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Tag, turn: Turn) {
+    let me = keys.public_key().to_hex();
+    let mut tags = vec![tag(["h", &turn.channel])];
+    if let Some(target) = &turn.target {
+        let id = target.id.to_hex();
+        let root = target
+            .tags
+            .iter()
+            .find(|t| t.as_slice().get(3).is_some_and(|m| m == "root"))
+            .and_then(|t| t.content())
+            .map_or_else(|| id.clone(), str::to_string);
+        tags.extend(reply_tags(&root, &id));
+    }
+    let reply = EventBuilder::new(
+        kind(KIND_STREAM_MESSAGE),
+        format!("{TIMED_PREFIX}{} {me}", now_micros()),
+    )
+    .tags(tags);
+    submit(shared, community, keys, auth, reply, Op::HttpEvents).await;
+    let Some(target) = turn.target.filter(|_| !stopped(shared)) else {
+        return;
+    };
+    let mine = json!([{
+        "kinds": [KIND_REACTION],
+        "authors": [me],
+        "#e": [target.id.to_hex()],
+    }]);
+    for _ in TURN_REACTIONS {
+        if stopped(shared) {
+            return;
+        }
+        let found = query(shared, Op::HttpQuery, keys, community, &mine, auth)
+            .await
+            .and_then(|body| serde_json::from_str::<Vec<Event>>(&body).ok())
+            .unwrap_or_default();
+        // The first pass deletes every reaction found, so the second only
+        // reads, as the harness's second removal finds nothing left.
+        for reaction in found {
+            let event = EventBuilder::new(kind(KIND_DELETION), "")
+                .tags([tag(["e", &reaction.id.to_hex()])]);
+            submit(shared, community, keys, auth, event, Op::HttpEvents).await;
+        }
+    }
+}
+
+/// An encrypted kind:24200 telemetry frame to `owner`, its plaintext padded
+/// by `pad` bytes.
+fn observer_frame(keys: &Keys, owner: &Keys, pad: usize) -> Result<Event, String> {
+    let payload = json!({
+        "type": "loadgen",
+        "sent_micros": now_micros().to_string(),
+        "pad": "x".repeat(pad),
+    });
+    let content =
+        encrypt_observer_payload(keys, &owner.public_key(), &payload).map_err(|e| e.to_string())?;
+    EventBuilder::new(kind(KIND_AGENT_OBSERVER_FRAME), content)
+        .tags([
+            tag(["p", &owner.public_key().to_hex()]),
+            tag([OBSERVER_AGENT_TAG, &keys.public_key().to_hex()]),
+            tag([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]),
+        ])
+        .sign_with_keys(keys)
+        .map_err(|e| e.to_string())
+}
+
+async fn publish_frame(
+    stats: &Stats,
+    conn: &mut NostrWsConnection,
+    frame: Result<Event, String>,
+) -> Result<bool, WsClientError> {
+    match frame {
+        Ok(event) => publish(stats, conn, Op::PublishEphemeral, event).await,
+        Err(e) => {
+            stats.err(Op::PublishEphemeral, &format!("observer: {e}"));
+            Ok(false)
+        }
+    }
+}
+
+/// Signs and submits `event` through HTTP `/events` as `op`. A reaction the
+/// relay already holds counts as answered: an earlier turn cut short by the
+/// stop left it, and the next removal deletes it.
+async fn submit(
+    shared: &Shared,
+    community: &Community,
+    keys: &Keys,
+    auth: &Tag,
+    event: EventBuilder,
+    op: Op,
+) {
+    let event = match event.sign_with_keys(keys) {
+        Ok(event) => event,
+        Err(e) => return shared.stats.err(op, &format!("sign: {e}")),
+    };
+    let pending = shared.stats.begin(op);
+    match shared.net.submit(keys, community, &event, Some(auth)).await {
+        Ok(()) => pending.ok(),
+        Err(e) if e.to_string().contains("reaction already exists") => pending.ok(),
+        Err(e) => pending.err(&e.to_string()),
     }
 }
 
@@ -1303,7 +1576,7 @@ async fn http(
     path: &str,
     body: &Value,
     auth: Option<&Tag>,
-) {
+) -> Option<String> {
     let pending = shared.stats.begin(op);
     let body = serde_json::to_vec(body).expect("serialize JSON body");
     match shared
@@ -1311,10 +1584,31 @@ async fn http(
         .post(keys, &community.http_url, path, body, auth)
         .await
     {
-        Ok((status, _)) if status.is_success() => pending.ok(),
-        Ok((status, text)) => pending.err(&http_reason(status, &text)),
-        Err(e) => pending.err(&e.to_string()),
+        Ok((status, text)) if status.is_success() => {
+            pending.ok();
+            Some(text)
+        }
+        Ok((status, text)) => {
+            pending.err(&http_reason(status, &text));
+            None
+        }
+        Err(e) => {
+            pending.err(&e.to_string());
+            None
+        }
     }
+}
+
+/// An agent's HTTP `/query` as `op`; the response body when it succeeded.
+async fn query(
+    shared: &Shared,
+    op: Op,
+    keys: &Keys,
+    community: &Community,
+    filters: &Value,
+    auth: &Tag,
+) -> Option<String> {
+    http(shared, op, keys, community, "/query", filters, Some(auth)).await
 }
 
 #[cfg(test)]
@@ -1671,6 +1965,9 @@ hold_secs = 1
                                 json!(["EOSE", frame[1]])
                             }
                             Some("EVENT") => {
+                                if let Some(k) = frame[1]["kind"].as_u64() {
+                                    seen.kinds.lock().unwrap().push(k);
+                                }
                                 let tags = frame[1]["tags"].as_array().cloned().unwrap_or_default();
                                 if let Some(h) = tags.iter().find(|t| t[0] == "h") {
                                     let h = h[1].as_str().unwrap_or_default().to_string();
@@ -1710,6 +2007,8 @@ hold_secs = 1
         closed: AtomicUsize,
         /// The `h` tag of every EVENT that had one.
         channels: std::sync::Mutex<Vec<String>>,
+        /// The kind of every EVENT.
+        kinds: std::sync::Mutex<Vec<u64>>,
     }
 
     impl Seen {
@@ -2098,6 +2397,132 @@ hold_secs = 2
     }
 
     /// Holds `/events` responses until opened, counting the requests held.
+    /// One agent running turns over a fake socket and a fake HTTP relay
+    /// that holds one channel message and the agent's live reactions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_turns_read_react_stream_reply_and_remove_their_reactions() {
+        let (ws, seen) = fake_ws_relay(FakeRelay::PROMPT).await;
+        let channel = identity::channel_id("t", 0, 0);
+        let author = Keys::generate();
+        let target = EventBuilder::new(kind(KIND_STREAM_MESSAGE), "question")
+            .tags([tag(["h", &channel])])
+            .sign_with_keys(&author)
+            .unwrap();
+        let posted: Log<Event> = Default::default();
+        let queries: Log<Value> = Default::default();
+        let (post_log, query_log, held) = (posted.clone(), queries.clone(), target.clone());
+        let http = super::super::seed::tests::fake_http(move |_, path, body| {
+            if path == "/events" {
+                let event: Event = serde_json::from_slice(body).unwrap();
+                post_log.lock().unwrap().push(event);
+                return (200, json!({"accepted": true, "message": ""}).to_string());
+            }
+            let filters: Value = serde_json::from_slice(body).unwrap();
+            query_log.lock().unwrap().push(filters.clone());
+            let found = match filters[0]["kinds"][0].as_u64() {
+                Some(k) if k == u64::from(KIND_STREAM_MESSAGE) => json!([held]),
+                // Reactions not deleted since they were posted. Two turns in
+                // one second post the same reaction id again.
+                Some(k) if k == u64::from(KIND_REACTION) => {
+                    let mut live: Vec<Event> = Vec::new();
+                    for e in post_log.lock().unwrap().iter() {
+                        if e.kind == kind(KIND_REACTION) {
+                            live.push(e.clone());
+                        } else if e.kind == kind(KIND_DELETION) {
+                            let gone: Vec<&str> = e.tags.iter().filter_map(|t| t.content()).collect();
+                            live.retain(|r| !gone.contains(&r.id.to_hex().as_str()));
+                        }
+                    }
+                    json!(live)
+                }
+                _ => json!([]),
+            };
+            (200, found.to_string())
+        })
+        .await;
+        let scenario = Scenario::parse(&format!(
+            r#"
+run_id = "t"
+[target]
+ws_url = "ws://{ws}"
+http_url = "http://{http}"
+[shape]
+communities = 1
+channels_per_community = 1
+[population]
+humans = 0
+agents = 1
+channels_per_member = 1
+[agent]
+query_interval_secs = 0.0
+events_per_hour = 0.0
+observer_frames_per_hour = 0.0
+presence_interval_secs = 1.0
+channel_subscriptions = true
+[agent.turn]
+per_hour = 36000.0
+mean_secs = 0.6
+frame_secs = 0.1
+typing_secs = 0.1
+reads = 2
+[[ramp]]
+users = 1.0
+hold_secs = 3
+"#
+        ))
+        .unwrap();
+        let net = Net::new(&scenario).await.unwrap();
+        let shard = Shard::parse("0/1").unwrap();
+        let report = run_with(scenario, net, shard, Duration::from_secs(5))
+            .await
+            .expect("agent turn run passes");
+        let ops = &report["steps"][0]["ops"];
+        assert!(ops["turn_context"]["count"].as_u64() > Some(0), "{report}");
+
+        // Mentions plus one channel subscription on the one session.
+        assert_eq!(seen.reqs_after(1).await, 2);
+        let kinds = seen.kinds.lock().unwrap().clone();
+        for k in [KIND_TYPING_INDICATOR, KIND_AGENT_OBSERVER_FRAME, KIND_PRESENCE_UPDATE] {
+            assert!(kinds.contains(&u64::from(k)), "no kind {k} over the socket: {kinds:?}");
+        }
+
+        let posted = posted.lock().unwrap().clone();
+        let of = |k: u32| posted.iter().filter(move |e| e.kind == kind(k));
+        let target_id = target.id.to_hex();
+        let reactions: Vec<&Event> = of(KIND_REACTION).collect();
+        assert!(reactions.len() >= 4, "two reactions a turn: {posted:?}");
+        for reaction in &reactions {
+            let e = reaction.tags.iter().find(|t| t.kind().as_str() == "e");
+            assert_eq!(e.and_then(|t| t.content()), Some(target_id.as_str()));
+        }
+        // Every finished turn replied in the target's thread and deleted
+        // both of its reactions; only a turn cut by the stop leaves any.
+        let replies: Vec<&Event> = of(KIND_STREAM_MESSAGE).collect();
+        assert!(!replies.is_empty(), "{posted:?}");
+        for reply in &replies {
+            let markers = buzz_core::nip10::parse_thread_markers(&reply.tags);
+            assert_eq!(markers.root.as_deref(), Some(target_id.as_str()));
+            assert_eq!(markers.reply.as_deref(), Some(target_id.as_str()));
+        }
+        let deleted: Vec<String> = of(KIND_DELETION)
+            .flat_map(|e| e.tags.iter().filter_map(|t| t.content()).map(str::to_string))
+            .collect();
+        assert_eq!(deleted.len(), 2 * replies.len(), "{posted:?}");
+        let ids: Vec<String> = reactions.iter().map(|e| e.id.to_hex()).collect();
+        assert!(deleted.iter().all(|id| ids.contains(id)), "{deleted:?}");
+
+        // Each turn reads its context: metadata, project home and profile.
+        let queries = queries.lock().unwrap().clone();
+        let has = |k: u32| queries.iter().any(|q| q[0]["kinds"][0] == json!(k));
+        for k in [KIND_NIP29_GROUP_METADATA, KIND_PROJECT, KIND_GIT_REPO_ANNOUNCEMENT] {
+            assert!(has(k), "no kind {k} read: {queries:?}");
+        }
+        let profile = json!([{ "kinds": [KIND_PROFILE], "authors": [author.public_key().to_hex()] }]);
+        assert!(queries.contains(&profile), "{queries:?}");
+        // Tool reads fetch the channel's newest 50 messages.
+        assert!(queries.iter().any(|q| q[0]["limit"] == json!(50)), "{queries:?}");
+    }
+
     #[derive(Default)]
     struct Gate {
         arrived: AtomicUsize,

@@ -77,6 +77,10 @@ Members are assigned deterministically by global index, so every shard and
 - **Agent**: authenticates with a NIP-OA tag from its owner, polls HTTP
   `/query` (channel window plus mentions), posts messages through HTTP
   `/events`, and sends encrypted kind:24200 observer frames to its owner.
+  With `agent.channel_subscriptions` it also opens one live REQ per channel
+  for its mentions there, and with `agent.presence_interval_secs` it sends
+  presence heartbeats. `agent.turn` adds turns of work, described under
+  [Agent turns](#agent-turns).
 - **Desktop human**: the `desktop.fraction` of humans that model the desktop
   app instead of the basic human above. They keep the basic human's presence,
   typing, messages and reactions; the subscriptions and HTTP reads are the
@@ -96,6 +100,31 @@ deployment, divide its hourly event counts by its client counts and set the
 results as the scenario's rates. Then a ramp step's `users` reads as a
 multiple of that deployment's population. Keep such scenarios with that
 deployment's own configuration.
+
+## Agent turns
+
+An agent harness is idle between prompts and then works in bursts. Set
+`agent.turn.per_hour` above 0 to model that. An idle agent starts a turn in
+one of its channels on a Poisson schedule and runs one turn at a time. A
+turn lasts 0.5–1.5 times `agent.turn.mean_secs` and does what the harness
+does around a prompt:
+
+1. **Start** (`turn_context`): HTTP `/query` reads of the channel's newest
+   13 messages, its kind:39000 metadata, its project home (kind:30621 and
+   kind:30617, one read each) and the newest message's author profile.
+   Then two kind:7 reactions on that message through HTTP `/events`.
+2. **Work**: a typing indicator every `typing_secs` and an encrypted
+   observer frame of `frame_bytes` plaintext every `frame_secs` over the
+   socket, plus `reads` HTTP `/query` reads of the channel's newest 50
+   messages at random points in the turn, as tool calls.
+3. **End**: a timed reply in the message's thread through HTTP `/events`,
+   then each reaction's removal: a `/query` for the agent's reactions on
+   the message and a kind:5 deletion of each one found.
+
+For a harness-like agent, also set `agent.query_interval_secs = 0` (no
+polling) and `events_per_hour = observer_frames_per_hour = 0`, so turns are
+its only work. A turn under way when the socket drops continues after the
+reconnect.
 
 ## Targeting and membership
 
@@ -258,7 +287,9 @@ session. Each connect plus authentication must finish within
 `rate-limited: quota exceeded` text, are reported as `throttled`, not errors.
 Every other rejection, including `rate-limited: shared admission unavailable`
 (the relay's admission store is down), counts as an error.
-Ramp steps must increase `users`, since clients are only ever added.
+Ramp steps must never decrease `users`, since clients are only ever added.
+Repeat a level to split a long hold into windows that are each reported and
+judged, for example six 600-second steps at the same `users` for an hour.
 
 When the run stops, clients get 15 seconds to settle what they have in flight
 and disconnect. An operation already under way runs to its own deadline
