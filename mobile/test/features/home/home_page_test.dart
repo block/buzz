@@ -183,8 +183,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
       expect(find.text('General').hitTestable(), findsOneWidget);
-      expect(find.text('Inbox'), findsNothing);
-      await tester.tap(find.byTooltip('Inbox'));
+      expect(find.text('Activity'), findsNothing);
+      await tester.tap(find.byTooltip('Activity'));
       await tester.pumpAndSettle();
       expect(find.byType(ActivityPage), findsOneWidget);
       Navigator.of(tester.element(find.byType(ActivityPage))).pop();
@@ -341,7 +341,7 @@ void main() {
           const Size.square(24),
         );
         expect(
-          find.byTooltip(unread ? 'Inbox, unread items' : 'Inbox'),
+          find.byTooltip(unread ? 'Activity, unread items' : 'Activity'),
           findsOneWidget,
         );
       }
@@ -420,10 +420,10 @@ void main() {
       );
       expect(search.hitTestable(), findsOneWidget);
       final inbox = find.byWidgetPredicate(
-        (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Inbox',
+        (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
       );
       expect(inbox, findsOneWidget);
-      expect(find.text('Inbox'), findsNothing);
+      expect(find.text('Activity'), findsNothing);
       final inboxButton = tester.widget<IosGlassNavigationButton>(inbox);
       expect(inboxButton.icon, IosGlassNavigationIcon.bell);
       double? filterWidth;
@@ -455,7 +455,7 @@ void main() {
       expect(find.byType(ActivityPage), findsOneWidget);
       expect(
         find.byWidgetPredicate(
-          (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Inbox',
+          (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
           skipOffstage: false,
         ),
         findsNothing,

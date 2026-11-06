@@ -60,7 +60,7 @@ class HomePage extends HookConsumerWidget {
     final communitySurfaceProgress = useState(0.0);
     final filter = useState('All');
     final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
-    final inboxLabel = hasUnreadInbox ? 'Inbox, unread items' : 'Inbox';
+    final inboxLabel = hasUnreadInbox ? 'Activity, unread items' : 'Activity';
     final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
     final newWorkspace = useValueNotifier<VoidCallback?>(null);

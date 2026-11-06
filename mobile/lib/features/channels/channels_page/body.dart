@@ -38,7 +38,7 @@ class _ChannelsBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final inbox = Semantics(
-      label: 'Inbox',
+      label: 'Activity',
       button: true,
       onTap: onInbox,
       excludeSemantics: true,
@@ -66,7 +66,7 @@ class _ChannelsBody extends StatelessWidget {
               const SizedBox(width: _kChannelLabelGap),
               Expanded(
                 child: Text(
-                  'Inbox',
+                  'Activity',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: navigationSectionTextStyle.copyWith(
