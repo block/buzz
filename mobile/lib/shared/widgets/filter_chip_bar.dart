@@ -48,8 +48,8 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
-  /// Sizes native glass filters equally to fit the widest label.
-  final bool equalNativeWidths;
+  /// Sizes filters equally to fit the widest label.
+  final bool equalWidths;
 
   /// Minimum visible capsule height; the hit target may be larger.
   final double minControlHeight;
@@ -73,7 +73,7 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
-    this.equalNativeWidths = false,
+    this.equalWidths = false,
     this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
@@ -83,27 +83,29 @@ class FilterChipBar<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final widths = [
+      for (final item in items)
+        (TextPainter(
+              text: TextSpan(
+                text: item.label,
+                style: filterChipTextStyle.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              textScaler: MediaQuery.textScalerOf(context),
+              textDirection: Directionality.of(context),
+            )..layout()).width +
+            32,
+    ];
+    if (equalWidths && widths.isNotEmpty) {
+      final widest = widths.reduce(math.max);
+      widths.fillRange(0, widths.length, widest);
+    }
     if (useNativeGlass && defaultTargetPlatform == TargetPlatform.iOS) {
-      final textStyle = filterChipTextStyle.copyWith(
-        fontWeight: FontWeight.w600,
-      );
       final height = math.max(
         MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16,
         math.max(48.0, minControlHeight),
       );
-      final widths = [
-        for (final item in items)
-          (TextPainter(
-                text: TextSpan(text: item.label, style: textStyle),
-                textScaler: MediaQuery.textScalerOf(context),
-                textDirection: Directionality.of(context),
-              )..layout()).width +
-              32,
-      ];
-      if (equalNativeWidths && widths.isNotEmpty) {
-        final widest = widths.reduce(math.max);
-        widths.fillRange(0, widths.length, widest);
-      }
       return LayoutBuilder(
         builder: (context, constraints) {
           final available = constraints.maxWidth - horizontalPadding * 2;
@@ -157,6 +159,11 @@ class FilterChipBar<T> extends StatelessWidget {
         if (index > 0) const SizedBox(width: Grid.xxs),
         if (expandItems)
           Expanded(child: _chip(context, items[index], fillWidth: true))
+        else if (equalWidths)
+          SizedBox(
+            width: widths[index],
+            child: _chip(context, items[index], fillWidth: true),
+          )
         else
           _chip(context, items[index]),
       ],

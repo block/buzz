@@ -124,6 +124,7 @@ void main() {
       expect(header.alwaysFrosted, isTrue);
       expect(header.titleStyle?.fontSize, 22);
       expect(header.centerTitle, isFalse);
+      double? paintedFilterWidth;
       for (final label in ['All', 'Solo', 'Team']) {
         final chip = find.ancestor(
           of: find.descendant(
@@ -138,6 +139,8 @@ void main() {
           matching: find.byType(Material),
         );
         expect(tester.getSize(paintedChip).height, 48);
+        paintedFilterWidth ??= tester.getSize(paintedChip).width;
+        expect(tester.getSize(paintedChip).width, paintedFilterWidth);
       }
 
       await tester.tap(
