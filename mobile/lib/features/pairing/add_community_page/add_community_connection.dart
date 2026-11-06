@@ -5,8 +5,11 @@ class _AddCommunityConnection extends HookWidget {
   const _AddCommunityConnection({
     super.key,
     required this.enteringLink,
+    required this.creatingCommunity,
+    this.onSubmitCommunity,
     required this.onboarding,
     this.onFindCommunities,
+    this.onImportIdentity,
     this.onCreateCommunity,
     required this.scannerProgress,
     required this.onBack,
@@ -22,8 +25,11 @@ class _AddCommunityConnection extends HookWidget {
   });
 
   final bool enteringLink;
+  final bool creatingCommunity;
+  final ValueChanged<String>? onSubmitCommunity;
   final bool onboarding;
   final VoidCallback? onFindCommunities;
+  final VoidCallback? onImportIdentity;
   final VoidCallback? onCreateCommunity;
   final double scannerProgress;
   final VoidCallback onBack;
@@ -39,21 +45,40 @@ class _AddCommunityConnection extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final controller = useTextEditingController();
+    final linkController = useTextEditingController();
+    final createController = useTextEditingController();
+    final enteringForm = enteringLink || creatingCommunity;
+    final controller = creatingCommunity ? createController : linkController;
     final focus = useFocusNode();
     final error = useState<String?>(null);
     final pairingVisible = useState(false);
+    useEffect(() {
+      error.value = null;
+      return null;
+    }, [creatingCommunity, enteringLink]);
     void revealPairing() => pairingVisible.value = !pairingVisible.value;
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
     final keyboardReady = useCommunityLinkFocus(
       context,
-      enteringLink: enteringLink,
+      enteringLink: enteringForm,
       focus: focus,
     );
 
     void submit() {
       if (busy || !canSubmit) return;
+      if (creatingCommunity) {
+        final name = controller.text.trim().toLowerCase();
+        if (!HostedCreateCommunity.validName(name)) {
+          error.value =
+              'Use letters, numbers and single hyphens (up to 63 characters).';
+          return;
+        }
+        error.value = null;
+        focus.unfocus();
+        onSubmitCommunity?.call(name);
+        return;
+      }
       final link = parseCommunityLinkInput(controller.text.trim());
       if (link == null) {
         error.value = 'Enter a valid community address or invite link.';
@@ -64,32 +89,39 @@ class _AddCommunityConnection extends HookWidget {
     }
 
     return _PairingRevealSurface(
-      onReveal: enteringLink || busy || scannerProgress > 0
+      onReveal: enteringForm || busy || scannerProgress > 0
           ? null
           : revealPairing,
       child: TweenAnimationBuilder<double>(
-        tween: Tween(end: enteringLink && (!ios || keyboardReady) ? 1 : 0),
+        tween: Tween(end: enteringForm && (!ios || keyboardReady) ? 1 : 0),
         duration: reducedMotion
             ? Duration.zero
             : Duration(milliseconds: ios ? 200 : 150),
         curve: ios ? Curves.easeOutCubic : Curves.easeOutQuad,
         builder: (context, progress, _) => OnboardingStepPage(
-          title: enteringLink ? 'Enter a community link' : 'Add a community',
-          subtitle: enteringLink
+          title: creatingCommunity
+              ? 'Create a community'
+              : enteringLink
+              ? 'Enter a community link'
+              : 'Add a community',
+          subtitle: creatingCommunity
+              ? 'Choose an address for your community.'
+              : enteringForm
               ? 'Paste an invite link or community address.'
               : onboarding
-              ? 'Join your people or create a space of your own.'
+              ? accountStatus ??
+                    'Join your people or create a space of your own.'
               : accountStatus ?? 'Scan a QR code or enter a community link.',
           onBack: onBack,
           foregroundProgress: scannerProgress,
           keyboardBottomSpacing: Grid.twelve,
-          onConnectionOptions: enteringLink || busy ? null : revealPairing,
+          onConnectionOptions: enteringForm || busy ? null : revealPairing,
           content: ExcludeSemantics(
-            excluding: !enteringLink,
+            excluding: !enteringForm,
             child: ExcludeFocus(
-              excluding: !enteringLink,
+              excluding: !enteringForm,
               child: IgnorePointer(
-                ignoring: !enteringLink,
+                ignoring: !enteringForm,
                 child: Opacity(
                   opacity: progress,
                   child: Transform.translate(
@@ -104,6 +136,14 @@ class _AddCommunityConnection extends HookWidget {
                             children: [
                               IosCommunityLinkInput(
                                 controller: controller,
+                                inputKey: Key(
+                                  creatingCommunity
+                                      ? 'community-create-input'
+                                      : 'community-link-input',
+                                ),
+                                placeholder: creatingCommunity
+                                    ? 'Community address'
+                                    : 'Community link or address',
                                 focusNode: focus,
                                 enabled: !busy,
                                 onChanged: (_) {
@@ -112,21 +152,35 @@ class _AddCommunityConnection extends HookWidget {
                                 },
                                 onSubmitted: (_) => submit(),
                               ),
+                              if (creatingCommunity)
+                                Text(
+                                  '.${HostedEnvironment.communitySuffix}',
+                                  style: context.textTheme.bodyMedium?.copyWith(
+                                    color: context.colors.onSurfaceVariant,
+                                  ),
+                                ),
                               if (error.value ?? errorMessage
                                   case final problem?)
                                 Padding(
                                   padding: const EdgeInsets.only(top: Grid.xs),
-                                  child: Text(
-                                    problem,
-                                    style: TextStyle(
-                                      color: context.colors.error,
+                                  child: Semantics(
+                                    liveRegion: true,
+                                    child: Text(
+                                      problem,
+                                      style: TextStyle(
+                                        color: context.colors.error,
+                                      ),
                                     ),
                                   ),
                                 ),
                             ],
                           )
                         : TextField(
-                            key: const Key('community-link-input'),
+                            key: Key(
+                              creatingCommunity
+                                  ? 'community-create-input'
+                                  : 'community-link-input',
+                            ),
                             controller: controller,
                             focusNode: focus,
                             enabled: !busy,
@@ -135,8 +189,15 @@ class _AddCommunityConnection extends HookWidget {
                             autocorrect: false,
                             enableSuggestions: false,
                             decoration: InputDecoration(
-                              labelText: 'Community link or address',
-                              hintText: 'community.example.com',
+                              labelText: creatingCommunity
+                                  ? 'Community address'
+                                  : 'Community link or address',
+                              hintText: creatingCommunity
+                                  ? 'my-community'
+                                  : 'community.example.com',
+                              helperText: creatingCommunity
+                                  ? '.${HostedEnvironment.communitySuffix}'
+                                  : null,
                               errorText: error.value ?? errorMessage,
                             ),
                             onChanged: (_) {
@@ -151,7 +212,7 @@ class _AddCommunityConnection extends HookWidget {
             ),
           ),
           actions: [
-            if (!enteringLink && errorMessage != null)
+            if (!enteringForm && errorMessage != null)
               Semantics(
                 liveRegion: true,
                 child: Text(
@@ -160,15 +221,18 @@ class _AddCommunityConnection extends HookWidget {
                 ),
               ),
             ExcludeSemantics(
-              excluding: enteringLink,
+              excluding: enteringForm,
               child: ExcludeFocus(
-                excluding: enteringLink,
+                excluding: enteringForm,
                 child: IgnorePointer(
-                  ignoring: enteringLink,
+                  ignoring: enteringForm,
                   child: Opacity(
                     opacity: 1 - progress,
                     child: FilledButton(
                       onPressed: busy ? null : onScan,
+                      onLongPress: busy || scannerProgress > 0
+                          ? null
+                          : revealPairing,
                       child: const Text('Scan a QR code'),
                     ),
                   ),
@@ -190,9 +254,9 @@ class _AddCommunityConnection extends HookWidget {
                 ),
                 side: BorderSide.none,
               ),
-              onPressed: busy || (enteringLink && !canSubmit)
+              onPressed: busy || (enteringForm && !canSubmit)
                   ? null
-                  : enteringLink
+                  : enteringForm
                   ? submit
                   : onCommunityLink,
               child: AnimatedSwitcher(
@@ -200,18 +264,18 @@ class _AddCommunityConnection extends HookWidget {
                     ? Duration.zero
                     : const Duration(milliseconds: 150),
                 child: Text(
-                  enteringLink
+                  enteringForm
                       ? busy
                             ? 'Connecting…'
                             : 'Continue'
                       : onboarding
                       ? 'Enter community link'
                       : 'Enter a community link',
-                  key: ValueKey(enteringLink),
+                  key: ValueKey(enteringForm),
                 ),
               ),
             ),
-            if (onboarding && !enteringLink) ...[
+            if (!enteringForm) ...[
               if (onFindCommunities != null)
                 FilledButton(
                   style: FilledButton.styleFrom(
@@ -221,7 +285,12 @@ class _AddCommunityConnection extends HookWidget {
                   onPressed: busy ? null : onFindCommunities,
                   child: const Text('Find my communities'),
                 ),
-              if (onCreateCommunity != null)
+              if (onImportIdentity != null)
+                TextButton(
+                  onPressed: busy ? null : onImportIdentity,
+                  child: const Text('Use an existing identity'),
+                ),
+              if (onboarding && onCreateCommunity != null)
                 FilledButton(
                   style: FilledButton.styleFrom(
                     backgroundColor: context.controlSurface,
@@ -231,7 +300,7 @@ class _AddCommunityConnection extends HookWidget {
                   child: const Text('Create a community'),
                 ),
             ],
-            if (pairingVisible.value && !enteringLink)
+            if (pairingVisible.value && !enteringForm)
               TextButton(
                 onPressed: busy ? null : onPairing,
                 child: const Text('Use a pairing code'),

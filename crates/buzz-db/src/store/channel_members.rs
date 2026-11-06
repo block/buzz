@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
-use crate::{AdmittedTx, Db};
+use crate::{AdmittedTx, Db, ReadAt};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
@@ -500,7 +500,9 @@ impl LockedMemberSnapshot {
         }
         let tags = serde_json::to_value(&event.tags)?;
         validate_channel_roster_snapshot(&mut self.tx, channel_id, &tags).await?;
-        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL")
+        sqlx::query(superseded_with_mentions_sql!(
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL"
+        ))
             .bind(community_id.as_uuid()).bind(kind).bind(pubkey.as_slice()).bind(channel_id)
             .execute(self.tx.conn()).await?;
         let received_at = Utc::now();
@@ -518,6 +520,7 @@ impl LockedMemberSnapshot {
         crate::store::event_follow_up::after_admitted_insert(
             &mut self.tx,
             event.id.as_bytes().as_slice(),
+            created_at,
             kind,
             Some(channel_id),
         )
@@ -577,23 +580,7 @@ pub async fn lock_member_snapshot(
     )
     .await?;
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
-        FROM channel_members cm
-        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
-        ORDER BY cm.joined_at ASC
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_all(tx.conn())
-    .await?;
-    let members = rows
-        .into_iter()
-        .map(row_to_member_record)
-        .collect::<Result<Vec<_>>>()?;
+    let members = select_active_members(tx.conn(), community_id, channel_id).await?;
     let identity = sqlx::query_as::<_, (String, Vec<String>, Vec<u8>)>(
         "SELECT channel_type::text, labels, created_by FROM channels WHERE community_id = $1 AND id = $2",
     )
@@ -1436,18 +1423,50 @@ async fn get_members_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Vec<MemberRecord>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    select_active_members(&mut connection, community_id, channel_id).await
+}
+
+/// Read a live channel's active members on `conn`, oldest first.
+pub(crate) async fn select_active_members(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<MemberRecord>> {
+    select_active_members_filtered(conn, community_id, channel_id, None).await
+}
+
+/// The active members of `channel_id` whose role is one of `roles`, in the
+/// order [`select_active_members`] returns them.
+pub(crate) async fn select_active_members_in_roles(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    roles: &[MemberRole],
+) -> Result<Vec<MemberRecord>> {
+    let roles: Vec<&str> = roles.iter().map(MemberRole::as_str).collect();
+    select_active_members_filtered(conn, community_id, channel_id, Some(&roles)).await
+}
+
+async fn select_active_members_filtered(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    roles: Option<&[&str]>,
+) -> Result<Vec<MemberRecord>> {
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
+          AND ($3::text[] IS NULL OR cm.role::text = ANY($3))
         ORDER BY cm.joined_at ASC
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_all(&mut *connection)
+    .bind(roles)
+    .fetch_all(conn)
     .await?;
     rows.into_iter().map(row_to_member_record).collect()
 }
@@ -1548,11 +1567,22 @@ pub async fn get_listed_open_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
 ) -> Result<Vec<Uuid>> {
+    Ok(get_listed_open_channel_ids_read_at(pool, community_id)
+        .await?
+        .value)
+}
+
+/// [`get_listed_open_channel_ids`], with when its connection was checked out.
+pub async fn get_listed_open_channel_ids_read_at(
+    pool: &PgPool,
+    community_id: CommunityId,
+) -> Result<ReadAt<Vec<Uuid>>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    let read_at = std::time::Instant::now();
     let sql = format!(
         r#"
         SELECT id
@@ -1563,11 +1593,11 @@ pub async fn get_listed_open_channel_ids(
         open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
     );
     // Built only from the constant type list.
-    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    let value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .fetch_all(&mut *connection)
-        .await
-        .map_err(Into::into)
+        .await?;
+    Ok(ReadAt { value, read_at })
 }
 
 /// Appends the channels of `more` that `ids` lacks.
@@ -2397,12 +2427,24 @@ impl Db {
     }
 
     /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].
-    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
     pub async fn get_listed_open_channel_ids(
         &self,
         community_id: CommunityId,
     ) -> Result<Vec<Uuid>> {
-        get_listed_open_channel_ids(&self.pool, community_id).await
+        Ok(self
+            .get_listed_open_channel_ids_read_at(community_id)
+            .await?
+            .value)
+    }
+
+    /// [`Self::get_listed_open_channel_ids`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
+    pub async fn get_listed_open_channel_ids_read_at(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<ReadAt<Vec<Uuid>>> {
+        get_listed_open_channel_ids_read_at(&self.pool, community_id).await
     }
 
     /// The channels of non-legacy types a pubkey can read (member, or open

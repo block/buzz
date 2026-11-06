@@ -39,7 +39,9 @@ struct BuzzNotificationAvatarLoaderTests {
             id: "community", name: "Test", relayUrl: relay, pubkey: "account", policies: [],
             notificationSessionID: "session")))
       let url = try #require(URL(string: "\(media)/media/\(hash).png"))
-      #expect((BuzzNotificationAvatarLoader.thumbnailURL(url, scope: scope) != nil) == expected)
+      #expect(
+        BuzzNotificationAvatarLoader.thumbnailURLs(url, scope: scope).map(\.lastPathComponent)
+          == (expected ? ["\(hash).thumb.webp", "\(hash).thumb.jpg"] : []))
     }
   }
 
@@ -71,4 +73,195 @@ struct BuzzNotificationAvatarLoaderTests {
       try BuzzNotificationAvatarLoader.decode(Data("not an image".utf8))
     }
   }
+
+  @Test("A scope revoked while the assertion is issued never starts the signed download")
+  func scopeRevokedDuringAssertionIssuance() async throws {
+    let key = String(repeating: "0", count: 63) + "1"
+    let account = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    let scope = try #require(
+      BuzzNotificationCacheScope(
+        community: PushLeaseCommunity(
+          id: "community", name: "Test", relayUrl: "wss://relay.org.example", pubkey: account,
+          policies: [], notificationSessionID: "session")))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AssertionIssuanceStub.self]
+    let state = AvatarScopeState()
+    AssertionIssuanceStub.onRequest = { state.revoke() }
+    defer { AssertionIssuanceStub.onRequest = nil }
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration),
+      loadSession: {
+        BuzzOrganizationSession(
+          origin: "https://identity.org.example", credential: "session-credential",
+          relayHosts: ["relay.org.example"])
+      })
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let loader = BuzzNotificationAvatarLoader(
+      directory: directory, privateKey: { _ in key }, isCurrent: { _ in state.isCurrent },
+      assertionIssuer: issuer)
+    loader.startDownload = { _, _, _, completion in
+      state.recordDownload()
+      completion(.failure(URLError(.cancelled)))
+    }
+
+    let result = await withCheckedContinuation { continuation in
+      loader.load(
+        source: "https://relay.org.example/media/\(String(repeating: "a", count: 64)).png",
+        scope: scope
+      ) { continuation.resume(returning: $0) }
+    }
+
+    guard case .failure(BuzzNotificationCacheError.revoked) = result else {
+      Issue.record("Expected a revoked failure, got \(result)")
+      return
+    }
+    #expect(state.downloads == 0)
+  }
+
+  @Test("An organization relay avatar is fetched with the issued assertion")
+  func relayAvatarCarriesAssertion() async throws {
+    let key = String(repeating: "0", count: 63) + "1"
+    let account = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    let scope = try #require(
+      BuzzNotificationCacheScope(
+        community: PushLeaseCommunity(
+          id: "community", name: "Test", relayUrl: "wss://relay.org.example", pubkey: account,
+          policies: [], notificationSessionID: "session")))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AssertionIssuanceStub.self]
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration),
+      loadSession: {
+        BuzzOrganizationSession(
+          origin: "https://identity.org.example", credential: "session-credential",
+          relayHosts: ["relay.org.example"])
+      })
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let loader = BuzzNotificationAvatarLoader(
+      directory: directory, privateKey: { _ in key }, isCurrent: { _ in true },
+      assertionIssuer: issuer)
+    let requests = AvatarRequests()
+    loader.startDownload = { request, _, _, completion in
+      requests.record(request)
+      completion(.failure(URLError(.cancelled)))
+    }
+
+    _ = await withCheckedContinuation { continuation in
+      loader.load(
+        source: "https://relay.org.example/media/\(String(repeating: "a", count: 64)).png",
+        scope: scope
+      ) { continuation.resume(returning: $0) }
+    }
+
+    let request = try #require(requests.first)
+    #expect(
+      request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
+        == "Bearer header.payload.signature")
+    #expect(request.value(forHTTPHeaderField: "Authorization") != nil)
+  }
+
+  @Test("An avatar fetched with an assertion from a replaced organization session is refused")
+  func replacedOrganizationSessionRefusesAvatar() async throws {
+    let key = String(repeating: "0", count: 63) + "1"
+    let account = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    let scope = try #require(
+      BuzzNotificationCacheScope(
+        community: PushLeaseCommunity(
+          id: "community", name: "Test", relayUrl: "wss://relay.org.example", pubkey: account,
+          policies: [], notificationSessionID: "session")))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [AssertionIssuanceStub.self]
+    let sessions = OrganizationSessions()
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { sessions.current })
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+      UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let loader = BuzzNotificationAvatarLoader(
+      directory: directory, privateKey: { _ in key }, isCurrent: { _ in true },
+      assertionIssuer: issuer)
+    let png = try #require(
+      Data(
+        base64Encoded:
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII="
+      ))
+    loader.startDownload = { _, _, _, completion in
+      // The member signs in again while the avatar is in flight; the community is unchanged.
+      sessions.replace()
+      completion(.success(png))
+    }
+
+    let result = await withCheckedContinuation { continuation in
+      loader.load(
+        source: "https://relay.org.example/media/\(String(repeating: "a", count: 64)).png",
+        scope: scope
+      ) { continuation.resume(returning: $0) }
+    }
+
+    guard case .failure(BuzzNotificationCacheError.revoked) = result else {
+      Issue.record("Expected a revoked failure, got \(result)")
+      return
+    }
+  }
+}
+
+private final class AvatarRequests: @unchecked Sendable {
+  private let lock = NSLock()
+  private var requests: [URLRequest] = []
+
+  var first: URLRequest? { lock.withLock { requests.first } }
+  func record(_ request: URLRequest) { lock.withLock { requests.append(request) } }
+}
+
+private final class OrganizationSessions: @unchecked Sendable {
+  private let lock = NSLock()
+  private var credential = "session-credential"
+
+  var current: BuzzOrganizationSession {
+    lock.withLock {
+      BuzzOrganizationSession(
+        origin: "https://identity.org.example", credential: credential,
+        relayHosts: ["relay.org.example"])
+    }
+  }
+  func replace() { lock.withLock { credential = "replacement-credential" } }
+}
+
+private final class AvatarScopeState: @unchecked Sendable {
+  private let lock = NSLock()
+  private var current = true
+  private var started = 0
+
+  var isCurrent: Bool { lock.withLock { current } }
+  var downloads: Int { lock.withLock { started } }
+  func revoke() { lock.withLock { current = false } }
+  func recordDownload() { lock.withLock { started += 1 } }
+}
+
+/// Answers the organization's assertion issuer, running `onRequest` while issuance is in flight.
+private final class AssertionIssuanceStub: URLProtocol, @unchecked Sendable {
+  nonisolated(unsafe) static var onRequest: (() -> Void)?
+
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+  override func startLoading() {
+    Self.onRequest?()
+    let body = try! JSONSerialization.data(withJSONObject: [
+      "assertion": "header.payload.signature",
+      "nostr_pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "expires_at": Int(Date().timeIntervalSince1970) + 300,
+    ])
+    let response = HTTPURLResponse(
+      url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: body)
+    client?.urlProtocolDidFinishLoading(self)
+  }
+
+  override func stopLoading() {}
 }

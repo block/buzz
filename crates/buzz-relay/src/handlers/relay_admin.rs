@@ -134,8 +134,9 @@ fn may_set_workspace_profile(
 /// [`super::push_lease::AcceptError`] and its `map_push_accept_error` seam.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RelayAdminError {
-    /// Sender is under a durable community ban — `blocked:` / HTTP 403.
-    Banned,
+    /// Sender is under a durable community ban — `blocked:` / HTTP 403. The
+    /// source says whether its own row or its owner's decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// Legacy command rejection — `invalid:` / HTTP 400. This is whatever
     /// [`execute_relay_admin_command`] returned as a `String`, which is mostly
     /// validation and authorization but also still includes that function's own
@@ -162,7 +163,9 @@ fn admits_relay_admin_command(
     restriction: &buzz_db::moderation::RestrictionState,
 ) -> Result<(), RelayAdminError> {
     if restriction.banned {
-        return Err(RelayAdminError::Banned);
+        return Err(RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::of(restriction),
+        ));
     }
     Ok(())
 }
@@ -537,11 +540,14 @@ mod postgres_tests {
     fn banned_actor_is_not_admitted_to_a_relay_admin_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
             admits_relay_admin_command(&banned),
-            Err(RelayAdminError::Banned),
+            Err(RelayAdminError::Banned(
+                crate::handlers::auth::BanSource::Own
+            )),
             "a durably banned admin must never reach a relay-admin command"
         );
     }
@@ -553,6 +559,7 @@ mod postgres_tests {
     fn timed_out_actor_is_still_admitted() {
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
         };
         assert!(
@@ -764,9 +771,8 @@ mod postgres_tests {
             .expect("ensure community");
         let tenant = TenantContext::resolved(record.id, host);
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool config");
+        let redis_pool =
+            buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool config");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1477,7 +1483,7 @@ mod postgres_tests {
                 vec![Tag::public_key(target.public_key())],
             ),
         ] {
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key.clone(),
                 buzz_db::moderation::RestrictionState::default(),
             );
@@ -1487,7 +1493,7 @@ mod postgres_tests {
             .await
             .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
             assert_eq!(
-                state.restriction_cache.get(&key),
+                state.restriction_cache.get(&key).map(|cached| cached.state),
                 None,
                 "kind {} must drop the cached row",
                 event.kind.as_u16()

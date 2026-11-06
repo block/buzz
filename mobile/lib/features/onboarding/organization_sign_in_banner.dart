@@ -9,8 +9,7 @@ import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/organization_sign_in.dart';
 import '../../shared/relay/relay_provider.dart';
 import '../../shared/relay/relay_session.dart';
-import '../../shared/theme/app_theme.dart';
-import '../../shared/theme/grid.dart';
+import '../../shared/widgets/buzz_toast.dart';
 
 /// Offers organization sign-in for the active community when it trusts the
 /// build's organization. Cached content stays available underneath.
@@ -24,82 +23,49 @@ class OrganizationSignInBanner extends HookConsumerWidget {
     useListenable(signIn);
     useListenable(auth);
     final config = ref.watch(relayConfigProvider);
-    if (signIn == null || !auth.organizationProtects(config)) {
+    if (signIn == null ||
+        !organizationSignInPromptVisible(signIn, auth, config)) {
       return const SizedBox.shrink();
     }
-    final relayFailure =
-        auth.failedRelay == config.baseUrl &&
-            auth.failedPubkey == pubkeyFromNsec(config.nsec)
-        ? auth.failure
-        : null;
+    final relayFailure = organizationRelayFailure(auth, config);
     final String message;
-    final List<Widget> actions;
+    final String actionLabel;
+    final VoidCallback onAction;
+    ({String label, VoidCallback onPressed})? secondaryAction;
     switch (signIn.status) {
       case OrganizationSessionStatus.checking:
         return const SizedBox.shrink();
       case OrganizationSessionStatus.signingIn:
-        message = 'Finishing organization sign-in…';
-        actions = [
-          TextButton(
-            onPressed: () => unawaited(signIn.cancel()),
-            child: const Text('Cancel sign-in'),
-          ),
-        ];
+        message = 'Finish sign-in in browser';
+        actionLabel = 'Cancel';
+        onAction = () => unawaited(signIn.cancel());
       case OrganizationSessionStatus.signedOut:
-        message = switch (signIn.failure) {
-          null =>
-            'Sign in with your organization to stay connected to this community.',
-          AccountFailure.storage =>
-            'Your saved organization sign-in could not be read. Sign in again to replace it.',
-          _ => 'Organization sign-in did not finish. Try again.',
-        };
-        actions = [
-          TextButton(
-            onPressed: () => unawaited(signIn.signIn()),
-            child: const Text('Sign in'),
-          ),
-        ];
+        message = signIn.failure == null
+            ? "It looks like you're signed out."
+            : 'Sign in failed. Try again.';
+        actionLabel = 'Sign in';
+        onAction = () => unawaited(signIn.signIn());
       case OrganizationSessionStatus.signedIn:
-        // Signed out is handled above; unavailable keeps reconnecting.
-        if (relayFailure == null ||
-            relayFailure == AccountFailure.signedOut ||
-            relayFailure == AccountFailure.unavailable) {
-          return const SizedBox.shrink();
+        final denied = relayFailure == AccountFailure.denied;
+        message = denied
+            ? 'Denied access to this community.'
+            : 'Could not connect.';
+        actionLabel = 'Retry';
+        onAction = () =>
+            unawaited(ref.read(relaySessionProvider.notifier).reconnect());
+        if (denied) {
+          secondaryAction = (
+            label: 'Use a different account',
+            onPressed: () => unawaited(signIn.changeAccount()),
+          );
         }
-        message = relayFailure == AccountFailure.denied
-            ? 'Your organization account cannot use this community with this key.'
-            : 'Could not reconnect with your organization account.';
-        actions = [
-          TextButton(
-            onPressed: () =>
-                unawaited(ref.read(relaySessionProvider.notifier).reconnect()),
-            child: const Text('Retry'),
-          ),
-          // Retrying the same refused account fails the same way.
-          if (relayFailure == AccountFailure.denied)
-            TextButton(
-              onPressed: () => unawaited(signIn.changeAccount()),
-              child: const Text('Use a different account'),
-            ),
-        ];
     }
-    return Positioned(
-      left: Grid.sm,
-      right: Grid.sm,
-      bottom: 0,
-      child: SafeArea(
-        child: Material(
-          elevation: 4,
-          borderRadius: BorderRadius.circular(Radii.lg),
-          child: Padding(
-            padding: const EdgeInsets.all(Grid.sm),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [Text(message), ...actions],
-            ),
-          ),
-        ),
-      ),
+    return ReconnectCapsule(
+      message: message,
+      actionLabel: actionLabel,
+      onSignIn: onAction,
+      destructiveAction: signIn.status == OrganizationSessionStatus.signingIn,
+      secondaryAction: secondaryAction,
     );
   }
 }

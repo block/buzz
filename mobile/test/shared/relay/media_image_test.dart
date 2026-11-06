@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
+import 'package:buzz/shared/utils/bounded_fetch.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -72,29 +73,33 @@ void main() {
     });
   });
 
-  group('relayThumbnailUrl', () {
+  group('relayThumbnailUrls', () {
     final hash = 'ab' * 32;
     final auth = _auth();
 
-    test('maps relay blobs of any format to the thumbnail', () {
-      for (final ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '']) {
-        expect(
-          relayThumbnailUrl('$_relayBase/media/$hash$ext', auth),
-          '$_relayBase/media/$hash.thumb.jpg',
-        );
-      }
-    });
+    test(
+      'maps relay blobs of any format to the WebP, then JPEG, thumbnail',
+      () {
+        for (final ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '']) {
+          expect(relayThumbnailUrls('$_relayBase/media/$hash$ext', auth), [
+            '$_relayBase/media/$hash.thumb.webp',
+            '$_relayBase/media/$hash.thumb.jpg',
+          ]);
+        }
+      },
+    );
 
     test('leaves everything else alone', () {
       for (final url in [
         'https://elsewhere.example/media/$hash.jpg',
         '$_relayBase/media/$hash.thumb.jpg',
+        '$_relayBase/media/$hash.thumb.webp',
         '$_relayBase/media/$hash.jpg?v=2',
         '$_relayBase/media/not-a-hash.jpg',
         '$_relayBase/avatars/$hash.jpg',
         '$_relayBase/media/$hash.JPG',
       ]) {
-        expect(relayThumbnailUrl(url, auth), isNull, reason: url);
+        expect(relayThumbnailUrls(url, auth), isEmpty, reason: url);
       }
     });
   });
@@ -177,7 +182,7 @@ void main() {
           final error = await _waitError(
             provider.resolve(ImageConfiguration.empty),
           ).timeout(const Duration(seconds: 2));
-          expect(error, isA<FormatException>());
+          expect(error, isA<ResponseTooLargeException>());
           expect(cancelled, isTrue);
           expect(aborted, isTrue);
           expect(delivered, isFalse);

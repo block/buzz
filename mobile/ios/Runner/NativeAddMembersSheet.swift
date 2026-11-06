@@ -66,20 +66,21 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
       if request == session { picker?.update(data) }
       result(nil)
     case "dismiss":
-      if request == session { close(notify: false) }
-      result(nil)
+      if request == session { close(notify: false) { result(nil) } }
+      else { result(nil) }
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
-  private func close(notify: Bool) {
-    guard let request = session, let navigation else { return }
+  private func close(notify: Bool, completion: (() -> Void)? = nil) {
+    guard let request = session, let navigation else { completion?(); return }
     session = nil
     self.navigation = nil
     picker = nil
     navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
       if notify { self?.channel.invokeMethod("closed", arguments: ["session": request]) }
+      completion?()
     }
   }
 
@@ -99,6 +100,13 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
   private let rowColor: UIColor
+  /// The app theme's error color, which keeps 4.5:1 contrast on the sheet
+  /// where `.systemRed` does not.
+  private static let errorColor = UIColor { traits in
+    traits.userInterfaceStyle == .dark
+      ? UIColor(red: 0xFF / 255, green: 0x95 / 255, blue: 0x92 / 255, alpha: 1)
+      : UIColor(red: 0xCE / 255, green: 0x2C / 255, blue: 0x31 / 255, alpha: 1)
+  }
   private var selected: [[String: Any]] { state["selected"] as? [[String: Any]] ?? [] }
   private var users: [[String: Any]] {
     let selectedKeys = Set(selected.compactMap { $0["pubkey"] as? String })
@@ -106,6 +114,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       !selectedKeys.contains($0["pubkey"] as? String ?? "")
     }
   }
+  private var checkmarkAction: Bool { state["confirmWithCheckmark"] as? Bool == true }
+  private var atLimit: Bool { selected.count >= (state["selectionLimit"] as? Int ?? Int.max) }
   private var busy: Bool { state["submitting"] as? Bool == true }
   private var loading: Bool { state["loading"] as? Bool == true }
   private var loadError: Bool { state["loadError"] as? Bool == true }
@@ -117,7 +127,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     pageColor = Self.color(state["pageColor"]) ?? .systemGroupedBackground
     rowColor = Self.color(state["rowColor"]) ?? .secondarySystemGroupedBackground
     super.init(style: .insetGrouped)
-    title = "Add members"
+    title = state["title"] as? String ?? "Add members"
   }
 
   @available(*, unavailable)
@@ -126,6 +136,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func viewDidLoad() {
     super.viewDidLoad()
     tableView.backgroundColor = pageColor
+    tableView.sectionHeaderTopPadding = 0
     tableView.keyboardDismissMode = .interactive
     tableView.rowHeight = UITableView.automaticDimension
     tableView.estimatedRowHeight = 64
@@ -142,14 +153,25 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     definesPresentationContext = true
     navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancel))
     navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(add))
+    if checkmarkAction {
+      navigationItem.leftBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(cancel))
+      navigationItem.leftBarButtonItem?.accessibilityLabel = "Close"
+      navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "checkmark"), style: .done, target: self, action: #selector(add))
+      navigationItem.rightBarButtonItem?.accessibilityLabel = "Create message"
+    }
     NavigationTopEdge.configure(tableView, item: navigationItem)
     applyState()
   }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    search.isActive = true
-    search.searchBar.becomeFirstResponder()
+    // Activating in the same pass as the appearance is ignored, so focus
+    // the field on the next turn of the run loop.
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.view.window != nil else { return }
+      self.search.isActive = true
+      self.search.searchBar.searchTextField.becomeFirstResponder()
+    }
   }
 
   func update(_ data: [String: Any]) {
@@ -163,7 +185,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     navigationController?.isModalInPresentation = busy
     navigationItem.leftBarButtonItem?.isEnabled = !busy
     navigationItem.rightBarButtonItem?.isEnabled = !busy && !selected.isEmpty
-    navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
+    if checkmarkAction {
+      navigationItem.rightBarButtonItem?.accessibilityLabel = busy ? "Creating message" : "Create message"
+    } else {
+      navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
+    }
     search.searchBar.isUserInteractionEnabled = !busy
     tableView.reloadData()
     let error = state["error"] as? String ?? ""
@@ -172,7 +198,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     } else {
       let label = UILabel()
       label.text = error
-      label.textColor = .systemRed
+      label.textColor = Self.errorColor
       label.font = .preferredFont(forTextStyle: .footnote)
       label.adjustsFontForContentSizeCategory = true
       label.numberOfLines = 0
@@ -189,8 +215,6 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     let query = searchController.searchBar.text ?? ""
     guard query != (state["query"] as? String ?? "") else { return }
     state["query"] = query
-    state["loading"] = true
-    tableView.reloadData()
     send("query", ["value": searchController.searchBar.text ?? ""])
   }
 
@@ -202,12 +226,40 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     send("submit", [:])
   }
 
-  override func numberOfSections(in tableView: UITableView) -> Int { 2 }
-  override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    section == 0 ? selected.count : (loading || loadError || users.isEmpty ? 1 : users.count)
+  /// The status row after the results: the selection limit, a failed
+  /// search, or why there are no results. Results stay shown while a search
+  /// refreshes them.
+  private var status: String? {
+    if atLimit { return "DMs support up to nine people, including you." }
+    if loadError { return "Couldn't search people or agents. Tap to retry." }
+    if !users.isEmpty { return nil }
+    if loading { return "Searching…" }
+    if (state["query"] as? String ?? "").trimmingCharacters(in: .whitespaces).isEmpty,
+      let hint = state["emptyQueryHint"] as? String {
+      return hint
+    }
+    return "No matching people or agents."
   }
-  override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-    section == 0 ? (selected.isEmpty ? nil : "Selected") : "People and agents"
+  private var shownUsers: [[String: Any]] { atLimit ? [] : users }
+  private func isStatus(_ indexPath: IndexPath) -> Bool {
+    indexPath.section == 1 && indexPath.row >= shownUsers.count
+  }
+
+  override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+  // No section titles, and no grouped-table header bands: a small gap
+  // above the first shown card and between the two.
+  override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+    if section == 0 { return selected.isEmpty ? .leastNormalMagnitude : Self.cardGap }
+    return selected.isEmpty ? Self.cardGap : Self.cardGap * 2
+  }
+  override func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat {
+    .leastNormalMagnitude
+  }
+  override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? { nil }
+  override func tableView(_ tableView: UITableView, viewForFooterInSection section: Int) -> UIView? { nil }
+  private static let cardGap: CGFloat = 8
+  override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+    section == 0 ? selected.count : shownUsers.count + (status == nil ? 0 : 1)
   }
   override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
     let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
@@ -215,14 +267,15 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     var content = cell.defaultContentConfiguration()
     var avatarRequest: (String, String)?
     var memberLabel: String?
-    if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
-      content.text = loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
-      content.textProperties.color = .secondaryLabel
+    if isStatus(indexPath) {
+      content.text = status
+      content.textProperties.color = loadError && !atLimit ? Self.errorColor : .secondaryLabel
       content.textProperties.numberOfLines = 0
-      cell.selectionStyle = loadError && !loading ? .default : .none
-      if loadError && !loading { cell.accessibilityTraits.insert(.button) }
+      cell.selectionStyle = loadError && !atLimit ? .default : .none
+      if loadError && !atLimit { cell.accessibilityTraits.insert(.button) }
     } else {
-      let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
+      let user = indexPath.section == 0 ? selected[indexPath.row] : shownUsers[indexPath.row]
+      let unavailable = user["unavailable"] as? Bool == true
       content.text = user["name"] as? String
       content.secondaryText = user["detail"] as? String
       memberLabel = [content.text, content.secondaryText]
@@ -236,6 +289,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
         avatarRequest = (pubkey, key)
       }
       cell.accessoryType = indexPath.section == 0 ? .checkmark : .none
+      if unavailable {
+        content.textProperties.color = .secondaryLabel
+        cell.selectionStyle = .none
+        cell.accessibilityTraits.insert(.notEnabled)
+      }
       cell.accessibilityTraits.insert(.button)
       if indexPath.section == 0 { cell.accessibilityTraits.insert(.selected) }
     }
@@ -264,12 +322,22 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     guard !busy else { return }
-    if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
-      if loadError && !loading { send("retry", [:]) }
+    if isStatus(indexPath) {
+      if loadError && !atLimit { send("retry", [:]) }
       return
     }
-    let user = indexPath.section == 0 ? selected[indexPath.row] : users[indexPath.row]
-    if let pubkey = user["pubkey"] as? String { send("toggle", ["pubkey": pubkey]) }
+    let user = indexPath.section == 0 ? selected[indexPath.row] : shownUsers[indexPath.row]
+    if user["unavailable"] as? Bool == true { return }
+    guard let pubkey = user["pubkey"] as? String else { return }
+    send("toggle", ["pubkey": pubkey])
+    // Where asked (New DM), a pick ends its query, as an inserted mention
+    // does, so the next name starts fresh.
+    if indexPath.section == 1 && state["clearQueryOnPick"] as? Bool == true
+      && !(search.searchBar.text ?? "").isEmpty {
+      search.searchBar.text = ""
+      state["query"] = ""
+      send("query", ["value": ""])
+    }
   }
 
   private func fallbackAvatar(_ user: [String: Any]) -> UIImage {

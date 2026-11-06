@@ -1,4 +1,8 @@
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/hosted/browser_auth.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 
@@ -42,6 +46,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
+import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
@@ -64,10 +69,13 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 
+import '../../helpers/recipient_directory_session.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/native_creation_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
 part 'channels_page_test/home_community_flight.dart';
@@ -75,10 +83,12 @@ part 'channels_page_test/read_seed_journey.dart';
 
 void main() {
   setUpAll(() async {
-    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS')) {
+    if (Platform.environment.containsKey('COMMUNITY_SCREENSHOTS') ||
+        Platform.environment.containsKey('CREATE_SHEET_SCREENSHOTS')) {
       for (final font in {
         'Inter': 'assets/fonts/InterVariable.ttf',
         'BuzzTabler': 'assets/fonts/TablerIcons.ttf',
+        'MaterialIcons': 'fonts/MaterialIcons-Regular.otf',
       }.entries) {
         await (FontLoader(
           font.key,
@@ -88,7 +98,6 @@ void main() {
   });
   Widget buildTestable({
     required List<Override> overrides,
-    bool previewDirectory = false,
     Brightness brightness = Brightness.light,
     double keyboardInset = 0,
     bool disableAnimations = false,
@@ -116,9 +125,6 @@ void main() {
           if (loadCommunityIcon != null) return loadCommunityIcon(relayUrl);
           return communityIcons[relayUrl];
         }),
-        dmDirectoryPreviewEnabledProvider.overrideWith(
-          (ref) => previewDirectory,
-        ),
         appLifecycleProvider.overrideWith(() => _CommunitySettingsLifecycle()),
         ...overrides,
       ],
@@ -2553,6 +2559,173 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('organization sign-in is reachable before content loads', (
+    tester,
+  ) async {
+    final communities = [
+      Community(
+        id: 'alpha',
+        name: 'Alpha',
+        relayUrl: 'wss://alpha.example.com',
+        addedAt: DateTime(2025),
+      ),
+      Community(
+        id: 'bravo',
+        name: 'Bravo',
+        relayUrl: 'wss://bravo.example.com',
+        addedAt: DateTime(2025),
+      ),
+    ];
+    final notifier = _FakeCommunityListNotifier(communities);
+    final pending = Completer<List<Channel>>();
+    final account = BuilderlabAccountClient();
+    final signIn = OrganizationSignIn(
+      account: account,
+      browser: BrowserAuth(),
+      reconnect: () async {},
+    )..status = OrganizationSessionStatus.signedOut;
+    final auth = HostedRelayAuth(
+      BuilderlabAccountClient(),
+      organization: account,
+      organizationRelay: (uri) => uri.host == 'bravo.example.com',
+    );
+    addTearDown(() {
+      signIn.dispose();
+      auth.dispose();
+      account.dispose();
+    });
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          organizationSignInProvider.overrideWithValue(signIn),
+          hostedRelayAuthProvider.overrideWithValue(auth),
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              testChannels,
+              load: () => notifier.activeId == 'alpha'
+                  ? Future.value(testChannels)
+                  : pending.future,
+            ),
+          ),
+          communityListProvider.overrideWith(() => notifier),
+          activeCommunityProvider.overrideWith((ref) async {
+            await ref.watch(communityListProvider.future);
+            return communities.firstWhere(
+              (community) => community.id == notifier.activeId,
+            );
+          }),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == 'Community settings',
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-menu-switch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+    await tester.pumpAndSettle();
+    expect(notifier.switchedIds, ['bravo']);
+    expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+    expect(find.textContaining('taking longer to load'), findsNothing);
+    pending.complete(testChannels);
+  });
+
+  testWidgets(
+    'a refused organization key closes the switcher before content loads',
+    (tester) async {
+      final communities = [
+        Community(
+          id: 'alpha',
+          name: 'Alpha',
+          relayUrl: 'wss://alpha.example.com',
+          addedAt: DateTime(2025),
+        ),
+        Community(
+          id: 'bravo',
+          name: 'Bravo',
+          relayUrl: 'wss://bravo.example.com',
+          addedAt: DateTime(2025),
+        ),
+      ];
+      final notifier = _FakeCommunityListNotifier(communities);
+      final pending = Completer<List<Channel>>();
+      final account = BuilderlabAccountClient();
+      final signIn = OrganizationSignIn(
+        account: account,
+        browser: BrowserAuth(),
+        reconnect: () async {},
+      )..status = OrganizationSessionStatus.signedIn;
+      final auth = HostedRelayAuth(
+        BuilderlabAccountClient(),
+        organization: account,
+        organizationRelay: (uri) => uri.host == 'bravo.example.com',
+      );
+      addTearDown(() {
+        signIn.dispose();
+        auth.dispose();
+        account.dispose();
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            organizationSignInProvider.overrideWithValue(signIn),
+            hostedRelayAuthProvider.overrideWithValue(auth),
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                testChannels,
+                load: () => notifier.activeId == 'alpha'
+                    ? Future.value(testChannels)
+                    : pending.future,
+              ),
+            ),
+            communityListProvider.overrideWith(() => notifier),
+            activeCommunityProvider.overrideWith((ref) async {
+              await ref.watch(communityListProvider.future);
+              return communities.firstWhere(
+                (community) => community.id == notifier.activeId,
+              );
+            }),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.label == 'Community settings',
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-menu-switch')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('community-switcher-row-bravo')));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(notifier.switchedIds, ['bravo']);
+      // Signed in with no refusal yet: keep waiting for content.
+      expect(find.byKey(const Key('community-switcher-page')), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byKey(const Key('community-switcher-page'))),
+      );
+      auth.rejected(
+        container.read(relayConfigProvider),
+        'Bearer refused',
+        terminal: true,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('community-switcher-page')), findsNothing);
+      expect(find.textContaining('taking longer to load'), findsNothing);
+      pending.complete(testChannels);
+    },
+  );
+
   for (final timeout in [false, true]) {
     testWidgets(
       'community loading failure can retry the active selection (timeout: $timeout)',
@@ -2756,13 +2929,181 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('create channel sheet lists type and visibility radio options', (
+  registerNativeCreationTests(
+    (overrides) => buildTestable(overrides: overrides),
+  );
+
+  testWidgets(
+    'create channel sheet uses checked menus and a validated header action',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final actions = _CreateSheetActions();
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            channelActionsProvider.overrideWith((ref) => actions),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New channel'));
+      await tester.pumpAndSettle();
+      final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
+      expect(createSheetRect.top, 0);
+      expect(createSheetRect.height, 800);
+      tester.testTextInput.hide();
+      await tester.pumpAndSettle();
+
+      if (Platform.environment['CREATE_SHEET_SCREENSHOTS']
+          case final directory?) {
+        final boundary = tester
+            .element(find.byType(BottomSheet).last)
+            .findAncestorRenderObjectOfType<RenderRepaintBoundary>()!;
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 2);
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          await Directory(directory).create(recursive: true);
+          await File(
+            '$directory/new-channel.png',
+          ).writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+      }
+
+      expect(find.text('New channel'), findsOneWidget);
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(find.text('Name'), findsOneWidget);
+      expect(find.text('Description  Optional'), findsOneWidget);
+      void expectSingleFieldLabels() {
+        final nodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          nodes.add(node);
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
+
+        collect(tester.getSemantics(find.byType(BottomSheet).last));
+        for (final label in ['Name', 'Description']) {
+          final matches = nodes.where((node) => node.label.contains(label));
+          expect(matches, hasLength(1));
+          expect(matches.single.flagsCollection.isTextField, isTrue);
+        }
+      }
+
+      expectSingleFieldLabels();
+      expect(find.text('Channel type'), findsOneWidget);
+      expect(find.text('Ongoing'), findsOneWidget);
+      expect(find.text('Temporary'), findsNothing);
+      expect(find.text('Visibility'), findsOneWidget);
+      expect(find.text('Public'), findsOneWidget);
+      expect(find.text('Private'), findsNothing);
+      final submit = find.byKey(const Key('create-channel-submit'));
+      expect(tester.widget<TextButton>(submit).onPressed, isNull);
+      await tester.enterText(
+        find.byKey(const Key('create-channel-name')),
+        'release-notes',
+      );
+      await tester.pump();
+      expect(tester.widget<TextButton>(submit).onPressed, isNotNull);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.single, {
+        'name': 'release-notes',
+        'type': 'stream',
+        'visibility': 'open',
+        'description': '',
+        'ttl': null,
+      });
+      expect(find.text('Bad state: Try again'), findsOneWidget);
+      expectSingleFieldLabels();
+
+      final nameField = tester.widget<TextField>(
+        find.byKey(const Key('create-channel-name')),
+      );
+      final descriptionField = tester.widget<TextField>(
+        find.byKey(const Key('create-channel-description')),
+      );
+      expect(nameField.textInputAction, TextInputAction.done);
+      expect(nameField.onSubmitted, isNotNull);
+      expect(descriptionField.textInputAction, TextInputAction.done);
+      expect(descriptionField.onSubmitted, isNotNull);
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-name'))).height,
+        greaterThanOrEqualTo(52),
+      );
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-type'))).height,
+        greaterThanOrEqualTo(48),
+      );
+
+      await tester.tap(find.byKey(const Key('create-channel-type')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('create-channel-type-temporary')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Expires after'), findsOneWidget);
+      expect(find.text('7 days'), findsOneWidget);
+      expect(
+        tester.getSize(find.byKey(const Key('create-channel-ttl'))).height,
+        greaterThanOrEqualTo(51),
+      );
+
+      await tester.tap(find.byKey(const Key('create-channel-visibility')));
+      await tester.pumpAndSettle();
+      final privateVisibility = find.byKey(
+        const Key('create-channel-visibility-private'),
+      );
+      await tester.ensureVisible(privateVisibility);
+      await tester.pumpAndSettle();
+      await tester.tap(privateVisibility);
+      await tester.pumpAndSettle();
+      expect(find.text('Private'), findsOneWidget);
+      expect(find.text('Public'), findsNothing);
+      await tester.enterText(
+        find.byKey(const Key('create-channel-description')),
+        'Release updates',
+      );
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.last, {
+        'name': 'release-notes',
+        'type': 'stream',
+        'visibility': 'private',
+        'description': 'Release updates',
+        'ttl': 7 * 24 * 60 * 60,
+      });
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('create-channel-name')), findsNothing);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('create channel sheet shows a taken-name refusal as plain text', (
     tester,
   ) async {
     await tester.pumpWidget(
       buildTestable(
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          // Same shape relay_session completes a refused publish with.
+          channelActionsProvider.overrideWith(
+            (ref) => _RefusingCreateActions(
+              Exception(
+                'invalid: an open channel named "Launch" already exists',
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -2772,65 +3113,23 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('New channel'));
     await tester.pumpAndSettle();
-    final createSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(createSheetRect.top, greaterThanOrEqualTo(24));
-    tester.testTextInput.hide();
-    await tester.pumpAndSettle();
-
-    expect(find.text('Create a new channel'), findsOneWidget);
-    expect(find.text('Name'), findsOneWidget);
-    expect(find.text('Description  Optional'), findsOneWidget);
-    expect(find.text('Channel type'), findsOneWidget);
-    expect(find.text('Ongoing'), findsOneWidget);
-    expect(find.text('Temporary'), findsOneWidget);
-    expect(find.text('Visibility'), findsOneWidget);
-    expect(find.text('Public'), findsOneWidget);
-    expect(find.text('Private'), findsOneWidget);
-    expect(find.byKey(const Key('create-channel-submit')), findsNothing);
-    final nameField = tester.widget<TextField>(
+    await tester.enterText(
       find.byKey(const Key('create-channel-name')),
+      'Launch',
     );
-    final descriptionField = tester.widget<TextField>(
-      find.byKey(const Key('create-channel-description')),
-    );
-    expect(nameField.textInputAction, TextInputAction.done);
-    expect(nameField.onSubmitted, isNotNull);
-    expect(descriptionField.textInputAction, TextInputAction.done);
-    expect(descriptionField.onSubmitted, isNotNull);
-    expect(
-      tester.getSize(find.byKey(const Key('create-channel-name'))).height,
-      greaterThanOrEqualTo(52),
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const Key('create-channel-type-ongoing')))
-          .height,
-      greaterThanOrEqualTo(56),
-    );
-
-    await tester.tap(find.byKey(const Key('create-channel-type-temporary')));
+    await tester.pump();
+    // The sheet submits from the keyboard's done action.
+    await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();
 
-    expect(find.text('Expires after'), findsOneWidget);
-    expect(find.text('7 days'), findsOneWidget);
     expect(
-      tester.getSize(find.byKey(const Key('create-channel-ttl'))).height,
-      greaterThanOrEqualTo(51),
+      find.text('An open channel named "Launch" already exists'),
+      findsOneWidget,
     );
-
-    final privateVisibility = find.byKey(
-      const Key('create-channel-visibility-private'),
-    );
-    await tester.ensureVisible(privateVisibility);
-    await tester.pumpAndSettle();
-    await tester.tap(privateVisibility);
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<RadioGroup<String>>(find.byType(RadioGroup<String>))
-          .groupValue,
-      'private',
-    );
+    expect(find.textContaining('Exception'), findsNothing);
+    expect(find.textContaining('invalid:'), findsNothing);
+    // The sheet stays open so the user can pick another name.
+    expect(find.text('New channel'), findsOneWidget);
   });
 
   dmRecipientLayoutTests(
@@ -2843,182 +3142,236 @@ void main() {
     ),
   );
 
-  testWidgets('new message sheet lists and selects relay members', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(390, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets(
+    'new DM sheet finds and selects people like mention autocomplete',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    final waits = <bool>[];
-    const directoryUsers = [
-      DirectoryUser(
-        pubkey: 'alice',
-        displayName: 'Alice',
-        nip05Handle: 'alice@example.com',
-      ),
-      DirectoryUser(pubkey: 'bob', displayName: 'Bob'),
-      DirectoryUser(pubkey: 'charlie', displayName: 'Charlie'),
-      DirectoryUser(pubkey: 'danielle', displayName: 'Danielle'),
-    ];
-    await tester.pumpWidget(
-      buildTestable(
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => directoryUsers,
-          ),
-          relayDirectorySearchProvider.overrideWith((ref, query) async {
-            return directoryUsers
-                .where(
-                  (user) =>
-                      user.label.toLowerCase().contains(query.toLowerCase()),
-                )
-                .toList();
-          }),
-          channelActionsProvider.overrideWith(
-            (ref) => _PendingDmActions(waits),
-          ),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
+      final waits = <bool>[];
+      final alice = _dmKey(0);
+      final bob = _dmKey(1);
+      final charlie = _dmKey(2);
+      final danielle = _dmKey(3);
+      final session = RecipientDirectorySession({
+        alice: 'Alice',
+        bob: 'Bob',
+        charlie: 'Charlie',
+        danielle: 'Danielle',
+      });
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+            relaySessionProvider.overrideWith(() => session),
+            channelActionsProvider.overrideWith(
+              (ref) => _PendingDmActions(waits),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Create'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('New DM'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Create'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New DM'));
+      await tester.pumpAndSettle();
 
-    final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
-    expect(dmSheetRect.top, greaterThanOrEqualTo(24));
-    expect(find.text('New message'), findsOneWidget);
-    expect(find.text('To:'), findsOneWidget);
-    expect(find.text('Search for a person'), findsOneWidget);
-    final recipientField = find.byKey(const Key('new-dm-recipient-field'));
-    final initialRecipientWidth = tester.getSize(recipientField).width;
-    expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
-    expect(find.byKey(const Key('new-dm-person-alice')), findsOneWidget);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byKey(const Key('new-dm-person-alice')),
-        matching: find.byType(AvatarImage),
-      ),
-      findsOneWidget,
-    );
+      final dmSheetRect = tester.getRect(find.byType(BottomSheet).last);
+      expect(dmSheetRect.top, 0);
+      expect(dmSheetRect.height, 800);
+      expect(
+        find.descendant(
+          of: find.byType(BottomSheet).last,
+          matching: find.text('New DM'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Close'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+            .onPressed,
+        isNull,
+      );
+      expect(find.text('To:'), findsOneWidget);
+      expect(find.text('Search for people or agents'), findsOneWidget);
+      final recipientField = find.byKey(const Key('new-dm-recipient-field'));
+      final initialRecipientWidth = tester.getSize(recipientField).width;
+      expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
+      // No directory dump: people are found by name, as with `@`.
+      expect(
+        find.text('Type a name to find people or agents.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('new-dm-search')))
+            .autofocus,
+        isTrue,
+      );
 
-    await tester.enterText(find.byKey(const Key('new-dm-search')), 'bob');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('new-dm-person-alice')), findsNothing);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
+      await _searchDm(tester, 'b');
+      expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(Key('new-dm-person-$bob')),
+          matching: find.byType(AvatarImage),
+        ),
+        findsOneWidget,
+      );
+      // A longer query keeps the shown rows while its own search runs.
+      await tester.enterText(find.byKey(const Key('new-dm-search')), 'bo');
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      // A query searched before shows its people at once.
+      await tester.enterText(find.byKey(const Key('new-dm-search')), 'b');
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(session.searches, ['b', 'bo']);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
 
-    await tester.enterText(find.byKey(const Key('new-dm-search')), '');
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-dm-person-alice')));
-    await tester.pump();
+      await _searchDm(tester, 'al');
+      await tester.tap(find.byKey(Key('new-dm-person-$alice')));
+      await tester.pump();
 
-    final aliceChip = find.byKey(const Key('new-dm-selected-alice'));
-    final inlineSearch = find.byKey(const Key('new-dm-search'));
-    final aliceRect = tester.getRect(aliceChip);
-    final inlineSearchRect = tester.getRect(inlineSearch);
-    expect(inlineSearchRect.left, greaterThan(aliceRect.right));
-    expect(
-      (inlineSearchRect.center.dy - aliceRect.center.dy).abs(),
-      lessThan(1),
-    );
-    expect(find.text('Search for a person'), findsNothing);
-    expect(tester.widget<TextField>(inlineSearch).focusNode?.hasFocus, isTrue);
-    expect(tester.getSize(recipientField).width, initialRecipientWidth);
-    expect(tester.getSize(aliceChip).height, 40);
-    expect(tester.getSize(aliceChip).width, lessThanOrEqualTo(224));
-    final aliceChipMaterial = tester.widget<Material>(
-      find.descendant(of: aliceChip, matching: find.byType(Material)).first,
-    );
-    expect(aliceChipMaterial.shape, isA<StadiumBorder>());
-    expect(
-      aliceChipMaterial.color,
-      Theme.of(tester.element(aliceChip)).colorScheme.surfaceContainerHighest,
-    );
-    expect(
-      tester
-          .widget<AvatarImage>(
-            find.descendant(of: aliceChip, matching: find.byType(AvatarImage)),
-          )
-          .radius,
-      16,
-    );
-    expect(
-      tester
-          .widget<Text>(
-            find.descendant(of: aliceChip, matching: find.text('Alice')),
-          )
-          .style
-          ?.fontSize,
-      16,
-    );
-    expect(
-      find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
-      findsNothing,
-    );
-    expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
+      final aliceChip = find.byKey(Key('new-dm-selected-$alice'));
+      final inlineSearch = find.byKey(const Key('new-dm-search'));
+      final aliceRect = tester.getRect(aliceChip);
+      final inlineSearchRect = tester.getRect(inlineSearch);
+      expect(inlineSearchRect.left, greaterThan(aliceRect.right));
+      expect(
+        (inlineSearchRect.center.dy - aliceRect.center.dy).abs(),
+        lessThan(1),
+      );
+      expect(find.text('Search for people or agents'), findsNothing);
+      expect(
+        tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,
+        isTrue,
+      );
+      expect(tester.getSize(recipientField).width, initialRecipientWidth);
+      expect(tester.getSize(aliceChip).height, 40);
+      expect(tester.getSize(aliceChip).width, lessThanOrEqualTo(224));
+      final aliceChipMaterial = tester.widget<Material>(
+        find.descendant(of: aliceChip, matching: find.byType(Material)).first,
+      );
+      expect(aliceChipMaterial.shape, isA<StadiumBorder>());
+      expect(
+        aliceChipMaterial.color,
+        Theme.of(tester.element(aliceChip)).colorScheme.surfaceContainerHighest,
+      );
+      expect(
+        tester
+            .widget<AvatarImage>(
+              find.descendant(
+                of: aliceChip,
+                matching: find.byType(AvatarImage),
+              ),
+            )
+            .radius,
+        16,
+      );
+      expect(
+        tester
+            .widget<Text>(
+              find.descendant(of: aliceChip, matching: find.text('Alice')),
+            )
+            .style
+            ?.fontSize,
+        16,
+      );
+      expect(
+        find.descendant(of: aliceChip, matching: find.byIcon(BuzzIcons.x)),
+        findsNothing,
+      );
+      expect(find.bySemanticsLabel('Remove Alice'), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('new-dm-person-bob')));
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('new-dm-person-charlie')));
-    await tester.pump();
-    await tester.tap(find.byKey(const Key('new-dm-person-danielle')));
-    await tester.pump();
+      for (final (query, key) in [
+        ('bob', bob),
+        ('ch', charlie),
+        ('da', danielle),
+      ]) {
+        await _searchDm(tester, query);
+        await tester.tap(find.byKey(Key('new-dm-person-$key')));
+        await tester.pump();
+      }
 
-    expect(aliceChip, findsOneWidget);
-    expect(find.byKey(const Key('new-dm-selected-bob')), findsOneWidget);
-    expect(find.byKey(const Key('new-dm-selected-charlie')), findsOneWidget);
-    final danielleChip = find.byKey(const Key('new-dm-selected-danielle'));
-    expect(danielleChip, findsOneWidget);
-    expect(tester.getSize(recipientField).width, initialRecipientWidth);
-    expect(
-      tester.getRect(danielleChip).top,
-      greaterThan(tester.getRect(aliceChip).top),
-    );
-    final recipientScrollViews = tester.widgetList<SingleChildScrollView>(
-      find.ancestor(
-        of: aliceChip,
-        matching: find.byType(SingleChildScrollView),
-      ),
-    );
-    expect(
-      recipientScrollViews.every(
-        (scrollView) => scrollView.scrollDirection == Axis.vertical,
-      ),
-      isTrue,
-    );
-    expect(
-      find.ancestor(
-        of: aliceChip,
-        matching: find.byKey(const Key('new-dm-recipient-wrap')),
-      ),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const Key('new-dm-selected-bob')));
-    await tester.pump();
-    expect(find.byKey(const Key('new-dm-selected-bob')), findsNothing);
-    expect(find.byKey(const Key('new-dm-person-bob')), findsOneWidget);
-    expect(tester.widget<TextField>(inlineSearch).focusNode?.hasFocus, isTrue);
-    expect(find.text('Cancel'), findsNothing);
-    expect(find.text('Open DM'), findsNothing);
-    final searchField = tester.widget<TextField>(
-      find.byKey(const Key('new-dm-search')),
-    );
-    expect(searchField.textInputAction, TextInputAction.done);
-    expect(searchField.onSubmitted, isNotNull);
+      expect(aliceChip, findsOneWidget);
+      expect(find.byKey(Key('new-dm-selected-$bob')), findsOneWidget);
+      expect(find.byKey(Key('new-dm-selected-$charlie')), findsOneWidget);
+      final danielleChip = find.byKey(Key('new-dm-selected-$danielle'));
+      expect(danielleChip, findsOneWidget);
+      expect(tester.getSize(recipientField).width, initialRecipientWidth);
+      expect(
+        tester.getRect(danielleChip).top,
+        greaterThan(tester.getRect(aliceChip).top),
+      );
+      final recipientScrollViews = tester.widgetList<SingleChildScrollView>(
+        find.ancestor(
+          of: aliceChip,
+          matching: find.byType(SingleChildScrollView),
+        ),
+      );
+      expect(
+        recipientScrollViews.every(
+          (scrollView) => scrollView.scrollDirection == Axis.vertical,
+        ),
+        isTrue,
+      );
+      expect(
+        find.ancestor(
+          of: aliceChip,
+          matching: find.byKey(const Key('new-dm-recipient-wrap')),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(Key('new-dm-selected-$bob')));
+      await tester.pump();
+      expect(find.byKey(Key('new-dm-selected-$bob')), findsNothing);
+      // A Space never picks here: a full name with edge spaces still finds.
+      await _searchDm(tester, ' Bob ');
+      expect(find.byKey(Key('new-dm-person-$bob')), findsOneWidget);
+      expect(
+        tester.widget<TextField>(inlineSearch).focusNode?.hasFocus,
+        isTrue,
+      );
+      expect(find.text('Cancel'), findsNothing);
+      expect(find.text('Open DM'), findsNothing);
+      final searchField = tester.widget<TextField>(
+        find.byKey(const Key('new-dm-search')),
+      );
+      expect(searchField.textInputAction, TextInputAction.done);
+      expect(searchField.onSubmitted, isNotNull);
 
-    // Done opens the DM at once instead of waiting on the full channel list.
-    await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pump();
-    expect(waits, [false]);
-  });
+      // The header action opens the DM without waiting on the full channel list.
+      await tester.tap(find.byKey(const Key('new-dm-submit')));
+      await tester.pump();
+      expect(waits, [false]);
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byWidgetPredicate(
+                (widget) => widget is IconButton && widget.tooltip == 'Close',
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+    },
+  );
 
   testWidgets('wraps many recipients without overflowing above the keyboard', (
     tester,
@@ -3028,21 +3381,18 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    final directoryUsers = [
+    final people = {
       for (var index = 0; index < 9; index++)
-        DirectoryUser(
-          pubkey: 'person-$index',
-          displayName: 'Long recipient name number $index',
-        ),
-    ];
+        _dmKey(index): 'Long recipient name number $index',
+    };
 
     await tester.pumpWidget(
       buildTestable(
         keyboardInset: 300,
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-          relayDirectoryUsersProvider.overrideWith(
-            (ref) async => directoryUsers,
+          relaySessionProvider.overrideWith(
+            () => RecipientDirectorySession(people),
           ),
         ],
       ),
@@ -3054,8 +3404,9 @@ void main() {
     await tester.tap(find.text('New DM'));
     await tester.pumpAndSettle();
 
-    for (final user in directoryUsers.take(8)) {
-      final result = find.byKey(Key('new-dm-person-${user.pubkey}'));
+    for (var index = 0; index < 8; index++) {
+      await _searchDm(tester, 'Long recipient name number $index');
+      final result = find.byKey(Key('new-dm-person-${_dmKey(index)}'));
       await tester.ensureVisible(result);
       await tester.pumpAndSettle();
       await tester.tap(result);
@@ -3071,14 +3422,15 @@ void main() {
       find.text('DMs support up to nine people, including you.'),
       findsOneWidget,
     );
-    expect(find.byKey(const Key('new-dm-person-person-8')), findsNothing);
-    final lastChip = find.byKey(const Key('new-dm-selected-person-7'));
+    await _searchDm(tester, 'Long recipient name number 8');
+    expect(find.byKey(Key('new-dm-person-${_dmKey(8)}')), findsNothing);
+    final lastChip = find.byKey(Key('new-dm-selected-${_dmKey(7)}'));
     await tester.ensureVisible(lastChip);
     await tester.pumpAndSettle();
     await tester.tap(lastChip);
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('new-dm-selected-person-7')), findsNothing);
-    final ninthRecipient = find.byKey(const Key('new-dm-person-person-8'));
+    expect(find.byKey(Key('new-dm-selected-${_dmKey(7)}')), findsNothing);
+    final ninthRecipient = find.byKey(Key('new-dm-person-${_dmKey(8)}'));
     final listScroll = find
         .descendant(
           of: find.byType(BottomSheet).last,
@@ -3097,53 +3449,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(ninthRecipient.hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('shows local preview people when the relay is offline', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(390, 800);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(
-      buildTestable(
-        previewDirectory: true,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byTooltip('Create'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('New DM'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Could not load people from this relay.'), findsNothing);
-    expect(find.text('Maya Chen'), findsOneWidget);
-    expect(find.text('Jordan Brooks'), findsOneWidget);
-    expect(find.text('Priya Shah'), findsOneWidget);
-
-    await tester.tap(
-      find.byKey(
-        const Key(
-          'new-dm-person-'
-          '1111111111111111111111111111111111111111111111111111111111111111',
-        ),
-      ),
-    );
-    await tester.pump();
-    expect(find.text('Maya Chen'), findsWidgets);
-
-    await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pump();
-    expect(
-      find.text('Preview only — mock people cannot be messaged.'),
-      findsOneWidget,
-    );
   });
 
   testWidgets('hides unjoined and archived channels from the main list', (
@@ -3840,6 +4145,55 @@ class _PendingDmActions implements ChannelActions {
     waits.add(waitForChannelList);
     return Completer<Channel>().future;
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _CreateSheetActions implements ChannelActions {
+  final creations = <Map<String, Object?>>[];
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async {
+    creations.add({
+      'name': name,
+      'type': channelType,
+      'visibility': visibility,
+      'description': description,
+      'ttl': ttlSeconds,
+    });
+    throw StateError('Try again');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _RefusingCreateActions implements ChannelActions {
+  _RefusingCreateActions(this.error);
+
+  final Object error;
+
+  @override
+  Future<Channel> createChannel({
+    String? channelId,
+    required String name,
+    required String channelType,
+    required String visibility,
+    List<String> labels = const [],
+    String? description,
+    int? ttlSeconds,
+    bool waitForChannelList = true,
+  }) async => throw error;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

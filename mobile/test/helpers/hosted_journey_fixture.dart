@@ -60,9 +60,18 @@ class HostedJourneyFixture {
   HostedFlow get flow => activeFlow!;
   late ProviderContainer container;
   String? bound;
+
+  /// Binding these pubkeys answers [bindStatus]; [challengeStatus] fails the
+  /// challenge first.
+  final rejectedBindings = <String>{};
+  int bindStatus = 409;
+  int? challengeStatus;
   int starterFailures = 0;
   final policyResponses = <http.Response>[];
   int browserStarts = 0;
+  final browserUrls = <Uri>[];
+  bool needsAccountSetup = false;
+  bool screeningPending = false;
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
   bool relayAuthEnabled = false;
@@ -143,7 +152,20 @@ class HostedJourneyFixture {
       };
     } else if (path.endsWith('/me')) {
       if (expiredSession) return http.Response('{}', 401);
-      result = {'subject': subject, 'expires_at': expiry};
+      result = {
+        'subject': subject,
+        'expires_at': expiry,
+        'account_status': needsAccountSetup
+            ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
+            : screeningPending
+            ? 'ACCOUNT_STATUS_PENDING'
+            : 'ACCOUNT_STATUS_OK',
+        if (needsAccountSetup || screeningPending)
+          'account_standing': {
+            'details_status': 'ACCOUNT_DETAILS_STATUS_MISSING',
+            'screening_status': 'ACCOUNT_SCREENING_STATUS_NOT_SCREENED',
+          },
+      };
     } else if (path.endsWith('/identity/assertions')) {
       await beforeAssertionReturn?.call();
       if (expiredSession) return http.Response('{}', 401);
@@ -207,6 +229,7 @@ class HostedJourneyFixture {
         'failed_backup_ids': <String>[],
       };
     } else if (path.endsWith('/challenge')) {
+      if (challengeStatus != null) return http.Response('{}', challengeStatus!);
       result = {
         'challenge_id': '12345678-1234-1234-1234-123456789abc',
         'nonce': 'a' * 43,
@@ -218,6 +241,9 @@ class HostedJourneyFixture {
       final event =
           jsonDecode(jsonDecode(request.body)['signed_payload'] as String)
               as Map;
+      if (rejectedBindings.contains(event['pubkey'])) {
+        return http.Response('{}', bindStatus);
+      }
       bound = event['pubkey'] as String;
       result = {
         'identity': {'pubkey_hex': bound},
@@ -369,7 +395,8 @@ class HostedJourneyFixture {
 
   HostedFlow createFlow(Ref ref) => activeFlow = createHostedFlow(
     ref,
-    browserAuth: _Browser(() async {
+    browserAuth: _Browser((uri) async {
+      browserUrls.add(uri);
       browserStarts++;
       await beforeBrowserReturn?.call();
     }),
@@ -428,7 +455,7 @@ class HostedJourneyFixture {
               final signIn = OrganizationSignIn(
                 account: ref.watch(organizationAccountProvider)!,
                 browser: _Browser(
-                  () async => organizationBrowserStarts++,
+                  (_) async => organizationBrowserStarts++,
                   origin: organizationOrigin,
                 ),
                 // As in production: only the organization's relay reconnects.
@@ -564,7 +591,7 @@ class HostedJourneyFixture {
         .open(
           Uri(
             scheme: 'buzz',
-            host: invite ? 'join' : 'add',
+            host: invite ? 'join' : 'add-community',
             queryParameters: {
               'relay': 'wss://$name.communities.buzz.xyz',
               if (invite) 'code': 'invite-$name',
@@ -664,10 +691,10 @@ class _Recovery implements InviteJoinRecovery {
 }
 
 class _Browser extends BrowserAuth {
-  _Browser(Future<void> Function() onStart, {super.origin})
+  _Browser(Future<void> Function(Uri) onStart, {super.origin})
     : super(
         openBrowser: (uri) async {
-          await onStart();
+          await onStart(uri);
           return Uri.parse(BrowserAuth.callback)
               .replace(
                 queryParameters: {

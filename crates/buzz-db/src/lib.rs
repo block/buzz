@@ -21,6 +21,28 @@
 //! Existing crate-root modules, records, and [`Db`] methods remain the public
 //! API. The internal `runtime` and `store` namespaces are not public APIs.
 
+/// Wrap `$retire`, an `UPDATE`/`DELETE` on `events` that retires a
+/// coordinate's previous head, so the same statement drops those rows' mention
+/// index entries. Mention-index reads (`#p` filters and feeds) never return a
+/// retired row, so its mention rows are dead weight they must walk and
+/// discard: one per member for every kind:39002 roster republish. `$1` must
+/// bind the community.
+///
+/// The three replacement paths that index mentions (NIP-33 parameterized,
+/// addressable, and the relay's member snapshot) go through this, so a head
+/// and its mention rows leave together on those paths.
+macro_rules! superseded_with_mentions_sql {
+    ($retire:literal) => {
+        concat!(
+            "WITH superseded AS (",
+            $retire,
+            " RETURNING id) \
+             DELETE FROM event_mentions mention USING superseded \
+             WHERE mention.community_id = $1 AND mention.event_id = superseded.id"
+        )
+    };
+}
+
 mod runtime;
 mod store;
 
@@ -37,7 +59,7 @@ pub use runtime::{
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
-pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] =
+pub const DB_POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] =
     runtime::observability::POOL_ACQUIRE_VALID_PAIRS;
 
 /// Raw Prometheus series ceiling per relay pod for the operation-aware contract.
@@ -66,11 +88,11 @@ pub(crate) use runtime::{
 };
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
-    channel_members, community, deletion, dm, entity_deletion, event, feed, git_repo, moderation,
-    nip_fi_binding, operator_listener, partition, personal_read, product_feedback, push, reaction,
-    read_state, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
-    replaceable, storage_accounting, thread, thread_window, usage, user, user_deletion,
-    user_deletion_fences, workflow,
+    channel_members, community, community_auth, deletion, dm, entity_deletion, event, feed,
+    git_repo, leader_lock, membership_snapshot, moderation, nip_fi_binding, operator_listener,
+    partition, personal_read, product_feedback, push, reaction, read_state, relay_admin_actions,
+    relay_invite, relay_members, relay_operators, reminder, replaceable, storage_accounting,
+    thread, thread_window, user, user_deletion, user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
@@ -81,13 +103,28 @@ pub use community::{
     UnarchivedCommunityRecord,
 };
 pub use error::{DbError, Result};
-pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus};
+pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use leader_lock::SessionLeader;
 pub use nip_fi_binding::{NipFiBindingRecord, NipFiUnbind, RowCapExceeded};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
 pub use store::{ArtifactSnapshot, SnapshotDenied};
-pub use usage::SessionLeader;
+
+/// A value read from the database, with when its reading connection was
+/// checked out of the pool.
+///
+/// The statement that produced `value` started after `read_at`, so its
+/// snapshot is no older than `read_at`. A cache that serves `value` for a
+/// bound after `read_at` is never staler than that bound, however long the
+/// read waited for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadAt<T> {
+    /// The value as read.
+    pub value: T,
+    /// When the connection that read `value` was checked out.
+    pub read_at: std::time::Instant,
+}
 
 use buzz_core::CommunityId;
 

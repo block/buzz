@@ -117,3 +117,33 @@ bool validAgentModelSelection(
           (entry) => entry.id == model && entry.efforts.contains(effort),
         ) ==
         true;
+
+/// The model and effort a new agent starts with, so the easy path is a
+/// capable but affordable choice rather than a blank (or the priciest) one.
+/// A draft's own model wins when the catalog offers it; then the service's
+/// recommendation; otherwise the first Sonnet model, at medium effort when
+/// supported. Anything the catalog doesn't offer is left for the user.
+(String?, String?) startingAgentModel(
+  List<RemoteAgentModel> catalog, {
+  String? draftModel,
+  String? draftEffort,
+}) {
+  final drafted = catalog.where((entry) => entry.id == draftModel).firstOrNull;
+  if (drafted != null) {
+    return (
+      drafted.id,
+      drafted.efforts.contains(draftEffort) ? draftEffort : null,
+    );
+  }
+  final recommended = catalog
+      .where((entry) => entry.recommendedEffort != null)
+      .firstOrNull;
+  if (recommended != null) {
+    return (recommended.id, recommended.recommendedEffort);
+  }
+  final fallback = catalog
+      .where((entry) => entry.id.toLowerCase().contains('sonnet'))
+      .firstOrNull;
+  if (fallback == null) return (null, null);
+  return (fallback.id, fallback.efforts.contains('medium') ? 'medium' : null);
+}

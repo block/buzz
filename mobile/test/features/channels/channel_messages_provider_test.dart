@@ -514,6 +514,8 @@ void main() {
   });
 
   test('notices read apart keep their reactions', () async {
+    const id = _paddedId;
+    final joinedId = id('20');
     NostrEvent aux(
       String id,
       int kind,
@@ -534,14 +536,24 @@ void main() {
     );
     final relaySession = _RecordingRelaySessionNotifier(
       queryResults: [
-        [_event(id: 'message', createdAt: 10), _bounds()],
+        [
+          _event(id: id('10'), createdAt: 50),
+          _bounds(hasMore: true, cursorCreatedAt: 50, cursorId: id('10')),
+        ],
+        [
+          _event(id: id('30'), createdAt: 50),
+          _bounds(dTag: '${_channelId.toLowerCase()}:50:${id('10')}'),
+        ],
       ],
     );
-    relaySession.noticeResults.add([_joinNotice('joined', 20)]);
+    relaySession.noticeResults.addAll([
+      [_joinNotice(joinedId, 50)],
+      [_joinNotice(joinedId, 50)],
+    ]);
     relaySession.auxEvents.addAll([
-      aux('kept', EventKind.reaction, 'joined', content: '👍'),
-      aux('removed', EventKind.reaction, 'joined', content: '🎉'),
-      aux('unreacted', EventKind.reaction, 'joined', content: '👀'),
+      aux('kept', EventKind.reaction, joinedId, content: '👍'),
+      aux('removed', EventKind.reaction, joinedId, content: '🎉'),
+      aux('unreacted', EventKind.reaction, joinedId, content: '👀'),
       aux('removal', EventKind.deletion, 'removed'),
       aux('channel-less', EventKind.deletion, 'unreacted', inChannel: false),
     ]);
@@ -564,7 +576,7 @@ void main() {
         null,
       ],
     );
-    expect(reads[0].tags['#e'], ['joined']);
+    expect(reads[0].tags['#e'], [joinedId]);
     expect(
       reads[2].tags['#e'],
       unorderedEquals(['kept', 'removed', 'unreacted']),
@@ -572,10 +584,43 @@ void main() {
     for (final read in reads.skip(1)) {
       expect(read.kinds, isNot(contains(EventKind.reaction)));
     }
+    // The notice is cached below the current same-second message floor.
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .requireValue
+          .where((event) => event.id == joinedId),
+      isEmpty,
+    );
+    relaySession.emit(aux('live', EventKind.reaction, joinedId, content: '🔥'));
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(await notifier.fetchOlder(), isTrue);
+    await _pumpEventQueue();
+    expect(
+      reads,
+      hasLength(4),
+      reason: 'cached notices need no auxiliary reread',
+    );
     final joined = formatTimeline(
       container.read(channelMessagesProvider(_channelId)).value!,
-    ).singleWhere((message) => message.id == 'joined');
-    expect(joined.reactions.map((reaction) => reaction.emoji), ['👍']);
+    ).singleWhere((message) => message.id == joinedId);
+    expect(
+      joined.reactions.map((reaction) => reaction.emoji),
+      unorderedEquals(['👍', '🔥']),
+    );
+    relaySession.emit(aux('live-removal', EventKind.deletion, 'kept'));
+    await _pumpEventQueue();
+    expect(
+      formatTimeline(
+            container.read(channelMessagesProvider(_channelId)).requireValue,
+          )
+          .singleWhere((message) => message.id == joinedId)
+          .reactions
+          .map((reaction) => reaction.emoji),
+      ['🔥'],
+    );
   });
 
   test('notice reactions are read past one page', () async {
@@ -723,54 +768,102 @@ void main() {
     expect(joined.reactions.single.count, 500);
   });
 
-  test(
-    'a page that loads during a failed notice read gets its notices',
-    () async {
-      const id = _paddedId;
+  for (final rowId in [_paddedId('50'), 'z-row']) {
+    test('an empty notice range stops at its message floor: $rowId', () async {
       final relaySession = _RecordingRelaySessionNotifier(
         queryResults: [
           [
-            _event(id: id('a100'), createdAt: 100),
-            _bounds(hasMore: true, cursorCreatedAt: 100, cursorId: id('a100')),
-          ],
-          [
-            _event(id: id('a10'), createdAt: 10),
-            _bounds(dTag: '${_channelId.toLowerCase()}:100:${id('a100')}'),
+            _event(id: rowId, createdAt: 50),
+            _bounds(
+              hasMore: true,
+              cursorCreatedAt: 50,
+              cursorId: _paddedId('50'),
+            ),
           ],
         ],
       );
-      final firstRead = Completer<List<NostrEvent>>();
       relaySession.noticeResults.addAll([
-        firstRead.future,
-        [_joinNotice(id('n50'), 50)],
+        <NostrEvent>[],
+        // Bound a broken implementation too, so a repeated empty-range read
+        // fails the assertion instead of exhausting the test process's heap.
+        Exception('unexpected repeated notice range'),
       ]);
       final container = _buildContainer(relaySession);
       addTearDown(container.dispose);
-
       container.read(channelMessagesProvider(_channelId));
       await relaySession.subscribed;
       await _pumpEventQueue();
       expect(relaySession.noticeFilters, hasLength(1));
-
-      final notifier = container.read(
-        channelMessagesProvider(_channelId).notifier,
-      );
-      expect(await notifier.fetchOlder(), isTrue);
-      await _pumpEventQueue();
-      expect(relaySession.noticeFilters, hasLength(1));
-
-      firstRead.completeError(Exception('notices unavailable'));
-      await _pumpEventQueue();
-      expect(relaySession.noticeFilters, hasLength(2));
       expect(
         container
             .read(channelMessagesProvider(_channelId))
-            .value!
-            .map((event) => event.id),
-        [id('a10'), id('n50'), id('a100')],
+            .requireValue
+            .map((e) => e.id),
+        [rowId],
       );
-    },
-  );
+    });
+  }
+
+  for (final fails in [false, true]) {
+    test(
+      'a page that loads during a notice read gets its notices: fails=$fails',
+      () async {
+        const id = _paddedId;
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [
+              _event(id: id('a100'), createdAt: 100),
+              _bounds(
+                hasMore: true,
+                cursorCreatedAt: 100,
+                cursorId: id('a100'),
+              ),
+            ],
+            [
+              _event(id: id('a10'), createdAt: 10),
+              _bounds(dTag: '${_channelId.toLowerCase()}:100:${id('a100')}'),
+            ],
+          ],
+        );
+        final firstRead = Completer<List<NostrEvent>>();
+        relaySession.noticeResults.addAll([
+          firstRead.future,
+          [_joinNotice(id('n50'), 50)],
+        ]);
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(1));
+
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        expect(await notifier.fetchOlder(), isTrue);
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(1));
+
+        if (fails) {
+          firstRead.completeError(Exception('notices unavailable'));
+        } else {
+          firstRead.complete([]);
+        }
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(2));
+        expect(relaySession.noticeFilters.first.since, 100);
+        expect(relaySession.noticeFilters.last.since, isNull);
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .value!
+              .map((event) => event.id),
+          [id('a10'), id('n50'), id('a100')],
+        );
+      },
+    );
+  }
 
   test('the notice descent stops at its cap', () async {
     const id = _paddedId;
@@ -803,6 +896,97 @@ void main() {
       hasLength(1 + 4 * NostrFilters.channelNoticePageSize),
     );
   });
+
+  for (final overlaps in [false, true]) {
+    test(
+      'mixed notice ranges respect the unique cap: overlaps=$overlaps',
+      () async {
+        const id = _paddedId;
+        final shortPages = [
+          for (var page = 0; page < 4; page++)
+            [
+              for (var i = 0; i < 499; i++)
+                _joinNotice(
+                  id('p$page-${i.toString().padLeft(3, '0')}'),
+                  page == 3 ? 2000 : 6000 - page * 1000 - i,
+                ),
+            ],
+        ];
+        final tail = [
+          for (var i = 0; i < (overlaps ? 498 : 500); i++)
+            _joinNotice(id('tail-${i.toString().padLeft(3, '0')}'), 1999 - i),
+        ];
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            for (var page = 0; page < 6; page++)
+              [
+                _event(id: id('a$page'), createdAt: 5000 - page * 1000),
+                _bounds(
+                  hasMore: page < 5,
+                  cursorCreatedAt: 5000 - page * 1000,
+                  cursorId: id('a$page'),
+                  dTag: page == 0
+                      ? null
+                      : '${_channelId.toLowerCase()}:${6000 - page * 1000}:${id('a${page - 1}')}',
+                ),
+              ],
+          ],
+        );
+        relaySession.noticeResults.addAll([
+          ...shortPages,
+          [if (overlaps) ...shortPages.last.take(2), ...tail],
+        ]);
+        final container = _buildContainer(relaySession);
+        addTearDown(container.dispose);
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        final notifier = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        );
+        for (var page = 1; page < 5; page++) {
+          expect(await notifier.fetchOlder(), isTrue);
+          await _pumpEventQueue();
+        }
+        final retained = container
+            .read(channelMessagesProvider(_channelId))
+            .requireValue
+            .where((event) => event.kind == EventKind.systemMessage)
+            .toList();
+        expect(retained, hasLength(2000));
+        expect(retained.map((event) => event.id).toSet(), hasLength(2000));
+        expect(
+          retained.map((event) => event.id),
+          containsAll(tail.take(4).map((e) => e.id)),
+        );
+        final discarded = tail.skip(4).map((e) => e.id).toSet();
+        expect(
+          retained.map((event) => event.id),
+          isNot(anyElement(isIn(discarded))),
+        );
+        expect(
+          relaySession.auxFilters.expand(
+            (filter) => filter.tags['#e'] ?? const <String>[],
+          ),
+          isNot(anyElement(isIn(discarded))),
+          reason:
+              'excess notices must not fetch reactions or deletion metadata',
+        );
+        final reads = relaySession.noticeFilters.length;
+        expect(await notifier.fetchOlder(), isTrue);
+        await _pumpEventQueue();
+        expect(relaySession.noticeFilters, hasLength(reads));
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .requireValue
+              .map((event) => event.id),
+          contains(id('a5')),
+          reason: 'reaching the notice cap must not stop message paging',
+        );
+      },
+    );
+  }
 
   test('retains historical and live Huddle end events in the window', () async {
     final relaySession = _RecordingRelaySessionNotifier(
@@ -2145,6 +2329,44 @@ void main() {
       expect(container.exists(threadLocalRepliesProvider(args)), isFalse);
     },
   );
+
+  test('reply counts stay on screen while a reconnect catches up', () async {
+    final reconnectPage = Completer<List<NostrEvent>>();
+    final session = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: threadIdRoot, createdAt: 10),
+          _summary(rootId: threadIdRoot, replyCount: 6, createdAt: 10),
+          _bounds(),
+        ],
+        reconnectPage.future,
+      ],
+    );
+    final container = _buildContainer(session);
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await _pumpEventQueue();
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(notifier.threadSummaries[threadIdRoot]?.replyCount, 6);
+
+    session.setConnected(false);
+    await _pumpEventQueue();
+    session.setConnected(true);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isTrue);
+    expect(notifier.threadSummaries[threadIdRoot]?.replyCount, 6);
+
+    // The replacement window decides, including dropping a summary.
+    reconnectPage.complete([
+      _event(id: threadIdRoot, createdAt: 10),
+      _bounds(),
+    ]);
+    await _pumpEventQueue();
+    expect(notifier.isCatchingUp, isFalse);
+    expect(notifier.threadSummaries[threadIdRoot], isNull);
+  });
 
   test('a loaded timeline catches up after reconnecting', () async {
     final reconnectPage = Completer<List<NostrEvent>>();
@@ -6028,6 +6250,46 @@ void main() {
       );
     },
   );
+
+  test('concurrent window pagination shares one page request', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'head', createdAt: 20),
+          _bounds(hasMore: true, cursorCreatedAt: 20, cursorId: 'head'),
+        ],
+        [
+          _event(id: 'older', createdAt: 10),
+          _bounds(dTag: '${_channelId.toLowerCase()}:20:head'),
+        ],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    final queriesBefore = relaySession.queryFilters.length;
+    final results = await Future.wait([
+      notifier.fetchOlder(),
+      notifier.fetchOlder(),
+    ]);
+
+    expect(results, [isTrue, isTrue]);
+    expect(relaySession.queryFilters.length - queriesBefore, 1);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((event) => event.id),
+      ['older', 'head'],
+    );
+  });
 
   test('window pagination failures return false without exhausting', () async {
     final relaySession = _RecordingRelaySessionNotifier(

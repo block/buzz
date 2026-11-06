@@ -39,6 +39,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   void Function()? _unsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
+  Future<bool>? _olderInFlight;
   bool _usingChannelWindow = false;
   NostrEvent? _legacyHistoryCursor;
   bool _initialWindowQueryInFlight = false;
@@ -66,6 +67,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final Map<String, String> _localReplyRoots = {};
   final Map<String, ChannelWindowThreadSummary> _queryThreadSummaries = {};
   final Map<String, ChannelWindowThreadSummary> _overflowFloors = {};
+
+  /// Thread summaries from the window a reconnect discarded. They stand,
+  /// below every fresher source, until the replacement history lands, so
+  /// reply counts don't blink off during the catch-up.
+  Map<String, ChannelWindowThreadSummary> _reconnectSummaries = const {};
   final Map<String, int> _threadQueryVersions = {};
   final Map<String, int> _threadEvidenceVersions = {};
   int _threadQuerySerial = 0;
@@ -136,6 +142,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   Map<String, ChannelWindowThreadSummary> get _baseThreadSummaries => {
+    ..._reconnectSummaries,
     ...channelWindowThreadSummaries(_windowStore),
     ..._queryThreadSummaries,
     ..._overflowFloors,
@@ -190,6 +197,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
 
     _reachedOldest = false;
+    if (_windowStore.pages.isNotEmpty) {
+      _reconnectSummaries = channelWindowThreadSummaries(_windowStore);
+    }
     _windowStore = const ChannelWindowStore.empty();
     _notices.clear();
     _noticeAux.clear();
@@ -260,6 +270,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ...history.where((event) => existingIds.add(event.id)),
       ]);
       _lastKnownMessages = merged;
+      _reconnectSummaries = const {};
       _reconcileRetainedSummaryPayloads(merged);
       _reconcileRetainedAggregates(historyVersion);
       // Clear before publishing so the rebuild it triggers is no longer
@@ -313,6 +324,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         page,
         retainLiveSummaryRootIds: _liveSummaryRootsDuringInitialWindowQuery,
       );
+      _reconnectSummaries = const {};
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       _pruneOffWindowReplies();
       _usingChannelWindow = true;
@@ -1016,7 +1028,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   AsyncValue<List<NostrEvent>> get _historyState => state;
   set _historyState(AsyncValue<List<NostrEvent>> value) => state = value;
 
-  Future<bool> fetchOlder() => _fetchOlder();
+  /// Concurrent callers share one in-flight page; pages continue one cursor.
+  Future<bool> fetchOlder() => _olderInFlight ??= _fetchOlder().whenComplete(
+    () => _olderInFlight = null,
+  );
 }
 
 int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;

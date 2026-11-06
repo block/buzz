@@ -2849,7 +2849,7 @@ void main() {
   });
 
   test(
-    'archived kind:39000 metadata sets Channel.isArchived (covers TTL auto-archive)',
+    'archived and unlisted kind:39000 flags reach Channel (covers TTL auto-archive)',
     () async {
       // The relay's TTL reaper auto-archives expired ephemeral channels and
       // republishes kind:39000 with `["archived", "true"]`. The Channel needs
@@ -2864,7 +2864,7 @@ void main() {
           _membership(_channelB, myPk),
         ],
         metadata: [
-          _meta(id: _channelA, name: 'active'),
+          _meta(id: _channelA, name: 'active', unlisted: true),
           _meta(
             id: _channelB,
             name: 'expired-ttl',
@@ -2883,6 +2883,10 @@ void main() {
       // The active channel must not be flagged archived.
       final active = channels.firstWhere((c) => c.name == 'active');
       expect(active.isArchived, isFalse);
+      // The bare `["unlisted"]` flag: an unlisted namesake does not hold a
+      // name in the relay's listed-name rule (starter setup relies on it).
+      expect(active.isUnlisted, isTrue);
+      expect(expired.isUnlisted, isFalse);
     },
   );
 
@@ -3132,6 +3136,7 @@ NostrEvent _meta({
   int createdAt = 1,
   int? ttlSeconds,
   bool archived = false,
+  bool unlisted = false,
   List<String> participants = const [],
 }) => NostrEvent(
   id: 'meta-$id',
@@ -3145,6 +3150,7 @@ NostrEvent _meta({
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
     if (archived) ['archived', 'true'],
+    if (unlisted) ['unlisted'],
     for (final participant in participants) ['p', participant],
   ],
   content: '',
@@ -3277,6 +3283,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> directoryQueryFilters = [];
   final List<NostrFilter> membershipQueryFilters = [];
   final List<NostrFilter> subscribeFilters = [];
+  // The channel list notice subscription, kept apart from the live channel
+  // subscriptions these tests count.
+  final List<NostrFilter> listNoticeFilters = [];
+  final Map<int, void Function(NostrEvent)> _listNoticeListeners = {};
   final Map<
     int,
     (NostrFilter, void Function(NostrEvent), void Function(String message)?)
@@ -3706,11 +3716,29 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    if (filter.kinds.contains(EventKind.memberAddedNotification)) {
+      final key = ++_nextSubscriptionKey;
+      listNoticeFilters.add(filter);
+      _listNoticeListeners[key] = onEvent;
+      return () {
+        if (_listNoticeListeners.remove(key) != null) {
+          listNoticeFilters.remove(filter);
+        }
+      };
+    }
     totalSubscribeCount++;
     subscribeFilters.add(filter);
     final paused = _pausedSubscribe;
@@ -3754,6 +3782,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   /// Emit a live event to all subscribers.
   void emit(NostrEvent event) {
     for (final (_, listener, _) in List.of(_subscriptions.values)) {
+      listener(event);
+    }
+    for (final listener in List.of(_listNoticeListeners.values)) {
       listener(event);
     }
   }

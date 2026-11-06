@@ -17,18 +17,19 @@ String _threadTypingKey(List<TypingEntry> all, String? selfPubkey) {
 /// message ID, in first-seen order. As on desktop, the user's agents are their
 /// inventory, archived ones included, read at most
 /// [meAgentInventoryMaxAge] ago. Other typing in a thread stays inside the
-/// thread view.
+/// thread view. DMs also include their known agents via [additionalAgents].
 Map<String, List<String>> _threadWorkingAgents(
   WidgetRef ref,
-  String typingKey,
-) {
+  String typingKey, {
+  Set<String> additionalAgents = const {},
+}) {
   if (typingKey.isEmpty) return const {};
   final owned = ref.watch(meAgentInventoryProvider).value;
-  if (owned == null) return const {};
+  final eligible = {...?owned, ...additionalAgents};
   final working = <String, List<String>>{};
   for (final pair in typingKey.split(',')) {
     final [pubkey, root] = pair.split(' ');
-    if (!owned.contains(pubkey)) continue;
+    if (!eligible.contains(pubkey)) continue;
     final agents = working.putIfAbsent(root, () => []);
     if (!agents.contains(pubkey)) agents.add(pubkey);
   }

@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/default_agent_launcher.dart';
+import 'package:buzz/features/channels/bestie_welcome.dart';
+import 'package:buzz/features/channels/bestie_welcome_storage.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -9,12 +11,15 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
+
 import 'dart:async';
+
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 
 import '../profile/presence_snapshot_test.dart'
     show PresenceTestRelay, presenceEvent;
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -53,7 +58,7 @@ import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
-import 'package:buzz/features/channels/emoji_picker.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
@@ -61,6 +66,7 @@ import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -71,6 +77,7 @@ import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
@@ -101,6 +108,8 @@ part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
 part 'channel_detail_page_test/action_row_tests.dart';
 part 'channel_detail_page_test/bubble_tests.dart';
+part 'channel_detail_page_test/message_width_tests.dart';
+part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 
@@ -247,6 +256,7 @@ Widget _buildTestable({
   bool personalChat = false,
   required List<NostrEvent> messages,
   PresenceCacheNotifier? presenceCache,
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
   List<TypingEntry> typing = const [],
   Map<String, UserProfile> users = const {},
   Set<String>? knownAgentPubkeys,
@@ -265,10 +275,14 @@ Widget _buildTestable({
   _FakeChannelsNotifier? channelsNotifier,
   List<NavigatorObserver> navigatorObservers = const [],
   Future<List<ChannelMember>> Function()? loadMembers,
-  List<DirectoryUser>? directoryUsers,
+  List<UserProfile>? directoryPeople,
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
+
+  /// The channel's own history in a personal chat, which [messagesNotifier]
+  /// does not back there.
+  _FakeMessagesNotifier? channelMessagesNotifier,
   _FakeTypingNotifier? typingNotifier,
   _FakeTypingNotifier? huddleTypingNotifier,
   String? canvasContent,
@@ -293,7 +307,6 @@ Widget _buildTestable({
   List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
   http.Client? mediaClient,
-  VideoPreviewFrameLoader? videoPreviewLoader,
   Widget? home,
   Stream<MeGroups>? organization,
   SendMessage? sender,
@@ -340,11 +353,9 @@ Widget _buildTestable({
         meMessagesProvider(_channelId).overrideWith(() => fakeMessagesNotifier),
         meAssistantsProvider.overrideWith((ref) async => []),
       ],
-      if (videoPreviewLoader != null)
-        videoPreviewFrameLoaderProvider.overrideWithValue(videoPreviewLoader),
       channelMessagesProvider(_channelId).overrideWith(
         () => personalChat
-            ? _FakeMessagesNotifier(messages)
+            ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
             : fakeMessagesNotifier,
       ),
       channelTypingProvider(
@@ -363,6 +374,8 @@ Widget _buildTestable({
       ),
       if (signingPubkey != null)
         myPubkeyProvider.overrideWithValue(signingPubkey),
+      if (ownedAgents != null)
+        ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (presenceCache != null)
         presenceCacheProvider.overrideWith(() => presenceCache),
       if (!useRealChannelProviders)
@@ -413,8 +426,16 @@ Widget _buildTestable({
       meAgentInventoryReadProvider.overrideWithValue(
         () async => {...inventoryAgents},
       ),
-      if (directoryUsers != null)
-        relayDirectoryUsersProvider.overrideWith((ref) async => directoryUsers),
+      if (directoryPeople != null)
+        mentionUserSearchProvider.overrideWith(
+          (ref, query) async => [
+            for (final person in directoryPeople)
+              if (person.displayName!.toLowerCase().contains(
+                query.trim().toLowerCase(),
+              ))
+                person,
+          ],
+        ),
       if (createChannelActions != null)
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
@@ -582,10 +603,14 @@ double? effectiveFontSizeForText(
   return null;
 }
 
+const _directoryAlice =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const _directoryBob =
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
   for (final fromLauncher in [false, true]) {
     testWidgets(
-      'Bestie DM shows replies inline and sends at top level: launcher=$fromLauncher',
+      'Bestie DM preserves thread replies and ordinary sends: launcher=$fromLauncher',
       (tester) async {
         final sender = _RecordingOrdinarySender();
         final dm = Channel(
@@ -607,7 +632,20 @@ void main() {
             bestie: 'agent',
             organization: Stream.value(const MeGroups()),
             channel: dm,
-            soloSender: sender,
+            sender: sender,
+            threadReplies: {
+              threadIdRoot: [
+                _textMsg(
+                  id: threadIdA,
+                  pubkey: 'agent',
+                  content: 'Existing threaded answer',
+                  createdAt: 1001,
+                  extraTags: [
+                    ['e', threadIdRoot, '', 'reply'],
+                  ],
+                ),
+              ],
+            },
             messages: [
               _textMsg(
                 id: threadIdRoot,
@@ -620,7 +658,7 @@ void main() {
                 content: 'Existing threaded answer',
                 createdAt: 1001,
                 extraTags: [
-                  ['e', threadIdRoot, '', 'root'],
+                  ['e', threadIdRoot, '', 'reply'],
                 ],
               ),
             ],
@@ -628,7 +666,6 @@ void main() {
                 ? Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {}))
                 : ChannelDetailPage(
                     channel: dm,
-                    continuousConversation: true,
                     initialMessageId: threadIdA,
                     initialThreadRootId: threadIdRoot,
                   ),
@@ -639,24 +676,191 @@ void main() {
           await tester.tap(find.byType(IconButton));
           await tester.pumpAndSettle();
         }
+        if (fromLauncher) {
+          expect(find.byType(ThreadDetailPage), findsNothing);
+          final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+          await tester.tap(row);
+          await tester.pumpAndSettle();
+        }
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(find.text('Existing threaded answer'), findsOneWidget);
-        expect(find.byType(ThreadDetailPage), findsNothing);
-        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
-        await tester.tap(row);
-        await tester.pumpAndSettle();
-        expect(find.byType(ThreadDetailPage), findsNothing);
-        await tester.drag(row, const Offset(220, 0));
+        await tester
+            .widget<ComposeBar>(find.byType(ComposeBar).last)
+            .onSend('Reply in thread', []);
+        expect(sender.parents, [threadIdRoot]);
+        await tester.pageBack();
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsNothing);
         await tester
             .widget<ComposeBar>(find.byType(ComposeBar))
             .onSend('Continue here', []);
-        expect(sender.sent, ['Continue here']);
-        expect(sender.parents, [null]);
-        expect(sender.channels.single?.isDm, isTrue);
+        expect(sender.sent, ['Reply in thread', 'Continue here']);
+        expect(sender.parents, [threadIdRoot, null]);
+        expect(
+          sender.channels.every((channel) => channel?.id == dm.id),
+          isTrue,
+        );
+        final row = find.byKey(const ValueKey('message-row-$threadIdRoot'));
+        await tester.drag(
+          find
+              .descendant(
+                of: row,
+                matching: find.byType(LocalSendBubbleSurface),
+              )
+              .first,
+          const Offset(220, 0),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
         expect(tester.takeException(), isNull);
       },
     );
+  }
+  testWidgets('a saved Bestie welcome keeps a way to older history', (
+    tester,
+  ) async {
+    List<NostrEvent> hiddenPage(int page) => [
+      for (var i = 0; i < 3; i++)
+        _systemMsg(
+          id: 'join$page-$i',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'user$page-$i',
+            'target': 'user$page-$i',
+          },
+          createdAt: 10000 - page * 10 - i,
+        ),
+    ];
+    final messagesNotifier = _FakeMessagesNotifier(
+      hiddenPage(0),
+      olderPages: [
+        for (var page = 1; page <= 5; page++) hiddenPage(page),
+        [_textMsg(id: 'old', pubkey: 'agent', content: 'Older chat')],
+      ],
+    );
+    final dm = Channel(
+      id: _channelId,
+      name: 'Bestie',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'self',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      participantPubkeys: const ['self', 'agent'],
+      isMember: true,
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        signingPubkey: 'self',
+        bestie: 'agent',
+        organization: Stream.value(const MeGroups()),
+        channel: dm,
+        messages: const [],
+        channelMessagesNotifier: messagesNotifier,
+        home: const Scaffold(
+          body: DefaultAgentLauncher(onChooseAgent: _noAgentChoice),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(DefaultAgentLauncher)),
+    );
+    await saveBestieWelcome(
+      container.read(savedPrefsProvider),
+      container.read(meSyncProvider),
+      _channelId,
+      'agent',
+    );
+    await tester.tap(find.byType(IconButton));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(BestieWelcome), findsOneWidget);
+    expect(messagesNotifier.fetchOlderCalls, 5);
+    expect(find.text('Load earlier messages'), findsOneWidget);
+
+    await tester.tap(find.text('Load earlier messages'));
+    await tester.pumpAndSettle();
+    expect(findRichText('Older chat'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+  for (final hasHistory in [true, false]) {
+    testWidgets('a saved Bestie welcome stays at the start of its chat: '
+        'history=$hasHistory', (tester) async {
+      final dm = Channel(
+        id: _channelId,
+        name: 'Bestie',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        participantPubkeys: const ['self', 'agent'],
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          personalChat: true,
+          signingPubkey: 'self',
+          bestie: 'agent',
+          organization: Stream.value(const MeGroups()),
+          channel: dm,
+          messages: [
+            if (hasHistory)
+              _textMsg(id: threadIdRoot, pubkey: 'agent', content: 'Hello!'),
+          ],
+          home: const Scaffold(
+            body: DefaultAgentLauncher(onChooseAgent: _noAgentChoice),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DefaultAgentLauncher)),
+      );
+      // Creating a first agent saves this before opening its chat.
+      await saveBestieWelcome(
+        container.read(savedPrefsProvider),
+        container.read(meSyncProvider),
+        _channelId,
+        'agent',
+      );
+      await tester.tap(find.byType(IconButton));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+      expect(find.byType(BestieWelcome), findsOneWidget);
+      expect(find.text('Hello!'), hasHistory ? findsOneWidget : findsNothing);
+      if (!hasHistory) {
+        final messages =
+            container.read(channelMessagesProvider(_channelId).notifier)
+                as _FakeMessagesNotifier;
+        messages.setMessages([
+          _textMsg(
+            id: threadIdRoot,
+            pubkey: 'self',
+            content: 'My first message',
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(find.byType(BestieWelcome), findsOneWidget);
+        expect(find.text('My first message'), findsOneWidget);
+        tester.state<NavigatorState>(find.byType(Navigator).first).pop();
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(DefaultAgentLauncher),
+            matching: find.byType(IconButton),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BestieWelcome), findsOneWidget);
+        expect(find.text('My first message'), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
   }
   testWidgets(
     'refresh replaces stale Solo details before opening and sending',
@@ -753,6 +957,7 @@ void main() {
   presenceTests();
   actionRowTests();
   bubbleLayoutTests();
+  messageWidthTests();
   swipeReplyTests();
   reviewAvatarTests();
   setUp(() async {
@@ -3675,8 +3880,8 @@ void main() {
               joinedAt: DateTime(2025),
             ),
           ],
-          directoryUsers: const [
-            DirectoryUser(pubkey: 'alice', displayName: 'Alice'),
+          directoryPeople: [
+            UserProfile(pubkey: _directoryAlice, displayName: 'Alice'),
           ],
         ),
       );
@@ -3710,8 +3915,8 @@ void main() {
               joinedAt: DateTime(2025),
             ),
           ],
-          directoryUsers: const [
-            DirectoryUser(pubkey: 'alice', displayName: 'Alice'),
+          directoryPeople: [
+            UserProfile(pubkey: _directoryAlice, displayName: 'Alice'),
           ],
           createChannelActions: (ref) => _FakeChannelActions(
             ref,
@@ -3730,33 +3935,39 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      await tester.enterText(
+        find.byKey(const ValueKey('add-channel-members-search')),
+        'Al',
+      );
       await tester.pump();
-      final unselectedSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('add-channel-member-alice')),
+      await tester.pumpAndSettle();
+      final rowSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
       );
-      expect(unselectedSemantics.flagsCollection.isButton, isTrue);
-      expect(
-        unselectedSemantics.flagsCollection.isSelected.toString(),
-        'Tristate.isFalse',
-      );
+      expect(rowSemantics.flagsCollection.isButton, isTrue);
+      expect(rowSemantics.label, 'Alice');
 
-      await tester.tap(find.byKey(const ValueKey('add-channel-member-alice')));
+      await tester.tap(
+        find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
+      );
       await tester.pump();
-      final selectedSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('add-channel-member-alice')),
-      );
-      expect(selectedSemantics.flagsCollection.isButton, isTrue);
+      // A pick moves to the chips above the search.
       expect(
-        selectedSemantics.flagsCollection.isSelected.toString(),
-        'Tristate.isTrue',
+        find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
+        findsNothing,
       );
-      expect(selectedSemantics.label, 'Alice, selected');
+      expect(
+        find.byKey(
+          const ValueKey('add-channel-member-selected-$_directoryAlice'),
+        ),
+        findsOneWidget,
+      );
       await tester.tap(
         find.byKey(const ValueKey('add-channel-members-submit')),
       );
       await tester.pumpAndSettle();
 
-      expect(addedPubkeys, ['alice']);
+      expect(addedPubkeys, [_directoryAlice]);
       expect(
         find.byKey(const ValueKey('add-channel-members-search')),
         findsNothing,
@@ -3778,9 +3989,9 @@ void main() {
                 joinedAt: DateTime(2025),
               ),
             ],
-            directoryUsers: const [
-              DirectoryUser(pubkey: 'alice', displayName: 'Alice'),
-              DirectoryUser(pubkey: 'bob', displayName: 'Bob'),
+            directoryPeople: [
+              UserProfile(pubkey: _directoryAlice, displayName: 'Alice'),
+              UserProfile(pubkey: _directoryBob, displayName: 'Bob'),
             ],
             createChannelActions: (ref) => _FakeChannelActions(
               ref,
@@ -3788,7 +3999,7 @@ void main() {
                 submittedPubkeys.add(pubkeys);
                 attempts += 1;
                 if (attempts == 1) {
-                  throw const AddMembersException({'bob': 'rejected'});
+                  throw const AddMembersException({_directoryBob: 'rejected'});
                 }
               },
             ),
@@ -3805,18 +4016,29 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(
-          find.byKey(const ValueKey('add-channel-member-alice')),
-        );
-        await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('add-channel-member-bob')));
-        await tester.pump();
+        Future<void> pick(String name, String pubkey) async {
+          await tester.enterText(
+            find.byKey(const ValueKey('add-channel-members-search')),
+            name,
+          );
+          await tester.pump();
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(ValueKey('add-channel-member-$pubkey')));
+          await tester.pump();
+        }
+
+        await pick('Alice', _directoryAlice);
+        await pick('Bob', _directoryBob);
         expect(
-          find.byKey(const ValueKey('add-channel-member-selected-alice')),
+          find.byKey(
+            const ValueKey('add-channel-member-selected-$_directoryAlice'),
+          ),
           findsOneWidget,
         );
         expect(
-          find.byKey(const ValueKey('add-channel-member-selected-bob')),
+          find.byKey(
+            const ValueKey('add-channel-member-selected-$_directoryBob'),
+          ),
           findsOneWidget,
         );
         await tester.tap(
@@ -3826,24 +4048,29 @@ void main() {
 
         expect(attempts, 1);
         expect(
-          find.byKey(const ValueKey('add-channel-member-selected-alice')),
+          find.byKey(
+            const ValueKey('add-channel-member-selected-$_directoryAlice'),
+          ),
           findsNothing,
         );
-        expect(
-          find.byKey(const ValueKey('add-channel-member-selected-bob')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('add-channel-member-alice')),
-          findsNothing,
-        );
-        // The successful add must not remain selected for a retry.
+        // The successful add must not remain selected for a retry, nor be
+        // offered again.
         expect(
           tester
               .widgetList<InputChip>(find.byType(InputChip))
               .map((chip) => chip.key)
               .toList(),
-          [const ValueKey('add-channel-member-selected-bob')],
+          [const ValueKey('add-channel-member-selected-$_directoryBob')],
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('add-channel-members-search')),
+          'Alice',
+        );
+        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('add-channel-member-$_directoryAlice')),
+          findsNothing,
         );
         await tester.tap(
           find.byKey(const ValueKey('add-channel-members-submit')),
@@ -3851,8 +4078,8 @@ void main() {
         await tester.pumpAndSettle();
         expect(attempts, 2);
         expect(submittedPubkeys, [
-          ['alice', 'bob'],
-          ['bob'],
+          [_directoryAlice, _directoryBob],
+          [_directoryBob],
         ]);
       },
     );
@@ -4217,30 +4444,27 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, 13.1);
-      expect(aliceText.style?.fontWeight, messageUsernameTextStyle.fontWeight);
-      expect(aliceText.style?.height, 17 / 13.1);
+      expect(aliceText.style?.fontSize, 11);
+      expect(aliceText.style?.fontWeight, FontWeight.w500);
+      expect(aliceText.style?.height, 17 / 11);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, 13.1);
+      expect(aliceUsername.style?.fontSize, 11);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, 17 / 13.1);
+      expect(aliceUsername.style?.height, 17 / 11);
       expect(aliceTimestamp.style?.fontSize, 11);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
+      final timeFinder = find.byKey(const ValueKey('message-timestamp-msg1'));
       expect(
-        tester
-            .getCenter(find.byKey(const ValueKey('message-timestamp-msg1')))
-            .dy,
+        tester.getCenter(timeFinder).dy,
         closeTo(tester.getCenter(aliceName).dy, 0.01),
       );
-      expect(
-        aliceTimestamp.style?.fontSize,
-        lessThan(aliceText.style!.fontSize!),
-      );
+      expect(aliceTimestamp.style?.color, aliceText.style?.color);
+      expect(aliceTimestamp.style?.fontSize, aliceText.style!.fontSize!);
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('message-row-msg1')),
@@ -4283,6 +4507,74 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsNothing,
       );
+    });
+
+    testWidgets('composer growth reuses rows, recounts refresh them', (
+      tester,
+    ) async {
+      final messages = [
+        _textMsg(id: 'msg1', pubkey: 'alice', content: 'Hello world!'),
+        _textMsg(id: 'msg2', pubkey: 'bob', content: 'Hey Alice!'),
+      ];
+      final summaries = {
+        'msg1': const ChannelWindowThreadSummary(
+          replyCount: 2,
+          descendantCount: 2,
+          lastReplyAt: 1000,
+          participantPubkeys: ['bob'],
+        ),
+      };
+      final notifier = _FakeMessagesNotifier(messages, summaries: summaries);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          messagesNotifier: notifier,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          threadReplies: const {'msg1': []},
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('2 replies'), findsOneWidget);
+
+      Widget row(String id) =>
+          tester.widget(find.byKey(ValueKey('channel-message-send-$id')));
+      double listInset() => tester
+          .widget<ScrollablePositionedList>(
+            find.byKey(const ValueKey('channel-message-list')),
+          )
+          .padding!
+          .bottom;
+      final rowsBefore = [row('msg1'), row('msg2')];
+      final insetBefore = listInset();
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'one\ntwo\nthree\nfour');
+      await tester.pumpAndSettle();
+
+      // The list moved up for the taller composer without rebuilding rows.
+      expect(listInset(), greaterThan(insetBefore));
+      expect(row('msg1'), same(rowsBefore[0]));
+      expect(row('msg2'), same(rowsBefore[1]));
+
+      // A relay recount changes only the summary, so the next list rebuild
+      // must refresh that row while leaving the others alone.
+      summaries['msg1'] = const ChannelWindowThreadSummary(
+        replyCount: 3,
+        descendantCount: 3,
+        lastReplyAt: 1000,
+        participantPubkeys: ['bob'],
+      );
+      await tester.enterText(
+        find.byType(TextField),
+        'one\ntwo\nthree\nfour\nfive',
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('3 replies'), findsOneWidget);
+      expect(row('msg2'), same(rowsBefore[1]));
     });
 
     testWidgets('keeps animated message avatars static and transparent', (
@@ -4349,12 +4641,13 @@ void main() {
               payload: {
                 'type': 'member_joined',
                 'actor': 'alice',
-                'target': 'alice',
+                'target': 'bob',
               },
             ),
           ],
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
           },
         ),
       );
@@ -4378,7 +4671,7 @@ void main() {
       );
       expect(find.byType(BottomSheet), findsOneWidget);
       expect(find.text('Copy text'), findsNothing);
-      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(findRichText(' added '), findsOneWidget);
       expect(hapticCalls, hasLength(1));
       expect(hapticCalls.single.arguments, 'HapticFeedbackType.mediumImpact');
 
@@ -4398,11 +4691,7 @@ void main() {
           messages: [
             _systemMsg(
               id: 'rebuild-target',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
+              payload: {'type': 'channel_archived', 'actor': 'alice'},
             ),
           ],
           userCacheNotifier: userCache,
@@ -5357,9 +5646,22 @@ void main() {
             createdAt: 1000 + i,
           ),
       ];
+      // A page of only hidden notices sits between, adding no entry.
+      final hiddenPage = [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$i',
+              'target': 'user$i',
+            },
+            createdAt: 1049,
+          ),
+      ];
       final messagesNotifier = _FakeMessagesNotifier(
         newestPage,
-        olderPages: [olderPage],
+        olderPages: [hiddenPage, olderPage],
       );
       final channelsNotifier = _FakeChannelsNotifier(
         [_testChannel],
@@ -5399,7 +5701,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(messagesNotifier.fetchOlderCalls, 1);
+      expect(messagesNotifier.fetchOlderCalls, 2);
       await tester.tap(
         find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
       );
@@ -6037,7 +6339,7 @@ void main() {
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       for (final multiline in [false, true]) {
         testWidgets(
-          'outgoing group keeps one trailing avatar throughout a local send: $platform, multiline=$multiline',
+          'outgoing group hides avatars throughout a local send: $platform, multiline=$multiline',
           (tester) async {
             final previousPlatform = debugDefaultTargetPlatformOverride;
             debugDefaultTargetPlatformOverride = platform;
@@ -6068,7 +6370,7 @@ void main() {
                 of: find.byKey(ValueKey('message-row-$id')),
                 matching: find.byType(AvatarImage),
               );
-              expect(avatar('first'), findsOneWidget);
+              expect(avatar('first'), findsNothing);
               final container = ProviderScope.containerOf(
                 tester.element(find.byType(ChannelDetailPage)),
               );
@@ -6095,12 +6397,12 @@ void main() {
                 );
                 expect(
                   avatar('second'),
-                  findsOneWidget,
+                  findsNothing,
                   reason: 'second avatar frame $frame',
                 );
               }
               await tester.pumpAndSettle();
-              expect(avatar('second'), findsOneWidget);
+              expect(avatar('second'), findsNothing);
             } finally {
               debugDefaultTargetPlatformOverride = previousPlatform;
             }
@@ -9227,7 +9529,19 @@ void main() {
         );
         await tester.pumpAndSettle();
 
+        // A stray tap asks first; Cancel leaves no Huddle behind.
         await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.pumpAndSettle();
+        expect(find.text('Start a Huddle?'), findsOneWidget);
+        await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+        await tester.pumpAndSettle();
+        expect(find.text('Start a Huddle?'), findsNothing);
+        expect(relaySession.huddleCreatePublishStarted.isCompleted, isFalse);
+
+        await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
+        await tester.pump();
         await relaySession.huddleCreatePublishStarted.future;
         var transitionCompleted = false;
         final transition =
@@ -9913,9 +10227,7 @@ void main() {
       },
     );
 
-    testWidgets('renders member_joined (self-join) system event', (
-      tester,
-    ) async {
+    testWidgets('hides a self-join', (tester) async {
       final messages = [
         _systemMsg(
           id: 'sys1',
@@ -9931,9 +10243,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText('joined the channel'), findsOneWidget);
-      expect(find.byType(CircleAvatar), findsNothing);
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys1')),
+        findsNothing,
+      );
+      expect(findRichText('joined the channel'), findsNothing);
     });
 
     testWidgets('opens a profile sheet from a membership activity name', (
@@ -10538,6 +10852,433 @@ void main() {
       );
     }
 
+    testWidgets('hides self-joins and leaves and collapses the rest', (
+      tester,
+    ) async {
+      NostrEvent change(String id, Map<String, Object> payload, int at) =>
+          _systemMsg(id: id, payload: payload, createdAt: at);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            change('sys1', {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'alice',
+            }, 1000),
+            change('sys2', {
+              'type': 'member_joined',
+              'actor': 'carol',
+              'target': 'bob',
+            }, 1600),
+            // A normal Leave (kind 9022) carries only the actor.
+            change('sys3', {'type': 'member_left', 'actor': 'dave'}, 2200),
+            // Removing yourself (kind 9001) also names the target.
+            change('sys4', {
+              'type': 'member_left',
+              'actor': 'erin',
+              'target': 'erin',
+            }, 2800),
+            // Hours later, by a different adder and a remover.
+            change('sys5', {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'frank',
+            }, 2800 + 5 * 3600),
+            change('sys6', {
+              'type': 'member_removed',
+              'actor': 'carol',
+              'target': 'gina',
+            }, 2900 + 5 * 3600),
+          ],
+          users: {
+            for (final name in [
+              'alice',
+              'bob',
+              'carol',
+              'dave',
+              'erin',
+              'frank',
+              'gina',
+            ])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys2')),
+        findsOneWidget,
+      );
+      for (final id in ['sys1', 'sys3', 'sys4', 'sys5', 'sys6']) {
+        expect(find.byKey(ValueKey('system-message-row-$id')), findsNothing);
+      }
+      expect(findRichText('joined the channel'), findsNothing);
+      expect(findRichText('left the channel'), findsNothing);
+      expect(findRichText(' were added · '), findsOneWidget);
+      expect(findRichText(' was removed'), findsOneWidget);
+      for (final name in ['bob', 'gina', '1 other']) {
+        expect(find.text(name), findsOneWidget);
+      }
+
+      await tester.tap(find.text('1 other'));
+      await tester.pumpAndSettle();
+      expect(find.text('Added members'), findsOneWidget);
+      for (final pubkey in ['bob', 'frank']) {
+        expect(find.byKey(ValueKey('activity-member-$pubkey')), findsOneWidget);
+      }
+    });
+
+    testWidgets('a run across midnight leaves the next day its divider', (
+      tester,
+    ) async {
+      final dayOne =
+          DateTime(2026, 7, 14, 23, 50).millisecondsSinceEpoch ~/ 1000;
+      final dayTwo = DateTime(2026, 7, 15, 9).millisecondsSinceEpoch ~/ 1000;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys1',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+              createdAt: dayOne,
+            ),
+            _systemMsg(
+              id: 'sys2',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'carol',
+              },
+              createdAt: dayTwo,
+            ),
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Morning',
+              createdAt: dayTwo + 60,
+            ),
+          ],
+          users: {
+            for (final name in ['alice', 'bob', 'carol'])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      for (final timestamp in [dayOne, dayTwo]) {
+        expect(
+          find.descendant(
+            of: find.byType(DayDivider),
+            matching: find.text(formatDayHeading(timestamp)),
+          ),
+          findsOneWidget,
+        );
+      }
+    });
+
+    testWidgets('pages past a newest page of only hidden notices', (
+      tester,
+    ) async {
+      final messagesNotifier = _FakeMessagesNotifier(
+        [
+          for (var i = 0; i < 5; i++)
+            _systemMsg(
+              id: 'join$i',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'user$i',
+                'target': 'user$i',
+              },
+              createdAt: 2000 + i,
+            ),
+        ],
+        failOlderFetch: true,
+        olderPages: [
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      messagesNotifier.throwOlderFetch = true;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A thrown fetch pauses paging once, without retrying on its own.
+      expect(messagesNotifier.fetchOlderCalls, 1);
+      expect(find.text('No messages yet'), findsNothing);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      // So does a fetch that loads nothing, and each leaves a way to resume.
+      messagesNotifier.throwOlderFetch = false;
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+      expect(messagesNotifier.fetchOlderCalls, 2);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      messagesNotifier.failOlderFetch = false;
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 3);
+      expect(findRichText('Older chat'), findsOneWidget);
+    });
+
+    testWidgets('stops automatic paging through hidden-only history', (
+      tester,
+    ) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        hiddenPage(0),
+        olderPages: [
+          for (var page = 1; page <= 7; page++) hiddenPage(page),
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 8);
+      expect(findRichText('Older chat'), findsOneWidget);
+    });
+
+    testWidgets('keeps a way to older history while an agent types', (
+      tester,
+    ) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        hiddenPage(0),
+        olderPages: [for (var page = 1; page <= 7; page++) hiddenPage(page)],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          typing: [
+            TypingEntry(
+              pubkey: 'alice',
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('inline-agent-typing-alice')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('caps hidden-only paging after one scroll', (tester) async {
+      List<NostrEvent> hiddenPage(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'join$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$page-$i',
+              'target': 'user$page-$i',
+            },
+            createdAt: 10000 - page * 10 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'chat$i',
+              pubkey: 'alice',
+              content: 'Chat $i',
+              createdAt: 20000 + i,
+            ),
+        ],
+        olderPages: [for (var page = 1; page <= 20; page++) hiddenPage(page)],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      final before = messagesNotifier.fetchOlderCalls;
+
+      await tester.drag(
+        find.byKey(const ValueKey('channel-message-list')),
+        const Offset(0, 20000),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls - before, 5);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+    });
+
+    testWidgets('fills a short collapsed history without a scroll', (
+      tester,
+    ) async {
+      // One collapsed row of additions fits the viewport, so clamping
+      // physics accepts no scroll to page older history.
+      List<NostrEvent> additions(int page) => [
+        for (var i = 0; i < 3; i++)
+          _systemMsg(
+            id: 'add$page-$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'user$page-$i',
+            },
+            createdAt: 900000 - page * 86400 - i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        additions(0),
+        olderPages: [
+          for (var page = 1; page <= 6; page++) additions(page),
+          [
+            _textMsg(
+              id: 'old',
+              pubkey: 'alice',
+              content: 'Older chat',
+              createdAt: 1000,
+            ),
+          ],
+        ],
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 5);
+      expect(findRichText('Older chat'), findsNothing);
+      expect(find.text('Load earlier messages'), findsOneWidget);
+
+      await tester.tap(find.text('Load earlier messages'));
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 7);
+      expect(findRichText('Older chat'), findsOneWidget);
+      expect(find.text('Load earlier messages'), findsNothing);
+    });
+
+    testWidgets('names no adder when several people added members', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys1',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+              createdAt: 1000,
+            ),
+            _systemMsg(
+              id: 'sys2',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'carol',
+                'target': 'dave',
+              },
+              createdAt: 1060,
+            ),
+          ],
+          users: {
+            for (final name in ['alice', 'bob', 'carol', 'dave'])
+              name: UserProfile(pubkey: name, displayName: name),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText(' were added to the channel'), findsOneWidget);
+      expect(find.text('bob'), findsOneWidget);
+      expect(find.text('dave'), findsOneWidget);
+      expect(find.text('alice'), findsNothing);
+      expect(find.text('carol'), findsNothing);
+    });
+
     testWidgets('aligns grouped reactions with the system message content', (
       tester,
     ) async {
@@ -10636,7 +11377,7 @@ void main() {
       expect(find.byKey(const ValueKey('add-reaction-pill')), findsNothing);
     });
 
-    testWidgets('renders member_left system event', (tester) async {
+    testWidgets('hides a voluntary leave', (tester) async {
       final messages = [
         _systemMsg(
           id: 'sys1',
@@ -10652,8 +11393,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob'), findsOneWidget);
-      expect(findRichText('left the channel'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('system-message-row-sys1')),
+        findsNothing,
+      );
     });
 
     testWidgets('renders member_removed system event', (tester) async {
@@ -10725,7 +11468,11 @@ void main() {
         ),
         _systemMsg(
           id: 'sys1',
-          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+          payload: {
+            'type': 'member_removed',
+            'actor': 'bob',
+            'target': 'carol',
+          },
           createdAt: 1010,
         ),
         _textMsg(
@@ -11297,9 +12044,9 @@ void main() {
     for (final scenario in [
       (personal: true, dm: false, agent: true, group: false, visible: true),
       (personal: false, dm: false, agent: true, group: false, visible: false),
-      (personal: false, dm: true, agent: true, group: false, visible: true),
+      (personal: false, dm: true, agent: true, group: false, visible: false),
       (personal: false, dm: true, agent: false, group: false, visible: false),
-      (personal: false, dm: true, agent: true, group: true, visible: true),
+      (personal: false, dm: true, agent: true, group: true, visible: false),
     ]) {
       testWidgets('reply-scoped typing follows conversation scope: $scenario', (
         tester,
@@ -11351,6 +12098,21 @@ void main() {
           scenario.visible ? findsOneWidget : findsNothing,
         );
         expect(find.text('Alice is typing…'), findsNothing);
+        if (scenario.dm && scenario.agent) {
+          expect(
+            find.byKey(const ValueKey('thread-working-dots')),
+            findsOneWidget,
+          );
+          final bubble = find.byWidgetPredicate(
+            (widget) => widget is MessageContent && widget.content == 'Hello',
+          );
+          expect(
+            tester
+                .getRect(find.byKey(const ValueKey('thread-working-container')))
+                .right,
+            closeTo(tester.getRect(bubble).right - 32, 0.1),
+          );
+        }
         typing.setEntries(const []);
         await tester.pumpAndSettle();
         expect(
@@ -11467,15 +12229,15 @@ void main() {
           avatarShape(isAgent: true, side: (shape as OutlinedBorder).side),
         );
       }
-      // As on desktop, the reply branch waits for a reply.
-      expect(connector, findsNothing);
+      // Working activity already belongs to the thread.
+      expect(connector, findsOneWidget);
       expect(
         find.descendant(of: row, matching: find.text('+1')),
         findsOneWidget,
       );
       expect(
         find.descendant(of: row, matching: find.text('View thread')),
-        findsOneWidget,
+        findsNothing,
       );
 
       typing.setEntries([
@@ -12826,7 +13588,7 @@ void main() {
         ),
         _systemMsg(
           id: 'sys2',
-          payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+          payload: {'type': 'member_joined', 'actor': 'alice', 'target': 'bob'},
           createdAt: 1100,
         ),
         _textMsg(
@@ -12848,11 +13610,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice'), findsNWidgets(2));
+      expect(find.text('Alice'), findsNWidgets(3));
       expect(findRichText('created this channel'), findsOneWidget);
       expect(findRichText('Welcome everyone!'), findsOneWidget);
       expect(find.text('Bob'), findsNWidgets(2));
-      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(findRichText(' to the channel'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
     });
   });
@@ -14030,12 +14792,95 @@ void main() {
       expect(observer.pushCount, initialPushCount + 1);
     });
 
-    testWidgets('missing channel link shows an error', (tester) async {
-      final randomChannel = _channel(id: 'random-channel', name: 'random');
-      final channelsNotifier = _FakeChannelsNotifier([
-        _testChannel,
-        randomChannel,
-      ]);
+    // A link can name a channel the loaded list lacks, such as an open
+    // channel the user hasn't joined. It opens from the channel's own
+    // metadata when the relay shares it, and otherwise says why it can't.
+    for (final (name, metaVisibility, fail, toast) in [
+      ('unjoined open channel opens', 'public', false, null),
+      ('channel the relay withholds', null, false, 'Channel not found here'),
+      (
+        'private channel stays closed',
+        'private',
+        false,
+        'Channel not found here',
+      ),
+      ('failed lookup', 'public', true, 'Could not open the channel'),
+    ]) {
+      testWidgets('unlisted channel link: $name', (tester) async {
+        final relay = _ChannelMetadataRelaySession(
+          metas: [
+            if (metaVisibility != null)
+              _channelMetadataEvent(
+                '8c1d2e3f-0000-4000-8000-00000000000a',
+                'random',
+                private: metaVisibility == 'private',
+              ),
+          ],
+          fail: fail,
+        );
+        final observer = _TestNavigatorObserver();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content:
+                    '[#random](buzz://channel/8c1d2e3f-0000-4000-8000-00000000000a)',
+                createdAt: 1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            relaySessionNotifier: relay,
+            navigatorObservers: [observer],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final initialPushCount = observer.pushCount;
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        // A second tap while the first is still resolving is ignored.
+        await tester.tap(find.text('#random', findRichText: true));
+        await tester.pump();
+        expect(relay.metadataLookups, ['8c1d2e3f-0000-4000-8000-00000000000a']);
+
+        relay.gate.complete();
+        await tester.pump();
+        await tester.pump();
+        if (toast == null) {
+          await tester.pumpAndSettle();
+          expect(observer.pushCount, initialPushCount + 1);
+          final opened = tester.widget<ChannelDetailPage>(
+            find.byType(ChannelDetailPage).last,
+          );
+          expect(opened.channel.id, '8c1d2e3f-0000-4000-8000-00000000000a');
+          expect(opened.channel.isMember, isFalse);
+        } else {
+          expect(find.text(toast), findsOneWidget);
+          expect(observer.pushCount, initialPushCount);
+          // The failed tap releases its lock, so tapping again retries.
+          await tester.tap(find.text('#random', findRichText: true));
+          await tester.pump();
+          expect(relay.metadataLookups, hasLength(2));
+        }
+      });
+    }
+
+    testWidgets('a channel link lookup that settles after the user moved on '
+        'opens nothing', (tester) async {
+      final relay = _ChannelMetadataRelaySession(
+        metas: [
+          _channelMetadataEvent(
+            _ChannelMetadataRelaySession.unlistedId,
+            'random',
+          ),
+        ],
+      );
+      final observer = _TestNavigatorObserver();
 
       await tester.pumpWidget(
         _buildTestable(
@@ -14043,24 +14888,115 @@ void main() {
             _textMsg(
               id: 'msg1',
               pubkey: 'alice',
-              content: 'Take this to #random',
+              content:
+                  '[#random](buzz://channel/${_ChannelMetadataRelaySession.unlistedId})',
               createdAt: 1000,
             ),
           ],
           users: {
             'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
           },
-          channelsNotifier: channelsNotifier,
+          relaySessionNotifier: relay,
+          navigatorObservers: [observer],
         ),
       );
       await tester.pumpAndSettle();
 
-      channelsNotifier.setChannels([_testChannel]);
-      await tester.tap(find.text('random'));
+      await tester.tap(find.text('#random', findRichText: true));
       await tester.pump();
+      // The user opens something else while the lookup is pending.
+      final page = find.byType(ChannelDetailPage);
+      Navigator.of(tester.element(page)).push(
+        MaterialPageRoute<void>(builder: (_) => const Text('somewhere else')),
+      );
+      await tester.pumpAndSettle();
+      final pushCount = observer.pushCount;
 
-      expect(find.text('Channel could not be opened'), findsOneWidget);
+      relay.gate.complete();
+      await tester.pumpAndSettle();
+      expect(observer.pushCount, pushCount);
+      expect(find.text('somewhere else'), findsOneWidget);
     });
+
+    // A tap whose lookup will be discarded must not block the next tap: one
+    // made after a community switch away and back, or from another page after
+    // the first page closed.
+    for (final interruption in ['community switch', 'closed page']) {
+      testWidgets('a channel link tap after a $interruption opens once', (
+        tester,
+      ) async {
+        final relay = _ChannelMetadataRelaySession(
+          metas: [
+            _channelMetadataEvent(
+              _ChannelMetadataRelaySession.unlistedId,
+              'random',
+            ),
+          ],
+        );
+        final relayConfig = _SwitchableRelayConfigNotifier();
+        final observer = _TestNavigatorObserver();
+        final link = find.text('#random', findRichText: true);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'msg1',
+                pubkey: 'alice',
+                content:
+                    '[#random](buzz://channel/${_ChannelMetadataRelaySession.unlistedId})',
+                createdAt: 1000,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            relaySessionNotifier: relay,
+            relayConfigNotifier: relayConfig,
+            navigatorObservers: [observer],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final initialPushCount = observer.pushCount;
+        var extraPushes = 0;
+        if (interruption == 'community switch') {
+          await tester.tap(link);
+          await tester.pump();
+          relayConfig.switchTo('https://other.example');
+          await tester.pump();
+          relayConfig.switchTo('https://relay.example');
+          await tester.pump();
+        } else {
+          final page = find.byType(ChannelDetailPage);
+          final channel = tester.widget<ChannelDetailPage>(page).channel;
+          Navigator.of(tester.element(page)).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ChannelDetailPage(channel: channel),
+            ),
+          );
+          extraPushes = 1;
+          await tester.pumpAndSettle();
+          await tester.tap(link.last);
+          await tester.pump();
+          Navigator.of(
+            tester.element(find.byType(ChannelDetailPage).last),
+          ).pop();
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(link);
+        await tester.pump();
+        expect(relay.metadataLookups, [
+          _ChannelMetadataRelaySession.unlistedId,
+          _ChannelMetadataRelaySession.unlistedId,
+        ]);
+
+        relay.gate.complete();
+        await tester.pumpAndSettle();
+        // The discarded lookup opens nothing; the new tap opens once.
+        expect(observer.pushCount, initialPushCount + extraPushes + 1);
+      });
+    }
 
     testWidgets('tapping a channel link inside a thread opens that channel', (
       tester,
@@ -14718,7 +15654,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(31, 'Tall latest reply').join('\n')
+                  ? List.filled(31, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -15084,7 +16020,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(14, 'Tall latest reply').join('\n')
+                  ? List.filled(14, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -17559,7 +18495,10 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
   final List<List<NostrEvent>> _olderPages;
-  final bool failOlderFetch;
+  bool failOlderFetch;
+
+  /// Makes [fetchOlder] throw, as a legacy history request can.
+  bool throwOlderFetch = false;
   final Map<String, ChannelWindowThreadSummary> summaries;
   final loadedEventIds = <String>{};
   @override
@@ -17596,6 +18535,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   @override
   Future<bool> fetchOlder() async {
     fetchOlderCalls += 1;
+    if (throwOlderFetch) throw StateError('offline');
     if (failOlderFetch || _olderPages.isEmpty) return false;
     _messages = [..._olderPages.removeAt(0), ..._messages]
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -18150,6 +19090,69 @@ class _MutableHuddleMembersNotifier extends Notifier<List<ChannelMember>> {
   void replace(List<ChannelMember> members) => state = members;
 }
 
+/// Answers kind:39000 lookups for channels outside the loaded list.
+class _SwitchableRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
+
+  // Each switch is a new config, as the app makes one per connection.
+  void switchTo(String baseUrl) => state = RelayConfig(baseUrl: baseUrl);
+}
+
+class _ChannelMetadataRelaySession extends _IdentityUpdateRelaySession {
+  _ChannelMetadataRelaySession({required this.metas, this.fail = false});
+
+  final List<NostrEvent> metas;
+  final bool fail;
+  final metadataLookups = <String>[];
+
+  /// Holds each lookup until completed, so a test can tap again mid-lookup.
+  final gate = Completer<void>();
+
+  static const unlistedId = '8c1d2e3f-0000-4000-8000-00000000000a';
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!(filter.kinds.length == 1 && filter.kinds.single == 39000)) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    final ids = filter.tags['#d'] ?? const <String>[];
+    // The open page's own metadata reads pass through.
+    if (!ids.contains(unlistedId)) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    metadataLookups.addAll(ids);
+    await gate.future;
+    if (fail) throw StateError('relay unavailable');
+    return [
+      for (final event in metas)
+        if (ids.contains(event.getTagValue('d'))) event,
+    ];
+  }
+}
+
+NostrEvent _channelMetadataEvent(
+  String id,
+  String name, {
+  bool private = false,
+}) => NostrEvent(
+  id: 'meta-$id',
+  pubkey: 'relay',
+  createdAt: 2,
+  kind: 39000,
+  tags: [
+    ['d', id],
+    ['name', name],
+    ['t', 'stream'],
+    [private ? 'private' : 'public'],
+  ],
+  content: '',
+  sig: 'sig',
+);
+
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;
   final Map<String, Map<String, ObservedUnreadEvent>> _observedUnread;
@@ -18673,3 +19676,5 @@ class _SoloMetadataRelaySession extends RelaySessionNotifier {
     void Function(String)? onClosed,
   }) async => () {};
 }
+
+void _noAgentChoice() {}

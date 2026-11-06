@@ -3,6 +3,7 @@ import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
@@ -11,6 +12,7 @@ import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'agents_harness.dart';
 import '../../helpers/remote_agents_fixture.dart';
@@ -37,7 +39,12 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     final h = await AgentsHarness.create();
-    await h.open(tester, directory: [existing, otherAgentKeys.public]);
+    final prefs = await SharedPreferences.getInstance();
+    await h.open(
+      tester,
+      directory: [existing, otherAgentKeys.public],
+      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+    );
     expect(find.byKey(ValueKey(otherAgentKeys.public)), findsNothing);
     expect(find.byKey(ValueKey(oldAppAgentKeys.public)), findsNothing);
     if (!supportsRemoteAgents(h.community)) {
@@ -270,10 +277,12 @@ void main() {
     await h.open(
       tester,
       directory: [existing],
+      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
       home: HomePage(
         onAgents: showAgents,
-        defaultAgentBuilder: (context) =>
-            DefaultAgentLauncher(onChooseAgent: () => showAgents(context)),
+        defaultAgentBuilder: (context) => DefaultAgentLauncher(
+          onChooseAgent: () => showAgents(context, createOnOpen: true),
+        ),
         settingsPageBuilder: (_) => const SizedBox.shrink(),
         mePageBuilder: (_, _, _) =>
             const SliverToBoxAdapter(child: Text('Solo workspace')),

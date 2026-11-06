@@ -15,26 +15,26 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_EMOJI_ENTRY, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE,
+    KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -153,6 +153,51 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
         })?;
         buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
             .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    }
+    Ok(())
+}
+
+/// Validate a kind:30180 custom emoji entry (see `docs/nips/NIP-CE.md`).
+///
+/// Requires exactly one `d` tag, exactly one `emoji` tag, no `h` tag, a `d` equal
+/// to the normalized shortcode in the `emoji` tag, an `http(s)` image URL, and
+/// `content` equal to [`buzz_sdk::emoji_entry_search_text`] of that shortcode.
+fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
+    let reject = |message: &str| IngestError::Rejected(format!("invalid: {message}"));
+    let mut d_tags = Vec::new();
+    let mut emoji_tags = Vec::new();
+    for tag in event.tags.iter() {
+        match tag.as_slice().first().map(String::as_str) {
+            Some("h") => return Err(reject("emoji entry must not carry an h tag")),
+            Some("d") => d_tags.push(tag.as_slice()),
+            Some("emoji") => emoji_tags.push(tag.as_slice()),
+            _ => {}
+        }
+    }
+    let [d_tag] = d_tags.as_slice() else {
+        return Err(reject("emoji entry must have exactly one d tag"));
+    };
+    let [emoji_tag] = emoji_tags.as_slice() else {
+        return Err(reject("emoji entry must have exactly one emoji tag"));
+    };
+    let (Some(d), Some(shortcode), Some(url)) = (d_tag.get(1), emoji_tag.get(1), emoji_tag.get(2))
+    else {
+        return Err(reject(
+            "emoji entry emoji tag must be [emoji, shortcode, url]",
+        ));
+    };
+    let normalized = buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|err| reject(&err.to_string()))?;
+    if *d != normalized || *shortcode != normalized {
+        return Err(reject(
+            "emoji entry d tag and emoji shortcode must equal the normalized shortcode",
+        ));
+    }
+    buzz_sdk::check_custom_emoji_url(url).map_err(|err| reject(&err.to_string()))?;
+    if event.content != buzz_sdk::emoji_entry_search_text(&normalized) {
+        return Err(reject(
+            "emoji entry content must equal the shortcode with _ and - replaced by spaces",
+        ));
     }
     Ok(())
 }
@@ -466,10 +511,17 @@ pub enum IngestError {
 /// Which admission outcome an [`IngestError::Ban`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BanRefusal {
-    /// The principal or its owner is banned.
-    Banned,
+    /// The principal is banned; the source says whose row decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// The restriction lookup failed, so no ban decision could be made.
     Unavailable,
+}
+
+impl BanRefusal {
+    /// The ban refusal for a banned restriction snapshot.
+    pub(crate) fn banned(restriction: &buzz_db::moderation::RestrictionState) -> Self {
+        Self::Banned(crate::handlers::auth::BanSource::of(restriction))
+    }
 }
 
 impl IngestError {
@@ -517,8 +569,8 @@ fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestEr
     match error {
         // Same wire prefix and HTTP status (403) as every other durable
         // restriction refusal — see the write-path gate below and `auth.rs`.
-        RelayAdminError::Banned => IngestError::ban(
-            BanRefusal::Banned,
+        RelayAdminError::Banned(source) => IngestError::ban(
+            BanRefusal::Banned(source),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ),
         RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
@@ -574,6 +626,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // palette is the client-side union of every member's own set.
         | KIND_EMOJI_SET
         | KIND_EMOJI_LIST
+        // One entry per emoji (30180), keyed by (pubkey, kind, d_tag).
+        | KIND_EMOJI_ENTRY
         | KIND_AGENT_PROFILE => Ok(Scope::UsersWrite),
         KIND_DELETION
         | KIND_REACTION
@@ -763,6 +817,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // keyed by (pubkey, kind[, d_tag]). A stray `h` tag must not channel-scope them.
             | KIND_EMOJI_SET
             | KIND_EMOJI_LIST
+            // Custom emoji entry (30180): same ownership shape, never channel-scoped.
+            | KIND_EMOJI_ENTRY
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
@@ -2351,7 +2407,7 @@ fn write_restriction_denial(
 ) -> Option<IngestError> {
     if restriction.banned {
         return Some(IngestError::ban(
-            BanRefusal::Banned,
+            BanRefusal::banned(restriction),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ));
     }
@@ -2374,35 +2430,12 @@ fn write_restriction_denial(
 /// by its owner's (`users.agent_owner_pubkey`). A ban is normally enforced by
 /// the auth seam and the live disconnect; this gate is the durable backstop
 /// for a missed disconnect and for HTTP writes. A timeout has no auth-seam
-/// presence, so this is where it is enforced. Fails closed on a DB error.
+/// presence, so this is where it is enforced. It runs per write, so it reads
+/// through [`AppState::restriction_state_cached`]: a restriction change takes
+/// effect within [`crate::state::RESTRICTION_CACHE_MAX_AGE`]. The verdict is
+/// still taken at `now`, so a cached timeout lifts on time. Fails closed on a
+/// DB error.
 pub(crate) async fn enforce_write_restriction(
-    state: &AppState,
-    tenant: &TenantContext,
-    kind: u32,
-    pubkey: &nostr::PublicKey,
-) -> Result<(), IngestError> {
-    #[cfg(test)]
-    crate::nip_fi_test_hooks::before_write_ban_check(tenant.community()).await;
-    let restriction = state
-        .db
-        .moderation_restriction_state(tenant.community(), pubkey.as_bytes())
-        .await
-        .map_err(|e| {
-            IngestError::ban(
-                BanRefusal::Unavailable,
-                IngestError::Internal(format!(
-                    "error: internal error checking restriction state: {e}"
-                )),
-            )
-        })?;
-    write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
-}
-
-/// [`enforce_write_restriction`] over a 30-second cached restriction row, for
-/// the WebSocket ephemeral and observer paths. Those run per typing pulse and
-/// observer frame; persistent ingest keeps the uncached read. The verdict is
-/// still taken at `now`, so a cached timeout lifts on time.
-pub(crate) async fn enforce_cached_write_restriction(
     state: &AppState,
     tenant: &TenantContext,
     kind: u32,
@@ -2848,7 +2881,7 @@ async fn ingest_event_inner(
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
         // kind:3 (contact lists), kind:0 (profiles), and kind:9007 (create-group
-        // without an h-tag, which would auto-assign a server UUID).
+        // without an h-tag, which the create path also refuses).
         return Err(IngestError::AuthFailed(
             "restricted: channel-scoped tokens cannot publish global events".into(),
         ));
@@ -3213,8 +3246,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // A kind:9007 with an `h` tag creates its channel when it is stored, in the
-    // same transaction (see the storage dispatch below).
+    // A kind:9007 must carry the new channel's id in its `h` tag. It creates
+    // its channel when it is stored, in the same transaction (see the storage
+    // dispatch below).
     let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
@@ -3291,6 +3325,12 @@ async fn ingest_event_inner(
                 unlisted,
                 members,
             });
+        } else {
+            // The channel is created in the same commit as its event, so a
+            // refused create (a taken name, for example) reaches the client.
+            return Err(IngestError::Rejected(
+                "invalid: create-group must include an h tag with the new channel id".into(),
+            ));
         }
     }
 
@@ -3410,6 +3450,9 @@ async fn ingest_event_inner(
     if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
         validate_custom_emoji_tags(&event)?;
     }
+    if kind_u32 == KIND_EMOJI_ENTRY {
+        validate_emoji_entry(&event)?;
+    }
 
     // Resolve the target reference, then use one DB transaction to upsert the
     // reaction row (dedup via ON CONFLICT) with reaction_event_id already set and
@@ -3467,7 +3510,7 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
@@ -3523,7 +3566,6 @@ async fn ingest_event_inner(
         )
         .await;
 
-        info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -3541,6 +3583,7 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let atomic_deletion = crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
@@ -3559,8 +3602,12 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNameTaken(_) => {
+                    IngestError::Rejected(format!("invalid: {e}"))
+                }
+                _ => IngestError::Internal(format!("error: {}", e.kind())),
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3592,6 +3639,20 @@ async fn ingest_event_inner(
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if atomic_deletion {
+        // One commit stores the deletion and soft-deletes its targets, so an
+        // accepted deletion never leaves its target live. Failure stores
+        // nothing; the client is told and can resend.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_deletion(
+            tenant,
+            &event,
+            state,
+            channel_id,
+            thread_params,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: deletion failed: {e}")))?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3625,6 +3686,9 @@ async fn ingest_event_inner(
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
                 }
+                Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
+                    IngestError::Rejected(format!("invalid: {taken}"))
+                }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
@@ -3634,7 +3698,7 @@ async fn ingest_event_inner(
             .db
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3649,7 +3713,7 @@ async fn ingest_event_inner(
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3666,7 +3730,7 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3704,7 +3768,9 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
+                    other => {
+                        IngestError::Internal(format!("error: database error: {}", other.kind()))
+                    }
                 });
             }
         }
@@ -3718,9 +3784,10 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
-    // insert's own transaction above.
+    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and
+    // kind:9002 applied their changes in the insert's own transaction above.
     let persisted_atomically = workflow_deletion
+        || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
         || kind_u32 == KIND_NIP29_EDIT_METADATA;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
@@ -3790,8 +3857,6 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
-
-    info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
     Ok(IngestResult {
         event_id: event_id_hex,
@@ -3981,6 +4046,350 @@ mod postgres_tests {
         ));
     }
 
+    fn emoji_entry_event(tags: &[&[&str]], content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(KIND_EMOJI_ENTRY as u16), content)
+            .tags(
+                tags.iter()
+                    .map(|t| nostr::Tag::parse(t.iter().copied()).expect("tag")),
+            )
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign emoji entry")
+    }
+
+    #[test]
+    fn emoji_entry_validation_table() {
+        const URL: &str = "https://example.com/p.gif";
+        let ok_tags: &[&[&str]] = &[&["d", "party_parrot"], &["emoji", "party_parrot", URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(ok_tags, "party parrot")).is_ok());
+        let dashed_tags: &[&[&str]] =
+            &[&["d", "party-parrot-2"], &["emoji", "party-parrot-2", URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(dashed_tags, "party parrot 2")).is_ok());
+        let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let max_tags: &[&[&str]] = &[&["d", &max_shortcode], &["emoji", &max_shortcode, URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(max_tags, &max_shortcode)).is_ok());
+
+        let cases: Vec<(&str, Vec<&[&str]>, &str, &str)> = vec![
+            ("no d", vec![&["emoji", "a", URL]], "", "exactly one d tag"),
+            (
+                "two d",
+                vec![&["d", "a"], &["d", "a"], &["emoji", "a", URL]],
+                "",
+                "exactly one d tag",
+            ),
+            ("no emoji", vec![&["d", "a"]], "", "exactly one emoji tag"),
+            (
+                "two emoji",
+                vec![&["d", "a"], &["emoji", "a", URL], &["emoji", "b", URL]],
+                "",
+                "exactly one emoji tag",
+            ),
+            (
+                "h tag",
+                vec![&["d", "a"], &["emoji", "a", URL], &["h", "chan"]],
+                "",
+                "must not carry an h tag",
+            ),
+            (
+                "emoji tag without url",
+                vec![&["d", "a"], &["emoji", "a"]],
+                "",
+                "[emoji, shortcode, url]",
+            ),
+            (
+                "bad shortcode",
+                vec![&["d", "bad name"], &["emoji", "bad name", URL]],
+                "",
+                "may only contain",
+            ),
+            (
+                "d differs from shortcode",
+                vec![&["d", "other"], &["emoji", "a", URL]],
+                "",
+                "must equal the normalized shortcode",
+            ),
+            (
+                "uppercase shortcode",
+                vec![&["d", "a"], &["emoji", "A", URL]],
+                "",
+                "must equal the normalized shortcode",
+            ),
+            (
+                "non-http url",
+                vec![&["d", "a"], &["emoji", "a", "ftp://example.com/a.gif"]],
+                "",
+                "http:// or https://",
+            ),
+            (
+                "arbitrary content",
+                vec![&["d", "a"], &["emoji", "a", URL]],
+                "x",
+                "content must equal",
+            ),
+            (
+                "empty content",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "",
+                "content must equal",
+            ),
+            (
+                "keyword-stuffed content",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "party parrot cat dog",
+                "content must equal",
+            ),
+            (
+                "content keeps underscores",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "party_parrot",
+                "content must equal",
+            ),
+        ];
+        for (name, tags, content, needle) in cases {
+            match validate_emoji_entry(&emoji_entry_event(&tags, content)) {
+                Err(IngestError::Rejected(msg)) => assert!(
+                    msg.starts_with("invalid: ") && msg.contains(needle),
+                    "{name}: unexpected rejection {msg:?}"
+                ),
+                other => panic!("{name}: expected rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn emoji_entry_is_a_global_users_write_kind() {
+        assert!(is_global_only_kind(KIND_EMOJI_ENTRY));
+        assert!(!requires_h_channel_scope(KIND_EMOJI_ENTRY));
+        let event = emoji_entry_event(&[], "");
+        assert_eq!(
+            required_scope_for_kind(KIND_EMOJI_ENTRY, &event).ok(),
+            Some(Scope::UsersWrite)
+        );
+    }
+
+    async fn publish_emoji_entry(
+        state: &Arc<crate::state::AppState>,
+        tenant: &TenantContext,
+        keys: &nostr::Keys,
+        tags: &[&[&str]],
+        content: &str,
+        created_at: u64,
+    ) -> Result<IngestResult, IngestError> {
+        let event = EventBuilder::new(Kind::Custom(KIND_EMOJI_ENTRY as u16), content)
+            .tags(
+                tags.iter()
+                    .map(|t| nostr::Tag::parse(t.iter().copied()).expect("tag")),
+            )
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign emoji entry");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::UsersWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event(state, tenant, event, auth).await
+    }
+
+    async fn publish_built_emoji_entry(
+        state: &Arc<crate::state::AppState>,
+        tenant: &TenantContext,
+        keys: &nostr::Keys,
+        shortcode: &str,
+        url: &str,
+        created_at: u64,
+    ) -> Result<IngestResult, IngestError> {
+        let event = buzz_sdk::build_emoji_entry(shortcode, url)
+            .expect("build emoji entry")
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign emoji entry");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::UsersWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event(state, tenant, event, auth).await
+    }
+
+    async fn emoji_tenant(
+        state: &Arc<crate::state::AppState>,
+        keys: &[&nostr::Keys],
+    ) -> TenantContext {
+        let host = format!("emoji-entry-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        for k in keys {
+            state
+                .db
+                .ensure_user(community, k.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        TenantContext::resolved(community, &host)
+    }
+
+    /// Production-path regression for kind:30180: invalid entries are refused by
+    /// `ingest_event` and never stored; a valid entry is stored; a second publish
+    /// under the same `d` leaves one live event (the newer one).
+    /// Mutations: drop the `validate_emoji_entry` call, the `KIND_EMOJI_ENTRY`
+    /// scope arm, or the replace path → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn emoji_entry_ingest_validates_and_replaces() {
+        let state = ingest_state().await;
+        let author = nostr::Keys::generate();
+        let tenant = emoji_tenant(&state, &[&author]).await;
+        let now = chrono::Utc::now().timestamp() as u64;
+        const URL: &str = "https://example.com/p.gif";
+        let url = URL;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test Postgres");
+        let live_count = |d: &'static str| {
+            let pool = pool.clone();
+            let community = *tenant.community().as_uuid();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2 \
+                     AND d_tag = $3 AND deleted_at IS NULL",
+                )
+                .bind(community)
+                .bind(KIND_EMOJI_ENTRY as i32)
+                .bind(d)
+                .fetch_one(&pool)
+                .await
+                .expect("count")
+            }
+        };
+
+        let rejected: Vec<(&str, Vec<&[&str]>)> = vec![
+            (
+                "bad shortcode",
+                vec![&["d", "bad name"], &["emoji", "bad name", URL]],
+            ),
+            (
+                "d != shortcode",
+                vec![&["d", "other"], &["emoji", "party_parrot", URL]],
+            ),
+            (
+                "h tag",
+                vec![
+                    &["d", "party_parrot"],
+                    &["emoji", "party_parrot", URL],
+                    &["h", "11111111-1111-1111-1111-111111111111"],
+                ],
+            ),
+            (
+                "non-http url",
+                vec![
+                    &["d", "party_parrot"],
+                    &["emoji", "party_parrot", "javascript:alert(1)"],
+                ],
+            ),
+        ];
+        for (name, tags) in rejected {
+            match publish_emoji_entry(&state, &tenant, &author, &tags, "party parrot", now).await {
+                Err(IngestError::Rejected(msg)) => {
+                    assert!(msg.starts_with("invalid: "), "{name}: {msg}")
+                }
+                Err(other) => panic!("{name}: expected Rejected, got {other:?}"),
+                Ok(_) => panic!("{name}: must be rejected"),
+            }
+        }
+        assert_eq!(
+            live_count("party_parrot").await,
+            0,
+            "rejected entries are not stored"
+        );
+
+        let first =
+            publish_built_emoji_entry(&state, &tenant, &author, "party_parrot", url, now - 10)
+                .await
+                .expect("first publish");
+        assert!(first.accepted, "{}", first.message);
+        assert_eq!(live_count("party_parrot").await, 1);
+
+        let url2 = "https://example.com/p2.gif";
+        let second = publish_built_emoji_entry(&state, &tenant, &author, "Party_Parrot", url2, now)
+            .await
+            .expect("second publish");
+        assert!(second.accepted, "{}", second.message);
+        assert_eq!(
+            live_count("party_parrot").await,
+            1,
+            "same d keeps one live event"
+        );
+        let surviving: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id = $1 AND kind = $2 \
+             AND d_tag = 'party_parrot' AND deleted_at IS NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(KIND_EMOJI_ENTRY as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("surviving id");
+        assert_eq!(hex::encode(surviving), second.event_id);
+    }
+
+    /// Prefix search over kind:30180 content finds "party parrot" for "parr", and
+    /// matches words at any position.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn emoji_entry_prefix_search_finds_by_word_prefix() {
+        let state = ingest_state().await;
+        let author = nostr::Keys::generate();
+        let tenant = emoji_tenant(&state, &[&author]).await;
+        let now = chrono::Utc::now().timestamp() as u64;
+        let url = "https://example.com/p.gif";
+        for shortcode in ["party_parrot", "sad-parrot", "bufo_joy", "cloud_nine"] {
+            publish_built_emoji_entry(&state, &tenant, &author, shortcode, url, now)
+                .await
+                .unwrap_or_else(|e| panic!("publish {shortcode}: {e:?}"));
+        }
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test Postgres");
+        let indexed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2 \
+             AND search_tsv IS NOT NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(KIND_EMOJI_ENTRY as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("count indexed entries");
+        assert_eq!(
+            indexed, 4,
+            "events.search_tsv does not index kind 30180: this database uses the \
+             positive FTS allowlist (migration 0008); run against the desired-state lane"
+        );
+        let search = |q: &str| {
+            let service = buzz_search::SearchService::new(pool.clone());
+            let query = buzz_search::SearchQuery {
+                community: tenant.community(),
+                q: q.to_owned(),
+                channel_scope: buzz_search::ChannelScope::Any,
+                kinds: Some(vec![KIND_EMOJI_ENTRY as i32]),
+                authors: None,
+                since: None,
+                until: None,
+                page: 1,
+                per_page: 50,
+                mode: buzz_search::SearchMode::Prefix,
+                sort: buzz_search::SearchSort::Relevance,
+            };
+            async move { service.search(&query).await.expect("search").hits.len() }
+        };
+        assert_eq!(search("parr").await, 2, "word-prefix finds both parrots");
+        assert_eq!(search("party par").await, 1, "earlier words are exact");
+        assert_eq!(search("joy").await, 1, "any word position matches");
+        assert_eq!(search("zzz").await, 0);
+    }
+
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:
     /// `blocked:` and (via `bridge.rs`'s `AuthFailed` arm) HTTP 403 — never
@@ -3988,11 +4397,13 @@ mod postgres_tests {
     /// client retry-loop against an authorization decision.
     #[test]
     fn relay_admin_ban_maps_to_blocked_auth_failure() {
-        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::Own,
+        ));
         assert!(matches!(
             mapped,
             IngestError::Ban {
-                refusal: BanRefusal::Banned,
+                refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Own),
                 ..
             }
         ));
@@ -4268,7 +4679,8 @@ mod postgres_tests {
 
     #[test]
     fn create_group_does_not_require_h_tag() {
-        // kind:9007 creates the channel — h-tag is optional (client-chosen UUID)
+        // kind:9007 names its new channel in h, but the create path checks that
+        // itself (it refuses a create without one), not requires_h_channel_scope
         assert!(!requires_h_channel_scope(KIND_NIP29_CREATE_GROUP));
     }
 
@@ -4471,6 +4883,7 @@ mod postgres_tests {
             KIND_BOOKMARK_SET,
             KIND_EMOJI_SET,
             KIND_EMOJI_LIST,
+            KIND_EMOJI_ENTRY,
             KIND_AGENT_ENGRAM,
             KIND_AGENT_PROFILE,
             KIND_PERSONA,
@@ -6226,9 +6639,8 @@ mod postgres_tests {
 
         // ── AppState ─────────────────────────────────────────────────────────
         // Redis is lazy and never actually contacted on this rejection path.
-        let redis_pool = deadpool_redis::Config::from_url(FAKE_REDIS_URL)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("deadpool redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(FAKE_REDIS_URL).expect("lazy redis connection");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(FAKE_REDIS_URL, redis_pool.clone())
                 .await
@@ -6509,9 +6921,8 @@ mod postgres_tests {
 
         const FAKE_REDIS_URL: &str = "redis://127.0.0.1:1"; // never contacted
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(FAKE_REDIS_URL)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("deadpool redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(FAKE_REDIS_URL).expect("lazy redis connection");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(FAKE_REDIS_URL, redis_pool.clone())
                 .await
@@ -7526,7 +7937,7 @@ mod postgres_tests {
         match enforce_write_restriction(&state, &tenant, KIND_REPORT, &agent.public_key()).await {
             Err(
                 err @ IngestError::Ban {
-                    refusal: BanRefusal::Banned,
+                    refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Owner),
                     ..
                 },
             ) => match err.into_legacy() {
@@ -7543,6 +7954,11 @@ mod postgres_tests {
             .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
             .await
             .expect("unban owner");
+        // The unban command clears the owner's entry; the agent's entry
+        // carries the owner's ban until it ages out
+        // (`RESTRICTION_CACHE_MAX_AGE`).
+        state.invalidate_restriction_cache(tenant.community(), &owner_bytes);
+        state.invalidate_restriction_cache(tenant.community(), &agent.public_key().to_bytes());
         enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
             .await
             .expect("unbanning the owner restores the agent");
@@ -7564,7 +7980,7 @@ mod postgres_tests {
             .expect("ban owner");
 
         for keys in [&owner, &agent] {
-            let crate::api::relay_members::MembershipRefusal::Api((status, body)) =
+            let crate::api::relay_members::MembershipRefusal::Api(reason, (status, body)) =
                 crate::api::relay_members::enforce_relay_membership(
                     &state,
                     &tenant,
@@ -7578,6 +7994,7 @@ mod postgres_tests {
             else {
                 panic!("without a token the relay's own refusal is returned");
             };
+            assert_eq!(reason, crate::access::AuthReason::Banned);
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
             assert_eq!(
                 body.0["error"],
@@ -7590,6 +8007,8 @@ mod postgres_tests {
             .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
             .await
             .expect("unban owner");
+        // As the unban command does on its own pod.
+        state.invalidate_restriction_cache(tenant.community(), &owner_bytes);
         crate::api::relay_members::enforce_relay_membership(
             &state,
             &tenant,
@@ -7657,10 +8076,10 @@ mod postgres_tests {
         .map_err(|refusal| {
             let status = refusal.status();
             let body = match refusal {
-                crate::api::relay_members::MembershipRefusal::Api((_, body)) => {
+                crate::api::relay_members::MembershipRefusal::Api(_, (_, body)) => {
                     body.0["error"].as_str().unwrap_or("").to_owned()
                 }
-                crate::api::relay_members::MembershipRefusal::NipFi(class) => {
+                crate::api::relay_members::MembershipRefusal::NipFi(_, class) => {
                     class.http_body().to_owned()
                 }
             };

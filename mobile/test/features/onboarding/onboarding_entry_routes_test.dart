@@ -1,4 +1,3 @@
-import '../../helpers/two_finger_double_tap.dart';
 import 'package:buzz/shared/community/community_grid_option.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'dart:async';
@@ -6,6 +5,8 @@ import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/invites/invite_join_provider.dart';
+import 'package:buzz/features/invites/invite_join_sheet.dart';
 import 'package:buzz/features/onboarding/hosted_connect_page.dart';
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/hosted_app_gate.dart';
@@ -98,8 +99,8 @@ void main() {
     }
 
     Future<void> pair() async {
-      final trigger = find.byKey(const Key('developer-pairing-trigger'));
-      await twoFingerDoubleTap(tester, tester.getCenter(trigger));
+      await tester.longPress(find.text('Scan a QR code').hitTestable());
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Use a pairing code').hitTestable());
       await tester.pumpAndSettle();
       await tester.enterText(
@@ -138,9 +139,9 @@ void main() {
       await f.flow.signInAccount();
       await tester.pumpAndSettle();
       expect(f.admitted, isEmpty);
-      await tester.tap(find.byType(CommunityGridOption).first);
+      await tester.tap(find.byType(CommunityGridOption).last);
       await tester.pumpAndSettle();
-      expect(f.admitted, ['one.communities.buzz.xyz']);
+      expect(f.admitted, isEmpty);
       expect(f.flow.stage, HostedFlowStage.communityConflict);
       expect(
         find.text('Keep saved identity and skip').hitTestable(),
@@ -161,10 +162,7 @@ void main() {
       f.beforeAdmission = null;
       await tester.tap(find.byType(CommunityGridOption).first);
       await tester.pumpAndSettle();
-      expect(f.admitted, [
-        'one.communities.buzz.xyz',
-        'two.communities.buzz.xyz',
-      ]);
+      expect(f.admitted, ['one.communities.buzz.xyz']);
       expect(find.byType(OnboardingAppEntry), findsNothing);
       expect(find.text('Add community').hitTestable(), findsOneWidget);
       f.admitted.clear();
@@ -247,6 +245,25 @@ void main() {
       find.text('Enter a valid community address or invite link.'),
       findsOneWidget,
     );
+    // A pasted invite-page link keeps its code through to the join sheet.
+    await tester.enterText(
+      find.byKey(const Key('community-link-input')).hitTestable(),
+      'https://primary.example/invite/fixture',
+    );
+    await tester.tap(find.text('Continue').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.byType(InviteJoinSheet), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(InviteJoinSheet),
+        matching: find.text('primary.example'),
+      ),
+      findsOneWidget,
+    );
+    expect(container.read(inviteJoinProvider).invite?.code, 'fixture');
+    await tester.tap(find.text('Cancel').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.byType(InviteJoinSheet), findsNothing);
     // Drive the real deep-link dispatcher, sheet, service and auth persistence.
     await tester.enterText(
       find.byKey(const Key('community-link-input')).hitTestable(),

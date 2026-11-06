@@ -190,14 +190,34 @@ class SearchNotifier extends Notifier<SearchState> {
     _usersPending = false;
     _directoryLoad = null;
     _directoryAttempted = false;
-    // Channel rows come from the loaded channel list, which gains open
-    // channels when the directory arrives. Re-rank whenever either changes;
-    // the directory status for this community also drives the spinner.
-    ref.listen(channelsProvider, (_, _) => _refreshChannels());
+    // Channel rows are ranked once per query, so live channel events never
+    // reorder rows under a finger: they only update the shown rows' content.
+    // Rows are ranked again when the set of channels changes (the first
+    // load, a directory install); the directory status for this community
+    // also drives the spinner.
+    ref.listen(channelsProvider, (previous, next) {
+      final channels = next.asData?.value;
+      if (channels == null) return;
+      final before = previous?.asData?.value;
+      if (before == null || !_sameChannels(before, channels)) {
+        _refreshChannels();
+      } else {
+        _updateShownChannels(channels);
+      }
+    });
     ref.listen(
       channelDirectoryLoadStatusProvider,
       (_, _) => _refreshChannels(),
     );
+    // Offline, a directory load fails at once. Load it again on reconnect, so
+    // the failure clears without another query.
+    ref.listen(relaySessionProvider, (previous, next) {
+      if (next.status == SessionStatus.connected &&
+          previous?.status != SessionStatus.connected &&
+          _directoryFailed) {
+        retryChannels();
+      }
+    });
     ref.onDispose(() {
       _debounce?.cancel();
     });
@@ -260,6 +280,14 @@ class SearchNotifier extends Notifier<SearchState> {
     ChannelDirectoryLoadStatus.loading => false,
     _ => true,
   };
+
+  /// Whether this search loaded the directory for the current query and it
+  /// did not load. An earlier failure stays hidden while the next load runs.
+  bool get _directoryFailed =>
+      _searchesOpenChannels(state.query) &&
+      _directoryAttempted &&
+      _directoryLoad == null &&
+      _directoryMissing;
 
   /// Loads the directory again after it failed, like desktop's Retry channels.
   void retryChannels() {
@@ -366,6 +394,25 @@ class SearchNotifier extends Notifier<SearchState> {
     state = state.copyWith(userResults: users, isLoading: _isLoading);
   }
 
+  static bool _sameChannels(List<Channel> a, List<Channel> b) =>
+      a.length == b.length &&
+      a.map((c) => c.id).toSet().containsAll(b.map((c) => c.id));
+
+  /// Shows each shown channel's latest content (membership, member count,
+  /// name) in the rows' existing order.
+  void _updateShownChannels(List<Channel> channels) {
+    final shown = state.channelResults;
+    if (shown.isEmpty) return;
+    final byId = {for (final channel in channels) channel.id: channel};
+    final updated = [for (final row in shown) byId[row.id] ?? row];
+    for (var i = 0; i < shown.length; i++) {
+      if (!identical(updated[i], shown[i])) {
+        state = state.copyWith(channelResults: updated);
+        return;
+      }
+    }
+  }
+
   /// Publishes the channel rows and spinner for the current query.
   void _refreshChannels() {
     if (state.query.isEmpty) return;
@@ -376,13 +423,8 @@ class SearchNotifier extends Notifier<SearchState> {
         ref.read(channelsProvider).asData?.value ?? const <Channel>[],
         state.query,
       ),
-      // An earlier failure stays hidden while our next load runs, and the
-      // notice clears when another caller loads the directory.
-      channelSearchFailed:
-          _searchesOpenChannels(state.query) &&
-          _directoryAttempted &&
-          _directoryLoad == null &&
-          _directoryMissing,
+      // The notice clears when another caller loads the directory.
+      channelSearchFailed: _directoryFailed,
       isLoading: _isLoading,
     );
   }

@@ -154,6 +154,7 @@ macro_rules! make_hook {
     };
 }
 
+make_hook!(community_registration_hook, before_community_registration);
 make_hook!(auth_commit_hook, before_auth_commit);
 make_hook!(event_ingest_hook, before_event_ingest);
 make_hook!(req_registration_hook, before_req_registration);
@@ -211,6 +212,15 @@ make_hook!(auto_join_channel_hook, before_auto_join_channel);
 // `after_auto_join`: fires when an admission auto-join task has finished, so
 // a test can assert what it did (or did not) write.
 make_hook!(auto_join_done_hook, after_auto_join);
+// `before_group_state_lock`: fires immediately before a kind:39000/39001
+// publisher takes its replacement lock. Anything it read before this point
+// was read outside the lock; a publisher held here while the channel is
+// edited and republished must still store the edit's state.
+make_hook!(group_state_lock_hook, before_group_state_lock);
+// `after_group_state_read`: fires when a kind:39000/39001 publisher has read
+// the channel and its members behind the lock, before it signs and stores.
+// A publisher held here makes a racing edit wait for it.
+make_hook!(group_state_read_hook, after_group_state_read);
 // `before_http_ban_recheck`: fires in `buzz_v1` and Git settings after the
 // shared membership check passes, immediately before the fresh ban reread.
 // A ban or closed pool here makes only the reread refuse.
@@ -267,6 +277,39 @@ make_hook!(directory_acquire_hook, after_directory_acquire);
 // attempt a concurrent archive UPDATE here to prove it blocks (55P03) and is
 // serialized against the join commit.
 make_hook!(audio_archive_recheck_hook, before_archive_recheck);
+
+// ── Login decision hook ────────────────────────────────────────────────────
+// `before_auth_decision`: fires synchronously in the root WS auth handler
+// after its last cancellation check and before the login decides it won.
+// The armed action runs inline, with no await, so a disconnect lands in the
+// window a concurrent thread would hit, without the handler being dropped.
+pub(crate) mod auth_decision_hook {
+    use super::*;
+
+    type Action = Box<dyn FnOnce(&crate::connection::ConnectionState) + Send>;
+
+    static ACTIONS: LazyLock<Mutex<HashMap<CommunityId, Action>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Run `action` once when a login in `community` reaches its decision.
+    pub(crate) fn arm(
+        community: CommunityId,
+        action: impl FnOnce(&crate::connection::ConnectionState) + Send + 'static,
+    ) {
+        ACTIONS.lock().unwrap().insert(community, Box::new(action));
+    }
+
+    pub(crate) fn trigger(conn: &crate::connection::ConnectionState) {
+        let action = ACTIONS.lock().unwrap().remove(&conn.tenant.community());
+        if let Some(action) = action {
+            action(conn);
+        }
+    }
+}
+
+pub(crate) fn before_auth_decision(conn: &crate::connection::ConnectionState) {
+    auth_decision_hook::trigger(conn);
+}
 
 // ── Deny-set admission hooks ───────────────────────────────────────────────
 // `before_deny_set_check`: fires in both the root WS auth handler and the audio

@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/community/community_provider.dart';
 import '../../shared/agents/remote_agents.dart';
+import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list_card.dart';
 import 'agent_instructions.dart';
@@ -22,12 +22,15 @@ class AgentIdentitySections extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
+    useListenable(controller.account.subjectChanges);
+    final community = ref.watch(activeCommunityProvider).asData?.value;
+    final unknown = agentLocationUnknown(community, controller);
     final remote = controller.agents.any(
       (agent) => agent['agent_pubkey'] == pubkey,
     );
     // Remote instructions come from the registry row, listed for the active
     // community's owner only (as the agents page decides).
-    final owner = ref.watch(activeCommunityProvider).asData?.value?.pubkey;
+    final owner = community?.pubkey;
     final row = owner != null && controller.owner == owner
         ? controller.agents
               .where((agent) => agent['agent_pubkey'] == pubkey)
@@ -58,7 +61,11 @@ class AgentIdentitySections extends HookConsumerWidget {
               child: SizedBox(
                 width: double.infinity,
                 child: Text(
-                  remote
+                  unknown && !remote && controller.busy
+                      ? 'Checking whether this agent runs on Builderbot…'
+                      : unknown && !remote
+                      ? 'Sign in to Builderlab to see whether this agent runs on Builderbot or your desktop.'
+                      : remote
                       ? 'This agent runs on Builderbot. Your desktop doesn’t need to be online for it to work.'
                       : 'This agent is managed on your desktop. Keep Buzz open and your desktop online for it to work.',
                   style: context.textTheme.bodyMedium,

@@ -9,9 +9,14 @@ final class BuzzPushSnapshotBridge {
   private let endpointGrantStore: BuzzPushEndpointGrantKeychainStore
   private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
   private let keychainAccessGroup: String?
+  // Flutter awaits every call here, and the age-gate restore runs during app
+  // launch, when this process is busiest. At utility QoS these replies were the
+  // lowest-priority work in the process and stalled for over 10 s on saturated
+  // CI hosts while main-thread work kept moving; user-initiated is the class
+  // for work a caller is waiting on.
   private let queue = DispatchQueue(
     label: "xyz.block.buzz.push-snapshot",
-    qos: .utility
+    qos: .userInitiated
   )
   private lazy var store: BuzzPushPresentationCacheStore? = {
     guard let container = containerURL() else { return nil }
@@ -31,7 +36,7 @@ final class BuzzPushSnapshotBridge {
           INInteraction.deleteAll(completion: completion)
         },
         scheduleTimeout: { delay, action in
-          DispatchQueue.global(qos: .utility).asyncAfter(
+          DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + delay,
             execute: action
           )
@@ -78,6 +83,8 @@ final class BuzzPushSnapshotBridge {
     switch section {
     case "communities":
       syncCommunities(arguments, result: result)
+    case "organizationSession":
+      syncOrganizationSession(arguments, result: result)
     default: return false
     }
     return true
@@ -121,6 +128,50 @@ final class BuzzPushSnapshotBridge {
           value: FlutterError(
             code: "age_restriction_purge_failed",
             message: "Unable to suppress and purge restricted notifications.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    }
+  }
+
+  /// Shares the organization account session with the notification extension, or removes it
+  /// when the app has none, so the extension can mint NIP-FI assertions for organization relays.
+  private func syncOrganizationSession(
+    _ arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    let session: BuzzOrganizationSession?
+    if arguments["credential"] is NSNull || arguments["credential"] == nil {
+      session = nil
+    } else if let origin = arguments["origin"] as? String,
+      let credential = arguments["credential"] as? String, !credential.isEmpty,
+      credential.utf8.count <= 512,
+      let relayHosts = arguments["relayHosts"] as? [String], !relayHosts.isEmpty
+    {
+      session = BuzzOrganizationSession(
+        origin: origin, credential: credential, relayHosts: relayHosts)
+    } else {
+      result(
+        FlutterError(
+          code: "invalid_arguments",
+          message: "Expected an organization origin, credential and relay hosts.",
+          details: nil
+        )
+      )
+      return
+    }
+    queue.async { [weak self] in
+      do {
+        try BuzzPushKeychain.replace(
+          organizationSession: session, accessGroup: self?.keychainAccessGroup)
+        Self.complete(result, value: nil)
+      } catch {
+        Self.complete(
+          result,
+          value: FlutterError(
+            code: "snapshot_sync_failed",
+            message: "Unable to share the organization session.",
             details: error.localizedDescription
           )
         )

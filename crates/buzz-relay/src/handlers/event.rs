@@ -21,7 +21,6 @@ use buzz_pubsub::EventTopic;
 use nostr::{Event, PublicKey};
 
 use crate::connection::{AuthState, ConnectionState};
-use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
 use super::ingest::{reject_with_transport, IngestAuth, IngestError};
@@ -50,6 +49,15 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
         49001 => kind.to_string(),
         _ => "other".to_string(),
     }
+}
+
+/// Time one persistent WebSocket EVENT from frame to OK under `outcome`:
+/// `accepted`, `not_accepted` (for example a duplicate), or the ingest error
+/// class (`invalid`, `auth`, `error`). Failures are timed too, so a slow
+/// failing store shows in the latency instead of hiding from it.
+fn record_event_processing(start: std::time::Instant, outcome: &'static str) {
+    metrics::histogram!("buzz_event_processing_seconds", "outcome" => outcome)
+        .record(start.elapsed().as_secs_f64());
 }
 
 fn event_frame_for_sub(sub_id: &str, event_json: &str) -> String {
@@ -647,6 +655,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let start = std::time::Instant::now();
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
+    let mut write = crate::access::WriteLog::new(&conn, &event);
     let kind_str = bounded_kind_label(kind_u32);
 
     // Record the declared span fields now that we have the values.
@@ -680,11 +689,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ),
             _ => {
                 reject("auth");
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "auth-required: not authenticated",
-                ));
+                );
                 return;
             }
         }
@@ -696,38 +706,36 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != auth_pubkey && !is_gift_wrap {
         reject("invalid");
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             &event_id_hex,
             false,
             "invalid: event pubkey does not match authenticated identity",
-        ));
+        );
         return;
     }
 
     if kind_u32 == buzz_core::kind::KIND_AUTH {
         reject("invalid");
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             &event_id_hex,
             false,
             "invalid: AUTH events cannot be submitted via EVENT",
-        ));
+        );
         return;
     }
 
     // Observer frames and ephemeral kinds return before ingest, so they take
-    // the ban / timeout write-block here, over a short-TTL cache because it
-    // runs per frame. Persistent kinds get the uncached check in ingest, and
-    // so does NIP-43 leave (28936), which is ephemeral-range but ingested.
+    // the ban / timeout write-block here. Persistent kinds get the same check
+    // in ingest, and so does NIP-43 leave (28936), which is ephemeral-range but
+    // ingested.
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME
         || (is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST)
     {
-        if let Err(e) = super::ingest::enforce_cached_write_restriction(
-            &state,
-            &conn.tenant,
-            kind_u32,
-            &auth_pubkey,
-        )
-        .await
+        if let Err(e) =
+            super::ingest::enforce_write_restriction(&state, &conn.tenant, kind_u32, &auth_pubkey)
+                .await
         {
             let (message, reason) = match e.into_legacy() {
                 // `into_legacy` never returns `Ban`; it would fail closed here.
@@ -740,7 +748,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 | IngestError::CanvasConflict(m) => (m, "auth"),
             };
             reject(reason);
-            conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+            write.ok(&conn, &event_id_hex, false, &message);
             return;
         }
     }
@@ -748,11 +756,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 &event_id_hex,
                 false,
                 "restricted: insufficient scope for agent observer frames",
-            ));
+            );
             return;
         }
         // P1-b: acquire an effect permit before the observer handler's
@@ -772,15 +781,16 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 // an FI assertion is present. Gate is off_mode when no assertion
                 // exists, so SessionExpired here always implies an active FI session.
                 // [FI-TRACE-DENIAL-ORACLE, NIP-FI §authorization_denied]
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "restricted: authorization denied",
-                ));
+                );
                 return;
             }
         };
-        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state).await;
+        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state, &mut write).await;
         return;
     }
 
@@ -795,37 +805,35 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     if is_ephemeral(kind_u32) && kind_u32 != buzz_core::kind::KIND_NIP43_LEAVE_REQUEST {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 &event_id_hex,
                 false,
                 "restricted: insufficient scope for ephemeral events",
-            ));
+            );
             return;
         }
-        // Cached (10s): this runs per ephemeral event. Persistent ingest keeps
-        // the uncached read as its durable write fence.
+        // Cached: this runs per ephemeral event. Persistent ingest keeps the
+        // uncached read as its durable write fence.
         match state
-            .is_serving_active_cached(conn.tenant.community())
+            .is_community_active_cached(conn.tenant.community())
             .await
         {
             Ok(true) => {}
             Ok(false) => {
                 reject("restricted");
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "restricted: community writes are fenced",
-                ));
+                );
                 return;
             }
             Err(error) => {
                 reject("error");
                 tracing::warn!(%error, event_id = %event_id_hex, "failed to check ephemeral-event community lifecycle");
-                conn.send(RelayMessage::ok(
-                    &event_id_hex,
-                    false,
-                    "error: internal server error",
-                ));
+                write.ok(&conn, &event_id_hex, false, "error: internal server error");
                 return;
             }
         }
@@ -836,11 +844,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             Ok(permit) => permit,
             Err(crate::nip_fi_gate::SessionExpired) => {
                 // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-                conn.send(RelayMessage::ok(
+                write.ok(
+                    &conn,
                     &event_id_hex,
                     false,
                     "restricted: authorization denied",
-                ));
+                );
                 return;
             }
         };
@@ -855,7 +864,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         .await
         {
             Ok(()) => {
-                conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+                write.ok(&conn, &event_id_hex, true, "");
             }
             Err(e) => {
                 // Rejections carry the ingest taxonomy so backend failures
@@ -877,7 +886,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     }
                 };
                 reject(reason);
-                conn.send(RelayMessage::ok(&event_id_hex, false, &message));
+                write.ok(&conn, &event_id_hex, false, &message);
             }
         }
         return;
@@ -904,11 +913,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         Ok(permit) => permit,
         Err(crate::nip_fi_gate::SessionExpired) => {
             // Fix 4: [FI-TRACE-DENIAL-ORACLE]
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 &event_id_hex,
                 false,
                 "restricted: authorization denied",
-            ));
+            );
             return;
         }
     };
@@ -925,13 +935,15 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     "Event ingested"
                 );
             }
-            metrics::histogram!("buzz_event_processing_seconds")
-                .record(start.elapsed().as_secs_f64());
-            conn.send(RelayMessage::ok(
-                &result.event_id,
-                result.accepted,
-                &result.message,
-            ));
+            record_event_processing(
+                start,
+                if result.accepted {
+                    "accepted"
+                } else {
+                    "not_accepted"
+                },
+            );
+            write.ok(&conn, &result.event_id, result.accepted, &result.message);
         }
         Err(e) => {
             let e = e.into_legacy();
@@ -945,8 +957,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     ("error: internal server error".to_string(), "error")
                 }
             };
+            record_event_processing(start, reason);
             reject(reason);
-            conn.send(RelayMessage::ok(&event_id_hex, false, &msg));
+            write.ok(&conn, &event_id_hex, false, &msg);
         }
     }
 }
@@ -1250,17 +1263,12 @@ pub(crate) async fn publish_http_typing(
         Ok(Err(e)) => return Err(IngestError::Rejected(format!("invalid: {e}"))),
         Err(_) => return Err(IngestError::Internal("error: internal error".into())),
     }
-    // Same short-TTL caches as the WebSocket ephemeral path: this runs per
-    // typing pulse, and persistent ingest keeps the uncached durable fence.
-    super::ingest::enforce_cached_write_restriction(
-        state,
-        tenant,
-        KIND_TYPING_INDICATOR,
-        &auth_pubkey,
-    )
-    .await?;
+    // Same restriction gate and serving-fence cache as the WebSocket
+    // ephemeral path: this runs per typing pulse.
+    super::ingest::enforce_write_restriction(state, tenant, KIND_TYPING_INDICATOR, &auth_pubkey)
+        .await?;
     super::ingest::map_serving_fence_state(
-        state.is_serving_active_cached(tenant.community()).await,
+        state.is_community_active_cached(tenant.community()).await,
     )?;
     publish_channel_ephemeral(state, tenant, event, ch_id, auth_pubkey.as_bytes()).await
 }
@@ -1315,25 +1323,18 @@ async fn handle_agent_observer_event(
     event_id_hex: &str,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    write: &mut crate::access::WriteLog,
 ) {
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
     match verify_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                &format!("invalid: {e}"),
-            ));
+            write.ok(&conn, event_id_hex, false, &format!("invalid: {e}"));
             return;
         }
         Err(_) => {
-            conn.send(RelayMessage::ok(
-                event_id_hex,
-                false,
-                "error: internal error",
-            ));
+            write.ok(&conn, event_id_hex, false, "error: internal error");
             return;
         }
     }
@@ -1342,11 +1343,12 @@ async fn handle_agent_observer_event(
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).unsigned_abs() > 300 {
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             event_id_hex,
             false,
             "invalid: observer frame timestamp outside ±5 minute freshness window",
-        ));
+        );
         return;
     }
 
@@ -1354,12 +1356,12 @@ async fn handle_agent_observer_event(
         Ok(Some(route)) => route,
         Ok(None) => {
             // Unknown frame value — silently drop, no error to publisher.
-            conn.send(RelayMessage::ok(event_id_hex, true, ""));
+            write.ok(&conn, event_id_hex, true, "");
             return;
         }
         Err(message) => {
             reject("invalid");
-            conn.send(RelayMessage::ok(event_id_hex, false, &message));
+            write.ok(&conn, event_id_hex, false, &message);
             return;
         }
     };
@@ -1398,11 +1400,7 @@ async fn handle_agent_observer_event(
                     }
                     Err(e) => {
                         warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer owner check failed: {e}");
-                        conn.send(RelayMessage::ok(
-                            event_id_hex,
-                            false,
-                            "error: internal server error",
-                        ));
+                        write.ok(&conn, event_id_hex, false, "error: internal server error");
                         return;
                     }
                 }
@@ -1411,11 +1409,12 @@ async fn handle_agent_observer_event(
     };
     if !is_owner {
         reject("auth");
-        conn.send(RelayMessage::ok(
+        write.ok(
+            &conn,
             event_id_hex,
             false,
             "restricted: observer frame is not authorized for this agent owner",
-        ));
+        );
         return;
     }
 
@@ -1425,11 +1424,12 @@ async fn handle_agent_observer_event(
     if matches!(route.direction, AgentObserverDirection::Telemetry) {
         let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
         if observer_frame_rate_limited(&state, conn.tenant.community(), agent_key) {
-            conn.send(RelayMessage::ok(
+            write.ok(
+                &conn,
                 event_id_hex,
                 false,
                 "rate-limited: observer frame rate exceeded (100/sec per agent)",
-            ));
+            );
             return;
         }
     }
@@ -1456,7 +1456,7 @@ async fn handle_agent_observer_event(
     );
     fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
 
-    conn.send(RelayMessage::ok(event_id_hex, true, ""));
+    write.ok(&conn, event_id_hex, true, "");
 }
 
 fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, String> {
@@ -1794,6 +1794,7 @@ mod tests {
         let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
         let (terminal_ctrl_tx, _terminal_ctrl_rx) = mpsc::channel(1);
         let conn = Arc::new(crate::connection::ConnectionState {
+            refusal_budget: Default::default(),
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
@@ -1823,12 +1824,14 @@ mod tests {
             ),
         });
 
+        let mut write = crate::access::WriteLog::new(&conn, &event);
         super::handle_agent_observer_event(
             event.clone(),
             conn.conn_id,
             &event.id.to_hex(),
             conn,
             state,
+            &mut write,
         )
         .await;
 
@@ -1881,6 +1884,7 @@ mod tests {
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2042,6 +2046,7 @@ mod tests {
             }
             let (send_tx, _send_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2164,6 +2169,7 @@ mod tests {
             let (send_tx, mut send_rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -2666,10 +2672,8 @@ mod tests {
         async fn redis_url_if_available() -> Option<String> {
             let redis_url =
                 std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-            let pool = deadpool_redis::Config::from_url(&redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
-            let mut conn = pool.get().await.ok()?;
+            let pool = buzz_pubsub::redis_connection(&redis_url).ok()?;
+            let mut conn = pool.clone();
             redis::cmd("PING")
                 .query_async::<String>(&mut conn)
                 .await
@@ -3020,9 +3024,7 @@ mod tests {
             config.redis_url = redis_url.to_string();
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -3068,11 +3070,9 @@ mod tests {
             config.redis_url = "redis://127.0.0.1:6379".to_string();
             let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
             // Require a real Redis so dispatch's publish_event doesn't error-log.
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             redis::cmd("PING")
-                .query_async::<String>(&mut redis_pool.get().await.ok()?)
+                .query_async::<String>(&mut redis_pool.clone())
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
@@ -3481,6 +3481,38 @@ mod tests {
                 "membership lookup"
             );
         }
+
+        /// A refused WebSocket EVENT writes one `write` access line with the
+        /// OK's fixed prefix as its reason, and never the event's content or
+        /// tag values.
+        #[tokio::test]
+        async fn refused_ws_event_writes_one_access_line_without_its_content() {
+            let state = test_state().await;
+            let (conn, mut send_rx) =
+                crate::connection::tests::test_conn_with_auth(crate::connection::AuthState::Failed);
+            let event = EventBuilder::new(Kind::Custom(9), "secret words")
+                .tag(nostr::Tag::parse(["h", "secret-channel"]).unwrap())
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let (guard, out) = crate::access::tests::capture_scoped();
+            super::super::handle_event(event.clone(), conn, state).await;
+            drop(guard);
+
+            let axum::extract::ws::Message::Text(ack) = send_rx.try_recv().expect("OK") else {
+                panic!("expected text OK");
+            };
+            assert!(ack.contains("auth-required"), "{ack}");
+            assert!(!out.raw().contains("secret"), "{}", out.raw());
+            let lines = out.lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            let line = &lines[0];
+            assert_eq!(line["event"], "write", "{line}");
+            assert_eq!(line["outcome"], "rejected", "{line}");
+            assert_eq!(line["reason"], "auth-required", "{line}");
+            assert_eq!(line["kind"], 9, "{line}");
+            assert_eq!(line["event_id"], event.id.to_hex(), "{line}");
+            assert!(line.get("pubkey").is_none(), "{line}");
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -3678,6 +3710,7 @@ mod tests {
             let (ctrl_tx, _) = mpsc::channel(8);
             let (terminal_ctrl_tx, _) = mpsc::channel(1);
             let conn = std::sync::Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: uuid::Uuid::new_v4(),
                 tenant,
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
@@ -3870,10 +3903,11 @@ mod tests {
             let (state, tenant, user) = unrestricted_fixture().await;
             let key = (tenant.community(), user.public_key().to_bytes().to_vec());
 
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key.clone(),
                 buzz_db::moderation::RestrictionState {
                     banned: true,
+                    own_banned: true,
                     muted_until: None,
                 },
             );
@@ -3883,10 +3917,11 @@ mod tests {
                 "a cached ban must refuse the ephemeral event; got {frame}"
             );
 
-            state.restriction_cache.insert(
+            state.seed_restriction(
                 key,
                 buzz_db::moderation::RestrictionState {
                     banned: false,
+                    own_banned: false,
                     muted_until: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
                 },
             );
@@ -3898,12 +3933,12 @@ mod tests {
         }
 
         /// The ephemeral community fence reads the cached serving state.
-        /// Mutation: call the uncached `is_serving_active` → RED.
+        /// Mutation: call the uncached `is_community_active` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn ephemeral_fence_uses_cached_serving_state() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.serving_active_cache.insert(tenant.community(), false);
+            state.community_active.seed(tenant.community(), false);
             let frame = ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert!(
                 frame.contains("false") && frame.contains("community writes are fenced"),
@@ -3918,13 +3953,17 @@ mod tests {
             let (state, tenant, user) = unrestricted_fixture().await;
             ok_frame(&state, &tenant, &user, typing_event(&user)).await;
             assert_eq!(
-                state.serving_active_cache.get(&tenant.community()),
+                state
+                    .community_active
+                    .entry(tenant.community())
+                    .map(|(active, _)| active),
                 Some(true)
             );
             assert_eq!(
                 state
                     .restriction_cache
-                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec())),
+                    .get(&(tenant.community(), user.public_key().to_bytes().to_vec()))
+                    .map(|cached| cached.state),
                 Some(buzz_db::moderation::RestrictionState::default())
             );
         }
@@ -3935,53 +3974,105 @@ mod tests {
                 .expect("sign text note")
         }
 
-        /// Stored writes, and NIP-43 leave, skip the cached restriction row:
-        /// a cached ban on a sender Postgres has never restricted refuses
-        /// neither. The leave reaches ingest's later membership check, past
-        /// its uncached restriction check.
-        /// Mutation: make ingest call `enforce_cached_write_restriction`, or
-        /// drop the 28936 carve-out from the `handle_event` gate → RED.
+        /// Stored writes read the restriction through the cache, and only
+        /// while the entry is younger than `RESTRICTION_CACHE_MAX_AGE`: a
+        /// fresh cached ban on a sender Postgres has never restricted refuses
+        /// a stored write, and the same row past that age is reread and
+        /// admits it.
+        /// Mutation: make ingest read the restriction uncached, or drop the
+        /// max-age check from `restriction_state_cached` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
-        async fn stored_writes_ignore_cached_ban() {
+        async fn stored_writes_honor_cached_ban_until_it_ages_out() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.restriction_cache.insert(
-                (tenant.community(), user.public_key().to_bytes().to_vec()),
-                buzz_db::moderation::RestrictionState {
-                    banned: true,
-                    muted_until: None,
-                },
-            );
+            let key = (tenant.community(), user.public_key().to_bytes().to_vec());
+            let banned = buzz_db::moderation::RestrictionState {
+                banned: true,
+                own_banned: true,
+                muted_until: None,
+            };
             let scopes = buzz_auth::Scope::all_non_admin();
 
+            state.seed_restriction(key.clone(), banned.clone());
             let frame =
                 ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
             assert!(
-                frame.contains(",true,"),
-                "a stored write must read the restriction from Postgres; got {frame}"
+                frame.contains("blocked: you are banned"),
+                "a fresh cached ban must refuse a stored write; got {frame}"
             );
 
-            let leave = nostr::EventBuilder::new(
-                nostr::Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
-                "",
-            )
-            .sign_with_keys(&user)
-            .expect("sign leave");
-            let frame = ok_frame_scoped(&state, &tenant, &user, leave, scopes).await;
-            assert!(
-                frame.contains("relay membership is not enabled"),
-                "NIP-43 leave must skip the cached gate and pass ingest's uncached one; got {frame}"
+            state.restriction_cache.insert(
+                key,
+                crate::state::CachedRestriction {
+                    state: banned,
+                    read_at: std::time::Instant::now()
+                        .checked_sub(crate::state::RESTRICTION_CACHE_MAX_AGE)
+                        .expect("instant past max age"),
+                },
             );
+            let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
+            assert!(
+                frame.contains(",true,"),
+                "an aged-out cached ban must be reread from Postgres; got {frame}"
+            );
+        }
+
+        /// Every persistent ingest is timed under its outcome, failures
+        /// included, so a failing store cannot hide from the latency.
+        /// Mutation: drop `record_event_processing` from the `Err` arm → RED.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn event_processing_is_timed_for_accepted_and_refused_ingest() {
+            let (state, tenant, user) = unrestricted_fixture().await;
+            let scopes = buzz_auth::Scope::all_non_admin();
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                let frame =
+                    ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes.clone()).await;
+                assert!(frame.contains(",true,"), "{frame}");
+                state.seed_restriction(
+                    (tenant.community(), user.public_key().to_bytes().to_vec()),
+                    buzz_db::moderation::RestrictionState {
+                        banned: true,
+                        own_banned: true,
+                        muted_until: None,
+                    },
+                );
+                let frame = ok_frame_scoped(&state, &tenant, &user, text_note(&user), scopes).await;
+                assert!(frame.contains("blocked: you are banned"), "{frame}");
+            }
+            let mut timed: Vec<(String, usize)> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_event_processing_seconds")
+                .map(|(key, _, _, value)| {
+                    let metrics_util::debugging::DebugValue::Histogram(samples) = value else {
+                        panic!("buzz_event_processing_seconds must be a histogram");
+                    };
+                    let outcome = key
+                        .key()
+                        .labels()
+                        .find(|l| l.key() == "outcome")
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default();
+                    (outcome, samples.len())
+                })
+                .collect();
+            timed.sort();
+            assert_eq!(timed, [("accepted".to_owned(), 1), ("auth".to_owned(), 1)]);
         }
 
         /// Stored writes skip the cached serving state: a cached "fenced"
         /// for a community Postgres says is active does not refuse them.
-        /// Mutation: make ingest's fence call `is_serving_active_cached` → RED.
+        /// Mutation: make ingest's fence call `is_community_active_cached` → RED.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn stored_writes_ignore_cached_fence() {
             let (state, tenant, user) = unrestricted_fixture().await;
-            state.serving_active_cache.insert(tenant.community(), false);
+            state.community_active.seed(tenant.community(), false);
             let frame = ok_frame_scoped(
                 &state,
                 &tenant,
@@ -4033,6 +4124,7 @@ mod tests {
                 mpsc::channel::<axum::extract::ws::Message>(1);
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,
@@ -4226,6 +4318,7 @@ mod tests {
                 mpsc::channel::<axum::extract::ws::Message>(1);
 
             let conn = Arc::new(crate::connection::ConnectionState {
+                refusal_budget: Default::default(),
                 conn_id: Uuid::new_v4(),
                 tenant: buzz_core::tenant::TenantContext::resolved(
                     community,

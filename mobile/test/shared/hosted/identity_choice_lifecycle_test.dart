@@ -104,4 +104,24 @@ void main() {
       expect((await store.read())!.pubkey, second.public);
     },
   );
+
+  test(
+    'choosing creates a new identity beside offered keys and keeps them',
+    () async {
+      final before = await const FlutterSecureStorage().readAll();
+      await flow.start(target);
+      expect(flow.stage, HostedFlowStage.chooseIdentity);
+      expect(flow.canCreateIdentity, isTrue);
+      await flow.createIdentity();
+      final created = (await store.read())!.pubkey;
+      expect(created, isNot(anyOf(first.public, second.public)));
+      for (final entry in before.entries) {
+        expect(
+          await const FlutterSecureStorage().read(key: entry.key),
+          entry.value,
+        );
+      }
+      expect(flow.problem, HostedFlowProblem.denied);
+    },
+  );
 }

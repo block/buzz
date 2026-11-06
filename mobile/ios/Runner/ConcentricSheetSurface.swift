@@ -82,7 +82,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
       glassTintColorValue: (arguments?["glassTintColor"] as? NSNumber)?.uint32Value
     )
     applyInterfaceStyle(from: arguments?["brightness"])
-    applyCornerConfiguration(minimumRadius: minimumRadius)
+    applyCornerConfiguration(minimumRadius: minimumRadius, capsule: arguments?["capsule"] as? Bool == true)
 
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self else {
@@ -127,7 +127,8 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
         }
         self.applyInterfaceStyle(from: arguments["brightness"])
         self.applyCornerConfiguration(
-          minimumRadius: minimumRadius.doubleValue
+          minimumRadius: minimumRadius.doubleValue,
+          capsule: arguments["capsule"] as? Bool == true
         )
         result(nil)
       default:
@@ -164,8 +165,12 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     rootView.backgroundColor = backdropColorValue.map { Self.color(from: $0) } ?? .clear
   }
 
-  private func applyCornerConfiguration(minimumRadius: CGFloat) {
+  private func applyCornerConfiguration(minimumRadius: CGFloat, capsule: Bool) {
     if #available(iOS 26.0, *) {
+      if capsule {
+        surfaceView.cornerConfiguration = .capsule()
+        return
+      }
       let radius = UICornerRadius.containerConcentric(minimum: minimumRadius)
       surfaceView.cornerConfiguration =
         corners == "bottom"

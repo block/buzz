@@ -32,7 +32,7 @@ pub enum ConfigError {
 /// # Role resolution (nip98 mode only)
 ///
 /// In `nip98` mode the authenticated pubkey is resolved to an
-/// `AdminPrincipal` at request time via [`crate::api::admin::auth::resolve_admin_principal`]:
+/// `AdminPrincipal` at request time via [`crate::api::admin::auth::lookup_admin_principal`]:
 /// - `Operator/Config` if pubkey ∈ `RELAY_OPERATOR_PUBKEYS`
 /// - `Operator/OwnerFallback` if pubkey == `RELAY_OWNER_PUBKEY` **and**
 ///   `RELAY_OPERATOR_PUBKEYS` is empty (evaluated from config, never runtime rows)
@@ -116,8 +116,6 @@ pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Enable incremental artifact reads after every serving writer is upgraded.
-    pub artifact_incremental_enabled: bool,
     /// Address the relay HTTP/WebSocket server binds to.
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
@@ -129,10 +127,6 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
-    /// Replica freshness budget for fleet usage telemetry
-    /// (`BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS`). Independent of serving-read
-    /// routing; defaults to 30 seconds and `0` disables telemetry DB queries.
-    pub usage_metrics_replica_max_age_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -149,12 +143,6 @@ pub struct Config {
     pub drain_jitter_ms: u64,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
-    /// Maximum connections in the shared Redis pool. Defaults to 16.
-    ///
-    /// deadpool's own default is `CPU_COUNT * 2`, which on a 2-vCPU relay
-    /// pod is only 4 — small enough that rate-limit checks, presence, and
-    /// pub/sub publishes queue behind each other under load.
-    pub redis_pool_size: usize,
     /// Maximum connections in the Postgres writer/reader pools. Defaults to 50.
     ///
     /// The `buzz-db` default of 20 was sized for a handful of pods against
@@ -182,6 +170,9 @@ pub struct Config {
     pub max_frame_bytes: usize,
     /// Number of consecutive buffer-full events tolerated before cancelling a slow client.
     pub slow_client_grace_limit: u8,
+    /// `BUZZ_CLIENT_IP_HEADER`: the request header whose IP access lines log
+    /// as `client_ip`. `None` logs only the TCP `peer_addr`.
+    pub client_ip_header: Option<axum::http::HeaderName>,
     /// Authentication provider configuration.
     pub auth: buzz_auth::AuthConfig,
     /// Whether REST API requests must present a valid token. Independent of
@@ -189,6 +180,10 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
+    /// Opt-in NIP-CL compact membership projection; dark by default.
+    pub membership_snapshot_enabled: bool,
+    /// Opt-in NIP-CL public memberships, independent of self discovery.
+    pub membership_public_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
@@ -293,6 +288,10 @@ pub struct Config {
 
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
+
+    /// Endpoint receiving each new per-community storage snapshot
+    /// (`BUZZ_STORAGE_USAGE_URL`). Unset disables storage-usage delivery.
+    pub storage_usage_delivery_url: Option<url::Url>,
 
     /// Allow NIP-OA owner attestation for relay membership.
     ///
@@ -409,6 +408,10 @@ pub struct Config {
     /// Parsed whatever the NIP-FI mode, since creation happens in every mode.
     pub nip_fi_provision_binding: Option<buzz_auth::ProvisionBindingPolicy>,
 
+    /// Permit new irreversible FI upgrade acceptances. Default off; receipt
+    /// recovery/status remain available (`BUZZ_NIP_FI_UPGRADES_ENABLED`).
+    pub nip_fi_upgrades_enabled: bool,
+
     /// Database resolver bounds (`BUZZ_NIP_FI_RESOLVER_*`,
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
     /// fails the deploy that sets it, not the later switch to shadow.
@@ -440,6 +443,19 @@ fn invite_v1_cutoff_from_env() -> Result<Option<u64>, ConfigError> {
             "BUZZ_INVITE_V1_INVALID_AFTER must be valid Unicode".into(),
         )),
     }
+}
+
+/// An empty value turns the setting off; header names match case-insensitively.
+fn parse_client_ip_header(raw: &str) -> Result<Option<axum::http::HeaderName>, ConfigError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    axum::http::HeaderName::from_bytes(raw.to_ascii_lowercase().as_bytes())
+        .map(Some)
+        .map_err(|_| {
+            ConfigError::InvalidValue(format!("BUZZ_CLIENT_IP_HEADER is not a header name: {raw}"))
+        })
 }
 
 fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
@@ -690,16 +706,6 @@ impl Config {
             })?,
             Err(_) => 0,
         };
-        let usage_metrics_replica_max_age_ms =
-            match std::env::var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS") {
-                Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
-                    ConfigError::InvalidValue(
-                        "BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS must be a non-negative integer"
-                            .to_string(),
-                    )
-                })?,
-                Err(_) => 30_000,
-            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -722,12 +728,6 @@ impl Config {
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
-
-        let redis_pool_size = std::env::var("BUZZ_REDIS_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(16);
 
         let db_pool_size = std::env::var("BUZZ_DB_POOL_SIZE")
             .ok()
@@ -788,6 +788,9 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(15);
 
+        let client_ip_header =
+            parse_client_ip_header(&std::env::var("BUZZ_CLIENT_IP_HEADER").unwrap_or_default())?;
+
         let require_auth_token = std::env::var("BUZZ_REQUIRE_AUTH_TOKEN")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -797,9 +800,6 @@ impl Config {
             .unwrap_or(false);
 
         let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        let artifact_incremental_enabled = std::env::var("BUZZ_ARTIFACT_INCREMENTAL_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -928,6 +928,18 @@ impl Config {
             Err(error) => {
                 return Err(ConfigError::InvalidValue(format!(
                     "BUZZ_OPERATOR_LISTENERS must be valid UTF-8: {error}"
+                )));
+            }
+        };
+        let storage_usage_delivery_url = match std::env::var("BUZZ_STORAGE_USAGE_URL") {
+            Ok(raw) => Some(
+                crate::storage_usage_delivery::parse_delivery_url(&raw)
+                    .map_err(ConfigError::InvalidValue)?,
+            ),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(ConfigError::InvalidValue(format!(
+                    "BUZZ_STORAGE_USAGE_URL must be valid UTF-8: {error}"
                 )));
             }
         };
@@ -1430,10 +1442,8 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
-            usage_metrics_replica_max_age_ms,
             drain_jitter_ms,
             redis_url,
-            redis_pool_size,
             db_pool_size,
             db_read_pool_size,
             relay_url,
@@ -1443,9 +1453,14 @@ impl Config {
             send_buffer_size,
             max_frame_bytes,
             slow_client_grace_limit,
+            client_ip_header,
             auth,
             require_auth_token,
             buzz_v1_enabled,
+            membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
+                .is_ok_and(|v| v == "true"),
+            membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")
+                .is_ok_and(|v| v == "true"),
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
@@ -1457,7 +1472,6 @@ impl Config {
             partition_manager_advance_enabled,
             pubkey_allowlist_enabled,
             require_relay_membership,
-            artifact_incremental_enabled,
             huddle_audio_available,
             mesh,
             mesh_demo_echo,
@@ -1465,6 +1479,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             operator_listener_delivery_urls,
+            storage_usage_delivery_url,
             allow_nip_oa_auth,
             klipy,
             media,
@@ -1493,6 +1508,7 @@ impl Config {
             web_dir,
             serve_git_web_gui,
             nip_fi_provision_binding,
+            nip_fi_upgrades_enabled: parse_bool("BUZZ_NIP_FI_UPGRADES_ENABLED", false)?,
             nip_fi_resolver_bounds,
             nip_fi,
         })
@@ -1563,6 +1579,37 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cfg = ENV_MUTEX.lock().unwrap();
         (fi, cfg)
+    }
+
+    #[test]
+    fn nip_fi_upgrade_acceptance_is_explicitly_default_off() {
+        let (_fi, _cfg) = env_guards();
+        let before = std::env::var("BUZZ_NIP_FI_UPGRADES_ENABLED").ok();
+        std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED");
+        assert!(!Config::from_env().unwrap().nip_fi_upgrades_enabled);
+        for value in ["true", "TRUE", "1", "on", " On "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        for value in ["false", "FALSE", "0", "off", "", " Off "] {
+            std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value);
+            assert!(
+                !Config::from_env().unwrap().nip_fi_upgrades_enabled,
+                "{value}"
+            );
+        }
+        std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", "treu");
+        assert!(
+            matches!(Config::from_env(), Err(ConfigError::InvalidValue(message))
+            if message.contains("BUZZ_NIP_FI_UPGRADES_ENABLED must be true or false"))
+        );
+        match before {
+            Some(value) => std::env::set_var("BUZZ_NIP_FI_UPGRADES_ENABLED", value),
+            None => std::env::remove_var("BUZZ_NIP_FI_UPGRADES_ENABLED"),
+        }
     }
 
     // The three `source=database` startup guards. Mutation: dropping any one
@@ -1702,7 +1749,6 @@ mod tests {
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
         assert!(!config.redis_url.is_empty());
-        assert_eq!(config.redis_pool_size, 16);
         assert_eq!(config.db_pool_size, 50);
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
@@ -2300,31 +2346,6 @@ mod tests {
     }
 
     #[test]
-    fn redis_pool_size_env_override_and_invalid_fallback() {
-        let _guards = env_guards();
-        let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
-        let overridden = Config::from_env().expect("config").redis_pool_size;
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "0");
-        let zero = Config::from_env().expect("config").redis_pool_size;
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "not-a-number");
-        let junk = Config::from_env().expect("config").redis_pool_size;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_REDIS_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_REDIS_POOL_SIZE");
-        }
-
-        assert_eq!(overridden, 32);
-        assert_eq!(zero, 16, "zero must fall back to the default");
-        assert_eq!(junk, 16, "unparsable value must fall back to the default");
-    }
-
-    #[test]
     fn db_pool_size_env_override_and_invalid_fallback() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
@@ -2456,35 +2477,6 @@ mod tests {
             ),
             other => panic!("old env name must hard-fail startup, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn usage_metrics_replica_budget_defaults_on_independently_of_serving_reads() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous_usage = std::env::var_os("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        let previous_serving = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
-
-        std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        let defaults = Config::from_env().expect("config");
-
-        std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", "0");
-        let disabled = Config::from_env().expect("config");
-
-        if let Some(value) = previous_usage {
-            std::env::set_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_USAGE_METRICS_REPLICA_MAX_AGE_MS");
-        }
-        if let Some(value) = previous_serving {
-            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        }
-
-        assert_eq!(defaults.replica_read_max_age_ms, 0);
-        assert_eq!(defaults.usage_metrics_replica_max_age_ms, 30_000);
-        assert_eq!(disabled.usage_metrics_replica_max_age_ms, 0);
     }
 
     #[test]
@@ -2941,6 +2933,17 @@ mod tests {
             !config.huddle_audio_available,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
         );
+    }
+
+    #[test]
+    fn client_ip_header_is_off_when_empty_and_case_insensitive() {
+        assert_eq!(parse_client_ip_header("").unwrap(), None);
+        assert_eq!(parse_client_ip_header("  ").unwrap(), None);
+        assert_eq!(
+            parse_client_ip_header(" CF-Connecting-IP ").unwrap(),
+            Some(axum::http::HeaderName::from_static("cf-connecting-ip"))
+        );
+        assert!(parse_client_ip_header("not a header").is_err());
     }
 
     #[test]

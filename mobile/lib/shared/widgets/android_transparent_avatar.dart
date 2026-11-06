@@ -21,6 +21,38 @@ class AndroidTransparentAvatar extends HookWidget {
   Widget build(BuildContext context) {
     final channel = useState<MethodChannel?>(null);
     final failed = useState(false);
+    final ready = useState(false);
+    useEffect(() {
+      final current = channel.value;
+      if (current == null || !playing || ready.value || failed.value) {
+        return null;
+      }
+      var active = true;
+      Timer? retry;
+      Future<void> waitForFrame() async {
+        try {
+          final state = await current.invokeMethod<String>('isReady');
+          if (!active) return;
+          if (state == 'failed') {
+            failed.value = true;
+          } else if (state == 'ready') {
+            ready.value = true;
+          } else {
+            retry = Timer(const Duration(milliseconds: 50), waitForFrame);
+          }
+        } on PlatformException {
+          if (active) failed.value = true;
+        } on MissingPluginException {
+          if (active) failed.value = true;
+        }
+      }
+
+      unawaited(waitForFrame());
+      return () {
+        active = false;
+        retry?.cancel();
+      };
+    }, [channel.value, playing, failed.value]);
     useEffect(() {
       final current = channel.value;
       var active = true;
@@ -40,15 +72,32 @@ class AndroidTransparentAvatar extends HookWidget {
     if (failed.value) return fallback;
     return ExcludeSemantics(
       child: IgnorePointer(
-        child: AndroidView(
-          viewType: 'buzz/transparent-avatar',
-          creationParams: {'url': url.toString()},
-          creationParamsCodec: const StandardMessageCodec(),
-          onPlatformViewCreated: (id) {
-            if (context.mounted) {
-              channel.value = MethodChannel('buzz/transparent-avatar/$id');
-            }
-          },
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Opacity(
+              opacity: ready.value ? 1 : 0,
+              child: AndroidView(
+                viewType: 'buzz/transparent-avatar',
+                creationParams: {'url': url.toString()},
+                creationParamsCodec: const StandardMessageCodec(),
+                onPlatformViewCreated: (id) {
+                  if (context.mounted) {
+                    channel.value = MethodChannel(
+                      'buzz/transparent-avatar/$id',
+                    );
+                  }
+                },
+              ),
+            ),
+            IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: ready.value ? 0 : 1,
+                duration: const Duration(milliseconds: 120),
+                child: fallback,
+              ),
+            ),
+          ],
         ),
       ),
     );

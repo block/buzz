@@ -6,6 +6,10 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+
+import '../../shared/verified_profiles/verified_profile_fixture.dart';
+
 /// Tests for [channelDetailsFromEvent].
 ///
 /// The function maps a kind:39000 metadata event to [ChannelDetails], and is
@@ -141,47 +145,59 @@ void main() {
   });
 
   test('builds an alphabetized directory from the latest profile events', () {
-    final users = directoryUsersFromProfileEvents([
-      NostrEvent(
-        id: 'alice-old',
-        pubkey: 'alice',
-        createdAt: 10,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Zoe"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'bob',
-        pubkey: 'bob',
-        createdAt: 20,
-        kind: 0,
-        tags: const [],
-        content: '{"display_name":"Bob"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'alice-new',
-        pubkey: 'ALICE',
-        createdAt: 30,
-        kind: 0,
-        tags: const [],
-        content:
-            '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
-        sig: 'sig',
-      ),
-      NostrEvent(
-        id: 'not-a-profile',
-        pubkey: 'charlie',
-        createdAt: 40,
-        kind: 1,
-        tags: const [],
-        content: '{}',
-        sig: 'sig',
-      ),
-    ]);
+    final users = directoryUsersFromSearch(
+      searchedPeople([
+        NostrEvent(
+          id: 'alice-old',
+          pubkey: 'alice',
+          createdAt: 10,
+          kind: 0,
+          tags: const [],
+          content: '{"display_name":"Zoe"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'bob',
+          pubkey: 'bob',
+          createdAt: 20,
+          kind: 0,
+          tags: const [],
+          content: '{"display_name":"Bob"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'alice-new',
+          pubkey: 'ALICE',
+          createdAt: 30,
+          kind: 0,
+          tags: const [],
+          content:
+              '{"display_name":"Alice","picture":"https://example.com/alice.png"}',
+          sig: 'sig',
+        ),
+        NostrEvent(
+          id: 'not-a-profile',
+          pubkey: 'charlie',
+          createdAt: 40,
+          kind: 1,
+          tags: const [],
+          content: '{}',
+          sig: 'sig',
+        ),
+        // Someone with no kind:0 is listed by the relay's verified head.
+        signedProjection(profileTags(subjectA, name: 'Gabi Lilienfeld')),
+        signedProjection(
+          profileTags(subjectB, name: 'Forged'),
+          author: relayKeysOther(),
+        ),
+      ], authority),
+    );
 
-    expect(users.map((user) => user.label), ['Alice', 'Bob']);
+    expect(users.map((user) => user.label), [
+      'Alice',
+      'Bob',
+      'Gabi Lilienfeld',
+    ]);
     expect(users.first.pubkey, 'alice');
     expect(users.first.avatarUrl, 'https://example.com/alice.png');
   });
@@ -759,139 +775,6 @@ void main() {
       );
     });
   });
-
-  group('directory providers relay-config invalidation', () {
-    NostrEvent profile(String pubkey, String name) => NostrEvent(
-      id: '$pubkey-profile',
-      pubkey: pubkey,
-      createdAt: 1700000000,
-      kind: 0,
-      tags: const [],
-      content: '{"display_name":"$name"}',
-      sig: 'sig',
-    );
-
-    ProviderContainer buildContainer(_DirectoryFakeRelaySession session) {
-      return ProviderContainer(
-        retry: (_, _) => null,
-        overrides: [
-          relaySessionProvider.overrideWith(() => session),
-          myPubkeyProvider.overrideWithValue('me'),
-        ],
-      );
-    }
-
-    test('browse directory refetches when the relay config changes', () async {
-      final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('alice', 'Alice')],
-      );
-      final container = buildContainer(session);
-      addTearDown(container.dispose);
-
-      // Keep the autoDispose provider alive across the config change, the
-      // way an open New message sheet would.
-      final subscription = container.listen(
-        relayDirectoryUsersProvider,
-        (_, _) {},
-      );
-      addTearDown(subscription.close);
-
-      final firstUsers = await container.read(
-        relayDirectoryUsersProvider.future,
-      );
-      expect(firstUsers.map((user) => user.label), ['Alice']);
-      expect(session.directoryQueryCount, 1);
-
-      // Simulate switching to a community that shares the same signing key:
-      // session notifier instance and pubkey both survive; only the relay
-      // config changes.
-      session.profileEvents = [profile('bob', 'Bob')];
-      container
-          .read(relayConfigProvider.notifier)
-          .update(baseUrl: 'http://other-community.example', nsec: null);
-      await container.pump();
-
-      final secondUsers = await container.read(
-        relayDirectoryUsersProvider.future,
-      );
-      expect(secondUsers.map((user) => user.label), ['Bob']);
-      expect(session.directoryQueryCount, 2);
-    });
-
-    test('search results refetch when the relay config changes', () async {
-      final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('alice', 'Alice')],
-      );
-      final container = buildContainer(session);
-      addTearDown(container.dispose);
-
-      final subscription = container.listen(
-        relayDirectorySearchProvider('ali'),
-        (_, _) {},
-      );
-      addTearDown(subscription.close);
-
-      final firstResults = await container.read(
-        relayDirectorySearchProvider('ali').future,
-      );
-      expect(firstResults.map((user) => user.label), ['Alice']);
-      expect(session.searchQueryCount, 1);
-
-      session.profileEvents = [profile('alina', 'Alina')];
-      container
-          .read(relayConfigProvider.notifier)
-          .update(baseUrl: 'http://other-community.example', nsec: null);
-      await container.pump();
-
-      final secondResults = await container.read(
-        relayDirectorySearchProvider('ali').future,
-      );
-      expect(secondResults.map((user) => user.label), ['Alina']);
-      expect(session.searchQueryCount, 2);
-    });
-
-    test('search results keep the relay ranking', () async {
-      // The relay ranks the exact name first; alphabetizing would move
-      // "Abe Wes" above "Wes".
-      final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('wes', 'Wes'), profile('abe', 'Abe Wes')],
-      );
-      final container = buildContainer(session);
-      addTearDown(container.dispose);
-
-      final results = await container.read(
-        relayDirectorySearchProvider('wes').future,
-      );
-      expect(results.map((user) => user.label), ['Wes', 'Abe Wes']);
-      final found = await container
-          .read(channelActionsProvider)
-          .searchUsers('wes');
-      expect(found.map((user) => user.label), ['Wes', 'Abe Wes']);
-      final browsed = await container.read(relayDirectoryUsersProvider.future);
-      expect(browsed.map((user) => user.label), ['Abe Wes', 'Wes']);
-    });
-
-    test('cached search families are released once unlistened', () async {
-      final session = _DirectoryFakeRelaySession(
-        profileEvents: [profile('alice', 'Alice')],
-      );
-      final container = buildContainer(session);
-      addTearDown(container.dispose);
-
-      final subscription = container.listen(
-        relayDirectorySearchProvider('ali'),
-        (_, _) {},
-      );
-      await container.read(relayDirectorySearchProvider('ali').future);
-      subscription.close();
-      await container.pump();
-
-      // A fresh read after disposal hits the relay again instead of reusing
-      // a session-lifetime cache entry.
-      await container.read(relayDirectorySearchProvider('ali').future);
-      expect(session.searchQueryCount, 2);
-    });
-  });
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
@@ -978,47 +861,4 @@ class _ConnectionAwareRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async => () {};
-}
-
-/// Fake [RelaySessionNotifier] that serves canned kind:0 profile events from
-/// [queryRelay] and counts directory vs. search queries.
-class _DirectoryFakeRelaySession extends RelaySessionNotifier {
-  _DirectoryFakeRelaySession({required this.profileEvents});
-
-  List<NostrEvent> profileEvents;
-  int directoryQueryCount = 0;
-  int searchQueryCount = 0;
-
-  @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
-
-  @override
-  Future<List<NostrEvent>> queryRelay(
-    List<NostrFilter> filters, {
-    Duration timeout = const Duration(seconds: 8),
-  }) async {
-    if (filters.any((filter) => filter.search != null)) {
-      throw StateError('name search must use searchProfiles');
-    }
-    directoryQueryCount++;
-    return profileEvents;
-  }
-
-  @override
-  Future<List<NostrEvent>> searchProfiles(
-    String query, {
-    int limit = 50,
-    Duration timeout = const Duration(seconds: 8),
-  }) async {
-    searchQueryCount++;
-    return profileEvents;
-  }
-
-  @override
-  Future<List<NostrEvent>> fetchHistory(
-    NostrFilter filter, {
-    Duration timeout = const Duration(seconds: 8),
-  }) async {
-    return const [];
-  }
 }

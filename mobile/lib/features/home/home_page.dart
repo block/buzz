@@ -18,6 +18,7 @@ import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
+import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 class HomePage extends HookConsumerWidget {
   const HomePage({
@@ -67,7 +68,7 @@ class HomePage extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     void openSearch() => Navigator.of(context).push(
       BottomUpPageRoute<void>(
-        builder: (_) => const SearchPage(),
+        builder: (_) => const CoveredRouteKeyboardInsets(child: SearchPage()),
         reducedMotion: reducedMotion,
       ),
     );
@@ -95,7 +96,7 @@ class HomePage extends HookConsumerWidget {
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           (
-            label: 'Switch workspace',
+            label: 'Switch community',
             symbol: 'arrow.left.arrow.right',
             onPressed: openSwitcher,
           ),
@@ -105,17 +106,17 @@ class HomePage extends HookConsumerWidget {
               symbol: 'person.badge.plus',
               onPressed: () => openPage(communityInvitePageBuilder!),
             ),
+          (
+            label: 'Agents',
+            symbol: 'agent',
+            onPressed: () => onAgents(context),
+          ),
           if (communityAppearancePageBuilder != null)
             (
               label: 'Appearance',
               symbol: 'circle.lefthalf.filled',
               onPressed: () => openPage(communityAppearancePageBuilder!),
             ),
-          (
-            label: 'Agents',
-            symbol: 'person.2',
-            onPressed: () => onAgents(context),
-          ),
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [

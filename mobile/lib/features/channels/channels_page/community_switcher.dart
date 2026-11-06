@@ -137,8 +137,14 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         MediaQuery.disableAnimationsOf(context) ||
         FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
 
-    Future<void> waitForContent() async {
+    Future<void> waitForContent({Future<void>? abandon}) async {
       final ready = Completer<void>();
+      // Stop listening once the caller no longer needs the content.
+      unawaited(
+        abandon?.then((_) {
+          if (!ready.isCompleted) ready.complete();
+        }),
+      );
       final subscription = ref.listenManual(_communityContentReadyProvider, (
         _,
         next,
@@ -192,16 +198,54 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;
-        // Refresh this scope before awaiting its content. ChannelsNotifier
-        // fences cached snapshots to the destination relay and identity.
-        if (!arriving) ref.invalidate(channelsProvider);
-        await (() async {
-          await waitForContent();
-          if (!context.mounted) return;
-          final bounds = await prepareLanding();
-          if (context.mounted) landingBounds.value = bounds;
-        })().timeout(const Duration(seconds: 20));
+        // Organization sign-in can be needed before content loads, or only
+        // once the relay refuses this key. Close for either, so the Home
+        // banner's action is reachable instead of covered until the timeout.
+        final signIn = ref.read(organizationSignInProvider);
+        final auth = ref.read(hostedRelayAuthProvider);
+        // The picker can close while this waits, so check before using ref.
+        bool promptVisible() =>
+            context.mounted &&
+            organizationSignInPromptVisible(
+              signIn,
+              auth,
+              ref.read(relayConfigProvider),
+            );
+        if (promptVisible()) {
+          Navigator.of(context).pop();
+          return;
+        }
+        final prompt = Completer<bool>();
+        void checkPrompt() {
+          if (!prompt.isCompleted && promptVisible()) prompt.complete(true);
+        }
+
+        signIn?.addListener(checkPrompt);
+        auth.addListener(checkPrompt);
+        final bool prompted;
+        try {
+          // Refresh this scope before awaiting its content. ChannelsNotifier
+          // fences cached snapshots to the destination relay and identity.
+          if (!arriving) ref.invalidate(channelsProvider);
+          prompted = await Future.any([
+            prompt.future,
+            (() async {
+              await waitForContent(abandon: prompt.future);
+              if (!context.mounted || prompt.isCompleted) return false;
+              final bounds = await prepareLanding();
+              if (context.mounted) landingBounds.value = bounds;
+              return false;
+            })(),
+          ]).timeout(const Duration(seconds: 20));
+        } finally {
+          signIn?.removeListener(checkPrompt);
+          auth.removeListener(checkPrompt);
+        }
         if (!context.mounted) return;
+        if (prompted) {
+          Navigator.of(context).pop();
+          return;
+        }
         if (animate) {
           await controller.forward(from: 0).orCancel;
           if (!context.mounted) return;

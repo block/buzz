@@ -150,15 +150,41 @@ class _VersionFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final label = buildNumber.isEmpty
+        ? 'v$version'
+        : 'v$version ($buildNumber)';
     return SafeArea(
       top: false,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: Grid.xs, top: Grid.xxs),
-        child: Center(
-          child: Text(
-            buildNumber.isEmpty ? 'v$version' : 'v$version ($buildNumber)',
-            style: context.textTheme.bodySmall?.copyWith(
-              color: context.colors.onSurfaceVariant.withValues(alpha: 0.6),
+      child: Center(
+        child: Semantics(
+          button: true,
+          onTapHint: 'Copy version',
+          child: InkWell(
+            borderRadius: BorderRadius.circular(Grid.xs),
+            onTap: () =>
+                copyToClipboard(context, label, message: 'Version copied'),
+            // Keep the text where it was and grow the tap target downward
+            // to the platform minimum.
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(
+                minHeight: kMinInteractiveDimension,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.xs,
+                  Grid.xxs,
+                  Grid.xs,
+                  Grid.xs,
+                ),
+                child: Text(
+                  label,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant.withValues(
+                      alpha: 0.6,
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),

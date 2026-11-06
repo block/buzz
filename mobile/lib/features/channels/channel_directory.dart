@@ -263,7 +263,8 @@ List<NostrEvent> _latestChannelEvents(
   return latestById.values.toList();
 }
 
-Future<Set<String>> _fetchHiddenDmIds(
+/// The hidden DM ids, or null when the relay doesn't answer.
+Future<Set<String>?> _fetchHiddenDmIds(
   RelaySessionNotifier session,
   String myPk,
 ) async {
@@ -272,7 +273,7 @@ Future<Set<String>> _fetchHiddenDmIds(
       await session.fetchHistory(NostrFilters.hiddenDms(myPk)),
     );
   } catch (_) {
-    return const {};
+    return null;
   }
 }
 

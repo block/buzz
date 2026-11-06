@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:buzz/shared/community/community_avatar.dart';
-import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
@@ -111,10 +109,12 @@ void main() {
       final provider = (image.image as ResizeImage).imageProvider;
       return (provider as MediaImageProvider).url;
     });
-    expect(shown, ['$relay/media/$hash.thumb.jpg', original]);
+    expect(shown, ['$relay/media/$hash.thumb.webp', original]);
   });
 
-  testWidgets('a missing thumbnail falls back to the original', (tester) async {
+  testWidgets('missing thumbnails fall back to the JPEG, then the original', (
+    tester,
+  ) async {
     const relay = 'https://relay.example';
     final missing = '$relay/media/${'cd' * 32}.jpg';
     final broken = '$relay/media/${'ef' * 32}.jpg';
@@ -159,9 +159,19 @@ void main() {
       await tester.pump();
     }
 
-    String thumb(String url) => url.replaceFirst('.jpg', '.thumb.jpg');
-    // A 404 retries the original; any other failure shows the fallback.
-    expect(requested, containsAll([thumb(missing), missing, thumb(broken)]));
+    String thumb(String url, String ext) =>
+        url.replaceFirst('.jpg', '.thumb.$ext');
+    // A 404 tries the next source; any other failure shows the fallback.
+    expect(
+      requested,
+      containsAll([
+        thumb(missing, 'webp'),
+        thumb(missing, 'jpg'),
+        missing,
+        thumb(broken, 'webp'),
+      ]),
+    );
+    expect(requested, isNot(contains(thumb(broken, 'jpg'))));
     expect(requested, isNot(contains(broken)));
     expect(find.text('B'), findsOneWidget);
   });
@@ -215,7 +225,7 @@ void main() {
     expect(MediaImage.debugMissingThumbnailCount, 256);
     expect(
       MediaImageProvider.debugCooldownUrls.where(
-        (url) => url.endsWith('.thumb.jpg'),
+        (url) => url.contains('.thumb.'),
       ),
       isEmpty,
     );
@@ -245,9 +255,11 @@ void main() {
     }) async {
       tester.view.devicePixelRatio = 3;
       addTearDown(tester.view.resetDevicePixelRatio);
-      final client = http_testing.MockClient((request) {
+      final client = http_testing.MockClient((request) async {
         final url = request.url.toString();
         requested.add(url);
+        // These journeys run against a relay from before WebP thumbnails.
+        if (url.endsWith('.thumb.webp')) return http.Response('', 404);
         return respond(url);
       });
       await tester.pumpWidget(
@@ -308,7 +320,7 @@ void main() {
             fallback: const Text('M'),
           ),
         );
-        expect(requested, [thumbnail]);
+        expect(requested, [thumbnail.replaceFirst('.jpg', '.webp'), thumbnail]);
         await show(tester, const SizedBox());
         slow404.complete(http.Response('', 404));
         await show(tester, const SizedBox());
@@ -355,25 +367,97 @@ void main() {
       },
     );
 
-    testWidgets('community icons load the original, which keeps transparency', (
-      tester,
-    ) async {
-      final icon = '$relay/media/${'34' * 32}.png';
-      await mount(
-        tester,
-        overrides: [
-          communityIconPresentationProvider(relay).overrideWithValue(icon),
-        ],
-      );
+    testWidgets(
+      'a direct thumbnail URL and a fallback to it keep their own 404 handling',
+      (tester) async {
+        final original = '$relay/media/${'9a' * 32}.png';
+        final thumbnail = '$relay/media/${'9a' * 32}.thumb.jpg';
+        final slow404 = Completer<http.Response>();
+        respond = (url) async => url == thumbnail
+            ? slow404.future
+            : http.Response.bytes(_pngBytes, 200);
+        await mount(tester);
 
-      // The channels header size, well within the thumbnail.
-      await show(
-        tester,
-        const CommunityAvatar(name: 'Buzz', relayUrl: relay, size: 36),
-      );
-      expect(requested, [icon]);
-      expect(shownUrl(tester), icon);
-    });
+        // One profile stores the thumbnail URL itself; another stores the
+        // original, so its avatar substitutes the same thumbnail. Both are
+        // waiting on the relay when its 404 arrives.
+        await show(
+          tester,
+          Column(
+            children: [
+              AvatarImage(
+                imageUrl: thumbnail,
+                radius: 20,
+                fallback: const Text('D'),
+              ),
+              AvatarImage(
+                imageUrl: original,
+                radius: 20,
+                fallback: const Text('F'),
+              ),
+            ],
+          ),
+        );
+        expect(requested.where((url) => url == thumbnail), hasLength(2));
+        slow404.complete(http.Response('', 404));
+        await show(tester, const SizedBox());
+
+        // The direct URL is cooling down, and the fallback recorded the
+        // missing thumbnail, so the original avatar shown again at another
+        // size loads the original instead of showing initials.
+        expect(MediaImageProvider.debugCooldownUrls, [thumbnail]);
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: original,
+            radius: 16,
+            fallback: const Text('F'),
+          ),
+        );
+        expect(shownUrl(tester), original);
+        expect(find.text('F'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a fallback after a direct thumbnail 404 still loads the original',
+      (tester) async {
+        final original = '$relay/media/${'9b' * 32}.png';
+        final thumbnail = '$relay/media/${'9b' * 32}.thumb.jpg';
+        respond = (url) async => url == thumbnail
+            ? http.Response('', 404)
+            : http.Response.bytes(_pngBytes, 200);
+        await mount(tester);
+
+        // A profile that stores the thumbnail URL itself fails first and
+        // puts that URL on cooldown.
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: thumbnail,
+            radius: 20,
+            fallback: const Text('D'),
+          ),
+        );
+        await show(tester, const SizedBox());
+        expect(MediaImageProvider.debugCooldownUrls, [thumbnail]);
+
+        // During that cooldown, an avatar for the original falls back to the
+        // same thumbnail. Its own request records the thumbnail as missing,
+        // so the avatar ends up on the original rather than initials.
+        await show(
+          tester,
+          AvatarImage(
+            imageUrl: original,
+            radius: 20,
+            fallback: const Text('F'),
+          ),
+        );
+        expect(requested.where((url) => url == thumbnail), hasLength(2));
+        expect(requested, contains(original));
+        expect(find.text('F'), findsNothing);
+      },
+    );
   });
 
   testWidgets('clips agents to the desktop squircle', (tester) async {

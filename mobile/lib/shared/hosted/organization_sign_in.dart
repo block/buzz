@@ -192,3 +192,35 @@ class OrganizationSignIn extends ChangeNotifier {
     super.dispose();
   }
 }
+
+/// The relay's refusal for this community and key, if any.
+AccountFailure? organizationRelayFailure(
+  HostedRelayAuth auth,
+  RelayConfig config,
+) =>
+    auth.failedRelay == config.baseUrl &&
+        auth.failedPubkey == pubkeyFromNsec(config.nsec)
+    ? auth.failure
+    : null;
+
+/// Whether the organization sign-in banner offers an action for [config]. The
+/// community switcher closes early on this so the banner is reachable.
+bool organizationSignInPromptVisible(
+  OrganizationSignIn? signIn,
+  HostedRelayAuth auth,
+  RelayConfig config,
+) {
+  if (signIn == null || !auth.organizationProtects(config)) return false;
+  return switch (signIn.status) {
+    OrganizationSessionStatus.checking => false,
+    OrganizationSessionStatus.signingIn ||
+    OrganizationSessionStatus.signedOut => true,
+    OrganizationSessionStatus.signedIn => switch (organizationRelayFailure(
+      auth,
+      config,
+    )) {
+      null || AccountFailure.signedOut || AccountFailure.unavailable => false,
+      _ => true,
+    },
+  };
+}

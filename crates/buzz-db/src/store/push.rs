@@ -366,6 +366,7 @@ pub async fn accept_lease_event(
     crate::store::event_follow_up::after_admitted_insert(
         &mut tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         30350,
         None,
     )
@@ -2889,6 +2890,8 @@ mod postgres_tests {
                     &pool,
                     community,
                     raced.id.as_bytes().to_vec(),
+                    DateTime::from_timestamp(raced.created_at.as_secs() as i64, 0)
+                        .expect("signed timestamp"),
                     (held_tx, release_rx),
                 )
                 .await

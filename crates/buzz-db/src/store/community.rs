@@ -6,7 +6,13 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{relay_members, Db, DbError, Result};
+use crate::{relay_members, Db, DbError, ReadAt, Result};
+
+// Admission and policy must select the same serving row. A deletion request
+// alone does not stop serving; begin_quiescing changes deletion_state.
+pub(super) const SERVING_HOST_QUERY: &str = "SELECT id, host, requires_nip_fi, policy_generation
+    FROM communities WHERE lower(host) = lower($1)
+    AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active'";
 
 /// Community host-map row returned by [`Db::lookup_community_by_host`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,57 +116,73 @@ impl Db {
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
     /// request/connection error. buzz-db only reads the durable host map.
-    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
     pub async fn lookup_community_by_host(
         &self,
         normalized_host: &str,
     ) -> Result<Option<CommunityRecord>> {
+        Ok(self
+            .lookup_community_by_host_read_at(normalized_host)
+            .await?
+            .value)
+    }
+
+    /// [`Self::lookup_community_by_host`], with when its connection was
+    /// checked out, for caches that bound staleness from the read.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
+    pub async fn lookup_community_by_host_read_at(
+        &self,
+        normalized_host: &str,
+    ) -> Result<ReadAt<Option<CommunityRecord>>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::TenantResolution,
         )
         .await?;
-        let row = sqlx::query(
-            r#"
-            SELECT id, host
-            FROM communities
-            WHERE lower(host) = lower($1)
-              AND archived_at IS NULL
-              AND deleted_at IS NULL
-              AND deletion_state = 'active'
-            "#,
-        )
-        .bind(normalized_host)
-        .fetch_optional(&mut *connection)
-        .await?;
+        let read_at = std::time::Instant::now();
+        let row = sqlx::query(SERVING_HOST_QUERY)
+            .bind(normalized_host)
+            .fetch_optional(&mut *connection)
+            .await?;
 
-        row.map(|row| {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
+        let value = row
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let host: String = row.try_get("host")?;
 
-            Ok(CommunityRecord {
-                id: CommunityId::from_uuid(id),
-                host,
+                Ok::<_, DbError>(CommunityRecord {
+                    id: CommunityId::from_uuid(id),
+                    host,
+                })
             })
-        })
-        .transpose()
+            .transpose()?;
+        Ok(ReadAt { value, read_at })
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.
-    #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        Ok(self.is_community_active_read_at(community_id).await?.value)
+    }
+
+    /// [`Self::is_community_active`], with when its connection was checked
+    /// out, for caches that bound staleness from the read.
+    #[datastore_span(name = "is_community_active", system = "postgresql")]
+    pub async fn is_community_active_read_at(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<ReadAt<bool>> {
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
         )
         .await?;
-        let active = sqlx::query_scalar::<_, bool>(
+        let read_at = std::time::Instant::now();
+        let value = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
         .fetch_one(&mut *connection)
         .await?;
-        Ok(active)
+        Ok(ReadAt { value, read_at })
     }
 
     /// Runs `apply` while holding the community row lock only when the exact

@@ -6,6 +6,7 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../crypto/nip_oa.dart';
+import '../agents/remote_agents.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../relay/relay.dart';
 import 'me_agent_inventory.dart';
@@ -21,6 +22,8 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
   if (sync.connectionState != null) {
     ref.watch(relaySessionProvider.select((state) => state.status));
   }
+  // An agent this device just created or deleted changes the inventory.
+  ref.watch(remoteAgentRegistrationRevisionProvider);
   // Refresh archive evidence with the inventory, including explicit retries.
   // Ordinary sheet openings reuse this provider's completed directory.
   final archivedRequest = ref.refresh(meArchivedAgentsProvider.future);
