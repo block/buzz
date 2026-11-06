@@ -10,7 +10,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
     event_visible_to_reader, filter_can_match_result_gated_kinds,
     filter_can_match_shared_gated_kinds, result_gated_count_safe_for_pushdown,
-    DATABASE_ERROR_CLOSED,
+    DATABASE_ERROR_CLOSED, NUL_BYTE_CLOSED,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
@@ -40,6 +40,12 @@ pub async fn handle_count(
             }
         }
     };
+
+    if buzz_core::filter::filters_contain_nul(&filters) {
+        conn.send(RelayMessage::closed(&sub_id, NUL_BYTE_CLOSED));
+        access.deny("nul_byte");
+        return;
+    }
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
