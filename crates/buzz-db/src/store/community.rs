@@ -455,30 +455,6 @@ impl Db {
         .transpose()
     }
 
-    /// Returns the community's workspace icon (NIP-11 `icon`), if set.
-    ///
-    /// Set by relay admins/owners via the kind:9033 command; the value is
-    /// validated and size-capped at that write path.
-    #[datastore_span(name = "get_community_icon", system = "postgresql")]
-    pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
-        let row = sqlx::query(
-            r#"
-            SELECT icon
-            FROM communities
-            WHERE id = $1
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row
-            .map(|row| row.try_get::<Option<String>, _>("icon"))
-            .transpose()?
-            .flatten()
-            .filter(|icon| !icon.is_empty()))
-    }
-
     /// Returns the community's workspace icon and landing channel in one
     /// read, for its NIP-11 document. Read live, so a fresh document reflects
     /// a committed kind:9002 `landing` or kind:9033.
@@ -1034,7 +1010,6 @@ mod postgres_tests {
             "lookup_community_by_host_for_management",
             "list_communities_owned_by",
             "lookup_community_host",
-            "get_community_icon",
             "get_community_discovery",
             "set_community_icon",
             "ensure_configured_community",

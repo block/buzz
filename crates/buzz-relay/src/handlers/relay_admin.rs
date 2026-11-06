@@ -819,9 +819,10 @@ mod postgres_tests {
     async fn stored_icon(state: &Arc<AppState>, tenant: &TenantContext) -> Option<String> {
         state
             .db
-            .get_community_icon(tenant.community())
+            .get_community_discovery(tenant.community())
             .await
             .expect("read icon")
+            .icon
     }
 
     /// Open relay (`require_relay_membership = false`): a rosterless

@@ -65,28 +65,33 @@ pub(crate) fn validate_tags(event: &Event) -> anyhow::Result<bool> {
             None => anyhow::bail!("landing tag must have a value"),
         }
     }
-    let texts: [(&str, &[Option<&str>], fn(&str) -> Option<&'static str>); 2] = [
-        ("welcome", &welcome, buzz_db::landing::welcome_message_error),
-        (
-            "welcome_title",
-            &title,
-            buzz_db::landing::welcome_title_error,
-        ),
-    ];
-    for (name, values, text_error) in texts {
-        match values.first() {
-            None | Some(Some("")) => {}
-            Some(None) => anyhow::bail!(
-                "{name} tag must have a value (text, or empty to restore the default)"
-            ),
-            Some(Some(text)) => {
-                if let Some(error) = text_error(text) {
-                    anyhow::bail!("{error}");
-                }
-            }
-        }
-    }
+    validate_text_tag("welcome", &welcome, buzz_db::landing::welcome_message_error)?;
+    validate_text_tag(
+        "welcome_title",
+        &title,
+        buzz_db::landing::welcome_title_error,
+    )?;
     Ok(!landing.is_empty() || !welcome.is_empty() || !title.is_empty())
+}
+
+/// Validates the value of the one `name` tag, if any, with `text_error`.
+/// `""` restores the client default and always passes; a tag without a value
+/// is refused.
+fn validate_text_tag(
+    name: &str,
+    values: &[Option<&str>],
+    text_error: fn(&str) -> Option<&'static str>,
+) -> anyhow::Result<()> {
+    match values.first() {
+        None | Some(Some("")) => Ok(()),
+        Some(None) => {
+            anyhow::bail!("{name} tag must have a value (text, or empty to restore the default)")
+        }
+        Some(Some(text)) => match text_error(text) {
+            Some(error) => anyhow::bail!("{error}"),
+            None => Ok(()),
+        },
+    }
 }
 
 /// Makes sure the community has a landing channel (see
@@ -345,7 +350,10 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    fn edit(tags: &[&[&str]]) -> Event {
+    /// A kind:9002's tags, each as its name and values.
+    type Tags<'a> = &'a [&'a [&'a str]];
+
+    fn edit(tags: Tags) -> Event {
         let tags = tags
             .iter()
             .map(|tag| Tag::parse(tag.iter().copied()).expect("tag"));
@@ -373,7 +381,7 @@ mod tests {
             "# Hi!\n\n- read [#rules](buzz://channel/x) with nostr:npub1x\n\tindented code";
         let duplicate =
             "kind:9002 may include at most one landing, one welcome and one welcome_title tag";
-        let cases: &[(&[&[&str]], Result<bool, &str>)] = &[
+        let cases: &[(Tags, Result<bool, &str>)] = &[
             (&[&["h", "x"], &["name", "n"]], Ok(false)),
             (&[&["landing", "true"]], Ok(true)),
             (&[&["landing", "true"], &["welcome", ""]], Ok(true)),
