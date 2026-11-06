@@ -2119,6 +2119,65 @@ async fn is_relay_member_is_bounded_routed_and_fails_closed() {
     );
 }
 
+/// The per-AUTH pending default-channel read is bounded-routed like
+/// membership; the roster writers' read stays on the writer. A different
+/// token on each pool proves which pool answered.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn pending_default_channel_join_routed_reads_the_bounded_replica() {
+    let (writer, _writer_db) = ScratchDb::migrated(&admin_url().await, "pend_w").await;
+    let (replica, _replica_db) = ScratchDb::migrated(&admin_url().await, "pend_r").await;
+
+    let community = Uuid::new_v4();
+    let pubkey = "cc".repeat(32);
+    let (writer_token, replica_token) = (Uuid::new_v4(), Uuid::new_v4());
+    for (pool, token) in [(&writer, writer_token), (&replica, replica_token)] {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("pending-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, auto_join_pending) \
+             VALUES ($1, $2, 'member', $3)",
+        )
+        .bind(community)
+        .bind(&pubkey)
+        .bind(token)
+        .execute(pool)
+        .await
+        .expect("seed pending work");
+    }
+    let cid = CommunityId::from_uuid(community);
+    let token = |pending: Option<relay_members::PendingDefaultChannelJoin>| {
+        pending.expect("pending work").token
+    };
+
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
+    db.fence().force_open_for_tests(chrono::Utc::now());
+
+    // Budget unset ⇒ writer.
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate off")), writer_token);
+
+    // Budget set + fresh entry ⇒ replica; the writer-only read ignores it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("gate on")), replica_token);
+    let pending = db.pending_default_channel_join(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("writer read")), writer_token);
+
+    // Entry older than the budget ⇒ fail closed to the writer.
+    db.fence().close();
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        std::time::Instant::now() - std::time::Duration::from_secs(10),
+    );
+    let pending = db.pending_default_channel_join_routed(cid, &pubkey).await;
+    assert_eq!(token(pending.expect("entry too old")), writer_token);
+}
+
 /// Community separation across every routed seam, verified on
 /// REPLICA-SERVED reads.
 ///
