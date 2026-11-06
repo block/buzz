@@ -182,6 +182,10 @@ has. History and replies rotate across humans. A write the relay still
 throttles waits out the window the relay names and is retried, up to 10
 times, before it counts as failed.
 
+A private fixture with more than 8 channels per community that was seeded
+before channels had creators cannot be reseeded, and `run` finds none of its
+roots past the first 8 channels. Seed it again under a fresh `run_id`.
+
 ## Desktop clients
 
 A desktop client models the subscriptions and reads the desktop app makes,
