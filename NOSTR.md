@@ -315,9 +315,9 @@ is never more than one. Clients read it from NIP-11:
   and resolving whatever links clients agree on (`buzz://channel/<id>` and
   `buzz://message?channel=<id>&id=<hex>` links to channels and messages,
   `nostr:npub…` links to people), is a client concern, as is treating the
-  text as untrusted input. The title is one line of plain text. With no custom message or
-  title, clients show their own default for that part, so a client can
-  customize either alone.
+  text as untrusted input. The title is one line of plain text. With no
+  custom message or title, clients show their own default for that part, so
+  a client can customize either alone.
 
 **Adoption.** With no designation, the relay adopts the oldest open,
 unarchived stream named `general` (case-insensitive) without a TTL,
@@ -365,8 +365,9 @@ tokens need the `AdminChannels` scope):
 - The message is 1–4000 Unicode scalar values, not blank, with no control
   characters other than `\n` and `\t` (so `\r` is refused: send `\n` line
   endings).
-- The title is 1–120 Unicode scalar values, not blank, on one line, with no
-  control characters at all (`\n` and `\t` included).
+- The title is 1–120 Unicode scalar values, not blank, on one line: no
+  control characters at all (`\n` and `\t` included) and no Unicode line or
+  paragraph separator (U+2028, U+2029).
 - The relay stores both exactly as it receives them and validates nothing
   else about them (see the Markdown note above).
 - The designation cannot be turned off, only moved.
@@ -388,7 +389,7 @@ Refusals (`accepted: false`):
 | Message with a control character other than `\n` or `\t` | `invalid: welcome message must not contain control characters other than line breaks and tabs` |
 | Whitespace-only title | `invalid: welcome title must not be blank` |
 | Title over 120 characters | `invalid: welcome title is too long (max 120 characters)` |
-| Title with any control character (`\n` and `\t` included) | `invalid: welcome title must be a single line without control characters` |
+| Title with any control character (`\n` and `\t` included) or U+2028/U+2029 | `invalid: welcome title must be a single line without control characters` |
 | Ineligible target channel | `invalid: landing requires an open, unarchived channel without a ttl` |
 | `welcome` or `welcome_title` on another channel without `landing` | `invalid: welcome and welcome_title can only be set on the landing channel` |
 | A protected operation (below) | `invalid: this is the community's landing channel; make another channel the landing channel first` |
@@ -406,10 +407,10 @@ allowed.
 **Rollout.** During a rolling deploy, relay pods from before this feature do
 not advertise `landing_channel`, enroll nobody at AUTH, do not enforce the
 protections, and re-sign a channel's kind:39000 without its `landing`,
-`welcome` and `welcome_title` tags. The designation itself is unaffected, and a newer pod
-re-signs the tags at the channel's next change. A landing channel archived,
-made private or given a TTL through an old pod stays designated but
-ineligible: the relay counts it
+`welcome` and `welcome_title` tags. The designation itself is unaffected,
+and a newer pod re-signs the tags at the channel's next change. A landing
+channel archived, made private or given a TTL through an old pod stays
+designated but ineligible: the relay counts it
 (`buzz_landing_adoption_total{outcome="existing_ineligible"}`) and logs a
 warning at each adoption attempt, and nobody is enrolled into it until an
 owner or admin moves the designation with kind:9002 `landing`.
