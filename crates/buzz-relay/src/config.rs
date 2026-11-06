@@ -313,6 +313,8 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Channel media authorization rollout: off, shadow, or enforce.
+    pub media_read_mode: crate::api::media_access::MediaReadMode,
     /// Maximum concurrent media uploads handled by one relay process.
     pub media_max_concurrent_uploads: usize,
     /// Maximum concurrent media uploads accepted from one pubkey.
@@ -1010,6 +1012,15 @@ impl Config {
                 ));
             }
         };
+        let media_read_mode = match std::env::var("BUZZ_MEDIA_READ_MODE") {
+            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
+            Err(std::env::VarError::NotPresent) => crate::api::media_access::MediaReadMode::Off,
+            Err(_) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MEDIA_READ_MODE must be valid Unicode".into(),
+                ))
+            }
+        };
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
@@ -1483,6 +1494,7 @@ impl Config {
             allow_nip_oa_auth,
             klipy,
             media,
+            media_read_mode,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
