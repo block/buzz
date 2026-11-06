@@ -10827,6 +10827,10 @@ pub(crate) mod postgres_tests {
             .expect("lock replica events");
         let search: nostr::Filter =
             serde_json::from_value(fx.search_filter()).expect("search filter");
+        // `before_search_query` runs after the claim and before the query, so
+        // the live entry must already be gone there: the timeout CLOSED,
+        // which also retires it, has not happened yet.
+        let (arrived, release) = crate::nip_fi_test_hooks::search_query_hook::arm(fx.community);
         let task = tokio::spawn(handle_req(
             "x".into(),
             vec![search],
@@ -10834,27 +10838,20 @@ pub(crate) mod postgres_tests {
             conn.clone(),
             fx.state.clone(),
         ));
-        // Search takes the ID's token when it is admitted, before its access
-        // checks, so the token alone does not show it has claimed. Its claim
-        // retires the live fan-out under the lifecycle lock, and then its
-        // hydrate blocks on the table lock: the live entry must be gone while
-        // search is still running, not only at final cleanup.
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while fx
-                .state
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived)
+            .await
+            .expect("search reaches its query")
+            .expect("hook armed");
+        assert!(
+            fx.state
                 .sub_registry
                 .get_filters(conn.conn_id, "x")
-                .is_some()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("accepting search must retire live fan-out");
-        // The claim's critical section, topic release included, is over once
-        // the lifecycle lock is free again.
-        drop(conn.subscriptions.lock().await);
+                .is_none(),
+            "accepting search must retire live fan-out"
+        );
         assert_eq!(fx.state.pubsub.topic_refcount(&tenant, topic).await, 0);
+        assert!(rx.is_empty(), "nothing sent before the query");
+        release.notify_one();
         task.await.expect("search task");
         locker.rollback().await.expect("unlock");
 
