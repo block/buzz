@@ -4,37 +4,58 @@ use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, sdk_err, validate_hex64};
 
-/// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
+/// Tag values named `name` on a relay event.
+fn tag_values<'a>(event: &'a serde_json::Value, name: &'a str) -> impl Iterator<Item = &'a str> {
+    event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(move |tag| {
+            let arr = tag.as_array()?;
+            (arr.first()?.as_str()? == name)
+                .then(|| arr.get(1)?.as_str())
+                .flatten()
+        })
+}
+
+/// List visible DM conversations: the viewer's DM group metadata (kind:39000
+/// `t=dm`, one `p` per participant), minus the DMs in the viewer's newest
+/// relay-signed visibility snapshot (kind:30622, one `h` per hidden DM).
 pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
     let my_pk = client.public_key().to_hex();
     let limit = limit.unwrap_or(50).min(200);
-    let filter = serde_json::json!({
-        "kinds": [41001],
-        "#p": [my_pk],
-        "limit": limit
-    });
-    let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let snapshots = client
+        .query_paginated(
+            serde_json::json!({
+                "kinds": [buzz_sdk::kind::KIND_DM_VISIBILITY],
+                "#p": [my_pk],
+            }),
+            10,
+        )
+        .await?;
+    let hidden: std::collections::HashSet<&str> = snapshots
+        .iter()
+        .max_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0))
+        .map(|e| tag_values(e, "h").collect())
+        .unwrap_or_default();
+    let events = client
+        .query_paginated(
+            serde_json::json!({
+                "kinds": [39000],
+                "#t": ["dm"],
+                "#p": [my_pk],
+            }),
+            200,
+        )
+        .await?;
     let dms: Vec<serde_json::Value> = events
         .iter()
-        .map(|e| {
-            let dm_id = extract_d_tag(e);
-            let participants: Vec<String> = e
-                .get("tags")
-                .and_then(|t| t.as_array())
-                .map(|tags| {
-                    tags.iter()
-                        .filter_map(|tag| {
-                            let arr = tag.as_array()?;
-                            if arr.first()?.as_str()? == "p" {
-                                arr.get(1)?.as_str().map(|s| s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+        .map(|e| (extract_d_tag(e), e))
+        .filter(|(dm_id, _)| !dm_id.is_empty() && !hidden.contains(dm_id.as_str()))
+        .take(limit as usize)
+        .map(|(dm_id, e)| {
+            let participants: Vec<&str> = tag_values(e, "p").collect();
             serde_json::json!({
                 "dm_id": dm_id,
                 "participants": participants,

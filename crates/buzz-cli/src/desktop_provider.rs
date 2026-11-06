@@ -1049,6 +1049,50 @@ pub async fn discover(relay_url: &str) -> Result<Option<Arc<Provider>>, CliError
     discover_with(inherited()?, &Keychain, advertisements, relay_url).await
 }
 
+/// The relay for a command given none: the one the inherited token acts on,
+/// else the ones the paired tokens of running desktops act on. `None` without
+/// a desktop link; bad input when the link acts on several relays.
+pub async fn default_relay() -> Result<Option<String>, CliError> {
+    let relays = match inherited()? {
+        Some((endpoint, token)) => {
+            // A failed `describe` is reported by the credential chain.
+            match call(&endpoint, Some(&token), true, "describe", &[]).await {
+                Ok(raw) => serde_json::from_str::<Describe>(&raw)
+                    .map(|d| d.relays)
+                    .unwrap_or_default(),
+                Err(_) => return Ok(None),
+            }
+        }
+        None => paired_relays(&Keychain, advertisements()),
+    };
+    let mut distinct: Vec<String> = Vec::new();
+    for relay in relays {
+        if !distinct.iter().any(|known| same_relay(known, &relay)) {
+            distinct.push(provider_relay_url(&relay).unwrap_or(relay));
+        }
+    }
+    match distinct.len() {
+        0 => Ok(None),
+        1 => Ok(distinct.pop()),
+        _ => Err(CliError::Usage(format!(
+            "the Buzz desktop acts on several relays ({}); pass --relay or set BUZZ_RELAY_URL",
+            distinct.join(", ")
+        ))),
+    }
+}
+
+/// Every relay a paired token of an advertised desktop acts on.
+fn paired_relays(store: &dyn PairingStore, advertised: Vec<(String, Endpoint)>) -> Vec<String> {
+    let Ok(Ok(pairings)) = store.read().map(parse_pairings) else {
+        return Vec::new();
+    };
+    advertised
+        .iter()
+        .filter_map(|(instance, _)| pairings.0.get(instance))
+        .flat_map(|pairing| pairing.relays.iter().cloned())
+        .collect()
+}
+
 async fn discover_with(
     inherited: Option<(Endpoint, String)>,
     store: &dyn PairingStore,
@@ -2022,16 +2066,21 @@ pub(crate) mod tests {
 
         let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![TEAM.into()]).await;
         let cli = parse(&["buzz", "--relay", TEAM, "users", "get"]);
-        let (_, client) = crate::connect(&cli.relay, cli.command, async |_, _| unreachable!(), {
-            let store = &store;
-            async move |relay| {
-                let provider =
-                    discover_with(Some((endpoint, "agent".into())), store, Vec::new, relay)
-                        .await?
-                        .unwrap();
-                crate::credentials::Credentials::from_desktop(provider).await
-            }
-        })
+        let (_, client) = crate::connect(
+            cli.relay.as_deref().unwrap(),
+            cli.command,
+            async |_, _| unreachable!(),
+            {
+                let store = &store;
+                async move |relay| {
+                    let provider =
+                        discover_with(Some((endpoint, "agent".into())), store, Vec::new, relay)
+                            .await?
+                            .unwrap();
+                    crate::credentials::Credentials::from_desktop(provider).await
+                }
+            },
+        )
         .await
         .unwrap()
         .unwrap();
@@ -2050,7 +2099,7 @@ pub(crate) mod tests {
             "buzz", "--relay", TEAM, "auth", "desktop", "pair", "--name", "cli",
         ]);
         let paired = crate::connect(
-            &cli.relay,
+            cli.relay.as_deref().unwrap(),
             cli.command,
             async |sub, relay| {
                 let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, .. }) = sub else {

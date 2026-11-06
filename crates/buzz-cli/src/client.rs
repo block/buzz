@@ -65,8 +65,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
+/// MIME types the relay stores as inline media; everything else is a generic
+/// file it validates, stores and serves as a download.
+const MEDIA_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
@@ -79,6 +80,9 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic file uploads (100 MB), the relay's default.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 fn relay_server_tag(relay_url: &str) -> Option<String> {
     let authority = buzz_core::tenant::relay_url_authority(relay_url);
@@ -701,8 +705,7 @@ impl BuzzClient {
     ///
     /// The relay's `{"error": …}` / `{"message": …}` field becomes the
     /// message. A 401 without a NIP-FI evidence source names the settings,
-    /// since an enforcing relay answers every request that way; a 403 with an
-    /// auth tag configured hints that the tag may be stale.
+    /// since an enforcing relay answers every request that way.
     fn relay_error(&self, status: u16, body: String) -> CliError {
         let message = extract_relay_message_field(&body).unwrap_or(body);
         let message = message.trim_end().to_owned();
@@ -724,18 +727,6 @@ impl BuzzClient {
                  (a human session for this key, not an agent grant) and \
                  {FEDERATED_IDENTITY_ADAPTER_ENV} to its adapter, which mints the assertion"
             ));
-        }
-        if status == 403 && self.credentials.auth_tag().is_some() {
-            let hint = if desktop {
-                "the Buzz desktop's NIP-OA auth tag may be stale or revoked; check this \
-                 identity's owner in Buzz"
-            } else {
-                "BUZZ_AUTH_TAG is set — it may be stale or revoked; try unsetting it"
-            };
-            return CliError::Relay {
-                status,
-                body: format!("{message} ({hint})"),
-            };
         }
         CliError::Relay {
             status,
@@ -1387,7 +1378,7 @@ impl BuzzClient {
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
         // 1. Read file — validate it exists and is a regular file
         let metadata = std::fs::metadata(file_path)
-            .map_err(|e| CliError::Other(format!("cannot access {file_path}: {e}")))?;
+            .map_err(|e| CliError::Usage(format!("cannot access {file_path}: {e}")))?;
         if !metadata.is_file() {
             return Err(CliError::Usage(format!("{file_path} is not a file")));
         }
@@ -1400,15 +1391,13 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
-        let max = if mime.starts_with("video/") {
+        // 3. Size check. The relay decides which other types it accepts.
+        let max = if mime == "video/mp4" {
             MAX_VIDEO_BYTES
-        } else {
+        } else if MEDIA_MIMES.contains(&mime.as_str()) {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -1423,7 +1412,7 @@ impl BuzzClient {
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
-        let upload_timeout = if mime.starts_with("video/") {
+        let upload_timeout = if max > MAX_IMAGE_BYTES {
             Duration::from_secs(600)
         } else {
             Duration::from_secs(120)
@@ -3497,7 +3486,7 @@ mod desktop_throttle_tests {
         let err = client.get_authed("/forbidden").await.unwrap_err();
         let text = err.to_string();
         assert!(
-            text.contains("in Buzz") && !text.contains("BUZZ_AUTH_TAG"),
+            !text.contains("stale") && !text.contains("BUZZ_AUTH_TAG"),
             "{text}"
         );
     }
