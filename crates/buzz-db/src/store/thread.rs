@@ -2628,8 +2628,11 @@ mod postgres_tests {
         let waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let blocked: bool = sqlx::query_scalar(
+                    // `pg_locks` spans every database, and the per-test
+                    // databases are clones that share relation OIDs.
                     "SELECT EXISTS(SELECT 1 FROM pg_locks \
-                     WHERE relation = $1::text::regclass AND NOT granted)",
+                     WHERE relation = $1::text::regclass AND NOT granted \
+                     AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
                 )
                 .bind(&newest)
                 .fetch_one(&mut *newest_lock)
