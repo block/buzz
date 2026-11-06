@@ -819,9 +819,10 @@ mod postgres_tests {
     async fn stored_icon(state: &Arc<AppState>, tenant: &TenantContext) -> Option<String> {
         state
             .db
-            .get_community_icon(tenant.community())
+            .get_community_discovery(tenant.community())
             .await
             .expect("read icon")
+            .icon
     }
 
     /// Open relay (`require_relay_membership = false`): a rosterless
@@ -1072,6 +1073,11 @@ mod postgres_tests {
                         kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
                         p_tag_hex: Some(target_hex),
                         global_only: true,
+                        // Not the landing channel's, which the add also joins.
+                        tag_values: vec![(
+                            "h".to_owned(),
+                            vec![flagged.to_string(), control.to_string()],
+                        )],
                         ..buzz_db::EventQuery::for_community(community)
                     })
                     .await

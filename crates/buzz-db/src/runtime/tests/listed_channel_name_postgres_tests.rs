@@ -505,6 +505,20 @@ async fn ledger_version(pool: &PgPool) -> i64 {
         .expect("read migration ledger")
 }
 
+/// The newest migration, where a completed `run_migrations` leaves the
+/// ledger.
+async fn latest_migration() -> i64 {
+    sqlx::migrate::Migrator::new(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+    )
+    .await
+    .expect("read migrations")
+    .iter()
+    .map(|migration| migration.version)
+    .max()
+    .expect("at least one migration")
+}
+
 async fn index_oid(pool: &PgPool) -> Option<i64> {
     sqlx::query_scalar("SELECT to_regclass('public.idx_channels_listed_name')::oid::bigint")
         .fetch_one(pool)
@@ -556,7 +570,7 @@ async fn migration_schema_listed_name_index_needs_the_renames_then_builds_inline
     migration::run_migrations(&pool)
         .await
         .expect("migrate a populated table after the renames");
-    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
+    assert_eq!(ledger_version(&pool).await, latest_migration().await);
     let mut expected = vec![
         (kept, "square-ios".to_owned()),
         renamed(newer, "Square-iOS"),
@@ -633,6 +647,6 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
         .await
         .expect("accept the prebuild without waiting for channel writers");
     writer.rollback().await.unwrap();
-    assert_eq!(ledger_version(&pool).await, BEFORE_INDEX + 1);
+    assert_eq!(ledger_version(&pool).await, latest_migration().await);
     assert_eq!(index_oid(&pool).await, oid, "the prebuild is not replaced");
 }

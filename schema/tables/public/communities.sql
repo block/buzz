@@ -21,6 +21,15 @@ CREATE TABLE communities (
     -- Per-community workspace icon (NIP-11 `icon`), set via kind:9033.
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
+    -- The community's landing channel (NIP-11 `landing_channel`) and its
+    -- custom welcome message, set via kind:9002 `landing` / `welcome` or
+    -- adopted by the relay. Added by migration 0084. No foreign key: the
+    -- relay keeps the designation on an eligible channel itself.
+    landing_channel_id UUID,
+    welcome_message TEXT,
+    -- The welcome message's custom title, set via kind:9002
+    -- `welcome_title`. Added by migration 0085.
+    welcome_title TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at     TIMESTAMPTZ,
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),

@@ -1,0 +1,469 @@
+//! The community landing channel: the one open stream every person who
+//! enters the community is joined to first, and where its welcome message
+//! shows.
+//!
+//! The designation lives on the `communities` row (see
+//! [`buzz_db::landing`]); NIP-11 `landing_channel` is its authoritative read
+//! and the `["landing"]`, `["welcome", text]` and `["welcome_title", text]`
+//! tags on the channel's kind:39000 are a projection. A relay owner or admin
+//! moves it with a kind:9002 `landing` tag. With no designation, the relay
+//! adopts or creates `general` here, lazily: at provisioning, at boot for
+//! the deployment community, and on every human admission. A NULL
+//! designation is the retry record.
+
+use std::sync::Arc;
+
+use nostr::Event;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION;
+use buzz_core::tenant::TenantContext;
+use buzz_db::landing::LandingAdoption;
+
+use super::side_effects::{self, SelfJoinOutcome};
+use crate::nip_fi_gate::SessionAdmissionGate;
+use crate::state::AppState;
+
+/// Refusal for a kind:9002 `landing`, `welcome` or `welcome_title` tag from
+/// an actor who is not a relay owner or admin.
+pub(crate) const NOT_AUTHORIZED: &str =
+    "actor not authorized: landing, welcome and welcome_title require a relay owner or admin";
+
+/// Validates a kind:9002's `landing`, `welcome` and `welcome_title` tags.
+/// Returns whether the event carries any of them; the caller then requires a
+/// relay owner or admin and a stream channel.
+///
+/// `["landing", "true"]` designates the channel; there is no way to turn the
+/// designation off, only to move it. `["welcome", text]` sets the welcome
+/// message (Markdown source, stored as-is) and `["welcome_title", text]` its
+/// title; `""` restores the client default for either. Each may appear once.
+pub(crate) fn validate_tags(event: &Event) -> anyhow::Result<bool> {
+    let tags = |name: &str| {
+        event
+            .tags
+            .iter()
+            .filter(move |tag| tag.as_slice().first().map(String::as_str) == Some(name))
+            .map(|tag| tag.as_slice().get(1).map(String::as_str))
+            .collect::<Vec<_>>()
+    };
+    let (landing, welcome, title) = (tags("landing"), tags("welcome"), tags("welcome_title"));
+    if landing.len() > 1 || welcome.len() > 1 || title.len() > 1 {
+        anyhow::bail!(
+            "kind:9002 may include at most one landing, one welcome and one welcome_title tag"
+        );
+    }
+    if let Some(value) = landing.first() {
+        match value {
+            Some("true") => {}
+            Some("false") => {
+                anyhow::bail!(
+                    "landing cannot be turned off; make another channel the landing channel"
+                )
+            }
+            Some(other) => anyhow::bail!("invalid landing value: {other} (must be \"true\")"),
+            None => anyhow::bail!("landing tag must have a value"),
+        }
+    }
+    validate_text_tag("welcome", &welcome, buzz_db::landing::welcome_message_error)?;
+    validate_text_tag(
+        "welcome_title",
+        &title,
+        buzz_db::landing::welcome_title_error,
+    )?;
+    Ok(!landing.is_empty() || !welcome.is_empty() || !title.is_empty())
+}
+
+/// Validates the value of the one `name` tag, if any, with `text_error`.
+/// `""` restores the client default and always passes; a tag without a value
+/// is refused.
+fn validate_text_tag(
+    name: &str,
+    values: &[Option<&str>],
+    text_error: fn(&str) -> Option<&'static str>,
+) -> anyhow::Result<()> {
+    match values.first() {
+        None | Some(Some("")) => Ok(()),
+        Some(None) => {
+            anyhow::bail!("{name} tag must have a value (text, or empty to restore the default)")
+        }
+        Some(Some(text)) => match text_error(text) {
+            Some(error) => anyhow::bail!("{error}"),
+            None => Ok(()),
+        },
+    }
+}
+
+/// Makes sure the community has a landing channel (see
+/// [`buzz_db::Db::ensure_landing_channel`]) and announces a new designation:
+/// the channel's kind:39000 with its `landing` tag, and for a channel the
+/// relay created, the owner's membership notice. Returns the landing
+/// channel, `None` when the community has none and cannot get one yet.
+///
+/// The designation is committed before any announcement, so a failed
+/// announcement is logged and does not fail the call.
+pub(crate) async fn ensure_landing_channel(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+) -> anyhow::Result<Option<Uuid>> {
+    let adoption = state.db.ensure_landing_channel(tenant.community()).await?;
+    if let Some(outcome) = adoption.outcome() {
+        metrics::counter!("buzz_landing_adoption_total", "outcome" => outcome).increment(1);
+    }
+    match adoption {
+        LandingAdoption::Existing(_) => {}
+        LandingAdoption::ExistingIneligible(channel_id) => {
+            warn!(channel = %channel_id, "the landing channel is no longer eligible (archived, private, deleted or with a ttl); move the designation with a kind:9002 landing tag");
+        }
+        LandingAdoption::Reused(channel_id) => {
+            info!(channel = %channel_id, "adopted general as the landing channel");
+            state.invalidate_all_accessible_channels(tenant);
+            announce_designation(tenant, state, channel_id).await;
+        }
+        LandingAdoption::Created {
+            channel_id,
+            steward,
+        } => {
+            info!(channel = %channel_id, steward = %hex::encode(steward), "created general as the landing channel");
+            state.invalidate_membership(tenant, channel_id, &steward);
+            state.invalidate_all_accessible_channels(tenant);
+            announce_designation(tenant, state, channel_id).await;
+            if let Err(e) = side_effects::emit_membership_notification(
+                tenant,
+                state,
+                channel_id,
+                &steward,
+                state.relay_keypair.public_key().as_bytes(),
+                KIND_MEMBER_ADDED_NOTIFICATION,
+            )
+            .await
+            {
+                warn!(channel = %channel_id, error = %e, "landing channel owner notification failed");
+            }
+        }
+        LandingAdoption::SkippedNoSteward => {
+            debug!("no landing channel: no eligible general and no owner or admin to create one");
+        }
+        LandingAdoption::SkippedNameTaken => {
+            debug!("no landing channel: general is taken by a channel that cannot be the landing channel");
+        }
+    }
+    Ok(adoption.channel_id())
+}
+
+async fn announce_designation(tenant: &TenantContext, state: &Arc<AppState>, channel_id: Uuid) {
+    if let Err(e) = side_effects::emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, error = %e, "landing channel discovery emission failed");
+    }
+}
+
+/// Best-effort [`ensure_landing_channel`] for a caller that has nothing to
+/// do with the result: provisioning and boot. A failure is logged; the NULL
+/// designation retries at the next human admission.
+pub async fn converge_landing_channel(tenant: &TenantContext, state: &Arc<AppState>) {
+    if let Err(e) = ensure_landing_channel(tenant, state).await {
+        metrics::counter!("buzz_landing_adoption_failures_total").increment(1);
+        warn!(community = %tenant.host(), error = %e, "landing channel adoption failed");
+    }
+}
+
+/// The landing join at a roster write (invite claim, kind:9030), as a
+/// kind:9021 self-join: an earlier landing membership is restored, as the
+/// default channels' are. Returns whether the default channels should
+/// follow: `false` only when the membership write failed in a way a retry
+/// could get past, so the person keeps no entry evidence and their next
+/// AUTH joins the landing channel and then the defaults
+/// ([`admission_joins_on_auth`]). A refusal (a ban, or a designation left
+/// unusable) is final, so the defaults follow it. So does a committed row
+/// whose announcement failed: the row is entry evidence, so no AUTH would
+/// recover the defaults if they were skipped here.
+pub(crate) async fn join_landing_on_roster_admission(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+) -> bool {
+    let member = hex::encode(pubkey);
+    let landing = match ensure_landing_channel(tenant, state).await {
+        Ok(Some(landing)) => landing,
+        Ok(None) => return true,
+        Err(e) => {
+            metrics::counter!("buzz_landing_join_failures_total").increment(1);
+            warn!(%member, error = %e, "landing join skipped: adopting the landing channel failed");
+            return false;
+        }
+    };
+    match side_effects::put_member_as_self(tenant, state, landing, pubkey).await {
+        Ok(SelfJoinOutcome::Joined) => {
+            metrics::counter!("buzz_landing_joins_total").increment(1);
+            info!(channel = %landing, %member, "joined the landing channel");
+            if let Err(e) = side_effects::announce_self_join(tenant, state, landing, pubkey).await {
+                warn!(channel = %landing, %member, error = %e, "landing join announcement failed");
+            }
+            true
+        }
+        Ok(SelfJoinOutcome::AlreadyMember) => true,
+        Err(e) if side_effects::is_self_join_refusal(&e) => {
+            metrics::counter!("buzz_landing_join_refused_total").increment(1);
+            info!(channel = %landing, %member, error = %e, "landing join refused");
+            true
+        }
+        Err(e) => {
+            metrics::counter!("buzz_landing_join_failures_total").increment(1);
+            warn!(channel = %landing, %member, error = %e, "landing membership write failed; default channels wait for the next admission");
+            false
+        }
+    }
+}
+
+/// The joins after a person's WebSocket admission, in both community modes.
+/// Agents are not joined, so the caller does not spawn this for one.
+///
+/// 1. Make sure the community has a landing channel.
+/// 2. A person with no entry evidence
+///    ([`buzz_db::Db::has_entered_community`]) is joined to it. In roster
+///    mode the evidence counts from their roster row's `created_at`, so a
+///    re-admission after kind:9031 is a first entry again unless a shared
+///    membership from before is still active (kind:9031 removes nobody
+///    from channels, and an active membership always counts); without a
+///    roster any history counts.
+/// 3. In roster mode, the same person is then joined to the default
+///    channels they have not been in since admission
+///    ([`side_effects::join_default_channels_since`]): the recovery for a
+///    roster write whose joins did not complete
+///    ([`join_landing_on_roster_admission`]), and the enrollment of a
+///    `buzz-admin add-member` row. Without a roster, the default channels
+///    they have never been in follow on every admission
+///    ([`side_effects::join_never_joined_channels`]).
+///
+/// Every write is a `put_first_member_since` under one of the socket's
+/// effect permits, announced only when it wrote a row, so nothing is joined
+/// after the session ends, two admissions racing each other announce once,
+/// and a leave that commits first stands. The person's `channel_add_policy`
+/// is not consulted: an admission join is their own act, as a kind:9021 is,
+/// and the policy restricts who else may add them (the kind:9030 path checks
+/// it against that actor). Failures are logged and counted; a landing
+/// membership write that fails skips the defaults, so the next admission
+/// retries both, while a failed announcement of a committed row does not.
+pub(crate) async fn admission_joins_on_auth(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+    gate: &Arc<SessionAdmissionGate>,
+) {
+    admission_joins(tenant, state, pubkey, gate).await;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::after_auto_join(tenant.community()).await;
+}
+
+async fn admission_joins(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey: &[u8],
+    gate: &Arc<SessionAdmissionGate>,
+) {
+    let member = hex::encode(pubkey);
+    let landing = match ensure_landing_channel(tenant, state).await {
+        Ok(landing) => landing,
+        Err(e) => {
+            metrics::counter!("buzz_landing_join_failures_total").increment(1);
+            warn!(%member, error = %e, "admission joins skipped: adopting the landing channel failed");
+            return;
+        }
+    };
+    // `Some` in roster mode, where the roster row's `created_at` bounds the
+    // evidence and the default-channel history.
+    let admitted_at = if state.config.require_relay_membership {
+        match state.db.get_relay_member(tenant.community(), &member).await {
+            Ok(Some(row)) => Some(row.created_at),
+            // Removed from the roster since admission: the session is
+            // being closed, so it joins nothing.
+            Ok(None) => return,
+            Err(e) => {
+                metrics::counter!("buzz_landing_join_failures_total").increment(1);
+                warn!(%member, error = %e, "admission joins skipped: reading the roster row failed");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let entered = match state
+        .db
+        .has_entered_community(tenant.community(), pubkey, admitted_at)
+        .await
+    {
+        Ok(entered) => entered,
+        Err(e) => {
+            metrics::counter!("buzz_landing_join_failures_total").increment(1);
+            warn!(%member, error = %e, "admission joins skipped: reading entry evidence failed");
+            return;
+        }
+    };
+    if !entered {
+        if let Some(landing) = landing {
+            #[cfg(test)]
+            crate::nip_fi_test_hooks::before_auto_join_channel(tenant.community()).await;
+            let Ok(_permit) = gate.acquire_effect().await else {
+                info!(channel = %landing, %member, "landing join stopped: the session ended");
+                return;
+            };
+            match state
+                .db
+                .put_first_member_since(tenant.community(), landing, pubkey, admitted_at)
+                .await
+            {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    metrics::counter!("buzz_landing_joins_total").increment(1);
+                    info!(channel = %landing, %member, "joined the landing channel on admission");
+                    if let Err(e) =
+                        side_effects::announce_self_join(tenant, state, landing, pubkey).await
+                    {
+                        warn!(channel = %landing, %member, error = %e, "landing join announcement failed");
+                    }
+                }
+                Err(
+                    e @ (buzz_db::DbError::AccessDenied(_) | buzz_db::DbError::ChannelNotFound(_)),
+                ) => {
+                    metrics::counter!("buzz_landing_join_refused_total").increment(1);
+                    info!(channel = %landing, %member, error = %e, "landing join refused");
+                }
+                Err(e) => {
+                    metrics::counter!("buzz_landing_join_failures_total").increment(1);
+                    warn!(channel = %landing, %member, error = %e, "landing membership write on admission failed; default channels wait for the next admission");
+                    return;
+                }
+            }
+        }
+        if let Some(admitted_at) = admitted_at {
+            side_effects::join_default_channels_since(tenant, state, pubkey, admitted_at, gate)
+                .await;
+        }
+    }
+    if admitted_at.is_none() {
+        side_effects::join_never_joined_channels(tenant, state, pubkey, gate).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// A kind:9002's tags, each as its name and values.
+    type Tags<'a> = &'a [&'a [&'a str]];
+
+    fn edit(tags: Tags) -> Event {
+        let tags = tags
+            .iter()
+            .map(|tag| Tag::parse(tag.iter().copied()).expect("tag"));
+        EventBuilder::new(Kind::Custom(9002), "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign")
+    }
+
+    /// The `landing`/`welcome`/`welcome_title` rules, with the exact receipt
+    /// text a client shows.
+    ///
+    /// Mutations: drop `'\t'` from the message's allowed controls → the
+    /// Markdown indentation row is refused (RED); validate the title with
+    /// the message rule → the title line break row is accepted (RED).
+    #[test]
+    fn landing_and_welcome_tag_rules() {
+        use buzz_db::landing::{
+            welcome_message_error, welcome_title_error, WELCOME_MAX_CHARS, WELCOME_TITLE_MAX_CHARS,
+        };
+        let long = "a".repeat(WELCOME_MAX_CHARS + 1);
+        let at_limit = "a".repeat(WELCOME_MAX_CHARS);
+        let long_title = "a".repeat(WELCOME_TITLE_MAX_CHARS + 1);
+        let markdown =
+            "# Hi!\n\n- read [#rules](buzz://channel/x) with nostr:npub1x\n\tindented code";
+        let duplicate =
+            "kind:9002 may include at most one landing, one welcome and one welcome_title tag";
+        let cases: &[(Tags, Result<bool, &str>)] = &[
+            (&[&["h", "x"], &["name", "n"]], Ok(false)),
+            (&[&["landing", "true"]], Ok(true)),
+            (&[&["landing", "true"], &["welcome", ""]], Ok(true)),
+            (
+                &[&["landing", "true"], &["welcome", "Hi!\nWelcome."]],
+                Ok(true),
+            ),
+            (&[&["welcome", "Hi"]], Ok(true)),
+            (&[&["welcome", markdown]], Ok(true)),
+            (&[&["welcome", at_limit.as_str()]], Ok(true)),
+            // The client's full-state form, and its three-tag predecessor.
+            (
+                &[
+                    &["landing", "true"],
+                    &["welcome", "Hi"],
+                    &["welcome_title", "Welcome aboard"],
+                ],
+                Ok(true),
+            ),
+            (
+                &[
+                    &["landing", "true"],
+                    &["welcome", ""],
+                    &["welcome_title", ""],
+                ],
+                Ok(true),
+            ),
+            (&[&["welcome_title", "Hello, team"]], Ok(true)),
+            (
+                &[&["landing", "false"]],
+                Err("landing cannot be turned off; make another channel the landing channel"),
+            ),
+            (
+                &[&["landing", "yes"]],
+                Err("invalid landing value: yes (must be \"true\")"),
+            ),
+            (&[&["landing"]], Err("landing tag must have a value")),
+            (
+                &[&["welcome"]],
+                Err("welcome tag must have a value (text, or empty to restore the default)"),
+            ),
+            (
+                &[&["welcome_title"]],
+                Err("welcome_title tag must have a value (text, or empty to restore the default)"),
+            ),
+            (
+                &[&["landing", "true"], &["landing", "true"]],
+                Err(duplicate),
+            ),
+            (&[&["welcome", "a"], &["welcome", "b"]], Err(duplicate)),
+            (
+                &[&["welcome_title", "a"], &["welcome_title", "b"]],
+                Err(duplicate),
+            ),
+            (
+                &[&["welcome", "   "]],
+                Err(welcome_message_error("   ").expect("blank refused")),
+            ),
+            (
+                &[&["welcome", long.as_str()]],
+                Err(welcome_message_error(&long).expect("long refused")),
+            ),
+            (
+                &[&["welcome", "bell\u{7}"]],
+                Err(welcome_message_error("bell\u{7}").expect("control refused")),
+            ),
+            (
+                &[&["welcome", "Hi"], &["welcome_title", " \t "]],
+                Err(welcome_title_error(" \t ").expect("blank title refused")),
+            ),
+            (
+                &[&["welcome_title", long_title.as_str()]],
+                Err(welcome_title_error(&long_title).expect("long title refused")),
+            ),
+            (
+                &[&["landing", "true"], &["welcome_title", "Two\nlines"]],
+                Err(welcome_title_error("Two\nlines").expect("title line break refused")),
+            ),
+        ];
+        for (tags, expected) in cases {
+            let got = validate_tags(&edit(tags)).map_err(|e| e.to_string());
+            assert_eq!(got, expected.map_err(str::to_string), "tags {tags:?}");
+        }
+    }
+}

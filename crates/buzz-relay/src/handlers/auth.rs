@@ -993,17 +993,20 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 &conn.tenant,
                 conn.nip_fi_assertion.as_ref(),
             );
-            // A community without a membership roster has no roster insert to
-            // join default channels at, so a person is joined on admission to
-            // the ones they have never been in, under this socket's effect
-            // permits. Agents are not.
-            let auto_join = !state.config.require_relay_membership && !admitted_agent;
+            // A person's admission joins them, under this socket's effect
+            // permits, to the landing channel if they have never entered the
+            // community, and then to the default channels: in a community
+            // without a membership roster (which has no roster insert to join
+            // them at) the ones they have never been in, and in roster mode
+            // as the recovery for a roster write whose joins did not finish.
+            // Agents are not joined.
+            let auto_join = !admitted_agent;
             if auto_join {
                 let state = Arc::clone(&state);
                 let tenant = conn.tenant.clone();
                 let gate = Arc::clone(&conn.nip_fi_gate);
                 tokio::spawn(async move {
-                    crate::handlers::side_effects::auto_join_never_joined_channels(
+                    crate::handlers::landing::admission_joins_on_auth(
                         &tenant,
                         &state,
                         &pubkey.to_bytes(),
@@ -2931,12 +2934,13 @@ mod tests {
         }
 
         /// On a community without a membership roster, a person's admission
-        /// joins them to the default channels they have never been in. An
+        /// joins them to the default channels they have never been in (here
+        /// `general` is also adopted as the landing channel). An
         /// agent's (NIP-OA) admission runs no join, and a person who left is
         /// not joined back when they are admitted again. Each check waits for
         /// that admission's own auto-join outcome (skip or finished task).
         ///
-        /// Mutations: delete the `auto_join_never_joined_channels` spawn →
+        /// Mutations: delete the `admission_joins_on_auth` spawn →
         /// no outcome arrives (RED); drop `!admitted_agent` → the agent is
         /// joined (RED); drop the row check in `put_first_member` → the
         /// leave is undone (RED).
@@ -3052,6 +3056,313 @@ mod tests {
                     "the next admission joins what was skipped"
                 );
             }
+        }
+
+        /// The active role of `keys` in `channel`, if any.
+        async fn channel_role(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            channel: uuid::Uuid,
+            keys: &Keys,
+        ) -> Option<String> {
+            state
+                .db
+                .get_member_role(community, channel, &keys.public_key().to_bytes())
+                .await
+                .expect("member role")
+        }
+
+        /// How many `member_joined` kind:40099 notices in `channel` target
+        /// `keys`.
+        async fn member_joined_notice_count(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            channel: uuid::Uuid,
+            keys: &Keys,
+        ) -> usize {
+            let member_hex = keys.public_key().to_hex();
+            state
+                .db
+                .query_events(&buzz_db::EventQuery {
+                    kinds: Some(vec![40099]),
+                    channel_id: Some(channel),
+                    ..buzz_db::EventQuery::for_community(community)
+                })
+                .await
+                .expect("query 40099")
+                .iter()
+                .filter_map(|stored| {
+                    serde_json::from_str::<serde_json::Value>(&stored.event.content).ok()
+                })
+                .filter(|content| {
+                    content["type"] == "member_joined" && content["target"] == member_hex
+                })
+                .count()
+        }
+
+        async fn seed_relay_member(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+            keys: &Keys,
+            role: &str,
+        ) {
+            state
+                .db
+                .add_relay_member(
+                    community,
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed relay member");
+        }
+
+        async fn landing_channel(
+            state: &crate::state::AppState,
+            community: buzz_core::tenant::CommunityId,
+        ) -> uuid::Uuid {
+            state
+                .db
+                .get_community_landing(community)
+                .await
+                .expect("landing")
+                .channel_id
+                .expect("a landing channel is designated")
+        }
+
+        /// Without a roster, a person's first admission creates the landing
+        /// `general` (owned by the relay owner) and joins them to it. Their
+        /// own private chats (Solo) are not entry evidence; a membership in a
+        /// shared channel is, and a leave stands at the next admission.
+        ///
+        /// Mutations: drop the `has_entered_community` gate → the regular is
+        /// joined and the leave is undone (RED); drop the own-private
+        /// exclusion → the Solo user is not joined (RED); drop the landing
+        /// join → nobody is joined (RED).
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn root_auth_joins_a_first_entry_to_the_landing_channel() {
+            use buzz_db::channel::{ChannelType, ChannelVisibility};
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, person, regular) = (Keys::generate(), Keys::generate(), Keys::generate());
+            seed_relay_member(&state, community, &owner, "owner").await;
+            for (keys, name, visibility) in [
+                (&person, "solo", ChannelVisibility::Private),
+                (&regular, "lounge", ChannelVisibility::Open),
+            ] {
+                state
+                    .db
+                    .create_channel(
+                        community,
+                        name,
+                        ChannelType::Stream,
+                        visibility,
+                        None,
+                        &keys.public_key().to_bytes(),
+                        None,
+                    )
+                    .await
+                    .expect("create channel");
+            }
+
+            admit_and_settle(&state, community, &person, "landing-first", None).await;
+            let landing = landing_channel(&state, community).await;
+            let general = state
+                .db
+                .get_channel(community, landing)
+                .await
+                .expect("general");
+            assert_eq!(
+                (general.name.as_str(), general.visibility.as_str()),
+                ("general", "open")
+            );
+            assert_eq!(
+                channel_role(&state, community, landing, &owner)
+                    .await
+                    .as_deref(),
+                Some("owner"),
+                "the relay owner owns the created general"
+            );
+            assert_eq!(
+                channel_role(&state, community, landing, &person)
+                    .await
+                    .as_deref(),
+                Some("member"),
+                "a Solo chat is not entry evidence"
+            );
+
+            admit_and_settle(&state, community, &regular, "landing-entered", None).await;
+            assert_eq!(
+                channel_role(&state, community, landing, &regular).await,
+                None,
+                "a shared-channel member has entered"
+            );
+
+            let person_key = person.public_key().to_bytes();
+            state
+                .db
+                .remove_member(community, landing, &person_key, &person_key)
+                .await
+                .expect("leave");
+            admit_and_settle(&state, community, &person, "landing-again", None).await;
+            assert_eq!(
+                channel_role(&state, community, landing, &person).await,
+                None,
+                "a landing leave stands"
+            );
+        }
+
+        /// With a roster, a roster write that did not join the person (here,
+        /// a bare roster insert, as `buzz-admin add-member` makes) is
+        /// recovered at AUTH: the landing channel, then the default channels
+        /// they have not been in since admission. Once they have left both,
+        /// an admission joins nothing; after a kind:9031 removal,
+        /// re-admission is a first entry again and restores both, through
+        /// `put_first_member_since` with the new roster row's `created_at`.
+        /// A recovery paused before the default channel's write, while a
+        /// racing join (an invite claim) and a leave land, writes nothing:
+        /// the leave stands and the admission adds no second notice.
+        ///
+        /// Mutations: use `None` for `admitted_at` in roster mode → the
+        /// re-admission joins nothing (RED); drop the roster-mode defaults
+        /// recovery → the default channel is not joined (RED); gate the spawn
+        /// on `!require_relay_membership` again → nothing is joined (RED);
+        /// recover the defaults with `join_channel_as_self` instead of
+        /// `put_first_member_since` → the leave is undone and a second
+        /// `member_joined` notice appears (RED).
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn roster_auth_recovers_landing_and_defaults_for_a_first_entry() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("connect to test DB");
+            let state = super::state_with_pool(pool, |c| c.require_relay_membership = true).await;
+            let community = seeded_community(&state).await;
+            let (owner, person) = (Keys::generate(), Keys::generate());
+            seed_relay_member(&state, community, &owner, "owner").await;
+            let announcements =
+                default_channels(&state, community, &owner, &["announcements"]).await[0];
+            seed_relay_member(&state, community, &person, "member").await;
+
+            admit_and_settle(&state, community, &person, "roster-recover", None).await;
+            let landing = landing_channel(&state, community).await;
+            let roles = |label: &'static str| {
+                let state = std::sync::Arc::clone(&state);
+                let person = person.clone();
+                async move {
+                    [
+                        channel_role(&state, community, landing, &person).await,
+                        channel_role(&state, community, announcements, &person).await,
+                    ]
+                    .map(|role| (label, role))
+                }
+            };
+            let member = |label| (label, Some("member".to_string()));
+            assert_eq!(
+                roles("recovered").await,
+                [member("recovered"), member("recovered")]
+            );
+
+            let person_key = person.public_key().to_bytes();
+            for channel in [landing, announcements] {
+                state
+                    .db
+                    .remove_member(community, channel, &person_key, &person_key)
+                    .await
+                    .expect("leave");
+            }
+            admit_and_settle(&state, community, &person, "roster-left", None).await;
+            assert_eq!(roles("left").await, [("left", None), ("left", None)]);
+
+            state
+                .db
+                .remove_relay_member(community, &person.public_key().to_hex(), &Keys::generate())
+                .await
+                .map(|write| write.outcome)
+                .expect("kind:9031 removal");
+            seed_relay_member(&state, community, &person, "member").await;
+            admit_and_settle(&state, community, &person, "roster-readmitted", None).await;
+            assert_eq!(
+                roles("readmitted").await,
+                [member("readmitted"), member("readmitted")]
+            );
+
+            // Another first entry, paused before the default channel's write
+            // while a racing join and a leave land.
+            use crate::nip_fi_test_hooks::{auto_join_channel_hook, auto_join_done_hook};
+            for channel in [landing, announcements] {
+                state
+                    .db
+                    .remove_member(community, channel, &person_key, &person_key)
+                    .await
+                    .expect("leave");
+            }
+            state
+                .db
+                .remove_relay_member(community, &person.public_key().to_hex(), &Keys::generate())
+                .await
+                .map(|write| write.outcome)
+                .expect("kind:9031 removal");
+            seed_relay_member(&state, community, &person, "member").await;
+            let (done, done_release) = auto_join_done_hook::arm(community);
+            let (reached, release) = auto_join_channel_hook::arm(community);
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-raced");
+            handle_auth(
+                signed_auth(&person, "roster-raced", None),
+                std::sync::Arc::clone(&conn),
+                std::sync::Arc::clone(&state),
+            )
+            .await;
+            assert!(matches!(
+                conn.auth_state_snapshot(),
+                AuthState::Authenticated(_)
+            ));
+            reached.await.expect("task reaches the landing channel");
+            // Re-arm before the task can run again: it does not yield
+            // between the release and the arm.
+            release.notify_one();
+            let (reached, release) = auto_join_channel_hook::arm(community);
+            reached.await.expect("task reaches the default channel");
+            crate::handlers::side_effects::join_channel_as_self(
+                &conn.tenant,
+                &state,
+                announcements,
+                &person_key,
+            )
+            .await
+            .expect("the racing join");
+            state
+                .db
+                .remove_member(community, announcements, &person_key, &person_key)
+                .await
+                .expect("leave again");
+            // A kind:40099 is relay-signed at one-second resolution with fixed
+            // content, so a second `member_joined` in the racing join's second
+            // would share its event id and be dropped on insert. Resume the
+            // admission in a later second, so a notice of its own would count.
+            let notices_after_race =
+                member_joined_notice_count(&state, community, announcements, &person).await;
+            let race_second = chrono::Utc::now().timestamp();
+            while chrono::Utc::now().timestamp() == race_second {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            release.notify_one();
+            done.await.expect("task finishes");
+            done_release.notify_one();
+            assert_eq!(
+                roles("raced").await,
+                [member("raced"), ("raced", None)],
+                "the leave since admission stands"
+            );
+            assert_eq!(
+                member_joined_notice_count(&state, community, announcements, &person).await,
+                notices_after_race,
+                "the racing join's notice is the admission's only one"
+            );
         }
 
         /// AUTH with NIP-OA records a previously ownerless agent's owner. That
