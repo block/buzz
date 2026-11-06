@@ -1,3 +1,6 @@
+import 'package:buzz/features/activity/inbox_unread_provider.dart';
+import 'package:buzz/features/activity/inbox_local_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/app.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/age_gate/age_signal_provider.dart';
@@ -26,6 +29,9 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   Completer<void>? mentionFetchGate;
   bool failNextMentionFetch = false;
   bool failNextQueryRelay = false;
+  bool snapshotQueries = false;
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
   int mentionFetchCount = 0;
   int activeMentionFetches = 0;
   int maxActiveMentionFetches = 0;
@@ -74,6 +80,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    final snapshot = [for (final filter in filters) ..._window(filter)];
     queryFilterCounts.add(filters.length);
     if (failNextQueryRelay) {
       failNextQueryRelay = false;
@@ -104,7 +111,9 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
       }
     }
     // Like the production bridge: each filter's results, concatenated.
-    return [for (final filter in filters) ..._window(filter)];
+    return snapshotQueries
+        ? snapshot
+        : [for (final filter in filters) ..._window(filter)];
   }
 
   @override
@@ -638,6 +647,22 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 100));
 
       expect(container.read(inboxItemsProvider).single.id, 'live-mention');
+      session.emit(
+        const NostrEvent(
+          id: 'quiet-live',
+          pubkey: 'other_pk',
+          createdAt: 1_700_000_001,
+          kind: 40002,
+          tags: [
+            ['p', 'me_pk'],
+            ['audience', 'agents'],
+          ],
+          content: 'Agent coordination',
+          sig: '',
+        ),
+      );
+      expect(container.read(inboxItemsProvider).single.id, 'live-mention');
+      expect(session.queryFilterCounts, [3]);
     },
   );
 
@@ -1054,7 +1079,7 @@ void main() {
   });
 
   test(
-    'serializes live refreshes and catches up events queued mid-fetch',
+    'retains the feed across reconnects and applies replay without history reads',
     () async {
       final session = _RecordingSessionNotifier();
       final container = ProviderContainer(
@@ -1073,16 +1098,20 @@ void main() {
       await container.read(activityProvider.future);
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      session.mentionFetchGate = Completer<void>();
+      final subscriptions = List.of(session._subscriptions);
       session.emit(_mentionEvent('live-one', 1_700_000_001));
-      await _waitFor(() => session.activeMentionFetches == 1);
-
+      for (var i = 0; i < 3; i++) {
+        session.setStatus(SessionStatus.reconnecting);
+        await container.pump();
+        expect(container.read(inboxItemsProvider).single.id, 'live-one');
+        session.setStatus(SessionStatus.connected);
+        await container.pump();
+      }
       session.emit(_mentionEvent('live-two', 1_700_000_002));
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      expect(session.maxActiveMentionFetches, 1);
-
-      session.mentionFetchGate!.complete();
-      await _waitFor(() => session.mentionFetchCount >= 3);
+      session.emit(_mentionEvent('live-two', 1_700_000_002));
+      expect(session._subscriptions, subscriptions);
+      expect(session.queryFilterCounts, [3]);
+      expect(session.mentionFetchCount, 1);
       await _waitFor(() => container.read(inboxItemsProvider).length == 2);
 
       expect(session.maxActiveMentionFetches, 1);
@@ -1093,73 +1122,114 @@ void main() {
     },
   );
 
-  test('serializes manual and live inbox refreshes', () async {
-    final session = _RecordingSessionNotifier();
-    final container = ProviderContainer(
-      overrides: [
-        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
-        myPubkeyProvider.overrideWithValue('me_pk'),
-        relaySessionProvider.overrideWith(() => session),
-        channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
+  test(
+    'preserves live events arriving after a manual refresh snapshot',
+    () async {
+      final session = _RecordingSessionNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(const <Channel>[]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    await container.read(channelsProvider.future);
-    await container.read(activityProvider.future);
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
 
-    session.mentionFetchGate = Completer<void>();
-    final manualRefresh = container.read(activityProvider.notifier).refresh();
-    await _waitFor(() => session.activeMentionFetches == 1);
+      session.snapshotQueries = true;
+      session.mentionFetchGate = Completer<void>();
+      final manualRefresh = container.read(activityProvider.notifier).refresh();
+      await _waitFor(() => session.activeMentionFetches == 1);
 
-    session.emit(_mentionEvent('live-during-manual', 1_700_000_003));
-    await Future<void>.delayed(const Duration(milliseconds: 100));
-    expect(session.maxActiveMentionFetches, 1);
+      session.emit(_mentionEvent('live-during-manual', 1_700_000_003));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(session.maxActiveMentionFetches, 1);
 
-    session.mentionFetchGate!.complete();
-    await manualRefresh;
-    await _waitFor(() => session.mentionFetchCount >= 3);
-    await _waitFor(
-      () =>
-          container.read(inboxItemsProvider).single.id == 'live-during-manual',
-    );
+      session.mentionFetchGate!.complete();
+      await manualRefresh;
+      expect(session.mentionFetchCount, 2);
+      await _waitFor(
+        () =>
+            container.read(inboxItemsProvider).single.id ==
+            'live-during-manual',
+      );
 
-    expect(session.maxActiveMentionFetches, 1);
-  });
+      expect(session.maxActiveMentionFetches, 1);
+    },
+  );
 
-  test('recovers a live refresh through websocket history fallback', () async {
-    final session = _RecordingSessionNotifier()
-      ..seed(_mentionEvent('existing', 1_700_000_001));
-    final container = ProviderContainer(
-      overrides: [
-        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
-        myPubkeyProvider.overrideWithValue('me_pk'),
-        relaySessionProvider.overrideWith(() => session),
-        channelsProvider.overrideWith(
-          () => _FixedChannelsNotifier(const <Channel>[]),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
+  test(
+    'retains unread items when HTTP and a fallback source both fail',
+    () async {
+      final session = _RecordingSessionNotifier()
+        ..seed(_mentionEvent('existing', 1_700_000_001));
+      final container = ProviderContainer(
+        overrides: [
+          readStateProvider.overrideWith(_ReadyReadState.new),
+          inboxLocalStateProvider.overrideWith(_EmptyLocalState.new),
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(const <Channel>[]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    await container.read(channelsProvider.future);
-    await container.read(activityProvider.future);
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(container.read(inboxItemsProvider).single.id, 'existing');
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(container.read(inboxItemsProvider).single.id, 'existing');
+      expect(container.read(inboxHasUnreadProvider), isTrue);
 
-    session.failNextMentionFetch = true;
-    session.emit(_mentionEvent('newer', 1_700_000_002));
-    await _waitFor(() => session.mentionFetchCount >= 2);
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+      session.seed(_mentionEvent('newer', 1_700_000_002));
+      session.failNextQueryRelay = true;
+      session.failNextMentionFetch = true;
+      await container.read(activityProvider.notifier).refresh();
+      expect(container.read(inboxItemsProvider).single.id, 'existing');
+      expect(container.read(inboxHasUnreadProvider), isTrue);
+      expect(container.read(activityProvider).hasError, isFalse);
 
-    expect(
-      container.read(inboxItemsProvider).map((item) => item.id),
-      containsAll(['existing', 'newer']),
-    );
-  });
+      await container.read(activityProvider.notifier).refresh();
+      expect(
+        container.read(inboxItemsProvider).map((item) => item.id),
+        containsAll(['existing', 'newer']),
+      );
+    },
+  );
+
+  test(
+    'cold load propagates an incomplete fallback instead of an empty feed',
+    () async {
+      final session = _RecordingSessionNotifier()
+        ..failNextQueryRelay = true
+        ..failNextMentionFetch = true;
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue('me_pk'),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(const <Channel>[]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await expectLater(
+        container.read(activityProvider.future),
+        throwsStateError,
+      );
+      expect(container.read(activityProvider).hasError, isTrue);
+    },
+  );
 
   group('hidden-DM subscription batching', () {
     const self =
@@ -1480,4 +1550,19 @@ class _ShellAge extends AgeSignalNotifier {
   AgeSignalState build() => AgeSignalState.allowed;
   @override
   Future<void> request() async {}
+}
+
+class _ReadyReadState extends ReadStateNotifier {
+  @override
+  ReadStateState build() => const ReadStateState(
+    isReady: true,
+    pubkey: 'me_pk',
+    contexts: {},
+    version: 1,
+  );
+}
+
+class _EmptyLocalState extends InboxLocalStateNotifier {
+  @override
+  InboxLocalState build() => const InboxLocalState.empty();
 }

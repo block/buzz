@@ -54,7 +54,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   void Function()? _unsubscribeAddressed;
   final List<void Function()> _unsubscribeDms = [];
   final List<void Function()> _unsubscribeHiddenDms = [];
-  Timer? _liveRefreshTimer;
+  HomeFeedResponse? _liveDuringRefresh;
   Future<void>? _refreshInFlight;
   int? _refreshGeneration;
   bool _refreshQueued = false;
@@ -71,7 +71,9 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   @override
   Future<HomeFeedResponse> build() async {
     ref.watch(relayConfigProvider);
-    final sessionState = ref.watch(relaySessionProvider);
+    // The session owns cursor-based replay and jittered reconnect backoff.
+    // Watching its status would discard those cursors and reload all history.
+    ref.watch(myPubkeyProvider);
     // React to the DM channel set (loading → data, membership changes) so a
     // cold start where channels resolve after the first fetch still surfaces
     // DMs without a manual refresh.
@@ -91,20 +93,20 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       _clearLiveSubscriptions();
     });
 
+    final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5;
     final response = await _fetch();
-    if (sessionState.status == SessionStatus.connected &&
-        generation == _subscriptionGeneration) {
-      unawaited(_subscribeLive(generation));
+    if (generation == _subscriptionGeneration) {
+      // Overlap the history read, including events arriving during the fetch.
+      unawaited(_subscribeLive(generation, since));
     }
     return response;
   }
 
-  Future<void> _subscribeLive(int generation) async {
+  Future<void> _subscribeLive(int generation, int since) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null || generation != _subscriptionGeneration) return;
 
     final session = ref.read(relaySessionProvider.notifier);
-    final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5;
     try {
       final unsubscribeAddressed = await session.subscribe(
         NostrFilter(
@@ -142,7 +144,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         channelIds: dmChannelIds,
         kinds: const [9],
         since: since,
-        onEvent: (_) => _scheduleLiveRefresh(generation),
+        onEvent: (event) => _handleAddressedLiveEvent(event, generation),
       );
       if (visibleUnsubscribers == null) return;
       _unsubscribeDms.addAll(visibleUnsubscribers);
@@ -264,14 +266,14 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   }
 
   void _handleAddressedLiveEvent(NostrEvent event, int generation) {
-    _scheduleLiveRefresh(generation);
+    _applyLiveEvent(event, generation);
   }
 
   void _handleHiddenDmLiveEvent(NostrEvent event, int generation) {
     if (generation != _subscriptionGeneration) return;
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null || !isIncomingChannelMessageFromOther(event, myPk)) return;
-    _scheduleLiveRefresh(generation);
+    _applyLiveEvent(event, generation);
     if (!ref.read(channelsProvider.notifier).hasLoaded) {
       unawaited(
         _resurfaceAfterChannelDiscovery(event, myPk, _dmResurfaceScope),
@@ -364,12 +366,44 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     }
   }
 
-  void _scheduleLiveRefresh(int generation) {
-    if (generation != _subscriptionGeneration) return;
-    _liveRefreshTimer?.cancel();
-    _liveRefreshTimer = Timer(
-      const Duration(milliseconds: 50),
-      () => unawaited(_queueRefresh(generation)),
+  void _applyLiveEvent(NostrEvent event, int generation) {
+    if (generation != _subscriptionGeneration ||
+        isQuietAgentMessage(event.tags)) {
+      return;
+    }
+    final incoming = _project([event]);
+    if (incoming.isEmpty) return;
+    if (_refreshInFlight != null) {
+      _liveDuringRefresh = _mergeFeed(_liveDuringRefresh, incoming);
+    }
+    state = AsyncData(_mergeFeed(state.value, incoming));
+  }
+
+  // Bound retained state to the same source windows as the initial query.
+  HomeFeedResponse _mergeFeed(
+    HomeFeedResponse? previous,
+    HomeFeedResponse next,
+  ) {
+    final byId = {
+      for (final item in previous?.all ?? <FeedItem>[]) item.id: item,
+    };
+    for (final item in next.all) {
+      final old = byId[item.id];
+      if (old == null ||
+          categoryPriority(item.category) <= categoryPriority(old.category)) {
+        byId[item.id] = item;
+      }
+    }
+    final items = byId.values.toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    List<FeedItem> category(String name, int limit) =>
+        items.where((item) => item.category == name).take(limit).toList();
+    return HomeFeedResponse(
+      // Tagged DM messages can also contribute to the mention category.
+      mentions: category('mention', 80),
+      needsAction: category('needs_action', 20),
+      activity: category('activity', 30),
+      agentActivity: category('agent_activity', 20),
     );
   }
 
@@ -391,10 +425,15 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     try {
       do {
         _refreshQueued = false;
+        _liveDuringRefresh = null;
         try {
           final next = await _fetch();
           if (generation != _subscriptionGeneration) return;
-          state = AsyncData(next);
+          state = AsyncData(
+            _liveDuringRefresh == null
+                ? next
+                : _mergeFeed(next, _liveDuringRefresh!),
+          );
         } catch (error) {
           if (generation != _subscriptionGeneration) return;
           debugPrint(
@@ -412,8 +451,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   }
 
   void _clearLiveSubscriptions() {
-    _liveRefreshTimer?.cancel();
-    _liveRefreshTimer = null;
+    _liveDuringRefresh = null;
     _refreshInFlight = null;
     _refreshGeneration = null;
     _refreshQueued = false;
@@ -507,6 +545,24 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       ...await _refillPastQuiet(session, filters, fetched),
     ];
 
+    return _project(events);
+  }
+
+  HomeFeedResponse _project(List<NostrEvent> events) {
+    final myPk = ref.read(myPubkeyProvider);
+    final dmChannelIds = [
+      for (final channel
+          in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
+        if (channel.isDm && channel.isMember) channel.id,
+    ];
+    if (myPk == null) {
+      return HomeFeedResponse(
+        mentions: [],
+        needsAction: [],
+        activity: [],
+        agentActivity: [],
+      );
+    }
     bool isFromOther(NostrEvent e) =>
         e.pubkey.toLowerCase() != myPk.toLowerCase();
     bool isAddressedToMe(NostrEvent event) => tagsAddress(event.tags, myPk);
@@ -684,14 +740,12 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       final end = start + fallbackConcurrency < filters.length
           ? start + fallbackConcurrency
           : filters.length;
+      // An incomplete source is not an authoritative empty result. Let the
+      // refresh retain its previous feed (or expose an error on a cold load).
       final results = await Future.wait(
-        filters.sublist(start, end).map((filter) async {
-          try {
-            return await session.fetchHistory(filter);
-          } catch (_) {
-            return const <NostrEvent>[];
-          }
-        }),
+        filters
+            .sublist(start, end)
+            .map((filter) => session.fetchHistory(filter)),
       );
       for (final result in results) {
         events.addAll(result);
