@@ -162,11 +162,31 @@ class HomePage extends HookConsumerWidget {
                               ? Duration.zero
                               : const Duration(milliseconds: 150),
                           curve: Curves.easeOut,
-                          child: Badge(
+                          child: SizedBox.square(
                             key: const Key('home-inbox-badge'),
-                            backgroundColor: context.colors.primary,
-                            smallSize: 6,
-                            child: const SizedBox.square(dimension: 24),
+                            dimension: 24,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Positioned(
+                                  top: -2,
+                                  right: 1,
+                                  child: Container(
+                                    key: const Key('home-inbox-dot'),
+                                    width: 8,
+                                    height: 8,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: context.colors.primary,
+                                      border: Border.all(
+                                        color: context.controlSurface,
+                                        width: 1,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),

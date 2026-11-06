@@ -320,10 +320,11 @@ void main() {
       for (final unread in [false, true, false]) {
         await tester.pumpWidget(await buildHome(inboxUnread: unread));
         await tester.pumpAndSettle();
-        final badge = tester.widget<Badge>(
-          find.byKey(const Key('home-inbox-badge')),
+        expect(
+          tester.getCenter(find.byKey(const Key('home-inbox-dot'))) -
+              tester.getTopLeft(find.byKey(const Key('home-inbox-badge'))),
+          const Offset(19, 2),
         );
-        expect(badge.smallSize, 6);
         final opacity = tester.widget<AnimatedOpacity>(
           find.ancestor(
             of: find.byKey(const Key('home-inbox-badge')),
