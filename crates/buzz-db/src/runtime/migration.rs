@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 87);
+        assert_eq!(migrations.len(), 88);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -945,6 +945,14 @@ mod postgres_tests {
         let desired = crate::test_support::desired_state_schema_sql();
         assert!(desired.contains("landing_channel_id UUID,"));
         assert!(desired.contains("welcome_message TEXT,"));
+        // Welcome title (0088): one more nullable community column, the
+        // same shape.
+        assert_eq!(migrations[87].version, 88);
+        let welcome_title = strip_sql_comments(migrations[87].sql.as_str());
+        assert!(welcome_title.contains("SET LOCAL lock_timeout = '5s';"));
+        assert!(welcome_title.contains("ADD COLUMN welcome_title TEXT;"));
+        assert!(!welcome_title.contains("UPDATE"));
+        assert!(desired.contains("welcome_title TEXT,"));
         assert!(migrations[70]
             .sql
             .as_str()

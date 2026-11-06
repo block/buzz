@@ -267,8 +267,9 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
-            // NIP-11 `landing_channel`, kind:9002 `landing`/`welcome` and the
-            // landing kind:39000 tags (NOSTR.md, Landing channel).
+            // NIP-11 `landing_channel`, kind:9002 `landing`/`welcome`/
+            // `welcome_title` and the landing kind:39000 tags (NOSTR.md,
+            // Landing channel).
             "buzz-landing-channel".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
