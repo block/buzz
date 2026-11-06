@@ -68,13 +68,14 @@ class _MarkdownEditingController extends TextEditingController {
 
   /// Text edits this controller has made. Undo and redo restore one of these
   /// exactly, which tells them apart from a key press or a paste of a link.
-  /// Like Flutter's undo stack this is unbounded; entries share their text
-  /// with the stack's, so each costs only a small wrapper.
-  final _recentValues = <TextEditingValue>{};
+  /// Like Flutter's undo stack this is unbounded, so it keeps a small key per
+  /// edit rather than each edit's full text.
+  final _recentValues = <(int, int, int)>{};
 
-  /// Android's undo history drops the composing range, so compare without it.
-  static TextEditingValue _historyKey(TextEditingValue value) =>
-      value.copyWith(composing: TextRange.empty);
+  /// Android's undo history drops the composing range, so the key leaves it
+  /// out.
+  static (int, int, int) _historyKey(TextEditingValue value) =>
+      (value.text.length, value.text.hashCode, value.selection.hashCode);
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     final selection = next.selection;
