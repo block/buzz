@@ -907,6 +907,14 @@ mod postgres_tests {
             fence.resolve(7, epoch),
             ResolveOutcome::Proved(entry) if entry.token == 7
         ));
+
+        // The retained entry is also what catches an epoch-keeping restore
+        // across the outage: a rewound token is a regression, not a fresh
+        // start. An emptied ring here would accept it under the old epoch.
+        assert_eq!(
+            fence.record(5, epoch, Instant::now(), wall),
+            RecordOutcome::TokenRegression
+        );
     }
 
     /// Resolve picks the greatest retained entry <= the observed token —
