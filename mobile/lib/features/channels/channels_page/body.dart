@@ -236,7 +236,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         if (entry.value.starred) entry.key,
     };
     final visibleChannels = channels
-        .where((channel) => channel.isMember && !channel.isArchived)
+        .where((channel) => channel.showsInChannelList)
         .toList();
     final streamChannels = visibleChannels
         .where((channel) => channel.isStream)
