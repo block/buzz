@@ -451,3 +451,97 @@ async fn cancelled_deliveries_keep_capacity_and_leave_v1_challenge_and_revoke_la
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     release.add_permits(8);
 }
+
+#[tokio::test]
+async fn slow_enrollment_bodies_are_bounded_without_occupying_revocation_capacity() {
+    use std::{future::IntoFuture, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn headers(socket: &mut tokio::net::TcpStream) -> String {
+        let read = async {
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                assert!(bytes.len() < 8192);
+                bytes.push(socket.read_u8().await.unwrap());
+            }
+            String::from_utf8(bytes).unwrap()
+        };
+        tokio::time::timeout(Duration::from_secs(25), read)
+            .await
+            .unwrap()
+    }
+
+    let (app, _, _, _) = fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .into_future(),
+    );
+    let mut stalled = Vec::new();
+    for _ in 0..2 {
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket.write_all(b"POST /v1/installations HTTP/1.1\r\nHost: push.example\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+        // Hyper sends Continue only when the handler starts reading the body:
+        // admission has happened, without a scheduling sleep or polling retry.
+        assert!(headers(&mut socket).await.starts_with("HTTP/1.1 100"));
+        stalled.push(socket);
+    }
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{address}/v1/installations"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["retry-after"], "1");
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/installations/challenges"))
+            .body(r#"{"v":1}"#)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/delegations/revoke"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Exercise the unchanged production timeout, then prove its permits return.
+    for socket in &mut stalled {
+        assert!(headers(socket).await.starts_with("HTTP/1.1 408"));
+    }
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/installations"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/installations"))
+            .body(vec![0; 1024 * 1024])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    server.abort();
+}
