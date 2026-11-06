@@ -145,6 +145,9 @@ class Channel {
 
   bool get isArchived => archivedAt != null;
 
+  /// The app badge counts only channels the channel list renders.
+  bool get showsInChannelList => isMember && !isArchived && (isStream || isDm);
+
   String displayLabel({String? currentPubkey}) {
     if (!isDm || participants.isEmpty) {
       return name;
