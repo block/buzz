@@ -8,9 +8,9 @@
 
 use serde_json::{json, Value};
 
-use super::sidebar_doc::{self, Edit, Projection, Section, Stamp, Tree};
-use super::sidebar_flags;
-use super::sidebar_sync::{self, channel_ids, now, Lane};
+use super::sidebar_doc::{self, Edit, Projection, Section, Tree};
+use super::sidebar_sync::{self, channel_ids, Lane};
+use super::{sidebar_flags, sidebar_sort};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::{SidebarCmd, SidebarSectionsCmd};
@@ -20,27 +20,21 @@ const LANE: Lane = Lane {
     label: "sidebar sections",
 };
 
-struct Head {
-    created_at: u64,
-    tree: Tree,
+async fn fetch_head(client: &BuzzClient) -> Result<Tree, CliError> {
+    Ok(
+        sidebar_sync::fetch_tree(client, LANE, &sidebar_doc::SECTIONS)
+            .await?
+            .1,
+    )
 }
 
-/// The relay's current sections event for this identity, decoded; an absent
-/// head is an empty tree.
-async fn fetch_head(client: &BuzzClient) -> Result<Head, CliError> {
-    let head = sidebar_sync::fetch_head(client, LANE, |json, created_at| {
-        let legacy_v = i64::try_from(created_at.saturating_mul(1_000)).unwrap_or(i64::MAX);
-        sidebar_doc::decode(json, legacy_v)
-    })
-    .await?;
-    Ok(Head {
-        created_at: head.created_at,
-        tree: head.doc.unwrap_or_default(),
-    })
+/// The live sections and assignments in your current sections document.
+pub(super) async fn fetch_view(client: &BuzzClient) -> Result<Projection, CliError> {
+    Ok(sidebar_doc::project(&fetch_head(client).await?))
 }
 
 /// A live section by exact id, or by exact name when that name is unique.
-fn resolve<'a>(view: &'a Projection, key: &str) -> Result<&'a Section, CliError> {
+pub(super) fn resolve<'a>(view: &'a Projection, key: &str) -> Result<&'a Section, CliError> {
     if let Some(section) = view.sections.iter().find(|s| s.id == key) {
         return Ok(section);
     }
@@ -80,34 +74,30 @@ async fn edit(
     client: &BuzzClient,
     apply: impl FnOnce(&mut Edit, &Projection) -> Result<(), CliError>,
 ) -> Result<Value, CliError> {
-    let head = fetch_head(client).await?;
-    let view = sidebar_doc::project(&head.tree);
-    let mut tree = head.tree.clone();
-    let stamp = Stamp {
-        now_ms: i64::try_from(now().as_millis()).unwrap_or(i64::MAX),
-        dev: format!("{:016x}", rand::random::<u64>()),
-    };
-    apply(&mut Edit::new(&mut tree, &stamp), &view)?;
-    if tree == head.tree {
-        return Ok(sidebar_sync::unchanged());
-    }
-    if !sidebar_doc::project(&tree).within_limits() {
-        return Err(CliError::Usage(format!(
-            "the sidebar supports at most {} sections and {} channel assignments",
-            sidebar_doc::MAX_SECTIONS,
-            sidebar_doc::MAX_ASSIGNMENTS
-        )));
-    }
-    let plaintext = serde_json::to_string(&sidebar_doc::encode(&tree))
-        .map_err(|e| CliError::Other(format!("failed to encode sidebar sections: {e}")))?;
-    sidebar_sync::publish(client, LANE, plaintext, head.created_at).await
+    sidebar_sync::edit_tree(
+        client,
+        LANE,
+        &sidebar_doc::SECTIONS,
+        |tree| {
+            if sidebar_doc::project(tree).within_limits() {
+                return Ok(());
+            }
+            Err(CliError::Usage(format!(
+                "the sidebar supports at most {} sections and {} channel assignments",
+                sidebar_doc::MAX_SECTIONS,
+                sidebar_doc::MAX_ASSIGNMENTS
+            )))
+        },
+        |edit, head| apply(edit, &sidebar_doc::project(head)),
+    )
+    .await
 }
 
 async fn run(cmd: SidebarSectionsCmd, client: &BuzzClient) -> Result<Value, CliError> {
     match cmd {
         SidebarSectionsCmd::List => {
-            let head = fetch_head(client).await?;
-            serde_json::to_value(sidebar_doc::project(&head.tree))
+            let tree = fetch_head(client).await?;
+            serde_json::to_value(sidebar_doc::project(&tree))
                 .map_err(|e| CliError::Other(format!("failed to encode sections: {e}")))
         }
         SidebarSectionsCmd::Create { name, icon } => {
@@ -181,7 +171,7 @@ async fn run(cmd: SidebarSectionsCmd, client: &BuzzClient) -> Result<Value, CliE
             let channels = channel_ids(&channels)?;
             edit(client, |edit, _| {
                 for channel in &channels {
-                    edit.unassign(channel);
+                    edit.clear(&["a", channel]);
                 }
                 Ok(())
             })
@@ -193,6 +183,7 @@ async fn run(cmd: SidebarSectionsCmd, client: &BuzzClient) -> Result<Value, CliE
 pub async fn dispatch(cmd: SidebarCmd, client: &BuzzClient) -> Result<(), CliError> {
     let output = match cmd {
         SidebarCmd::Sections(cmd) => run(cmd, client).await?,
+        SidebarCmd::Sort(cmd) => sidebar_sort::run(cmd, client).await?,
         SidebarCmd::Stars(cmd) => {
             sidebar_flags::run(&sidebar_flags::STARS, cmd.into(), client).await?
         }
@@ -209,6 +200,8 @@ pub async fn dispatch(cmd: SidebarCmd, client: &BuzzClient) -> Result<(), CliErr
 
 #[cfg(test)]
 mod tests {
+    use super::super::sidebar_doc::Stamp;
+    use super::super::sidebar_sync::now;
     use super::super::sidebar_sync::test_support::{self, Shared};
     use super::*;
     use nostr::Keys;
@@ -235,7 +228,7 @@ mod tests {
         for name in names {
             edit.create_section(&format!("id-{name}"), name, None);
         }
-        sidebar_doc::encode(&tree).to_string()
+        sidebar_doc::encode(&sidebar_doc::SECTIONS, &tree).to_string()
     }
 
     use test_support::{published, published_count};
