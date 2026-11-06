@@ -69,16 +69,6 @@ pub struct PolicyRecord {
     pub current_requires_nip_fi: Option<bool>,
 }
 
-impl PolicyRecord {
-    fn legacy(mut self) -> UpgradeRecord {
-        if self.acceptance.state == "superseded" {
-            self.acceptance.state = "unavailable".into();
-        }
-        self.acceptance.pending_reasons = vec!["connection_closure_unverified".into()];
-        self.acceptance
-    }
-}
-
 /// Refusal or an immutable acceptance with current status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyOutcome {
@@ -127,15 +117,6 @@ impl UpgradeRecord {
             && self.expected_issuer == request.expected_issuer
             && self.operator_pubkey == request.operator_pubkey
     }
-}
-
-/// A refused enable never mutates policy or creates a receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpgradeOutcome {
-    /// Committed or recovered acceptance, including current target state.
-    Accepted(UpgradeRecord),
-    /// Stable machine-readable precondition failure.
-    Refused(&'static str),
 }
 
 /// Authoritative policy for a community in the active lifecycle.
@@ -286,21 +267,6 @@ impl Db {
             .bind(community.as_uuid()).fetch_optional(&mut *connection).await?)
     }
 
-    /// Recover a receipt only for its authenticated originating operator.
-    /// Ownership changes do not destroy the original caller's recovery authority.
-    #[datastore_span(name = "community_auth_upgrade_status", system = "postgresql")]
-    pub async fn community_auth_upgrade_status(
-        &self,
-        operation: Uuid,
-        operator: &str,
-    ) -> Result<Option<UpgradeRecord>> {
-        Ok(self
-            .community_auth_policy_status(operation, operator)
-            .await?
-            .filter(|record| record.expected_policy_generation.is_none())
-            .map(PolicyRecord::legacy))
-    }
-
     /// Recover any policy receipt for its original authenticated operator.
     pub async fn community_auth_policy_status(
         &self,
@@ -325,49 +291,10 @@ impl Db {
         request: &PolicyRequest,
         configured_trust: std::result::Result<(), &'static str>,
     ) -> Result<PolicyOutcome> {
-        self.write_community_nip_fi_policy(
-            &request.tuple,
-            Some((
-                request.requires_nip_fi,
-                request.expected_policy_generation,
-                request.expected_requires_nip_fi,
-            )),
-            configured_trust,
-        )
-        .await
-    }
-
-    /// Atomically enable FI and persist the full idempotency tuple.
-    ///
-    /// `configured_trust` is the relay's trusted configuration check. Stored
-    /// binding presence is rechecked under a row lock here. No issuer is added.
-    /// Retries recover acceptance before rechecking mutable preconditions.
-    #[datastore_span(name = "enable_community_nip_fi", system = "postgresql")]
-    pub async fn enable_community_nip_fi(
-        &self,
-        request: &UpgradeRequest,
-        configured_trust: std::result::Result<(), &'static str>,
-    ) -> Result<UpgradeOutcome> {
-        Ok(
-            match self
-                .write_community_nip_fi_policy(request, None, configured_trust)
-                .await?
-            {
-                PolicyOutcome::Accepted(record) => UpgradeOutcome::Accepted((*record).legacy()),
-                PolicyOutcome::Refused(code) => UpgradeOutcome::Refused(code),
-            },
-        )
-    }
-
-    async fn write_community_nip_fi_policy(
-        &self,
-        request: &UpgradeRequest,
-        intent: Option<(bool, i64, bool)>,
-        configured_trust: std::result::Result<(), &'static str>,
-    ) -> Result<PolicyOutcome> {
-        let desired = intent.is_none_or(|i| i.0);
-        let expected_generation = intent.map(|i| i.1);
-        let expected_state = intent.map(|i| i.2);
+        let desired = request.requires_nip_fi;
+        let expected_generation = request.expected_policy_generation;
+        let expected_state = request.expected_requires_nip_fi;
+        let request = &request.tuple;
         let connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
@@ -391,8 +318,8 @@ impl Db {
             return Ok(
                 if record.acceptance.matches(request)
                     && record.acceptance.requires_nip_fi == desired
-                    && record.expected_policy_generation == expected_generation
-                    && record.expected_requires_nip_fi == expected_state
+                    && record.expected_policy_generation == Some(expected_generation)
+                    && record.expected_requires_nip_fi == Some(expected_state)
                 {
                     PolicyOutcome::Accepted(Box::new(record))
                 } else {
@@ -423,16 +350,10 @@ impl Db {
         }
         let old_required: bool = row.try_get("requires_nip_fi")?;
         let old_generation: i64 = row.try_get("policy_generation")?;
-        if let Some((_, generation, required)) = intent {
-            if generation < 0 || generation != old_generation || required != old_required {
-                return Ok(PolicyOutcome::Refused("policy_conflict"));
-            }
-        } else if !old_required && old_generation != 0 {
-            // An uncommitted legacy retry cannot reverse a later disable.
+        if expected_generation != old_generation || expected_state != old_required {
             return Ok(PolicyOutcome::Refused("policy_conflict"));
         }
-        let bump = intent.is_some() || !old_required;
-        if bump && old_generation == i64::MAX {
+        if old_generation == i64::MAX {
             return Ok(PolicyOutcome::Refused("policy_generation_exhausted"));
         }
         // Lock order: deletion-shared, community row, host lease. Fills take
@@ -489,7 +410,7 @@ impl Db {
         self.deletion_store()
             .guard_transaction(&mut tx, community)
             .await?;
-        let generation = old_generation + i64::from(bump);
+        let generation = old_generation + 1;
         sqlx::query(
             "UPDATE communities SET policy_generation = $2, requires_nip_fi = $3 WHERE id = $1",
         )

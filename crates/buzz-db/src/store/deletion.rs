@@ -8716,12 +8716,12 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
 
         let upgrade = db
-            .community_auth_upgrade_status(upgrade_id, "operator")
+            .community_auth_policy_status(upgrade_id, "operator")
             .await
             .unwrap()
             .expect("receipt survives purge");
-        assert_eq!(upgrade.community_id, community);
-        assert_eq!(upgrade.state, "unavailable");
+        assert_eq!(upgrade.acceptance.community_id, community);
+        assert_eq!(upgrade.acceptance.state, "unavailable");
         let retained: Uuid = sqlx::query_scalar(
             "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",
         )

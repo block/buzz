@@ -42,7 +42,7 @@ Acceptance serializes UUID reuse, then locks deletion-shared → community
 `FOR NO KEY UPDATE` → exclusive host lease, preserving lifecycle/deletion-intent,
 exact host, single owner and actor==owner checks and community write admission.
 Acceptance and receipt commit atomically. UUID identity binds the full tuple,
-action, both preconditions, request form and authenticated operator. Different
+action, both preconditions and authenticated operator. Different
 meaning under a committed UUID returns 409 `idempotency_conflict`. Identical
 committed replay recovers history before mutable preflight and never writes policy.
 
@@ -59,7 +59,8 @@ GET `?operation_id=<UUID>` returns only the originating operator's receipt.
 Mixed query forms are invalid. The response separates `receipt` (original tuple,
 accepted generation/action/preconditions and current target generation/flag) from
 `mode` and `effective_required`. Current-state reads also print exact expected
-precondition fields. Missing/deleted targets have null current fields.
+`expected_policy_generation` and `expected_requires_nip_fi` fields, without a
+duplicate unprefixed pair. Missing/deleted targets have null current fields.
 
 | Receipt state | Meaning | CLI exit |
 |---|---|---|
@@ -85,17 +86,27 @@ return 409 with corresponding `*_conflict` codes; generation exhaustion returns
 Migration 0084 adds desired action and nullable CAS preconditions to existing
 receipts. True/default and null preconditions preserve old receipt meaning and
 old INSERT compatibility. No data backfill, trigger, function or foreign key is
-added. Apply schema first, then compatible management writers across the **whole
-fleet** with `BUZZ_NIP_FI_CHANGES=false`, then explicitly enable mutations.
-The gate controls both directions; reads and committed replay remain available.
-Do not roll back to an unfenced management writer after the first general operation.
+added. Historical rows with null CAS preconditions remain readable through
+policy status, including after target deletion. A new fenced request cannot reuse
+such a row's UUID: null historical preconditions differ from the mandatory new
+preconditions, so it returns `idempotency_conflict` without mutation.
 
-Legacy `/nip-fi-upgrade` remains enable-only. Fresh enables on optional/nonzero
-generation are refused, so an old uncommitted retry cannot reverse disable.
-Already-required legacy no-ops retain their generation. Legacy GET hides general
-CAS receipts with 404, and POST cannot reuse their UUIDs. Old binaries cannot hide
-those receipts or fence retries; the gate-off whole-fleet rollout is mandatory.
-General status can read legacy receipts, with null CAS preconditions.
+The old `/operator/communities/nip-fi-upgrade` endpoint and the `nip-fi-upgrade`
+admin command have been removed. Its GET and POST requests receive 404; use
+`nip-fi-policy` for both changes and receipt recovery. Upgrade existing clients
+for the [policy client contract](operator-nip-fi-policy-client.md) before this
+relay version reaches their fleet, with their mutations paused until rollout ends.
+No client may guess CAS fields or refresh a saved request during recovery.
+
+Before rolling, close `BUZZ_NIP_FI_UPGRADES_ENABLED` on every old relay and keep
+`BUZZ_NIP_FI_CHANGES=false` on new relays. Apply schema first, roll the whole
+fleet to the supported policy writer, then explicitly enable the new gate and
+resume migrated clients. Old binaries with their old gate open can still accept
+unfenced enables and reverse a disable; a new-name setting alone cannot close
+that old gate. Retire the old setting after the last old binary is gone.
+Reads and committed replay remain available on the supported API with its gate
+closed. Do not roll back to a writer that exposes unfenced enable after any
+policy operation. This removal does not erase receipts or rewrite schema.
 
 ## Request enforcement and discovery
 

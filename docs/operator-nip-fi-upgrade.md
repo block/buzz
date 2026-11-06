@@ -5,8 +5,11 @@ stored requirement through the deployment operator API. The command needs the
 configured `RELAY_OPERATOR_API_ORIGIN` and an allowlisted operator signing key
 in a protected file. It sends one signed request and never retries automatically.
 
-Before changing policy, apply the schema and roll compatible management writers
-across the whole fleet with `BUZZ_NIP_FI_CHANGES=false`. Then explicitly
+Before rolling, close `BUZZ_NIP_FI_UPGRADES_ENABLED` on every old relay and
+keep `BUZZ_NIP_FI_CHANGES=false` on new relays. Pause callers and upgrade them
+for the [supported API](operator-nip-fi-policy-client.md) before deploying this
+relay version. Apply the schema and roll compatible management writers across
+the whole fleet. Then explicitly
 enable that gate, which controls both enable and disable. Enable additionally
 requires the deployment-selected issuer to be trusted and already bound to the
 community. The active community must have exactly one owner; the authenticated
@@ -71,5 +74,7 @@ A racing sweep may close one last non-FI socket; it can reconnect under optional
 policy. FI-admitted sockets retain their finite deadline. Re-enable repeats the
 optional-lease drain and existing periodic revalidation.
 
-The `nip-fi-upgrade enable/status` command targets the legacy enable-only endpoint.
-Use the general command for new operations; legacy GET hides general CAS receipts.
+The old `nip-fi-upgrade` command and endpoint are removed. Requests to that
+route now return 404. Recover historical receipts with `nip-fi-policy status
+--operation-id`; their original null CAS preconditions remain visible. Never
+reuse a historical operation UUID for a new intent.
