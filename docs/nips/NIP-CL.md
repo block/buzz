@@ -274,7 +274,9 @@ type.
 The `#p` rule for 44100/44101 still applies: it must be the reader's own
 pubkey. An `ids` filter does not lift it: the relay returns, counts or
 delivers a 44100/44101 only to the pubkey in its `p` tag, even to a reader
-who knows the event id.
+who knows the event id. A filter whose `authors` are all the reader's own
+pubkey is also admitted, with or without `#p` or `kinds`; it returns no
+notice, because only the relay signs them.
 
 Because the notices are stored, a client that reconnects can set `since` to
 the newest notice it has seen. One subscription then returns the notices it
