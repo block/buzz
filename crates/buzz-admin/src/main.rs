@@ -22,6 +22,7 @@
 mod communities;
 mod deletions;
 mod nip_fi;
+mod nip_fi_upgrade;
 mod user_deletions;
 
 use std::future::Future;
@@ -124,6 +125,8 @@ enum Command {
         #[command(subcommand)]
         command: nip_fi::NipFiCommand,
     },
+    /// Require NIP-FI through the relay's existing signed operator API.
+    NipFiUpgrade(nip_fi_upgrade::Args),
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
         #[command(subcommand)]
@@ -213,6 +216,11 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::Deletions { command } => deletions::run(command).await,
         Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
+        // Retain transport/file causes for this operator command without changing
+        // the diagnostics of other admin commands. Key parse errors are redacted.
+        Command::NipFiUpgrade(args) => nip_fi_upgrade::run(args)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error:#}")),
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
