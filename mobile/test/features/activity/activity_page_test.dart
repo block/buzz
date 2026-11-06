@@ -18,6 +18,7 @@ import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -876,6 +877,76 @@ void main() {
         find.byKey(const ValueKey('inbox-unread-dot-dm-reply')),
         findsOneWidget,
       );
+    },
+  );
+
+  testWidgets(
+    'reading a thread row under People leaves hidden agent replies unread',
+    (tester) async {
+      FeedItem threadEvent(String id, String pubkey, int age) => FeedItem(
+        id: id,
+        kind: 9,
+        pubkey: pubkey,
+        content: 'body $id',
+        createdAt: now - age,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', threadIdRoot1, '', 'root'],
+          ['e', threadIdRoot1, '', 'reply'],
+        ],
+        category: 'mention',
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          knownAgentPubkeys: const {'agent_pk'},
+          feed: HomeFeedResponse(
+            mentions: [
+              threadEvent('g1', 'agent_pk', 300),
+              threadEvent('p1', 'bob_pk', 200),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> chooseSender(String label) async {
+        await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+      }
+
+      await chooseSender('People');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-p1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
+
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsOneWidget);
+      int? threadMarker() => ProviderScope.containerOf(
+        tester.element(find.byType(ActivityPage)),
+      ).read(readStateProvider).contexts[threadContextKey(threadIdRoot1)];
+      // The synced marker stops short of the hidden agent reply.
+      expect(threadMarker(), now - 301);
+
+      await chooseSender('Agents');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-g1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      // With the agent reply read too, the synced marker covers both.
+      expect(threadMarker(), now - 200);
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
     },
   );
 
