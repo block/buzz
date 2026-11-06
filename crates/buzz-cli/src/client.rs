@@ -450,7 +450,7 @@ mod media_download_tests {
     }
 }
 
-const QUERY_PAGE_SIZE: u32 = 500;
+pub(crate) const QUERY_PAGE_SIZE: u32 = 500;
 
 /// The most pages one limited query reads before failing, so a relay that
 /// never runs out of events to skip cannot keep a command running forever.
@@ -826,30 +826,34 @@ impl BuzzClient {
         filter: serde_json::Value,
         limit: Option<u32>,
     ) -> Result<Vec<serde_json::Value>, CliError> {
-        self.query_pages_keeping(filter, limit, |_| true).await
+        self.query_pages_keeping(filter, limit, None).await
     }
 
-    /// Like `query_pages`, but only events `keep` accepts count toward
-    /// `limit`, so paging continues past the ones it drops.
+    /// Like `query_pages`, but with `keep`, only events it accepts count
+    /// toward `limit`: paging continues past the ones it drops, always in
+    /// full pages, for at most `MAX_QUERY_PAGES` pages.
     async fn query_pages_keeping(
         &self,
         mut filter: serde_json::Value,
         limit: Option<u32>,
-        keep: impl Fn(&serde_json::Value) -> bool,
+        keep: Option<&dyn Fn(&serde_json::Value) -> bool>,
     ) -> Result<Vec<serde_json::Value>, CliError> {
         let mut events = Vec::new();
         let mut pages = 0;
 
         while limit.is_none_or(|limit| events.len() < limit as usize) {
-            if limit.is_some() && pages == MAX_QUERY_PAGES {
+            if keep.is_some() && pages == MAX_QUERY_PAGES {
                 return Err(stalled_query(&format!(
                     "read {MAX_QUERY_PAGES} pages without reaching the end of the results"
                 )));
             }
             pages += 1;
-            let page_limit = limit
-                .map(|limit| (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize))
-                .unwrap_or(QUERY_PAGE_SIZE as usize);
+            let page_limit = match (limit, keep) {
+                (Some(limit), None) => {
+                    (limit as usize - events.len()).min(QUERY_PAGE_SIZE as usize)
+                }
+                _ => QUERY_PAGE_SIZE as usize,
+            };
             filter["limit"] = serde_json::json!(page_limit);
 
             let raw = self.query(&filter).await?;
@@ -860,12 +864,15 @@ impl BuzzClient {
             if !done {
                 advance_query_cursor(&mut filter, &page)?;
             }
-            events.extend(page.into_iter().filter(|e| keep(e)));
+            events.extend(page.into_iter().filter(|e| keep.is_none_or(|keep| keep(e))));
             if done {
                 break;
             }
         }
 
+        if let Some(limit) = limit {
+            events.truncate(limit as usize);
+        }
         Ok(events)
     }
 
@@ -877,7 +884,8 @@ impl BuzzClient {
         limit: u32,
         keep: impl Fn(&serde_json::Value) -> bool,
     ) -> Result<Vec<serde_json::Value>, CliError> {
-        self.query_pages_keeping(filter, Some(limit), keep).await
+        self.query_pages_keeping(filter, Some(limit), Some(&keep))
+            .await
     }
 
     /// Query up to `limit` historical events, following the relay bridge's

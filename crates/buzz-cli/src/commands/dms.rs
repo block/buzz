@@ -225,7 +225,7 @@ mod tests {
         events.push(serde_json::json!({
             "id": "f".repeat(64), "kind": 30622, "created_at": 5_000, "tags": hidden,
         }));
-        let (base, log) = relay(events).await;
+        let (base, _) = relay(events).await;
         let client = BuzzClient::new(
             base,
             crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
@@ -236,11 +236,29 @@ mod tests {
 
         assert_eq!(dms.len(), 1, "{dms:?}");
         assert_eq!(dms[0]["dm_id"], "dm-0");
-        assert!(log
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|f| f["before_id"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn a_small_limit_still_reads_full_pages_past_hidden_dms() {
+        // 150 newer hidden DMs, then one older visible DM, with limit 1.
+        let mut events: Vec<_> = (1..=150).rev().map(dm).collect();
+        events.push(dm(0));
+        let hidden: Vec<_> = (1..=150)
+            .map(|n| serde_json::json!(["h", format!("dm-{n}")]))
+            .collect();
+        events.push(serde_json::json!({
+            "id": "f".repeat(64), "kind": 30622, "created_at": 5_000, "tags": hidden,
+        }));
+        let (base, log) = relay(events).await;
+
+        let dms = list_dms(&client(base), 1).await.unwrap();
+
+        assert_eq!(dms.len(), 1, "{dms:?}");
+        assert_eq!(dms[0]["dm_id"], "dm-0");
+        let log = log.lock().unwrap();
+        let dm_pages: Vec<_> = log.iter().filter(|f| f["kinds"][0] == 39000).collect();
+        assert_eq!(dm_pages.len(), 1, "{dm_pages:?}");
+        assert_eq!(dm_pages[0]["limit"], crate::client::QUERY_PAGE_SIZE);
     }
 
     #[tokio::test]
@@ -251,20 +269,22 @@ mod tests {
             e["created_at"] = serde_json::json!(1_000);
             e
         };
-        let events = vec![
-            same(1),
-            same(2),
-            serde_json::json!({
-                "id": "f".repeat(64), "kind": 30622, "created_at": 5_000,
-                "tags": [["h", "dm-1"]],
-            }),
-        ];
+        // A full page of hidden DMs, then a visible one with the same
+        // timestamp and a larger id, so the cursor must stay on that second.
+        let page = crate::client::QUERY_PAGE_SIZE as u64;
+        let mut events: Vec<_> = (1..=page + 1).map(same).collect();
+        let hidden: Vec<_> = (1..=page)
+            .map(|n| serde_json::json!(["h", format!("dm-{n}")]))
+            .collect();
+        events.push(serde_json::json!({
+            "id": "f".repeat(64), "kind": 30622, "created_at": 5_000, "tags": hidden,
+        }));
         let (base, log) = relay(events).await;
 
         let dms = list_dms(&client(base), 1).await.unwrap();
 
         assert_eq!(dms.len(), 1, "{dms:?}");
-        assert_eq!(dms[0]["dm_id"], "dm-2");
+        assert_eq!(dms[0]["dm_id"], format!("dm-{}", page + 1));
         assert!(log
             .lock()
             .unwrap()
