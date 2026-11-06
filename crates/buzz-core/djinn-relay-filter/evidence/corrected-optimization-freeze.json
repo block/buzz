@@ -1,0 +1,17 @@
+{
+  "base": "71d7aa04369a6e86e158dc6d46246c8a3ce6d166",
+  "boundary": "corrected actual fan_out_scoped; one routing-consistent h, varied sorted canonical UUIDv4; heldout excluded",
+  "files": {
+    "src/input.rs": "7b382b2f32579fc543c5be2422e9a656b9255fc698db9e1eaf9432af74f96cbf",
+    "src/spec.rs": "e511336a76eb89e9ff4ab9ff04c901bddcdb966857f8a60f141c566eb3f3f9eb",
+    "src/adapter.rs": "b64d8c726eff9083dd113d724420394b44ad2631e35ce4e6ec7aad7a8772602d",
+    "src/bench.rs": "91a87b3d8b936e5ced1ef766421655ccb07f427058685515b0a976bfb8912057",
+    "baseline/src/fanout.rs": "6a93414a1ae20260bda866c60302ca74872444104a29766bf5bdeb713baef96e",
+    "baseline/src/bin/holdout.rs": "ffe57116e99ac81402feb865311abb782f3b94471021951dcb0d7aa96a6a65bd",
+    "baseline/src/lib.rs": "a2cc9a5416d313c7194bff6a67cb12988bc7fd779ba351e8fbc7310eee4f7c8d",
+    "baseline/build.rs": "0e2ad9a621dff5aa6a25babfd9c61ec21df82f7b12812e853128cba5ab20aa2c",
+    "baseline/Cargo.toml": "31433d09d082bb060c86a8e060dd55c14dc3ba47599563cf19629b9362a76f98",
+    "Cargo.toml": "c673c268a97a9fd4c5e361549df4031027d091742e9aa304bb97eca10419f758",
+    "djinn/solution/mod.rs": "c4ddd3602eb5c65e9e04ac639f68cd3d7fb34b468b28f61775638579cab509bd"
+  }
+}

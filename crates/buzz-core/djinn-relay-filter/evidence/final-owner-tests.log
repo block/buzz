@@ -1,0 +1,53 @@
+   Compiling buzz-core v0.1.0 (/home/bloxer/buzz/crates/buzz-core)
+   Compiling relay-filter-baseline v0.1.0 (/home/bloxer/buzz/crates/buzz-core/djinn-relay-filter/baseline)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running unittests src/lib.rs (crates/buzz-core/djinn-relay-filter/baseline/target/debug/deps/relay_filter_baseline-3319c382c769a07e)
+
+running 45 tests
+test current_subscription::tests::per_community_subscriptions_drops_to_zero_when_all_subs_removed ... ok
+test current_subscription::tests::per_community_subscriptions_snapshot_is_correctly_scoped ... ok
+test current_subscription::tests::test_channel_subscriber_conns_dedupes_and_scopes_to_channel ... ok
+test current_subscription::tests::test_empty_kinds_array_remove_is_noop ... ok
+test current_subscription::tests::scoped_global_registry_does_not_cross_fanout_same_kind ... ok
+test current_subscription::tests::scoped_remove_channel_subscriptions_keeps_same_channel_in_other_community ... ok
+test current_subscription::tests::scoped_registry_does_not_cross_fanout_same_channel_and_kind ... ok
+test current_subscription::tests::test_global_index_removal_cleanup ... ok
+test current_subscription::tests::same_scope_replacement_uses_current_prepared_selectors ... ok
+test current_subscription::tests::test_empty_kinds_array_matches_nothing ... ok
+test current_subscription::tests::revoking_one_channel_keeps_multi_channel_subscription_live ... ok
+test current_subscription::tests::test_evict_all_subscribers_leaves_no_channel_subscriptions ... ok
+test current_subscription::tests::test_global_p_kind_index_fan_out_targets_matching_p ... ok
+test current_subscription::tests::test_global_p_kind_index_removal_cleanup ... ok
+test current_subscription::tests::multi_channel_subscription_fans_out_only_requested_channels ... ok
+test current_subscription::tests::test_global_and_channel_subs_are_isolated ... ok
+test current_subscription::tests::test_global_sub_does_not_receive_channel_events ... ok
+test current_subscription::tests::test_global_kind_index_fan_out ... ok
+test current_subscription::tests::test_kindless_subscription_remove_cleans_wildcard_index ... ok
+test current_subscription::tests::test_remove_from_index_targeted_no_full_scan ... ok
+test current_subscription::tests::test_kindless_and_kinded_subs_coexist ... ok
+test current_subscription::tests::test_subscription_registry_get_filters ... ok
+test current_subscription::tests::test_global_wildcard_index_fan_out ... ok
+test current_subscription::tests::test_kindless_subscription_replace ... ok
+test current_subscription::tests::test_stale_candidate_snapshot_does_not_cross_subscription_scope ... ok
+test current_subscription::tests::test_subscription_registry_remove_connection ... ok
+test current_subscription::tests::test_remove_channel_subscriptions_only_evicts_target_channel ... ok
+test current_subscription::tests::test_subscription_registry_no_channel_slow_path ... ok
+test current_subscription::tests::test_subscription_registry_register_and_fan_out ... ok
+test current_subscription::tests::test_subscription_registry_channel_kind_index ... ok
+test current_subscription::tests::test_subscription_registry_remove ... ok
+test current_subscription::tests::test_kindless_channel_subscription_receives_all_kinds ... ok
+test owner::tests::empty_h_tag_filter_matches_nothing ... ok
+test current_subscription::tests::test_subscription_registry_replace_existing ... ok
+test owner::tests::h_tag_multi_value_filter_matches_any_channel ... ok
+test owner::contract_tests::structural_contract_matrix ... ok
+test owner::tests::h_tag_fallback_uses_stored_channel_id ... ok
+test owner::tests::or_semantics ... ok
+test owner::tests::reader_authorized_for_event_gates_agent_turn_metric_by_p ... ok
+test owner::tests::tag_matching ... ok
+test owner::tests::kind_author_since_until_tag_matching ... ok
+test owner::tests::reader_authorized_for_event_gates_dm_visibility_by_p ... ok
+test current_subscription::tests::test_subscription_removal_cannot_delete_replacement_index ... ok
+test owner::contract_tests::generated_matcher_agrees_with_typed_reference_on_composed_inputs ... ok
+test current_subscription::tests::test_fan_out_concurrent_with_subscription_replacement_completes ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.00s

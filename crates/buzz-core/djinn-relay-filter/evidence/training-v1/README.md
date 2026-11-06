@@ -1,0 +1,3 @@
+# Preserved original frozen workload
+
+These are exact fixture/driver snapshots used by the first three optimization rounds. The late/miss and old middle-tag events contain an earlier parseable h different from the manually stored channel. Ordinary ingest routes to that earlier h, so those rows are structural stress, not normal live-routing evidence. No production bug or proof failure is implied. Early rows were routing-consistent. See ../STRUCTURAL-V1.md and the original raw JSON/optimizer outcomes. The corrected live driver is ../../baseline/src/fanout.rs; the new eight-case heldout is ../../baseline/src/bin/holdout.rs and is excluded from the additional optimizer objective. Original specification and generator checkpoints remain unchanged.

@@ -1,0 +1,45 @@
+{
+  "run": {
+    "time": "2026-10-15 01:27:58 UTC",
+    "unix_time": 1792027678,
+    "duration_secs": 5,
+    "pass": true,
+    "stage": "done",
+    "errors": []
+  },
+  "obligations": {
+    "identities": {
+      "exists": "proved",
+      "wf": "proved"
+    },
+    "kinds": {
+      "exists": "proved",
+      "wf": "proved"
+    },
+    "since": {
+      "exists": "proved",
+      "wf": "proved"
+    },
+    "until": {
+      "exists": "proved",
+      "wf": "proved"
+    },
+    "tag_match": {
+      "exists": "proved",
+      "wf": "proved"
+    },
+    "tag_constraint": {
+      "exists": "proved",
+      "wf": "proved"
+    },
+    "one_filter": {
+      "exists": "proved"
+    },
+    "filters_match": {
+      "exists": "proved",
+      "impl_correct": "proved",
+      "unambiguous": "proved"
+    }
+  },
+  "spec_tokens_unchanged_from_first_verified": true
+}

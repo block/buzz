@@ -1,0 +1,338 @@
+{
+  "boundary": "actual fan_out_scoped, exactly one first h, canonical varied UUIDv4, eight held-out configurations; fixture/registry allocation outside timing; projection/result allocation inside",
+  "rows": [
+    {
+      "batch_seconds": [
+        0.047281877,
+        0.047295774,
+        0.04728345,
+        0.047209252,
+        0.047190039,
+        0.047162988,
+        0.047159305,
+        0.047178244,
+        0.047268984
+      ],
+      "case": "heldout_n1_h50_middle",
+      "iterations_per_batch": 4096,
+      "max_ns": 11546.81982421875,
+      "median_ns": 11525.6962890625,
+      "min_ns": 11513.502197265625,
+      "ns_per_fanout": [
+        11543.427001953125,
+        11546.81982421875,
+        11543.81103515625,
+        11525.6962890625,
+        11521.005615234375,
+        11514.4013671875,
+        11513.502197265625,
+        11518.1259765625,
+        11540.279296875
+      ],
+      "ranks": [
+        "heldout_n1_h50_rank25"
+      ],
+      "registry": "historical",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.044621702,
+        0.044678392,
+        0.044714613,
+        0.044724001,
+        0.04473201,
+        0.045537958,
+        0.044770554,
+        0.046212385,
+        0.045572641
+      ],
+      "case": "heldout_n1_h50_seeded16",
+      "iterations_per_batch": 256,
+      "max_ns": 11282.320556640625,
+      "median_ns": 10920.90087890625,
+      "min_ns": 10893.97021484375,
+      "ns_per_fanout": [
+        10893.97021484375,
+        10907.810546875,
+        10916.653564453125,
+        10918.945556640625,
+        10920.90087890625,
+        11117.66552734375,
+        10930.31103515625,
+        11282.320556640625,
+        11126.133056640625
+      ],
+      "ranks": [
+        "heldout_n1_h50_rank33",
+        "heldout_n1_h50_rank32",
+        "heldout_n1_h50_rank3",
+        "heldout_n1_h50_rank10",
+        "heldout_n1_h50_rank21",
+        "heldout_n1_h50_rank36",
+        "heldout_n1_h50_rank7",
+        "heldout_n1_h50_rank14",
+        "heldout_n1_h50_rank9",
+        "heldout_n1_h50_rank40",
+        "heldout_n1_h50_rank11",
+        "heldout_n1_h50_rank2",
+        "heldout_n1_h50_rank29",
+        "heldout_n1_h50_rank44",
+        "heldout_n1_h50_rank47",
+        "heldout_n1_h50_rank38"
+      ],
+      "registry": "historical",
+      "sequence_length": 16
+    },
+    {
+      "batch_seconds": [
+        0.074146606,
+        0.07399965,
+        0.073984357,
+        0.074277148,
+        0.074167774,
+        0.074149313,
+        0.074090016,
+        0.0741128,
+        0.074120384
+      ],
+      "case": "heldout_n100_h50_middle",
+      "iterations_per_batch": 64,
+      "max_ns": 1160580.4375,
+      "median_ns": 1158131.0,
+      "min_ns": 1156005.578125,
+      "ns_per_fanout": [
+        1158540.71875,
+        1156244.53125,
+        1156005.578125,
+        1160580.4375,
+        1158871.46875,
+        1158583.015625,
+        1157656.5,
+        1158012.5,
+        1158131.0
+      ],
+      "ranks": [
+        "heldout_n100_h50_rank25"
+      ],
+      "registry": "historical",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.069768957,
+        0.069655165,
+        0.069627729,
+        0.069650773,
+        0.069800128,
+        0.069728554,
+        0.069772932,
+        0.069996603,
+        0.069652279
+      ],
+      "case": "heldout_n100_h50_seeded16",
+      "iterations_per_batch": 4,
+      "max_ns": 1093696.921875,
+      "median_ns": 1089508.65625,
+      "min_ns": 1087933.265625,
+      "ns_per_fanout": [
+        1090139.953125,
+        1088361.953125,
+        1087933.265625,
+        1088293.328125,
+        1090627.0,
+        1089508.65625,
+        1090202.0625,
+        1093696.921875,
+        1088316.859375
+      ],
+      "ranks": [
+        "heldout_n100_h50_rank33",
+        "heldout_n100_h50_rank32",
+        "heldout_n100_h50_rank3",
+        "heldout_n100_h50_rank10",
+        "heldout_n100_h50_rank21",
+        "heldout_n100_h50_rank36",
+        "heldout_n100_h50_rank7",
+        "heldout_n100_h50_rank14",
+        "heldout_n100_h50_rank9",
+        "heldout_n100_h50_rank40",
+        "heldout_n100_h50_rank11",
+        "heldout_n100_h50_rank2",
+        "heldout_n100_h50_rank29",
+        "heldout_n100_h50_rank44",
+        "heldout_n100_h50_rank47",
+        "heldout_n100_h50_rank38"
+      ],
+      "registry": "historical",
+      "sequence_length": 16
+    },
+    {
+      "batch_seconds": [
+        0.059337207,
+        0.060073161,
+        0.059309452,
+        0.059416879,
+        0.059300199,
+        0.059292978,
+        0.059303935,
+        0.059489538,
+        0.059509854
+      ],
+      "case": "heldout_n1_h128_middle",
+      "iterations_per_batch": 2048,
+      "max_ns": 29332.59814453125,
+      "median_ns": 28973.24560546875,
+      "min_ns": 28951.6494140625,
+      "ns_per_fanout": [
+        28973.24560546875,
+        29332.59814453125,
+        28959.693359375,
+        29012.14794921875,
+        28955.17529296875,
+        28951.6494140625,
+        28956.99951171875,
+        29047.6259765625,
+        29057.5458984375
+      ],
+      "ranks": [
+        "heldout_n1_h128_rank64"
+      ],
+      "registry": "historical",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.0498418,
+        0.049834298,
+        0.049750131,
+        0.049826018,
+        0.049728449,
+        0.049785398,
+        0.04973093,
+        0.049819496,
+        0.049798764
+      ],
+      "case": "heldout_n1_h128_seeded16",
+      "iterations_per_batch": 128,
+      "max_ns": 24336.81640625,
+      "median_ns": 24315.802734375,
+      "min_ns": 24281.46923828125,
+      "ns_per_fanout": [
+        24336.81640625,
+        24333.1533203125,
+        24292.05615234375,
+        24329.1103515625,
+        24281.46923828125,
+        24309.2763671875,
+        24282.6806640625,
+        24325.92578125,
+        24315.802734375
+      ],
+      "ranks": [
+        "heldout_n1_h128_rank27",
+        "heldout_n1_h128_rank86",
+        "heldout_n1_h128_rank33",
+        "heldout_n1_h128_rank58",
+        "heldout_n1_h128_rank27",
+        "heldout_n1_h128_rank66",
+        "heldout_n1_h128_rank25",
+        "heldout_n1_h128_rank44",
+        "heldout_n1_h128_rank105",
+        "heldout_n1_h128_rank22",
+        "heldout_n1_h128_rank77",
+        "heldout_n1_h128_rank116",
+        "heldout_n1_h128_rank71",
+        "heldout_n1_h128_rank8",
+        "heldout_n1_h128_rank59",
+        "heldout_n1_h128_rank32"
+      ],
+      "registry": "historical",
+      "sequence_length": 16
+    },
+    {
+      "batch_seconds": [
+        0.04683644,
+        0.04682939,
+        0.046807444,
+        0.046891774,
+        0.046764598,
+        0.046827792,
+        0.046781813,
+        0.046735028,
+        0.046762567
+      ],
+      "case": "heldout_n100_h128_middle",
+      "iterations_per_batch": 16,
+      "max_ns": 2930735.875,
+      "median_ns": 2925465.25,
+      "min_ns": 2920939.25,
+      "ns_per_fanout": [
+        2927277.5,
+        2926836.875,
+        2925465.25,
+        2930735.875,
+        2922787.375,
+        2926737.0,
+        2923863.3125,
+        2920939.25,
+        2922660.4375
+      ],
+      "ranks": [
+        "heldout_n100_h128_rank64"
+      ],
+      "registry": "historical",
+      "sequence_length": 1
+    },
+    {
+      "batch_seconds": [
+        0.078193706,
+        0.079164938,
+        0.078291406,
+        0.078254947,
+        0.078256073,
+        0.078236159,
+        0.078340981,
+        0.078296197,
+        0.078307231
+      ],
+      "case": "heldout_n100_h128_seeded16",
+      "iterations_per_batch": 2,
+      "max_ns": 2473904.3125,
+      "median_ns": 2446606.4375,
+      "min_ns": 2443553.3125,
+      "ns_per_fanout": [
+        2443553.3125,
+        2473904.3125,
+        2446606.4375,
+        2445467.09375,
+        2445502.28125,
+        2444879.96875,
+        2448155.65625,
+        2446756.15625,
+        2447100.96875
+      ],
+      "ranks": [
+        "heldout_n100_h128_rank27",
+        "heldout_n100_h128_rank86",
+        "heldout_n100_h128_rank33",
+        "heldout_n100_h128_rank58",
+        "heldout_n100_h128_rank27",
+        "heldout_n100_h128_rank66",
+        "heldout_n100_h128_rank25",
+        "heldout_n100_h128_rank44",
+        "heldout_n100_h128_rank105",
+        "heldout_n100_h128_rank22",
+        "heldout_n100_h128_rank77",
+        "heldout_n100_h128_rank116",
+        "heldout_n100_h128_rank71",
+        "heldout_n100_h128_rank8",
+        "heldout_n100_h128_rank59",
+        "heldout_n100_h128_rank32"
+      ],
+      "registry": "historical",
+      "sequence_length": 16
+    }
+  ],
+  "trials": 9
+}

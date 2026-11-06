@@ -1,0 +1,23 @@
+{
+  "method": "exact Vec capacity times element size plus the new entry Vec header; excludes allocator metadata/bin rounding and event projection transient allocations",
+  "rows": [
+    {
+      "1000_subscriptions_bytes": 274000,
+      "additional_allocations": 6,
+      "additional_retained_bytes": 274,
+      "case": "live_fanout1_h1_first_late"
+    },
+    {
+      "1000_subscriptions_bytes": 3214000,
+      "additional_allocations": 55,
+      "additional_retained_bytes": 3214,
+      "case": "live_fanout1_h50_first_late"
+    },
+    {
+      "1000_subscriptions_bytes": 7894000,
+      "additional_allocations": 133,
+      "additional_retained_bytes": 7894,
+      "case": "live_fanout1_h128_first_late"
+    }
+  ]
+}

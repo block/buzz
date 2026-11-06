@@ -1,0 +1,11 @@
+{
+  "observation": "read-only 1Hz exact executable snapshots, no signals",
+  "final_benchmark_samples": 8,
+  "concurrent_lean_or_lake_samples": 0,
+  "start_utc": "2026-10-15T01:26:08Z",
+  "end_utc": "2026-10-15T01:26:15Z",
+  "final_driver_spread_percent": 1.0,
+  "baseline_spread_percent": 3.5,
+  "acceptance": "verified rejected -1.0%,needed3.5%; reverted",
+  "sampling_limit": "1Hz observation is not continuous process tracing; code audit confirms monitor joined before final verification/measurement"
+}

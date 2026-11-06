@@ -1,0 +1,8 @@
+    Updating `block-artifactory` index
+error: failed to select a version for the requirement `rustls = "^0.23"` (locked to 0.23.46)
+candidate versions found which didn't match: 0.24.0-dev.1, 0.24.0-dev.0, 0.23.45, ...
+location searched: `block-artifactory` index (which is replacing registry `crates-io`)
+required by package `buzz-relay v0.2.1 (/home/bloxer/buzz/crates/buzz-relay)`
+if you are looking for the prerelease package it needs to be specified explicitly
+    rustls = { version = "0.24.0-dev.1" }
+perhaps a crate was updated and forgotten to be re-vendored?

@@ -1,0 +1,147 @@
+{
+  "timestamp": "2026-10-15T00:55:48.367853+00:00",
+  "base": "71d7aa04369a6e86e158dc6d46246c8a3ce6d166",
+  "upstream": "8a9ae17c9a6cdbc5220f1881f5ad69f7e2d7e047",
+  "source_sha256": {
+    "experiments/djinn-relay-filter/src/spec.rs": "e511336a76eb89e9ff4ab9ff04c901bddcdb966857f8a60f141c566eb3f3f9eb",
+    "experiments/djinn-relay-filter/src/input.rs": "7b382b2f32579fc543c5be2422e9a656b9255fc698db9e1eaf9432af74f96cbf",
+    "experiments/djinn-relay-filter/src/adapter.rs": "b64d8c726eff9083dd113d724420394b44ad2631e35ce4e6ec7aad7a8772602d",
+    "experiments/djinn-relay-filter/src/fixtures.rs": "0f0d472a3bac0a42ee500c873d73441f0ef333190df07772aff12605b90c22f7",
+    "experiments/djinn-relay-filter/src/bench.rs": "72197ced9aa8df135c341f54fa8f2ce6f11fd0f3685ab3be67434a01c7d0158c",
+    "experiments/djinn-relay-filter/src/timing.rs": "97b56fce1568b0b8282d4702fb9298c235fde57b67d0ac751f85458a772eccfe",
+    "experiments/djinn-relay-filter/baseline/src/fanout.rs": "57f1fda92a78483bf23cf5f4c64d955c51d8de95025855a9d0f88ab7612217b0",
+    "experiments/djinn-relay-filter/baseline/src/historical_subscription.rs": "f7a1bf2609e1902cb7a808bfdf7d050df685ae803b54e872194a141e0b420c5c",
+    "experiments/djinn-relay-filter/src/historical.rs": "ac6db986630ee9eac5bf9009872ee3a15e08ef7a970a366f077f845907a8be83",
+    "experiments/djinn-relay-filter/djinn/solution/mod.rs": "c4ddd3602eb5c65e9e04ac639f68cd3d7fb34b468b28f61775638579cab509bd",
+    "crates/buzz-relay/src/subscription.rs": "841ae020858cecee3bf3ad264a5b0b91ac11765eba5ee9775629fc3b4d113353",
+    "crates/buzz-core/src/prepared_filter.rs": "2160fbb55e335536a694b7a5d9ee413f4bbaea0f0fdef65f75d45c6cf4c31f4e",
+    "experiments/djinn-relay-filter/baseline/Cargo.toml": "f3918f88527532793c2b9405ca2a752a58666935c5e4954159159e4f653ae05e",
+    "experiments/djinn-relay-filter/Cargo.toml": "aed2f4fa94ae6425e35317b270a3717d2f4cc410472bd8dcc182734b5b82078f"
+  },
+  "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  32\nOn-line CPU(s) list:                     0-31\nVendor ID:                               GenuineIntel\nModel name:                              Intel(R) Xeon(R) 6975P-C\nCPU family:                              6\nModel:                                   173\nThread(s) per core:                      2\nCore(s) per socket:                      16\nSocket(s):                               1\nStepping:                                1\nMicrocode version:                       0x1000434\nBogoMIPS:                                5400.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq monitor vmx ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd ida arat vnmi avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq rdpid bus_lock_detect cldemote movdiri movdir64b md_clear serialize amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities\nVirtualization:                          VT-x\nHypervisor vendor:                       KVM\nVirtualization type:                     full\nL1d cache:                               768 KiB (16 instances)\nL1i cache:                               1 MiB (16 instances)\nL2 cache:                                32 MiB (16 instances)\nL3 cache:                                480 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-31\nVulnerability Gather data sampling:      Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS Not affected; BHI BHI_DIS_S\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  "cpu_max": "800000 100000",
+  "memory_max": "34359738368",
+  "trials": 9,
+  "warmup_matcher_calls": 1000,
+  "warmup_fanout_calls": 100,
+  "calibration_target_ms": 40,
+  "distribution": "synthetic equal-case matrix, no measured traffic weighting",
+  "release_compiler": "Hermit-pinned Rust 1.95.0",
+  "optimizing_compiler": "isolated Rust nightly-2026-09-17; reported separately",
+  "dependency_versions": {
+    "nostr": {
+      "workspace": [
+        "0.44.7",
+        "0.45.1"
+      ],
+      "normal_harness": [
+        "0.44.7"
+      ],
+      "research_harness": [
+        "0.44.7"
+      ]
+    },
+    "uuid": {
+      "workspace": [
+        "1.23.1"
+      ],
+      "normal_harness": [
+        "1.28.0"
+      ],
+      "research_harness": [
+        "1.28.0"
+      ]
+    },
+    "chrono": {
+      "workspace": [
+        "0.4.45"
+      ],
+      "normal_harness": [
+        "0.4.45"
+      ],
+      "research_harness": [
+        "0.4.45"
+      ]
+    },
+    "dashmap": {
+      "workspace": [
+        "6.2.1"
+      ],
+      "normal_harness": [
+        "6.2.1"
+      ],
+      "research_harness": [
+        "6.2.1"
+      ]
+    },
+    "metrics": {
+      "workspace": [
+        "0.24.6"
+      ],
+      "normal_harness": [
+        "0.24.6"
+      ],
+      "research_harness": [
+        "0.24.6"
+      ]
+    },
+    "tracing": {
+      "workspace": [
+        "0.1.44"
+      ],
+      "normal_harness": [
+        "0.1.44"
+      ],
+      "research_harness": [
+        "0.1.44"
+      ]
+    },
+    "serde_json": {
+      "workspace": [
+        "1.0.150"
+      ],
+      "normal_harness": [
+        "1.0.154"
+      ],
+      "research_harness": [
+        "1.0.154"
+      ]
+    }
+  },
+  "compiler_actual": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2\ncargo 1.95.0 (f2d3ce0bd 2026-03-21)\n",
+  "final_snapshot": "retained optimizer cycle2, formatting only afterward"
+}
