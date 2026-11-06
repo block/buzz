@@ -33,12 +33,23 @@ pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
 /// All four fields are **required** by the schema (`args` and `env` may be empty arrays).
+/// `trusted` controls whether the agent runtime passes Buzz identity credentials
+/// (`BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG`) into the child process.
+/// The configured primary server is trusted by `buzz-agent`; extra MCP servers
+/// are untrusted. Third-party ACP adapters may not enforce this field and can
+/// pass their inherited environment to their MCP children.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct McpServer {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trusted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// A single environment variable for an MCP server.
@@ -2713,6 +2724,7 @@ mod tests {
                     value: "nsec1abc".into(),
                 },
             ],
+            trusted: true,
         };
         let serialized = serde_json::to_value(&server).unwrap();
         assert_eq!(serialized["name"].as_str(), Some("test-mcp"));
