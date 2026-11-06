@@ -44,7 +44,7 @@ class _ChannelTile extends ConsumerWidget {
           left: _kChannelSectionInset,
           right: _kChannelSectionInset,
           top: _kChannelRowVerticalPadding,
-          bottom: Grid.xxs,
+          bottom: _kChannelRowVerticalPadding,
         ),
         child: Row(
           children: [

@@ -211,7 +211,7 @@ class MePage extends HookConsumerWidget {
                     ),
                   for (final group in organization.groups) ...[
                     if (group != organization.groups.first)
-                      const SizedBox(height: Grid.xxs),
+                      const SizedBox(height: Grid.twelve),
                     MeSection(
                       key: ValueKey(group['id']),
                       label: group['name'] as String,
@@ -230,7 +230,7 @@ class MePage extends HookConsumerWidget {
                     ),
                   ],
                   if (organization.groups.isNotEmpty)
-                    const SizedBox(height: Grid.xxs),
+                    const SizedBox(height: Grid.twelve),
                   if (visible.isNotEmpty || organization.groups.isNotEmpty)
                     MeSection(
                       key: const ValueKey('me-ungrouped-chats'),
