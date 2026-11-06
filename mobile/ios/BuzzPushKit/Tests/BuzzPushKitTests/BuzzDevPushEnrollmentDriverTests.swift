@@ -393,11 +393,13 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
 
   func testResponseLostEnrollmentSurvivesTokenRotationAndAnotherReplayFailure() async throws {
     let store = MemoryGrantStore()
-    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+    let appAttest = RecordingAppAttest()
+    let driver = try makeDriver(store: store, appAttest: appAttest)
     let rotatedToken = Data(repeating: 42, count: 32)
     let rotatedHandle = "44444444-4444-4444-8444-444444444444"
     var oldRequests = 0
     var newRequests = 0
+    var retirements = 0
     var firstBody: [String: Any]?
     var delegatedHandles: [String] = []
     URLProtocolStub.handler = { request in
@@ -437,8 +439,17 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
         let handle = try XCTUnwrap(Self.body(request)["installation_handle"] as? String)
         delegatedHandles.append(handle)
         return Self.response(request, status: 201, json: ["endpoint_grant": "grant-\(handle)"])
+      case ("POST", "http://push.example/v1/delegations/revoke"):
+        let body = try Self.body(request)
+        XCTAssertEqual(body["installation_handle"] as? String, Self.installationHandle)
+        XCTAssertEqual(appAttest.assertionKeyIds.last, Self.keyId)
+        XCTAssertEqual(body["relay_pubkey"] as? String, Self.relayPubkey)
+        XCTAssertEqual(body["generation"] as? Int64, 1)
+        XCTAssertEqual(body["request_expires_at"] as? Int64, Self.now + 240)
+        retirements += 1
+        return Self.response(request, status: 200, json: ["status": "revoked"])
       default:
-        XCTFail("Unexpected request, including any migration/revocation route: \(request.url!)")
+        XCTFail("Unexpected request \(request.url!)")
         return Self.response(request, status: 500, json: [:])
       }
     }
@@ -456,6 +467,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     let grant = try await driver.enroll(deviceToken: rotatedToken, relayURL: Self.relayURL)
     XCTAssertEqual(oldRequests, 3)
     XCTAssertEqual(newRequests, 1)
+    XCTAssertEqual(retirements, 1)
     XCTAssertEqual(delegatedHandles, [Self.installationHandle, rotatedHandle])
     XCTAssertEqual(grant.endpointHash, Self.hex(SHA256.hash(data: rotatedToken)))
     XCTAssertTrue(store.pending.isEmpty)
@@ -1375,6 +1387,309 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
           body: "{\"error\":\"invalid_request\"}"
         )
       )
+    }
+  }
+
+  func testDirectRevocationRetriesWithoutChallengeAndPreventsLocalGrantReuse() async throws {
+    let store = MemoryGrantStore(records: [BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://relay.example",
+      relayPubkey: Self.relayPubkey, gatewayInstallationHandle: Self.installationHandle,
+      appAttestKeyId: Self.keyId, installationId: Self.installationId,
+      endpointGrant: "old-opaque-grant", endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
+      endpointEpoch: 1, generation: 1, expiresAt: Self.expiresAt
+    )])
+    let appAttest = RecordingAppAttest()
+    let driver = try makeDriver(store: store, appAttest: appAttest)
+    var requests = 0
+    URLProtocolStub.handler = { request in
+      XCTAssertEqual(request.url?.path, "/v1/delegations/revoke")
+      let body = try Self.body(request)
+      XCTAssertEqual(body["v"] as? Int, 2)
+      XCTAssertNil(body["challenge"])
+      XCTAssertEqual(body["request_expires_at"] as? Int64, Self.now + 240)
+      XCTAssertEqual(body["generation"] as? Int, 1)
+      XCTAssertEqual(store.saved.first?.endpointGrant, "")
+      requests += 1
+      if requests == 1 { throw URLError(.networkConnectionLost) }
+      return Self.response(request, status: 200, json: ["status":"revoked"])
+    }
+    do {
+      try await driver.revokeDelegation(installationHandle: UUID(uuidString: Self.installationHandle)!, keyId: Self.keyId, relayPubkey: Self.relayPubkey, generation: 1)
+      XCTFail("Expected lost revocation response")
+    } catch { XCTAssertEqual((error as NSError).domain, NSURLErrorDomain) }
+    try await driver.revokeDelegation(installationHandle: UUID(uuidString: Self.installationHandle)!, keyId: Self.keyId, relayPubkey: Self.relayPubkey, generation: 1)
+    XCTAssertEqual(requests, 2)
+    XCTAssertEqual(store.saved.first?.endpointGrant, "")
+    XCTAssertEqual(store.saved.first?.generation, 1)
+    XCTAssertEqual(store.saved.first?.expiresAt, Self.expiresAt)
+  }
+
+  func testCanceledFirstEnrollmentSettlesLostInstallationResponseThenRevokes() async throws {
+    let store = MemoryGrantStore(pending: [BuzzPushPendingEnrollmentRecord(
+      gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://relay.example", relayPubkey: Self.relayPubkey,
+      endpoint: Self.endpoint, endpointHash: Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init)))),
+      expiresAt: Self.expiresAt, installationId: Self.installationId,
+      challengeId: Self.firstChallengeId, challenge: Self.challenge, keyId: Self.keyId, attestation: Self.attestation)])
+    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+    var paths: [String] = []
+    URLProtocolStub.handler = { request in
+      let path = request.url!.path
+      paths.append(path)
+      switch path {
+      case "/v1/installations":
+        return Self.response(request, status: 201, json: ["installation_handle":Self.installationHandle,"endpoint_epoch":1,"expires_at":Self.expiresAt])
+      case "/v1/delegations":
+        return Self.response(request, status: 201, json: ["endpoint_grant":"reissued-grant"])
+      case "/v1/delegations/revoke":
+        XCTAssertEqual(try Self.body(request)["generation"] as? Int, 1)
+        return Self.response(request, status: 200, json: ["status":"revoked"])
+      default:
+        XCTFail("Unexpected request \(path)")
+        return Self.response(request, status: 500, json: [:])
+      }
+    }
+    try await driver.revokePendingDelegation(relayOrigin: "wss://relay.example", relayPubkey: "")
+    XCTAssertEqual(paths, ["/v1/installations", "/v1/delegations", "/v1/delegations/revoke"])
+    XCTAssertTrue(store.pending.isEmpty)
+    XCTAssertEqual(store.saved.first?.endpointGrant, "")
+  }
+
+  func testCancellationSettlesLostRenewalAndRevokesItsNewerAuthority() async throws {
+    let endpointHash = Self.hex(SHA256.hash(data: Data((1...32).map(UInt8.init))))
+    let store = MemoryGrantStore(records: [BuzzPushEndpointGrantRecord(
+      gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://relay.example", relayPubkey: Self.relayPubkey,
+      gatewayInstallationHandle: Self.installationHandle, appAttestKeyId: Self.keyId,
+      installationId: Self.installationId, endpointGrant: "old-grant", endpointHash: endpointHash,
+      endpointEpoch: 1, generation: 1, expiresAt: Self.now + 10
+    )], pending: [BuzzPushPendingEnrollmentRecord(
+      gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://relay.example", relayPubkey: Self.relayPubkey,
+      endpoint: Self.endpoint, endpointHash: endpointHash, expiresAt: Self.expiresAt,
+      installationId: Self.installationId, gatewayInstallationHandle: Self.installationHandle,
+      keyId: Self.keyId, delegationGeneration: 2, expectedDelegationGeneration: 1
+    )])
+    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+    var current: Int64 = 2
+    var revoked: [Int64] = []
+    URLProtocolStub.handler = { request in
+      let body = try Self.body(request)
+      switch request.url?.path {
+      case "/v1/delegations":
+        let expected = try XCTUnwrap(body["expected_generation"] as? Int64)
+        if expected != current {
+          return Self.response(request, status: 409, json: ["error":"stale_generation","current_generation":current])
+        }
+        current = try XCTUnwrap(body["generation"] as? Int64)
+        return Self.response(request, status: 201, json: ["endpoint_grant":"replacement-grant"])
+      case "/v1/delegations/revoke":
+        let generation = try XCTUnwrap(body["generation"] as? Int64)
+        XCTAssertEqual(generation, current)
+        revoked.append(generation)
+        return Self.response(request, status: 200, json: ["status":"revoked"])
+      default:
+        XCTFail("Unexpected request \(request.url!)")
+        return Self.response(request, status: 500, json: [:])
+      }
+    }
+    try await driver.revokeDelegation(installationHandle: UUID(uuidString: Self.installationHandle)!,
+      keyId: Self.keyId, relayPubkey: Self.relayPubkey, generation: 1, settlePending: true)
+    XCTAssertEqual(revoked, [4])
+    XCTAssertTrue(store.pending.isEmpty)
+    XCTAssertEqual(store.saved.first?.generation, 4)
+    XCTAssertEqual(store.saved.first?.endpointGrant, "")
+    XCTAssertEqual(store.saved.first?.expiresAt, Self.expiresAt)
+  }
+
+  func testReplacementRetiresExactPriorAuthorityBeforeLosingItsRecord() async throws {
+    let token = Data((1...32).map(UInt8.init))
+    let endpointHash = Self.hex(SHA256.hash(data: token))
+    let currentHandle = "44444444-4444-4444-8444-444444444444"
+    let currentKeyId = Data(repeating: 0xBB, count: 32).base64EncodedString()
+    for (oldEpoch, outcome) in [
+      (Int64(1), "success"), (3, "success"), (1, "revocation failure"),
+      (1, "revocation response loss"), (1, "issuance response loss"),
+      (1, "shared"), (1, "cached"), (1, "cached revocation failure"),
+      (1, "expired cleanup failure"), (1, "expired enrollment failure"),
+      (1, "expired shared cleanup failure"),
+    ] {
+      let discardingJournal = outcome.hasPrefix("expired")
+      let cached = outcome.hasPrefix("cached") || outcome == "shared"
+      let old = BuzzPushEndpointGrantRecord(
+        gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://relay.example",
+        relayPubkey: discardingJournal ? String(repeating: "c", count: 64) : Self.relayPubkey,
+        gatewayInstallationHandle: Self.installationHandle,
+        appAttestKeyId: Self.keyId, installationId: Self.installationId,
+        endpointGrant: "old-token-grant", endpointHash: "old-token-hash",
+        endpointEpoch: oldEpoch, generation: 7,
+        expiresAt: discardingJournal ? Self.now + 3600 : Self.expiresAt)
+      let current = BuzzPushEndpointGrantRecord(
+        gatewayOrigin: Self.gatewayOrigin, relayOrigin: "wss://other.example",
+        relayPubkey: cached ? Self.relayPubkey : String(repeating: "b", count: 64),
+        gatewayInstallationHandle: currentHandle,
+        appAttestKeyId: currentKeyId, installationId: String(repeating: "f", count: 32),
+        endpointGrant: "current-token-grant", endpointHash: endpointHash,
+        endpointEpoch: 1, generation: 1,
+        expiresAt: discardingJournal ? Self.now + 360 : Self.expiresAt)
+      let shared = BuzzPushEndpointGrantRecord(
+        gatewayOrigin: old.gatewayOrigin, relayOrigin: "wss://shared.example",
+        relayPubkey: old.relayPubkey, gatewayInstallationHandle: old.gatewayInstallationHandle,
+        appAttestKeyId: old.appAttestKeyId, installationId: String(repeating: "e", count: 32),
+        endpointGrant: old.endpointGrant, endpointHash: old.endpointHash,
+        endpointEpoch: old.endpointEpoch, generation: old.generation, expiresAt: old.expiresAt)
+      // MemoryGrantStore.save matches Keychain's gateway+origin replacement,
+      // so the old target is lost if retirement happens after save.
+      var store = MemoryGrantStore(records: [old, current] + (outcome == "shared" ? [shared] : []))
+      let appAttest = RecordingAppAttest()
+      var clock = Self.now
+      var driver = try makeDriver(store: store, appAttest: appAttest,
+        now: { Date(timeIntervalSince1970: TimeInterval(clock)) })
+      var generation: Int64 = cached ? 1 : 0
+      var revocations = 0
+      URLProtocolStub.handler = { request in
+        switch (request.httpMethod, request.url?.path) {
+        case ("GET", "/"):
+          return Self.response(request, status: 200,
+            json: ["push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]]])
+        case ("POST", "/v1/delegations"):
+          XCTAssertTrue(!cached || outcome == "shared")
+          let body = try Self.body(request)
+          XCTAssertEqual(body["installation_handle"] as? String, currentHandle)
+          XCTAssertEqual(body["endpoint_epoch"] as? Int, 1)
+          XCTAssertEqual(store.pending.first?.gatewayInstallationHandle, currentHandle)
+          let expected = try XCTUnwrap(body["expected_generation"] as? Int64)
+          if expected != generation {
+            return Self.response(request, status: 409,
+              json: ["error": "stale_generation", "current_generation": generation])
+          }
+          let next = try XCTUnwrap(body["generation"] as? Int64)
+          XCTAssertGreaterThan(next, generation)
+          generation = next
+          if outcome == "issuance response loss" && generation == 1 {
+            throw URLError(.networkConnectionLost)
+          }
+          return Self.response(request, status: 201, json: ["endpoint_grant": "renewed-grant"])
+        case ("POST", "/v1/delegations/revoke"):
+          revocations += 1
+          let body = try Self.body(request)
+          XCTAssertEqual(body["installation_handle"] as? String, old.gatewayInstallationHandle)
+          XCTAssertEqual(body["relay_pubkey"] as? String, old.relayPubkey)
+          XCTAssertEqual(body["generation"] as? Int64, old.generation)
+          XCTAssertEqual(appAttest.assertionKeyIds.last, old.appAttestKeyId)
+          let retained = try XCTUnwrap(store.saved.first {
+            $0.gatewayInstallationHandle == old.gatewayInstallationHandle && $0.relayPubkey == old.relayPubkey
+          })
+          XCTAssertEqual(retained.gatewayInstallationHandle, old.gatewayInstallationHandle)
+          XCTAssertEqual(retained.generation, old.generation)
+          XCTAssertEqual(retained.endpointGrant, "")
+          if outcome != "shared" { XCTAssertEqual(store.pending.isEmpty, cached) }
+          if revocations <= (discardingJournal ? 2 : 1)
+            && (discardingJournal || outcome.contains("revocation failure"))
+          {
+            return Self.response(request, status: 503, json: [:])
+          }
+          if revocations == 1 && outcome == "revocation response loss" {
+            throw URLError(.networkConnectionLost)
+          }
+          return Self.response(request, status: 200, json: ["status": "revoked"])
+        default:
+          XCTFail("The current token already has an installation; must not rotate or enroll")
+          return Self.response(request, status: 409, json: ["error": "endpoint_in_use"])
+        }
+      }
+
+      if outcome.contains("failure") || outcome.contains("loss") {
+        do {
+          _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+          XCTFail("Expected failure before replacing the old target: \(outcome)")
+        } catch {
+          XCTAssertEqual(store.saved.first?.gatewayInstallationHandle, old.gatewayInstallationHandle)
+          XCTAssertEqual(store.pending.isEmpty, cached)
+        }
+        // Restart from only Codable durable state, including the old target and
+        // the new issuance journal. A committed response loss needs a fresh grant.
+        store = MemoryGrantStore(
+          records: try JSONDecoder().decode([BuzzPushEndpointGrantRecord].self,
+            from: JSONEncoder().encode(store.saved)),
+          pending: try JSONDecoder().decode([BuzzPushPendingEnrollmentRecord].self,
+            from: JSONEncoder().encode(store.pending)))
+        driver = try makeDriver(store: store, appAttest: appAttest,
+          now: { Date(timeIntervalSince1970: TimeInterval(clock)) })
+      }
+      if discardingJournal {
+        let journal = try XCTUnwrap(store.pending.first)
+        XCTAssertEqual(journal.expiresAt, Self.now + 360)
+        XCTAssertNotEqual(journal.relayPubkey, old.relayPubkey)
+        clock = Self.now + 361
+        XCTAssertGreaterThan(old.expiresAt, clock)
+        if outcome.contains("shared") {
+          try store.save(shared)
+          try await driver.revokePendingDelegation(relayOrigin: old.relayOrigin,
+            relayPubkey: journal.relayPubkey)
+          XCTAssertEqual(revocations, 1, "Only a positive old owner permits skipping retirement")
+          XCTAssertTrue(store.saved.contains(shared))
+        } else {
+          do {
+            if outcome.contains("enrollment") {
+              _ = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+            } else {
+              try await driver.revokePendingDelegation(relayOrigin: old.relayOrigin,
+                relayPubkey: journal.relayPubkey)
+            }
+            XCTFail("Failed retirement must retain the replacement journal")
+          } catch BuzzDevPushEnrollmentError.unexpectedStatus(
+            route: "v1/delegations/revoke", _, 503, _
+          ) {}
+          XCTAssertEqual(revocations, 2)
+          XCTAssertEqual(store.pending, [journal])
+          XCTAssertEqual(store.saved.first?.gatewayInstallationHandle, old.gatewayInstallationHandle)
+          XCTAssertEqual(store.saved.first?.relayPubkey, old.relayPubkey)
+          XCTAssertEqual(store.saved.first?.endpointGrant, "")
+          try await driver.revokePendingDelegation(relayOrigin: old.relayOrigin,
+            relayPubkey: journal.relayPubkey)
+          XCTAssertEqual(revocations, 3)
+        }
+        XCTAssertTrue(store.pending.isEmpty)
+        continue
+      }
+      let record = try await driver.enroll(deviceToken: token, relayURL: Self.relayURL)
+
+      XCTAssertEqual(record.gatewayInstallationHandle, currentHandle)
+      XCTAssertEqual(record.installationId, old.installationId)
+      XCTAssertEqual(record.endpointEpoch, 1)
+      XCTAssertEqual(record.endpointHash, endpointHash)
+      XCTAssertEqual(record.endpointGrant, cached ? current.endpointGrant : "renewed-grant")
+      XCTAssertEqual(revocations, outcome == "shared" ? 0 : (outcome.contains("revocation") ? 2 : 1))
+      XCTAssertEqual(store.saved.first { $0.relayOrigin == old.relayOrigin }, record)
+      XCTAssertFalse(store.saved.contains(old))
+      XCTAssertTrue(store.pending.isEmpty)
+      XCTAssertTrue(store.saved.contains(current))
+      if outcome == "shared" {
+        XCTAssertTrue(store.saved.contains(shared))
+        // Removing the last old origin must leave the new installation and its
+        // same-signer pending renewal untouched.
+        let unrelatedPending = BuzzPushPendingEnrollmentRecord(
+          gatewayOrigin: Self.gatewayOrigin, relayOrigin: record.relayOrigin,
+          relayPubkey: record.relayPubkey, endpoint: Self.endpoint, endpointHash: endpointHash,
+          expiresAt: Self.expiresAt, installationId: record.installationId,
+          gatewayInstallationHandle: currentHandle, keyId: currentKeyId,
+          delegationGeneration: 2, expectedDelegationGeneration: record.generation)
+        try store.savePendingEnrollment(unrelatedPending)
+        try await driver.revokeDelegation(installationHandle: UUID(uuidString: Self.installationHandle)!,
+          keyId: old.appAttestKeyId, relayPubkey: old.relayPubkey, generation: old.generation,
+          settlePending: true)
+        XCTAssertEqual(revocations, 1)
+        XCTAssertTrue(store.saved.contains(record))
+        XCTAssertTrue(store.saved.contains(current))
+        XCTAssertEqual(store.pending, [unrelatedPending])
+        try await driver.revokePendingDelegation(relayOrigin: record.relayOrigin,
+          relayPubkey: record.relayPubkey)
+        XCTAssertEqual(revocations, 1, "A recovered shared installation must not be revoked")
+        XCTAssertTrue(store.saved.contains(current))
+        XCTAssertTrue(store.pending.isEmpty)
+        let recovered = try XCTUnwrap(store.saved.first { $0.relayOrigin == record.relayOrigin })
+        XCTAssertEqual(recovered.gatewayInstallationHandle, currentHandle)
+        XCTAssertGreaterThan(recovered.generation, record.generation)
+        XCTAssertFalse(recovered.endpointGrant.isEmpty)
+      }
     }
   }
 
