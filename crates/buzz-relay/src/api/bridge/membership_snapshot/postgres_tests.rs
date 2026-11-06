@@ -593,9 +593,7 @@ async fn public_memberships_share_requester_quota_across_subjects_and_fail_close
         StatusCode::OK
     );
     let mut unavailable = (*state).clone();
-    let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .unwrap();
+    let dead = buzz_pubsub::redis_connection("redis://127.0.0.1:1").unwrap();
     unavailable.admission_rate_limiter =
         Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(dead));
     let (auth, _) = proof(&Keys::generate(), &host, &body, true);
