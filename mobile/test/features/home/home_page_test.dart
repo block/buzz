@@ -272,7 +272,7 @@ void main() {
         0,
       );
       expect(filterOutline().width, 1);
-      expect(filterOutline().color.a, closeTo(0.01, 0.001));
+      expect(filterOutline().color.a, closeTo(0.02, 0.001));
       scroll.jumpTo(0);
       await tester.pump();
       expect(tester.getTopLeft(title).dy, titleTop);

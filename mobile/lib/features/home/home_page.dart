@@ -145,7 +145,8 @@ class HomePage extends HookConsumerWidget {
                     : IconButton.filledTonal(
                         tooltip: inboxLabel,
                         style: IconButton.styleFrom(
-                          backgroundColor: context.controlSurface,
+                          backgroundColor:
+                              context.colors.surfaceContainerHighest,
                           foregroundColor: context.colors.onSurface,
                           minimumSize: const Size.square(48),
                         ),
@@ -179,7 +180,13 @@ class HomePage extends HookConsumerWidget {
                                       shape: BoxShape.circle,
                                       color: context.colors.primary,
                                       border: Border.all(
-                                        color: context.controlSurface,
+                                        color:
+                                            defaultTargetPlatform ==
+                                                TargetPlatform.android
+                                            ? context
+                                                  .colors
+                                                  .surfaceContainerHighest
+                                            : context.controlSurface,
                                         width: 2,
                                       ),
                                     ),
@@ -214,6 +221,7 @@ class HomePage extends HookConsumerWidget {
                   )
                 : AndroidExpandingMenuButton(
                     label: 'Community menu',
+                    backgroundColor: context.colors.surfaceContainerHighest,
                     actions: moreActions,
                     dividerBefore: const {1},
                     width: 48,

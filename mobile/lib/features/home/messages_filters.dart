@@ -25,10 +25,10 @@ class MessagesFilters extends StatelessWidget {
       useNativeGlass: true,
       matchNativeWidths: true,
       labelOffset: defaultTargetPlatform == TargetPlatform.android
-          ? const Offset(0.5, -1)
+          ? const Offset(-0.5, -1)
           : Offset.zero,
       side: defaultTargetPlatform == TargetPlatform.android && isCollapsed
-          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.01))
+          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.02))
           : BorderSide.none,
       minControlHeight: defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48,
       horizontalPadding: Grid.gutter,
