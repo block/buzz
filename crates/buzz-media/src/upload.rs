@@ -516,23 +516,44 @@ async fn prepare_image_metadata(
     config: &MediaConfig,
     input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {
-    let body_ref = input.body.clone();
-    let mime_ref = input.mime.clone();
-    let ext_ref = input.ext.clone();
-    let sha256_ref = input.sha256.clone();
-    let cfg_ref = config.clone();
-    let (mut meta, thumbs) = tokio::task::spawn_blocking(move || {
-        generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body_ref, &mime_ref, &ext_ref)
+    let mut meta = store_image_thumbnails(
+        storage,
+        config,
+        &input.sha256,
+        input.body,
+        &input.mime,
+        &input.ext,
+    )
+    .await?;
+    meta.uploaded_at = input.uploaded_at;
+    Ok(meta)
+}
+
+/// Generate an image's metadata and store every thumbnail variant.
+///
+/// Shared by the upload path and on-demand regeneration of missing thumbnails.
+pub async fn store_image_thumbnails(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    sha256: &str,
+    body: Bytes,
+    mime: &str,
+    ext: &str,
+) -> Result<BlobMeta, MediaError> {
+    let (cfg_ref, sha256_ref, mime_ref, ext_ref) = (
+        config.clone(),
+        sha256.to_owned(),
+        mime.to_owned(),
+        ext.to_owned(),
+    );
+    let (meta, thumbs) = tokio::task::spawn_blocking(move || {
+        generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body, &mime_ref, &ext_ref)
     })
     .await
     .map_err(|_| MediaError::Internal)??;
 
-    meta.uploaded_at = input.uploaded_at;
-
     for (thumb, bytes) in THUMBS.into_iter().zip(thumbs.into_iter().flatten()) {
-        storage
-            .put(&thumb.key(&input.sha256), &bytes, thumb.mime)
-            .await?;
+        storage.put(&thumb.key(sha256), &bytes, thumb.mime).await?;
     }
 
     Ok(meta)
