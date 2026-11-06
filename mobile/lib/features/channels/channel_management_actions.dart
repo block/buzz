@@ -213,7 +213,8 @@ class ChannelActions {
   /// Adds [pubkeys] to the DM [channelId] (kind:41011) and returns the DM
   /// they ended up in. With [includeHistory] they join this DM and can read
   /// it, unless the grown group already has a DM, which is returned instead.
-  /// Without it, they start a new DM of everyone.
+  /// Without it, or when a person joins a DM of at most one person, they
+  /// start a new DM of everyone.
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
