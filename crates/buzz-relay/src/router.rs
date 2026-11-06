@@ -2792,10 +2792,10 @@ mod tests {
         );
     }
 
-    // ── F6: document fallback (postgres-only) ───────────────────────────────────
     #[path = "policy_sweep_postgres_tests.rs"]
     mod policy_sweep;
 
+    // ── F6: document fallback (postgres-only) ───────────────────────────────────
     //
     // A no-`Accept` plain GET / to a successfully mapped host must bypass the
     // NIP-FI gate, pass `bind_community`, and reach the NIP-11 document fallback

@@ -353,15 +353,13 @@ transport retirement or fleet completion. A relay without local sockets has no
 policy checks to report. Account for that when probing each serving relay.
 
 There is no new feature flag. The first successful sweep after deployment can
-close existing legacy sockets in already-required communities (and in every
-community under global Enforce). Count required rows and assess concurrent
+close existing legacy sockets in already-required communities. Count required rows and assess concurrent
 reconnect load before rollout; this change does not spread those reconnects.
 Keep new upgrades disabled throughout mixed-version deployment. A binary rollback
 needs no migration and restores the old receipt reason; clients must tolerate
 unknown pending reasons. An older binary cannot provide this eventual-closure
 behavior, so retain a compatible binary or contain affected communities instead
 of assuming rollback undoes accepted policy.
-
 
 ### Staging and containment
 
