@@ -176,21 +176,10 @@ class _InboxOptionsButton extends StatelessWidget {
             alignment: AnchoredPopoverAlignment.end,
             surfaceKey: const ValueKey('activity-options-popover'),
             items: [
-              PopupMenuItem(
+              CheckedPopupMenuItem(
                 value: 'unread-only',
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(unreadOnly ? 'Show all' : 'Show unread'),
-                    ),
-                    if (unreadOnly)
-                      Icon(
-                        BuzzIcons.check,
-                        size: 16,
-                        color: context.colors.primary,
-                      ),
-                  ],
-                ),
+                checked: unreadOnly,
+                child: Text(unreadOnly ? 'Show all' : 'Show unread'),
               ),
               PopupMenuItem(
                 value: 'mark-all-read',
