@@ -71,5 +71,5 @@ A racing sweep may close one last non-FI socket; it can reconnect under optional
 policy. FI-admitted sockets retain their finite deadline. Re-enable repeats the
 optional-lease drain and existing periodic revalidation.
 
-The legacy `nip-fi-upgrade enable/status` command remains for old saved requests.
+The `nip-fi-upgrade enable/status` command targets the legacy enable-only endpoint.
 Use the general command for new operations; legacy GET hides general CAS receipts.
