@@ -4220,6 +4220,51 @@ mod ws_deadline_tests {
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 
+    /// The NIP-42 AUTH event names the configured community URL, path and
+    /// trailing slash kept, as the relay checks it.
+    #[tokio::test]
+    async fn the_auth_event_names_the_relay_with_its_trailing_slash() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let named = Arc::new(std::sync::Mutex::new(None::<String>));
+        let log = named.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws
+                .send(Message::Text(r#"["AUTH","challenge"]"#.into()))
+                .await;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if frame[0] == "AUTH" {
+                    let relay = frame[1]["tags"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t[0] == "relay")
+                        .map(|t| t[1].as_str().unwrap().to_owned());
+                    *log.lock().unwrap() = relay;
+                }
+                let ok = serde_json::json!(["OK", frame[1]["id"], true, ""]);
+                let _ = ws.send(Message::Text(ok.to_string().into())).await;
+            }
+        });
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            format!("http://{addr}/team/"),
+            Credentials::from_keys(keys.clone()),
+        )
+        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(20001), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        c.publish_ephemeral_event(event).await.unwrap();
+        assert_eq!(
+            named.lock().unwrap().as_deref(),
+            Some(format!("ws://{addr}/team/").as_str())
+        );
+    }
+
     #[test]
     fn auth_keeps_the_configured_relay_path() {
         let client = BuzzClient::new(

@@ -70,6 +70,9 @@ pub enum ProviderError {
     Transport(String),
     /// The same-user check ran out of time before anything was sent.
     Unconfirmed,
+    /// The provider port is held by another user, or no owner was found:
+    /// nothing was sent.
+    OtherUser,
 }
 
 impl ProviderError {
@@ -111,6 +114,10 @@ impl ProviderError {
             Self::Transport(why) => CliError::Auth(format!("Buzz desktop: {why}")),
             Self::Unconfirmed => CliError::Unavailable(
                 "Buzz desktop: the same-user check timed out; nothing was sent".into(),
+            ),
+            Self::OtherUser => CliError::Auth(
+                "Buzz desktop: could not confirm the provider runs as this user; nothing was sent"
+                    .into(),
             ),
         }
     }
@@ -293,6 +300,10 @@ async fn connect(port: u16, check: bool) -> Result<TcpStream, ProviderError> {
             .local_addr()
             .map_err(|_| ProviderError::Transport("no local address".into()))?
             .port();
+        #[cfg(test)]
+        if tests::SAME_USER_HANGS.try_with(|_| ()).is_ok() {
+            return Err(ProviderError::Unconfirmed);
+        }
         confirm_same_user(server_side_uid(port, local)).await?;
     }
     Ok(stream)
@@ -305,9 +316,7 @@ async fn confirm_same_user(
 ) -> Result<(), ProviderError> {
     match tokio::time::timeout(SAME_USER_TIMEOUT, owner).await {
         Ok(Some(uid)) if uid == current_uid() => Ok(()),
-        Ok(_) => Err(ProviderError::Transport(
-            "could not confirm the provider runs as this user; nothing was sent".into(),
-        )),
+        Ok(_) => Err(ProviderError::OtherUser),
         Err(_) => Err(ProviderError::Unconfirmed),
     }
 }
@@ -568,7 +577,9 @@ impl Provider {
             Ok(raw) => raw,
             Err(ProviderError::Revoked) => return Ok(Err(Skip::Revoked)),
             Err(ProviderError::NoCommonVersion) => return Ok(Err(Skip::NotApplicable)),
-            Err(ProviderError::Transport(_)) => return Ok(Err(Skip::Unreachable)),
+            Err(ProviderError::Transport(_) | ProviderError::OtherUser) => {
+                return Ok(Err(Skip::Unreachable))
+            }
             Err(ProviderError::Unconfirmed) => return Ok(Err(Skip::Unconfirmed)),
             Err(e) => return Err(e.into_cli("describe")),
         };
@@ -1064,9 +1075,7 @@ pub async fn inherited_relay() -> Result<Option<String>, CliError> {
         .unwrap_or_default();
     let mut distinct: Vec<String> = Vec::new();
     for relay in relays {
-        if !distinct.iter().any(|known| same_relay(known, &relay)) {
-            distinct.push(provider_relay_url(&relay).unwrap_or(relay));
-        }
+        push_distinct(&mut distinct, relay);
     }
     match distinct.len() {
         0 => Ok(None),
@@ -1077,6 +1086,213 @@ pub async fn inherited_relay() -> Result<Option<String>, CliError> {
             distinct.join(", ")
         ))),
     }
+}
+
+/// Add `relay` to `list` in bound form, unless it is already there.
+fn push_distinct(list: &mut Vec<String>, relay: String) {
+    if !list.iter().any(|known| same_relay(known, &relay)) {
+        list.push(provider_relay_url(&relay).unwrap_or(relay));
+    }
+}
+
+/// The relay a paired person's command given none acts on: the one relay a
+/// running desktop still accepts this CLI's pairing for, by its `describe`.
+/// A stored pairing alone does not count, since its desktop may have revoked
+/// it or stopped. `None` for an agent (its inherited token decides), or when
+/// no relay or several qualify.
+pub async fn paired_relay() -> Result<Option<String>, CliError> {
+    if inherited()?.is_some() {
+        return Ok(None);
+    }
+    accepted_relay(&Keychain, advertisements()).await
+}
+
+async fn accepted_relay(
+    store: &dyn PairingStore,
+    advertised: Vec<(String, Endpoint)>,
+) -> Result<Option<String>, CliError> {
+    let Ok(Ok(pairings)) = store.read().map(parse_pairings) else {
+        return Ok(None);
+    };
+    let mut accepted = Vec::new();
+    let mut transient = None;
+    for (instance, endpoint) in advertised {
+        let Some(pairing) = pairings.0.get(&instance) else {
+            continue;
+        };
+        match probe(&endpoint, pairing, RATE_LIMIT_RETRIES).await {
+            Probe::Accepted(relays) => {
+                for relay in relays {
+                    push_distinct(&mut accepted, relay);
+                }
+            }
+            Probe::NotAccepted | Probe::NotRunning => {}
+            // A desktop that answered with a refusal has decided.
+            Probe::Refused(e) => return Err(e),
+            Probe::Unconfirmed(e) | Probe::Throttled(e) => keep_transient(&mut transient, e),
+        }
+    }
+    match (accepted.len(), transient) {
+        // A desktop whose check failed may accept a relay of its own: report
+        // it rather than pick, or fall back to, a relay it might contradict.
+        (0 | 1, Some(e)) => Err(e),
+        (1, None) => Ok(accepted.pop()),
+        _ => Ok(None),
+    }
+}
+
+/// Keep the first transient failure, except that a retryable one replaces an
+/// identity mismatch: the command may succeed once that desktop answers.
+fn keep_transient(kept: &mut Option<CliError>, e: CliError) {
+    let better = kept.as_ref().is_none_or(|k| {
+        !crate::error::is_retryable_error(k) && crate::error::is_retryable_error(&e)
+    });
+    if better {
+        *kept = Some(e);
+    }
+}
+
+/// What a running desktop says about a stored pairing now.
+enum Probe {
+    /// The pairing's relays it still binds for the token.
+    Accepted(Vec<String>),
+    /// It answered: the token is revoked, or binds none of the relays.
+    NotAccepted,
+    /// The advertised endpoint could not be reached or did not answer.
+    NotRunning,
+    /// The same-user check timed out, or the port's owner is another user.
+    Unconfirmed(CliError),
+    /// It is still rate-limiting after `retries` waits.
+    Throttled(CliError),
+    /// It refused `describe` (`denied`, `unavailable`, ...): final.
+    Refused(CliError),
+}
+
+/// Ask the desktop at `endpoint`, on a same-user connection, which of
+/// `pairing`'s relays it binds for its token. The one check behind both the
+/// default relay and `auth desktop list`.
+async fn probe(endpoint: &Endpoint, pairing: &Pairing, retries: u32) -> Probe {
+    let raw = match call_with(
+        endpoint,
+        Some(&pairing.token),
+        true,
+        "describe",
+        retries,
+        &Vec::new,
+    )
+    .await
+    {
+        Ok(raw) => raw,
+        Err(ProviderError::Revoked | ProviderError::NoCommonVersion) => return Probe::NotAccepted,
+        Err(ProviderError::Transport(_)) => return Probe::NotRunning,
+        Err(e @ (ProviderError::Unconfirmed | ProviderError::OtherUser)) => {
+            return Probe::Unconfirmed(e.into_cli("describe"))
+        }
+        Err(
+            e @ ProviderError::Code {
+                code: "rate_limited",
+                ..
+            },
+        ) => return Probe::Throttled(e.into_cli("describe")),
+        Err(e) => return Probe::Refused(e.into_cli("describe")),
+    };
+    let Ok(describe) = serde_json::from_str::<Describe>(&raw) else {
+        return Probe::Refused(CliError::Auth(
+            "Buzz desktop: unreadable `describe` answer".into(),
+        ));
+    };
+    let mut accepted = Vec::new();
+    for relay in describe.relays {
+        let bound = provider_relay_url(&relay).is_ok_and(|bound| {
+            pairing
+                .relays
+                .iter()
+                .any(|paired| same_relay(&bound, paired))
+        });
+        if bound {
+            push_distinct(&mut accepted, relay);
+        }
+    }
+    if accepted.is_empty() {
+        Probe::NotAccepted
+    } else {
+        Probe::Accepted(accepted)
+    }
+}
+
+/// This CLI's pairings, without their tokens, each with what a running
+/// desktop says about it now: `accepted`, `not accepted` (revoked or no
+/// longer bound), `not running`, `unconfirmed` (same-user check failed),
+/// `rate limited` or `refused`. Local and read-only. Desktops are asked at
+/// once, each without waiting out throttling.
+pub async fn list() -> Result<Vec<serde_json::Value>, CliError> {
+    list_with(&Keychain, advertisements()).await
+}
+
+async fn list_with(
+    store: &dyn PairingStore,
+    advertised: Vec<(String, Endpoint)>,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let pairings = parse_pairings(store.read()?)?;
+    let rows = pairings.0.into_iter().map(|(instance, pairing)| {
+        let running = advertised
+            .iter()
+            .find(|(i, _)| *i == instance)
+            .map(|(_, e)| e.clone());
+        async move {
+            let (status, error) = match running {
+                None => ("not running", None),
+                Some(endpoint) => match probe(&endpoint, &pairing, 0).await {
+                    Probe::Accepted(_) => ("accepted", None),
+                    Probe::NotAccepted => ("not accepted", None),
+                    Probe::NotRunning => ("not running", None),
+                    Probe::Unconfirmed(e) => ("unconfirmed", Some(e)),
+                    Probe::Throttled(e) => ("rate limited", Some(e)),
+                    Probe::Refused(e) => ("refused", Some(e)),
+                },
+            };
+            let mut row = serde_json::json!({
+                "instance": instance,
+                "relays": pairing.relays,
+                "pubkey": pairing.pubkey,
+                "status": status,
+            });
+            if let Some(e) = error {
+                row["error"] = e.to_string().into();
+            }
+            row
+        }
+    });
+    let asked: Vec<_> = rows.map(tokio::spawn).collect();
+    let mut listed = Vec::with_capacity(asked.len());
+    for row in asked {
+        listed.push(
+            row.await
+                .map_err(|e| CliError::Other(format!("listing failed: {e}")))?,
+        );
+    }
+    Ok(listed)
+}
+
+/// The relays this CLI's stored pairings are for, in bound form, without
+/// asking any desktop. For error hints only: a stored pairing may be stale.
+pub fn paired_relays() -> Vec<String> {
+    // Tests never read the real keychain.
+    #[cfg(test)]
+    return Vec::new();
+    #[cfg(not(test))]
+    paired_relays_in(&Keychain)
+}
+
+fn paired_relays_in(store: &dyn PairingStore) -> Vec<String> {
+    let Ok(Ok(pairings)) = store.read().map(parse_pairings) else {
+        return Vec::new();
+    };
+    let mut relays = Vec::new();
+    for relay in pairings.0.into_values().flat_map(|p| p.relays) {
+        push_distinct(&mut relays, relay);
+    }
+    relays
 }
 
 async fn discover_with(
@@ -1122,6 +1338,7 @@ async fn paired_link(
     };
     let relay = provider_relay_url(relay_url)?;
     let mut revoked = Vec::new();
+    let mut unconfirmed = false;
     let mut found = Ok(None);
     for (instance, endpoint) in advertised {
         let Some(pairing) = pairings.0.get(&instance) else {
@@ -1143,7 +1360,10 @@ async fn paired_link(
                 );
             }
             // A stale or unconfirmed advertisement decides nothing: skip it.
-            Ok(Err(Skip::NotApplicable | Skip::Unreachable | Skip::Unconfirmed)) => {}
+            Ok(Err(Skip::NotApplicable | Skip::Unreachable)) => {}
+            // A same-user check that ran out of time decided nothing either,
+            // but if nothing else serves, the command is worth retrying.
+            Ok(Err(Skip::Unconfirmed)) => unconfirmed = true,
             // The desktop answered (denied, unavailable, ...): that is final.
             Err(e) => {
                 found = Err(e);
@@ -1152,7 +1372,10 @@ async fn paired_link(
         }
     }
     forget_revoked(store, &revoked);
-    found
+    match found {
+        Ok(None) if unconfirmed => Err(ProviderError::Unconfirmed.into_cli("describe")),
+        found => found,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1170,7 +1393,24 @@ pub async fn pair(
     client_name: &str,
     instance: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
-    let mut found = advertisements();
+    pair_among(
+        &Keychain,
+        advertisements(),
+        relay_url,
+        client_name,
+        instance,
+    )
+    .await
+}
+
+/// [`pair`] among the `found` desktops, storing in `store`.
+async fn pair_among(
+    store: &dyn PairingStore,
+    mut found: Vec<(String, Endpoint)>,
+    relay_url: &str,
+    client_name: &str,
+    instance: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
     if let Some(want) = instance {
         found.retain(|(i, _)| i == want);
     }
@@ -1189,7 +1429,7 @@ pub async fn pair(
             )));
         }
     };
-    pair_with(&Keychain, instance, endpoint, relay_url, client_name).await
+    pair_with(store, instance, endpoint, relay_url, client_name).await
 }
 
 async fn pair_with(
@@ -1282,7 +1522,10 @@ pub(crate) mod tests {
     tokio::task_local! {
         /// Pretend the caller runs as this user ID.
         pub(crate) static CALLER_UID: u32;
+        /// Make every same-user check run out of time.
+        pub(crate) static SAME_USER_HANGS: ();
     }
+
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -2150,6 +2393,279 @@ pub(crate) mod tests {
         assert_eq!(store.instances(), ["i"]);
         unpair_with(&store, Some("i")).unwrap();
         assert!(store.json.lock().unwrap().is_none());
+    }
+
+    /// A paired desktop whose user cannot be confirmed is skipped without a
+    /// byte sent, so the chain moves on; a check that only ran out of time
+    /// leaves the command retryable rather than without credentials.
+    #[tokio::test]
+    async fn an_unconfirmed_paired_desktop_is_skipped() {
+        let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let ads = || vec![("a".to_owned(), endpoint.clone())];
+        let found = CALLER_UID
+            .scope(u32::MAX - 1, discover_with(None, &store, ads, RELAY))
+            .await
+            .unwrap();
+        assert!(found.is_none());
+
+        let ads = || vec![("a".to_owned(), endpoint.clone())];
+        let err = SAME_USER_HANGS
+            .scope((), discover_with(None, &store, ads, RELAY))
+            .await
+            .unwrap_err();
+        assert!(crate::error::is_retryable_error(&err), "{err:?}");
+        assert_eq!(crate::error::exit_code(&err), 2);
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(store.instances(), ["a"]);
+    }
+
+    /// A command given no relay uses the one relay a running desktop still
+    /// accepts a pairing for, never a stored pairing alone.
+    #[tokio::test]
+    async fn the_default_relay_is_the_one_a_running_desktop_accepts() {
+        const OTHER: &str = "wss://other.example/";
+        let (good, _) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let (other, _) = desktop(nostr::Keys::generate(), vec![OTHER.into()]).await;
+        let (revoked, _) =
+            provider(|_, _| serde_json::json!({"result": "", "error": "revoked"})).await;
+        let gone = Endpoint::parse("http://127.0.0.1:1/rpc").unwrap();
+        let store = MemoryStore::with(&[
+            ("a", "ta", &[RELAY]),
+            ("b", "tb", &[OTHER]),
+            ("c", "tc", &[OTHER]),
+            ("d", "td", &[OTHER]),
+        ]);
+        let ad = |i: &str, e: &Endpoint| (i.to_owned(), e.clone());
+
+        let one = vec![ad("a", &good), ad("c", &revoked), ad("d", &gone)];
+        assert_eq!(
+            accepted_relay(&store, one).await.unwrap().as_deref(),
+            Some("wss://community.example/")
+        );
+        // Several accepted relays, or none, keep the built-in default.
+        let two = vec![ad("a", &good), ad("b", &other)];
+        assert_eq!(accepted_relay(&store, two).await.unwrap(), None);
+        let none = vec![ad("c", &revoked), ad("d", &gone)];
+        assert_eq!(accepted_relay(&store, none).await.unwrap(), None);
+        // A desktop that no longer binds the paired relay does not count.
+        let rebound = vec![ad("b", &good)];
+        assert_eq!(accepted_relay(&store, rebound).await.unwrap(), None);
+
+        assert_eq!(
+            paired_relays_in(&store),
+            ["wss://community.example/", OTHER]
+        );
+    }
+
+    /// With no relay given, a desktop that refuses is final, and a check that
+    /// may pass on retry stays retryable, never a fallback to localhost.
+    #[tokio::test]
+    async fn the_default_relay_keeps_desktop_failures() {
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let (denied, _) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "denied", "message": "locked"}),
+        )
+        .await;
+        let err = accepted_relay(&store, vec![("a".into(), denied)])
+            .await
+            .unwrap_err();
+        assert!(!crate::error::is_retryable_error(&err), "{err:?}");
+        assert!(err.to_string().contains("locked"), "{err}");
+
+        let (throttled, _) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1}),
+        )
+        .await;
+        let err = accepted_relay(&store, vec![("a".into(), throttled)])
+            .await
+            .unwrap_err();
+        assert!(crate::error::is_retryable_error(&err), "{err:?}");
+
+        let (good, _) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let err = SAME_USER_HANGS
+            .scope((), accepted_relay(&store, vec![("a".into(), good.clone())]))
+            .await
+            .unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:?}");
+
+        // A still-throttled desktop might add a second relay, so one
+        // accepted relay elsewhere does not settle the choice.
+        let (throttled, _) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 1}),
+        )
+        .await;
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
+        let ads = vec![("a".into(), good), ("b".into(), throttled)];
+        let err = accepted_relay(&store, ads).await.unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:?}");
+    }
+
+    /// With no usable relay, a retryable failure is reported over an
+    /// identity mismatch, in either order.
+    #[test]
+    fn a_retryable_failure_outranks_an_identity_mismatch() {
+        let mismatch = || ProviderError::OtherUser.into_cli("describe");
+        let timeout = || ProviderError::Unconfirmed.into_cli("describe");
+        for order in [[mismatch(), timeout()], [timeout(), mismatch()]] {
+            let mut kept = None;
+            for e in order {
+                keep_transient(&mut kept, e);
+            }
+            assert_eq!(crate::error::exit_code(&kept.unwrap()), 2);
+        }
+        let mut kept = None;
+        keep_transient(&mut kept, mismatch());
+        assert_eq!(crate::error::exit_code(&kept.unwrap()), 3);
+    }
+
+    /// Through the command's relay selection with no `--relay`: a desktop's
+    /// refusal and a retryable failure both fail the command.
+    #[tokio::test]
+    async fn a_command_given_no_relay_reports_desktop_failures() {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(["buzz", "users", "get"]).unwrap();
+        assert!(cli.relay.is_none());
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let (denied, _) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "denied", "message": "locked"}),
+        )
+        .await;
+        let paired = accepted_relay(&store, vec![("a".into(), denied)]);
+        let err = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"), "{err}");
+
+        let (good, _) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let paired = accepted_relay(&store, vec![("a".into(), good.clone())]);
+        let err = SAME_USER_HANGS
+            .scope(
+                (),
+                crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:?}");
+
+        let paired = accepted_relay(&store, vec![("a".into(), good)]);
+        let relay = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
+            .await
+            .unwrap();
+        assert_eq!(relay, "wss://community.example/");
+    }
+
+    /// `auth desktop pair --instance b` with no `--relay`, through relay
+    /// selection and command dispatch: desktop A, which would refuse, is
+    /// never asked, and B gets exactly one pair request.
+    #[tokio::test]
+    async fn pairing_a_chosen_desktop_ignores_another_desktops_refusal() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["buzz", "auth", "desktop", "pair", "--instance", "b"])
+                .unwrap();
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY])]);
+        let (refusing, refused) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "denied", "message": "locked"}),
+        )
+        .await;
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        let answer = serde_json::json!({
+            "token": "tok", "instance": "b", "pubkey": pubkey, "relays": [RELAY],
+        });
+        let reply = answer.to_string();
+        let (b, seen) = provider(move |_, _| serde_json::json!({ "result": reply })).await;
+        let found = vec![("a".to_owned(), refusing.clone()), ("b".to_owned(), b)];
+
+        let paired = accepted_relay(&store, vec![("a".into(), refusing)]);
+        let relay = crate::default_relay_with(&cli.command, false, async { Ok(None) }, paired)
+            .await
+            .unwrap();
+        let result = std::cell::RefCell::new(None);
+        let connected = crate::connect(
+            &relay,
+            cli.command,
+            async |sub, relay| {
+                let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, instance }) = sub
+                else {
+                    unreachable!()
+                };
+                let out = pair_among(&store, found, relay, &name, instance.as_deref()).await?;
+                *result.borrow_mut() = Some(out);
+                Ok(())
+            },
+            async |_| unreachable!(),
+        )
+        .await
+        .unwrap();
+        assert!(connected.is_none());
+
+        assert!(refused.lock().unwrap().is_empty(), "A was asked");
+        let asked = seen.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].2["method"], "pair");
+        assert_eq!(
+            asked[0].2["params"],
+            serde_json::json!(["buzz CLI", "ws://localhost:3000/"])
+        );
+        assert_eq!(
+            result.into_inner().unwrap(),
+            serde_json::json!({"instance": "b", "pubkey": pubkey, "relays": [RELAY]})
+        );
+    }
+
+    /// A crashed desktop's leftover advertisement reads as not running, and
+    /// a throttled one is reported at once, not waited out.
+    #[tokio::test]
+    async fn list_tells_a_stale_advertisement_from_a_rejection() {
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            Endpoint::parse(&format!("http://127.0.0.1:{port}/rpc")).unwrap()
+        };
+        let (throttled, seen) = provider(
+            |_, _| serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
+        )
+        .await;
+        let store = MemoryStore::with(&[("a", "ta", &[RELAY]), ("b", "tb", &[RELAY])]);
+        let ads = vec![("a".to_owned(), closed), ("b".to_owned(), throttled)];
+        let started = std::time::Instant::now();
+        let listed = list_with(&store, ads).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(listed[0]["status"], "not running");
+        assert_eq!(listed[1]["status"], "rate limited");
+        assert_eq!(seen.lock().unwrap().len(), 1, "no retries");
+    }
+
+    /// The listing never shows a token and reports each pairing's state the
+    /// way the default relay judges it.
+    #[tokio::test]
+    async fn list_shows_each_pairing_without_its_token() {
+        assert!(list_with(&MemoryStore::default(), Vec::new())
+            .await
+            .unwrap()
+            .is_empty());
+        let (good, _) = desktop(nostr::Keys::generate(), vec![RELAY.into()]).await;
+        let (revoked, _) =
+            provider(|_, _| serde_json::json!({"result": "", "error": "revoked"})).await;
+        let store = MemoryStore::with(&[
+            ("a", "secret-a", &[RELAY]),
+            ("b", "secret-b", &[RELAY]),
+            ("c", "secret-c", &[RELAY]),
+        ]);
+        let ads = vec![("a".to_owned(), good), ("b".to_owned(), revoked)];
+        let listed = list_with(&store, ads).await.unwrap();
+        let text = serde_json::to_string(&listed).unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        let status: Vec<_> = listed.iter().map(|p| p["status"].clone()).collect();
+        assert_eq!(status, ["accepted", "not accepted", "not running"]);
+        assert_eq!(listed[0]["relays"], serde_json::json!([RELAY]));
+        assert_eq!(
+            store.instances(),
+            ["a", "b", "c"],
+            "listing changes nothing"
+        );
     }
 
     /// When this user cannot be confirmed on the server side, not one byte
