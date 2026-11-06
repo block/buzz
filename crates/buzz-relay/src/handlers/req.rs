@@ -377,14 +377,8 @@ pub async fn handle_admitted_req(
     if channel_id.is_none() {
         let authed_pubkey_hex = hex::encode(&pubkey_bytes);
         if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            super::close::close_if_owner(
-                &sub_id,
-                owner,
-                Some("restricted: p-gated events require #p matching your pubkey"),
-                &conn,
-                &state,
-            )
-            .await;
+            super::close::close_if_owner(&sub_id, owner, Some(P_GATED_REFUSAL), &conn, &state)
+                .await;
             access.deny("p_gated");
             return;
         }
@@ -1918,6 +1912,12 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
     found_id
 }
 
+/// Refusal text every read path (WS REQ, WS COUNT, `POST /query`,
+/// `POST /count`) sends when [`p_gated_filters_authorized`] fails. It names the
+/// two rules a scanning read can meet; the `ids` exemption serves lookups only.
+pub(crate) const P_GATED_REFUSAL: &str =
+    "restricted: p-gated events require #p or authors matching only your pubkey";
+
 /// Authorize read access for filters that can match a [`P_GATED_KINDS`] kind:
 /// gift wraps, membership notices, DM visibility snapshots, agent observer
 /// frames and agent turn metrics. A filter with no `kinds` can match all of
@@ -1930,7 +1930,10 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
 ///     snapshots by the relay, so `authors=[self]` can never fish those out
 ///     of another reader's inbox. Clients rely on this to ask whether the
 ///     reader has signed anything at all (`{authors:[self], until, limit:1}`
-///     with no `kinds`; NOSTR.md "Landing channel").
+///     with no `kinds`; NOSTR.md "Landing channel"). Without `kinds`,
+///     `idx_events_community_pubkey_kind_created` orders `kind` before
+///     `created_at`, so the read may scan a prolific author's events; that
+///     is accepted for the once-per-device new-member read.
 ///   - `ids` is non-empty and the filter names no [`RESULT_GATED_KINDS`]
 ///     kind (see below).
 ///   - `#p` is non-empty and every entry equals the authed pubkey.

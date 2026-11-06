@@ -559,10 +559,11 @@ may sign these.
 > **Subscription constraint:** Global REQs that can match p-gated kinds (44100, 44101, 1059) **must**
 > include a `#p` filter where **all** `#p` values match the authenticated pubkey. The relay rejects
 > subscriptions that omit `#p` or include other pubkeys (prevents eavesdropping on others' membership
-> changes and DMs). Error: `restricted: p-gated events require #p matching your pubkey`.
-> A filter whose `authors` are **all** the authenticated pubkey is also admitted, with or without
-> `#p` or `kinds`: an event the reader signed is theirs to read, and these kinds are signed by the
-> relay (44100, 44101) or a throwaway key (1059), so such a filter cannot return another reader's.
+> changes and DMs). A filter whose `authors` are **all** the authenticated pubkey is also admitted,
+> with or without `#p` or `kinds`: an event the reader signed is theirs to read, and these kinds are
+> signed by the relay (44100, 44101) or a throwaway key (1059), so such a filter cannot return
+> another reader's. Error, on REQ, COUNT, `POST /query` and `POST /count`:
+> `restricted: p-gated events require #p or authors matching only your pubkey`.
 
 ```bash
 nak req -k 44100 -k 44101 --tag "p=<your-hex-pubkey>" \
