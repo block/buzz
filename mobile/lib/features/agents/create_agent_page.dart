@@ -4,6 +4,7 @@ import 'agent_character_artwork.dart';
 import 'dart:math';
 
 import 'agent_model_picker.dart';
+import 'builderlab_harness_row.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -373,6 +374,7 @@ class CreateAgentPage extends HookConsumerWidget {
                 ),
                 const SizedBox(height: Grid.sm),
                 AgentModelPicker(
+                  harness: const BuilderlabHarnessRow(),
                   controller: controller,
                   catalog: catalog,
                   onRetry: retryCatalog,

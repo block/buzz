@@ -15,6 +15,7 @@ class AgentModelPicker extends StatelessWidget {
     required this.onChanged,
     this.modelId,
     this.effort,
+    this.harness,
     super.key,
   });
   final RemoteAgentController controller;
@@ -24,6 +25,9 @@ class AgentModelPicker extends StatelessWidget {
   final String? effort;
   final void Function(String?, String?) onChanged;
 
+  /// Leads the group, above Model, saying where the agent runs.
+  final Widget? harness;
+
   @override
   Widget build(BuildContext context) {
     // While loading, show the same rows disabled so nothing shifts.
@@ -31,6 +35,8 @@ class AgentModelPicker extends StatelessWidget {
     if (!loading && (catalog.hasError || catalog.data!.isEmpty)) {
       return Column(
         children: [
+          if (harness != null)
+            SheetActionSection(dividerIndent: Grid.xs, children: [harness!]),
           Text(
             catalog.hasError
                 ? 'Could not load available models.'
@@ -52,6 +58,7 @@ class AgentModelPicker extends StatelessWidget {
         SheetActionSection(
           dividerIndent: Grid.xs,
           children: [
+            ?harness,
             BuzzSettingMenu<String>(
               controlKey: const Key('agent-model'),
               enabled: enabled,
