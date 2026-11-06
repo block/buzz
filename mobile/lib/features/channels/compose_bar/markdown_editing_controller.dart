@@ -59,20 +59,29 @@ class _MarkdownEditingController extends TextEditingController {
   /// then shows as raw text.
   @override
   set value(TextEditingValue newValue) {
+    final previousText = super.value.text;
     super.value = _snapSelectionToChips(newValue);
+    // Like Flutter's undo history, keep only values that changed the text,
+    // so moving the caret around never pushes out an undo snapshot.
+    if (super.value.text == previousText && _recentValues.isNotEmpty) return;
+    final recorded = _historyKey(super.value);
     _recentValues
-      ..remove(super.value)
-      ..add(super.value);
+      ..remove(recorded)
+      ..add(recorded);
     if (_recentValues.length > _recentValueLimit) {
       _recentValues.remove(_recentValues.first);
     }
   }
 
-  /// Values this controller held recently, oldest first. Undo and redo
-  /// restore one of these exactly, which tells them apart from a paste of a
-  /// link.
+  /// Text edits this controller made recently, oldest first. Undo and redo
+  /// restore one of these exactly, which tells them apart from a key press
+  /// or a paste of a link.
   final _recentValues = <TextEditingValue>{};
   static const _recentValueLimit = 100;
+
+  /// Android's undo history drops the composing range, so compare without it.
+  static TextEditingValue _historyKey(TextEditingValue value) =>
+      value.copyWith(composing: TextRange.empty);
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     final selection = next.selection;
@@ -245,7 +254,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextEditingValue newValue,
   ) {
     // Undo and Redo restore an earlier value exactly, and must stay exact.
-    if (_recentValues.contains(newValue)) return newValue;
+    if (_recentValues.contains(_historyKey(newValue))) return newValue;
     return _spaceAfterPastedLink(
       oldValue,
       expandChipDeletion(oldValue, newValue),

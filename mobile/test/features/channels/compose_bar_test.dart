@@ -5205,13 +5205,13 @@ void main() {
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
         textField.controller!.value = const TextEditingValue(
-          text: '@Helper Bot @Helper Bo',
+          text: '@Helper Bot @Helper Bo and some more words',
           selection: TextSelection.collapsed(offset: 22),
         );
         await tester.pump(const Duration(seconds: 1));
         tester.testTextInput.updateEditingValue(
           const TextEditingValue(
-            text: '@Helper Bot @Helper Bot',
+            text: '@Helper Bot @Helper Bot and some more words',
             selection: TextSelection.collapsed(offset: 23),
           ),
         );
@@ -5220,11 +5220,27 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsNWidgets(2),
         );
+        // Moving the selection around a lot first changes nothing.
+        for (var base = 24; base < 43; base++) {
+          for (var extent = base + 1; extent <= 43; extent++) {
+            textField.controller!.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: extent,
+            );
+          }
+        }
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 23,
+        );
+        await tester.pump();
         await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
         await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
         await tester.pump();
-        expect(textField.controller!.text, '@Helper Bot @Helper Bo');
+        expect(
+          textField.controller!.text,
+          '@Helper Bot @Helper Bo and some more words',
+        );
 
         // Text that is not drawn as a chip still deletes one character.
         await tester.enterText(find.byType(TextField), '`@Helper Bot`');
