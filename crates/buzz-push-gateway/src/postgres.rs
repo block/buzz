@@ -626,6 +626,13 @@ impl AuthorityStore for PostgresAuthorityStore {
         if auth_inserted.rows_affected() != 1 || request_inserted.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
         }
+        let admitted_at = now.max(Utc::now().timestamp());
+        if request_expires_at < admitted_at
+            || authority.expires_at < admitted_at
+            || i.try_get::<DateTime<Utc>, _>("expires_at").map_err(db)? < at(admitted_at)?
+        {
+            return Err(AuthorityError::Rejected);
+        }
         tx.commit().await.map_err(db)?;
         Ok(DeliveryPermit::new(authority, relay.to_owned(), request_id))
     }

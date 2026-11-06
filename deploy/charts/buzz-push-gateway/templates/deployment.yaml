@@ -44,6 +44,9 @@ spec:
             - { name: public, containerPort: 8080 }
             - { name: health, containerPort: 8081 }
           env:
+            {{- with .Values.trustedProxyCidrs }}
+            - { name: BUZZ_PUSH_TRUSTED_PROXY_CIDRS, value: {{ join "," . | quote }} }
+            {{- end }}
             - { name: BUZZ_PUSH_GATEWAY_ORIGIN, value: {{ .Values.gatewayOrigin | quote }} }
             - { name: BUZZ_PUSH_BIND_ADDR, value: "0.0.0.0:8080" }
             - { name: BUZZ_PUSH_HEALTH_ADDR, value: "0.0.0.0:8081" }

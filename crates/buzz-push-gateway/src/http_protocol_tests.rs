@@ -218,6 +218,7 @@ async fn management_binds_parameters_versions_expiry_and_commits_counter_with_pe
         .await
         .unwrap();
     let state = AppState {
+        trusted_proxy_cidrs: Vec::new(),
         gateway_origin: ORIGIN.into(),
         authority: authority.clone(),
         token_keyring: Arc::new(tokens),
@@ -343,6 +344,27 @@ async fn management_binds_parameters_versions_expiry_and_commits_counter_with_pe
             .status(),
         StatusCode::NOT_FOUND
     );
+    for _ in 0..20 {
+        assert_eq!(
+            post(
+                &app,
+                "/v1/installations/challenges",
+                serde_json::json!({"v":1}),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    let limited = post(
+        &app,
+        "/v1/installations/challenges",
+        serde_json::json!({"v":1}),
+        None,
+    )
+    .await;
+    assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
     for counter in [3, 4] {
         assert_eq!(revoke(&app, id, &relay, 3, counter).await, StatusCode::OK);
     }

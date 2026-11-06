@@ -248,4 +248,77 @@ mod management_postgres_tests {
         pool.close().await;
         drop_schema(&schema).await;
     }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn lock_wait_cannot_extend_delivery_or_signed_management_expiry() {
+        let (pool, schema) = full_schema(5).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        let d = delegation([71; 32], RELAY_HEX, 2, now);
+        store
+            .upsert_delegation(d.clone(), assertion(0, 1, Some(1), now))
+            .await
+            .unwrap();
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM push_gateway_installations WHERE id=$1 FOR UPDATE")
+            .bind(d.installation_id)
+            .fetch_one(&mut *lock)
+            .await
+            .unwrap();
+        let delivery_store = store.clone();
+        let target = d.clone();
+        let request = Uuid::new_v4();
+        let pending_delivery = tokio::spawn(async move {
+            delivery_store
+                .authorize_delivery(
+                    target.grant_hash,
+                    RELAY_HEX,
+                    &"72".repeat(32),
+                    request,
+                    now + 1,
+                    60,
+                    40,
+                    now,
+                )
+                .await
+        });
+        let management_store = store.clone();
+        let mut signed = assertion(1, 2, Some(2), now);
+        signed.request_expires_at = now + 1;
+        let pending_management = tokio::spawn(async move {
+            management_store
+                .upsert_delegation(delegation([73; 32], RELAY_HEX, 3, now), signed)
+                .await
+        });
+        // Authority locks outlive initially valid signed request expiries.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        lock.commit().await.unwrap();
+        assert!(matches!(
+            pending_delivery.await.unwrap(),
+            Err(AuthorityError::Rejected)
+        ));
+        assert_eq!(
+            pending_management.await.unwrap(),
+            Err(AuthorityError::Rejected)
+        );
+        assert_eq!(
+            store
+                .installation(d.installation_id, Utc::now().timestamp())
+                .await
+                .unwrap()
+                .assertion_counter,
+            1
+        );
+        let replays: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_gateway_delivery_request_replays WHERE request_id=$1",
+        )
+        .bind(request)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(replays, 0);
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
 }
