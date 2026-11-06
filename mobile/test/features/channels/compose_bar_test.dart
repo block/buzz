@@ -5246,6 +5246,27 @@ void main() {
           offset: 23,
         );
         await tester.pump();
+        // So do many later edits, undone back to the completed mention.
+        const edits = 101;
+        for (var i = 1; i <= edits; i++) {
+          tester.testTextInput.updateEditingValue(
+            TextEditingValue(
+              text: '@Helper Bot @Helper Bot and some more words${'.' * i}',
+              selection: TextSelection.collapsed(offset: 43 + i),
+            ),
+          );
+          await tester.pump(const Duration(seconds: 1));
+        }
+        for (var i = 0; i < edits; i++) {
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+          await tester.pump();
+        }
+        expect(
+          textField.controller!.text,
+          '@Helper Bot @Helper Bot and some more words',
+        );
         await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
         await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);

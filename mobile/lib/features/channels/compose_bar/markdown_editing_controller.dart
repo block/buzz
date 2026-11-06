@@ -61,23 +61,16 @@ class _MarkdownEditingController extends TextEditingController {
   set value(TextEditingValue newValue) {
     final previousText = super.value.text;
     super.value = _snapSelectionToChips(newValue);
-    // Like Flutter's undo history, keep only values that changed the text,
-    // so moving the caret around never pushes out an undo snapshot.
+    // Like Flutter's undo history, keep only values that changed the text.
     if (super.value.text == previousText && _recentValues.isNotEmpty) return;
-    final recorded = _historyKey(super.value);
-    _recentValues
-      ..remove(recorded)
-      ..add(recorded);
-    if (_recentValues.length > _recentValueLimit) {
-      _recentValues.remove(_recentValues.first);
-    }
+    _recentValues.add(_historyKey(super.value));
   }
 
-  /// Text edits this controller made recently, oldest first. Undo and redo
-  /// restore one of these exactly, which tells them apart from a key press
-  /// or a paste of a link.
+  /// Text edits this controller has made. Undo and redo restore one of these
+  /// exactly, which tells them apart from a key press or a paste of a link.
+  /// Like Flutter's undo stack this is unbounded; entries share their text
+  /// with the stack's, so each costs only a small wrapper.
   final _recentValues = <TextEditingValue>{};
-  static const _recentValueLimit = 100;
 
   /// Android's undo history drops the composing range, so compare without it.
   static TextEditingValue _historyKey(TextEditingValue value) =>
