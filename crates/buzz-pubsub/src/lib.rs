@@ -862,13 +862,30 @@ mod tests {
         );
 
         manager.release_topic(&target, topic).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        // Queued after the debounced unsubscribe: once it answers, the
-        // subscriber has processed that unsubscribe.
-        manager
-            .confirm_topic(&filler, EventTopic::Channel(Uuid::from_u128(0)))
+        // Wait until Redis shows the debounced unsubscribe took effect, so
+        // the re-retain below starts from an unsubscribed topic.
+        let channel = EventTopicKey::from_context(&target, topic).redis_channel();
+        let mut redis = redis::Client::open("redis://127.0.0.1:6379")
+            .unwrap()
+            .get_multiplexed_async_connection()
             .await
-            .expect("confirm");
+            .expect("redis");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (_, subscribers): (String, i64) = redis::cmd("PUBSUB")
+                    .arg("NUMSUB")
+                    .arg(&channel)
+                    .query_async(&mut redis)
+                    .await
+                    .expect("numsub");
+                if subscribers == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the released topic must be unsubscribed");
         retain_with_dropped_hint(&manager, &filler, 1 << 32, &target, topic).await;
         assert!(
             delivered(&manager, &mut rx, &target, topic).await,
