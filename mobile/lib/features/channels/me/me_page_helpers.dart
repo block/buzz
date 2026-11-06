@@ -41,9 +41,11 @@ class _MeChatRow extends ConsumerWidget {
         borderRadius: BorderRadius.circular(Radii.md),
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xxs,
-            vertical: Grid.inventoryRowInset,
+          padding: const EdgeInsets.fromLTRB(
+            Grid.xxs,
+            Grid.inventoryRowInset,
+            Grid.xxs,
+            Grid.xxs,
           ),
           child: Row(
             children: [
