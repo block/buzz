@@ -1,6 +1,8 @@
+import '../../shared/widgets/duo_toolbar.dart';
 import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
@@ -271,6 +273,11 @@ enum InitialThreadRouteBehavior {
   /// Replace the temporary channel route so Back returns to its origin.
   replaceCurrentRoute,
 }
+
+double _conversationHeaderHeight(
+  BuildContext context, {
+  double titleContentHeight = 0,
+}) => frostedAppBarHeight(context, titleContentHeight: titleContentHeight);
 
 class _ResolvedChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
@@ -632,7 +639,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // it reads through it when it is shown again.
     final openReadActive =
         isAppInUse(useAppLifecycleState()) &&
-        (ModalRoute.of(context)?.isCurrent ?? true);
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
     useEffect(() {
       if (!readState.isReady || !openReadActive || openReadTimestamp == null) {
         return null;
@@ -708,6 +716,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     );
 
     return FrostedScaffold(
+      extendHeaderUnderRail: true,
       foreground:
           !resolvedChannel.isForum &&
               timelineEntries.isNotEmpty &&
@@ -719,7 +728,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   left: 0,
                   right: 0,
                   top:
-                      frostedAppBarHeight(
+                      _conversationHeaderHeight(
                         context,
                         titleContentHeight: appBarTitleContentHeight,
                       ) +
@@ -735,6 +744,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        nativeTitleInsets: duoContentInsetsOf(context),
+        automaticallyImplyLeading:
+            ConversationPaneScope.maybeOf(context) == null ||
+            !usesConversationPanes(
+              context,
+              windowSize:
+                  View.of(context).physicalSize /
+                  View.of(context).devicePixelRatio,
+            ),
         alwaysFrosted: true,
         nativeViewSuppressed: messageActionBackdropActive,
         nativeTitle:
@@ -820,7 +838,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   null)
                             Positioned(
                               top:
-                                  frostedAppBarHeight(
+                                  _conversationHeaderHeight(
                                     context,
                                     titleContentHeight:
                                         appBarTitleContentHeight,
@@ -866,7 +884,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           loading: SizedBox.shrink,
                           error: (e, _) => Padding(
                             padding: EdgeInsets.only(
-                              top: frostedAppBarHeight(
+                              top: _conversationHeaderHeight(
                                 context,
                                 titleContentHeight: appBarTitleContentHeight,
                               ),

@@ -6,6 +6,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../theme/theme.dart';
 import 'buzz_navigation_metrics.dart';
+import 'duo_toolbar.dart';
 import 'ios_glass_navigation_button.dart';
 
 /// A titled sheet header with balanced actions and an exactly centered title.
@@ -63,10 +64,11 @@ class BuzzSheetHeader extends StatelessWidget {
                   ),
                 ),
               ),
-            Align(
-              alignment: Alignment.bottomRight,
-              child: trailing ?? _SheetCloseButton(onClose: onClose),
-            ),
+            if (trailing != null || !DuoSheetCloseScope.of(context))
+              Align(
+                alignment: Alignment.bottomRight,
+                child: trailing ?? _SheetCloseButton(onClose: onClose),
+              ),
             if (leading case final leading?)
               Align(alignment: Alignment.bottomLeft, child: leading),
           ],

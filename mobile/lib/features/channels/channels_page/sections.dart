@@ -134,77 +134,124 @@ class _CustomSectionHeader extends StatelessWidget {
                 color: sectionColor,
               ),
             ),
-            Builder(
-              builder: (buttonContext) => _SectionOptionsButton(
+            if (_usesNativeSectionMenu(context))
+              IosMessageCreateButton(
                 key: ValueKey('section-menu-${section.id}'),
-                tooltip: '${section.name} options',
-                icon: Icon(
-                  BuzzIcons.ellipsis,
-                  size: 14,
-                  color: navigationAccessoryForeground(context),
+                icon: 'more',
+                accessibilityLabel: '${section.name} options',
+                width: 44,
+                height: 44,
+                plain: true,
+                iconSize: 14,
+                foregroundColor: navigationAccessoryForeground(context),
+                selectedIndex: sortMode == ChannelSortMode.recent ? 3 : 4,
+                dividerBefore: const {3, 5},
+                destructiveIndices: const {5},
+                actions: [
+                  (
+                    label: 'Rename section',
+                    symbol: 'pencil',
+                    onPressed: onRename,
+                  ),
+                  (
+                    label: 'Move up',
+                    symbol: 'arrow.up',
+                    onPressed: isFirst ? null : onMoveUp,
+                  ),
+                  (
+                    label: 'Move down',
+                    symbol: 'arrow.down',
+                    onPressed: isLast ? null : onMoveDown,
+                  ),
+                  (
+                    label: 'Sort: Recent',
+                    symbol: '',
+                    onPressed: () => onSortModeChange(ChannelSortMode.recent),
+                  ),
+                  (
+                    label: 'Sort: A–Z',
+                    symbol: '',
+                    onPressed: () => onSortModeChange(ChannelSortMode.alpha),
+                  ),
+                  (
+                    label: 'Delete section',
+                    symbol: 'trash',
+                    onPressed: onDelete,
+                  ),
+                ],
+              )
+            else
+              Builder(
+                builder: (buttonContext) => _SectionOptionsButton(
+                  key: ValueKey('section-menu-${section.id}'),
+                  tooltip: '${section.name} options',
+                  icon: Icon(
+                    BuzzIcons.ellipsis,
+                    size: 14,
+                    color: navigationAccessoryForeground(context),
+                  ),
+                  onPressed: () async {
+                    final value = await showAnchoredPopover<String>(
+                      context: buttonContext,
+                      width: 216,
+                      alignment: AnchoredPopoverAlignment.end,
+                      surfaceKey: ValueKey('section-popover-${section.id}'),
+                      items: [
+                        const PopupMenuItem(
+                          value: 'rename',
+                          padding: _sectionMenuItemPadding,
+                          child: _SectionMenuItemContent(
+                            icon: BuzzIcons.pencil,
+                            label: 'Rename section',
+                          ),
+                        ),
+                        PopupMenuItem(
+                          value: 'move_up',
+                          enabled: !isFirst,
+                          padding: _sectionMenuItemPadding,
+                          child: const _SectionMenuItemContent(
+                            icon: BuzzIcons.arrowUp,
+                            label: 'Move up',
+                          ),
+                        ),
+                        PopupMenuItem(
+                          value: 'move_down',
+                          enabled: !isLast,
+                          padding: _sectionMenuItemPadding,
+                          child: const _SectionMenuItemContent(
+                            icon: BuzzIcons.arrowDown,
+                            label: 'Move down',
+                          ),
+                        ),
+                        ..._sortMenuItems(sortMode),
+                        PopupMenuItem(
+                          value: 'delete',
+                          padding: _sectionMenuItemPadding,
+                          child: _SectionMenuItemContent(
+                            icon: BuzzIcons.trash2,
+                            label: 'Delete section',
+                            color: context.colors.error,
+                          ),
+                        ),
+                      ],
+                    );
+                    switch (value) {
+                      case 'rename':
+                        onRename();
+                      case 'move_up':
+                        onMoveUp();
+                      case 'move_down':
+                        onMoveDown();
+                      case _kSortRecentMenuValue:
+                        onSortModeChange(ChannelSortMode.recent);
+                      case _kSortAlphaMenuValue:
+                        onSortModeChange(ChannelSortMode.alpha);
+                      case 'delete':
+                        onDelete();
+                    }
+                  },
                 ),
-                onPressed: () async {
-                  final value = await showAnchoredPopover<String>(
-                    context: buttonContext,
-                    width: 216,
-                    alignment: AnchoredPopoverAlignment.end,
-                    surfaceKey: ValueKey('section-popover-${section.id}'),
-                    items: [
-                      const PopupMenuItem(
-                        value: 'rename',
-                        padding: _sectionMenuItemPadding,
-                        child: _SectionMenuItemContent(
-                          icon: BuzzIcons.pencil,
-                          label: 'Rename section',
-                        ),
-                      ),
-                      PopupMenuItem(
-                        value: 'move_up',
-                        enabled: !isFirst,
-                        padding: _sectionMenuItemPadding,
-                        child: const _SectionMenuItemContent(
-                          icon: BuzzIcons.arrowUp,
-                          label: 'Move up',
-                        ),
-                      ),
-                      PopupMenuItem(
-                        value: 'move_down',
-                        enabled: !isLast,
-                        padding: _sectionMenuItemPadding,
-                        child: const _SectionMenuItemContent(
-                          icon: BuzzIcons.arrowDown,
-                          label: 'Move down',
-                        ),
-                      ),
-                      ..._sortMenuItems(sortMode),
-                      PopupMenuItem(
-                        value: 'delete',
-                        padding: _sectionMenuItemPadding,
-                        child: _SectionMenuItemContent(
-                          icon: BuzzIcons.trash2,
-                          label: 'Delete section',
-                          color: context.colors.error,
-                        ),
-                      ),
-                    ],
-                  );
-                  switch (value) {
-                    case 'rename':
-                      onRename();
-                    case 'move_up':
-                      onMoveUp();
-                    case 'move_down':
-                      onMoveDown();
-                    case _kSortRecentMenuValue:
-                      onSortModeChange(ChannelSortMode.recent);
-                    case _kSortAlphaMenuValue:
-                      onSortModeChange(ChannelSortMode.alpha);
-                    case 'delete':
-                      onDelete();
-                  }
-                },
               ),
-            ),
           ],
         ),
       ),
@@ -473,31 +520,58 @@ class _SectionHeader extends StatelessWidget {
               ),
             ),
             if (sortMode case final mode?) ...[
-              Builder(
-                builder: (buttonContext) => _SectionOptionsButton(
+              if (_usesNativeSectionMenu(context))
+                IosMessageCreateButton(
                   key: ValueKey('sort-menu-$label'),
-                  tooltip: '$label options',
-                  icon: Icon(
-                    BuzzIcons.ellipsis,
-                    size: 14,
-                    color: navigationAccessoryForeground(context),
+                  icon: 'more',
+                  accessibilityLabel: '$label options',
+                  width: 44,
+                  height: 44,
+                  plain: true,
+                  iconSize: 14,
+                  foregroundColor: navigationAccessoryForeground(context),
+                  selectedIndex: mode == ChannelSortMode.recent ? 0 : 1,
+                  actions: [
+                    (
+                      label: 'Sort: Recent',
+                      symbol: '',
+                      onPressed: () =>
+                          onSortModeChange?.call(ChannelSortMode.recent),
+                    ),
+                    (
+                      label: 'Sort: A–Z',
+                      symbol: '',
+                      onPressed: () =>
+                          onSortModeChange?.call(ChannelSortMode.alpha),
+                    ),
+                  ],
+                )
+              else
+                Builder(
+                  builder: (buttonContext) => _SectionOptionsButton(
+                    key: ValueKey('sort-menu-$label'),
+                    tooltip: '$label options',
+                    icon: Icon(
+                      BuzzIcons.ellipsis,
+                      size: 14,
+                      color: navigationAccessoryForeground(context),
+                    ),
+                    onPressed: () async {
+                      final value = await showAnchoredPopover<String>(
+                        context: buttonContext,
+                        width: 216,
+                        alignment: AnchoredPopoverAlignment.end,
+                        surfaceKey: ValueKey('sort-popover-$label'),
+                        items: _sortMenuItems(mode, showDivider: false),
+                      );
+                      if (value == _kSortRecentMenuValue) {
+                        onSortModeChange?.call(ChannelSortMode.recent);
+                      } else if (value == _kSortAlphaMenuValue) {
+                        onSortModeChange?.call(ChannelSortMode.alpha);
+                      }
+                    },
                   ),
-                  onPressed: () async {
-                    final value = await showAnchoredPopover<String>(
-                      context: buttonContext,
-                      width: 216,
-                      alignment: AnchoredPopoverAlignment.end,
-                      surfaceKey: ValueKey('sort-popover-$label'),
-                      items: _sortMenuItems(mode, showDivider: false),
-                    );
-                    if (value == _kSortRecentMenuValue) {
-                      onSortModeChange?.call(ChannelSortMode.recent);
-                    } else if (value == _kSortAlphaMenuValue) {
-                      onSortModeChange?.call(ChannelSortMode.alpha);
-                    }
-                  },
                 ),
-              ),
             ],
           ],
         ),
@@ -558,6 +632,12 @@ class _SectionChevron extends StatelessWidget {
     );
   }
 }
+
+bool _usesNativeSectionMenu(BuildContext context) =>
+    defaultTargetPlatform == TargetPlatform.iOS &&
+    (DuoToolbarScope.maybeOf(context)?.strip ??
+            FoldGeometry.of(context).strip) !=
+        null;
 
 class _SectionOptionsButton extends StatelessWidget {
   const _SectionOptionsButton({

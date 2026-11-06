@@ -296,7 +296,7 @@ class _MessageList extends HookConsumerWidget {
       }
 
       final stickyTop =
-          frostedAppBarHeight(
+          _conversationHeaderHeight(
             context,
             titleContentHeight: appBarTitleContentHeight,
           ) +
@@ -475,7 +475,7 @@ class _MessageList extends HookConsumerWidget {
       final visiblePageHeight = max(
         0.0,
         viewportHeight -
-            frostedAppBarHeight(
+            _conversationHeaderHeight(
               context,
               titleContentHeight: appBarTitleContentHeight,
             ) -
@@ -621,7 +621,7 @@ class _MessageList extends HookConsumerWidget {
           (navigationBottomInset / viewportHeight).clamp(0.0, 1.0) - 0.01;
       final topEdge =
           1 -
-          frostedAppBarHeight(
+          _conversationHeaderHeight(
                 context,
                 titleContentHeight: appBarTitleContentHeight,
               ) /
@@ -675,7 +675,8 @@ class _MessageList extends HookConsumerWidget {
       active:
           readStateReady &&
           appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+          (ModalRoute.of(context)?.isCurrent ?? true) &&
+          ConversationPaneScope.isActiveOf(context),
       onDwell: readVisibleRows,
       keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
     );
@@ -869,7 +870,7 @@ class _MessageList extends HookConsumerWidget {
         return SingleChildScrollView(
           padding: EdgeInsets.fromLTRB(
             Grid.gutter,
-            frostedAppBarHeight(
+            _conversationHeaderHeight(
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ) +
@@ -956,7 +957,7 @@ class _MessageList extends HookConsumerWidget {
               padding: EdgeInsets.only(
                 left: Grid.gutter,
                 right: Grid.gutter,
-                top: frostedAppBarHeight(
+                top: _conversationHeaderHeight(
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ),
@@ -1162,22 +1163,13 @@ class _MessageList extends HookConsumerWidget {
             left: 0,
             right: 0,
             top:
-                frostedAppBarHeight(
+                _conversationHeaderHeight(
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ) +
                 Grid.xs,
             child: Center(
-              child: IconButton.filled(
-                key: const ValueKey('channel-jump-to-oldest-unread'),
-                onPressed: scrollToOldestUnread,
-                tooltip: 'Jump to oldest unread message',
-                style: IconButton.styleFrom(
-                  backgroundColor: context.controlSurface,
-                  foregroundColor: context.colors.onPrimaryContainer,
-                ),
-                icon: const Icon(BuzzIcons.chevronUp, size: 20),
-              ),
+              child: _JumpToOldestUnread(onPressed: scrollToOldestUnread),
             ),
           )
         else
