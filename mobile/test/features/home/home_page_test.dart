@@ -20,6 +20,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+// Production iOS capsules fit the semibold label plus 16 points on each side.
+double nativeFilterWidth(String label) =>
+    (TextPainter(
+      text: TextSpan(
+        text: label,
+        style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w600),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout()).width +
+    32;
+
 void main() {
   Future<Widget> buildHome({
     bool longSolo = false,
@@ -124,7 +135,7 @@ void main() {
       expect(header.alwaysFrosted, isTrue);
       expect(header.titleStyle?.fontSize, 22);
       expect(header.centerTitle, isFalse);
-      double? paintedFilterWidth;
+
       for (final label in ['All', 'Solo', 'Team']) {
         final chip = find.ancestor(
           of: find.descendant(
@@ -139,8 +150,7 @@ void main() {
           matching: find.byType(Material),
         );
         expect(tester.getSize(paintedChip).height, 48);
-        paintedFilterWidth ??= tester.getSize(paintedChip).width;
-        expect(tester.getSize(paintedChip).width, paintedFilterWidth);
+        expect(tester.getSize(paintedChip).width, nativeFilterWidth(label));
       }
 
       await tester.tap(
@@ -426,7 +436,7 @@ void main() {
       expect(find.text('Activity'), findsNothing);
       final inboxButton = tester.widget<IosGlassNavigationButton>(inbox);
       expect(inboxButton.icon, IosGlassNavigationIcon.bell);
-      double? filterWidth;
+
       for (final label in ['All', 'Solo', 'Team']) {
         final chip = tester.widget<IosGlassNavigationButton>(
           find.descendant(
@@ -437,8 +447,7 @@ void main() {
           ),
         );
         expect(chip.controlSize, inboxButton.controlSize);
-        filterWidth ??= chip.width;
-        expect(chip.width, filterWidth);
+        expect(chip.width, nativeFilterWidth(label));
       }
       expect(tester.getSize(inbox), const Size(44, 44));
       final communityTrigger = find.byWidgetPredicate(

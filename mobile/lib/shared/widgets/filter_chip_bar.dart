@@ -48,8 +48,8 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
-  /// Sizes filters equally to fit the widest label.
-  final bool equalWidths;
+  /// Uses the native iOS label widths for Material capsules too.
+  final bool matchNativeWidths;
 
   /// Minimum visible capsule height; the hit target may be larger.
   final double minControlHeight;
@@ -73,7 +73,7 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
-    this.equalWidths = false,
+    this.matchNativeWidths = false,
     this.minControlHeight = 0,
     this.visualDensity = VisualDensity.compact,
     this.chipVerticalPadding = Grid.quarter,
@@ -97,10 +97,6 @@ class FilterChipBar<T> extends StatelessWidget {
             )..layout()).width +
             32,
     ];
-    if (equalWidths && widths.isNotEmpty) {
-      final widest = widths.reduce(math.max);
-      widths.fillRange(0, widths.length, widest);
-    }
     if (useNativeGlass && defaultTargetPlatform == TargetPlatform.iOS) {
       final height = math.max(
         MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16,
@@ -159,7 +155,7 @@ class FilterChipBar<T> extends StatelessWidget {
         if (index > 0) const SizedBox(width: Grid.xxs),
         if (expandItems)
           Expanded(child: _chip(context, items[index], fillWidth: true))
-        else if (equalWidths)
+        else if (matchNativeWidths)
           SizedBox(
             width: widths[index],
             child: _chip(context, items[index], fillWidth: true),

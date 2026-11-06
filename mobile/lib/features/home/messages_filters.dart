@@ -21,7 +21,7 @@ class MessagesFilters extends StatelessWidget {
     width: double.infinity,
     child: FilterChipBar<String>(
       useNativeGlass: true,
-      equalWidths: true,
+      matchNativeWidths: true,
       minControlHeight: defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48,
       horizontalPadding: Grid.gutter,
       selected: selected,
