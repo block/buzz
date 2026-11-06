@@ -7,7 +7,6 @@ import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_disk_cache.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:flutter/painting.dart';
-import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
@@ -274,50 +273,46 @@ void main() {
   test(
     'evicts least recently used files past the byte or file budget',
     () async {
-      final directory = await Directory(p.join(root.path, 'media')).create();
-      final index = MediaCacheIndex(
-        File(p.join(directory.path, 'index.json')),
-        directory,
-        10,
-      );
-      await index.open();
-      final start = DateTime.utc(2026, 11, 5);
-      // (name, size, last used minutes after start)
-      const files = [('old', 4, 0), ('newest', 4, 3), ('middle', 4, 2)];
-      for (final (name, size, _) in files) {
-        await File(p.join(directory.path, name)).writeAsBytes(Uint8List(size));
-        await index.updateOrInsert(
-          CacheObject(
-            name,
-            relativePath: name,
-            validTill: start.add(const Duration(days: 1)),
-          ),
-        );
-      }
-      // updateOrInsert stamps touched as now; restore the scripted order.
-      for (final (name, _, minutes) in files) {
-        final object = (await index.get(name))!;
-        await index.update(
-          CacheObject.fromMap({
-            ...object.toMap(setTouchedToNow: false),
-            CacheObject.columnTouched: start
-                .add(Duration(minutes: minutes))
-                .millisecondsSinceEpoch,
-          }),
-          setTouchedToNow: false,
-        );
-      }
-
-      // (file capacity, evicted): 12 bytes are over the 10-byte budget.
+      // (byte budget, file budget, evicted): three 4-byte files make 12 bytes.
       const cases = [
-        (100, ['old']),
-        (1, ['middle', 'old']),
+        (10, 100, ['old']),
+        (100, 1, ['old', 'middle']),
       ];
-      for (final (capacity, evicted) in cases) {
-        final over = await index.getObjectsOverCapacity(capacity);
-        expect(over.map((object) => object.key), evicted, reason: '$capacity');
+      for (final (bytes, files, evicted) in cases) {
+        final directory = MediaDiskCache.directoryFor(
+          root,
+          '$bytes-$files',
+          's',
+        );
+        final cache = MediaDiskCache.open(
+          directory,
+          byteBudget: bytes,
+          fileBudget: files,
+          // Like the app's 10 s: long enough for the writes to finish.
+          evictionDelay: const Duration(milliseconds: 200),
+        );
+        for (final name in ['old', 'middle', 'newest']) {
+          await cache.write(name, Uint8List(4), immutable: true);
+          // Distinct last-used times.
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+        // Saving a new URL schedules eviction, as in the app.
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        for (final name in ['old', 'middle', 'newest']) {
+          expect(
+            await cache.read(name),
+            evicted.contains(name) ? isNull : isNotNull,
+            reason: '$bytes bytes, $files files: $name',
+          );
+        }
+        // Evicted files are gone from disk too; the index remains.
+        final names = directory
+            .listSync()
+            .map((entry) => p.basename(entry.path))
+            .where((name) => name != 'index.json');
+        expect(names, hasLength(3 - evicted.length), reason: '$bytes $files');
+        await cache.dispose();
       }
-      await index.close();
     },
   );
 }

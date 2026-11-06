@@ -33,16 +33,27 @@ class MediaDiskCache {
   /// that saves nothing when [directory] is null. Reads and writes wait for
   /// [directory] to resolve, so a load never skips the disk while it does.
   /// [now] is the clock staleness is judged by.
+  ///
+  /// Tests can shrink the budgets and the delay after a write or first read
+  /// before eviction runs (10 s in `flutter_cache_manager`).
   MediaDiskCache.open(
     FutureOr<Directory?> directory, {
     @visibleForTesting DateTime Function() now = DateTime.now,
+    @visibleForTesting int byteBudget = maxBytes,
+    @visibleForTesting int fileBudget = maxFiles,
+    @visibleForTesting Duration? evictionDelay,
   }) : _now = now {
     _manager = Future.value(directory)
         // Images wait for the disk, so never wait on it for long.
         .timeout(_openTimeout, onTimeout: () => null)
         .then((directory) {
           if (directory == null || isClosed) return null;
-          return _openManager(directory);
+          return _openManager(
+            directory,
+            byteBudget: byteBudget,
+            fileBudget: fileBudget,
+            evictionDelay: evictionDelay,
+          );
         })
         .catchError((Object error) {
           debugPrint('[MediaDiskCache] open failed: $error');
@@ -50,20 +61,31 @@ class MediaDiskCache {
         });
   }
 
-  static CacheManager _openManager(Directory directory) => CacheManager(
-    Config(
-      directory.path,
-      // Age never evicts: the byte budget below does.
-      stalePeriod: _neverStale,
-      maxNrOfCacheObjects: maxFiles,
-      repo: MediaCacheIndex(
-        File(p.join(directory.path, 'index.json')),
-        directory,
-        maxBytes,
+  static CacheManager _openManager(
+    Directory directory, {
+    required int byteBudget,
+    required int fileBudget,
+    required Duration? evictionDelay,
+  }) {
+    final manager = CacheManager(
+      Config(
+        directory.path,
+        // Age never evicts: the byte budget below does.
+        stalePeriod: _neverStale,
+        maxNrOfCacheObjects: fileBudget,
+        repo: MediaCacheIndex(
+          File(p.join(directory.path, 'index.json')),
+          directory,
+          byteBudget,
+        ),
+        fileSystem: _DirectoryFileSystem(directory),
       ),
-      fileSystem: _DirectoryFileSystem(directory),
-    ),
-  );
+    );
+    if (evictionDelay != null) {
+      manager.store.cleanupRunMinInterval = evictionDelay;
+    }
+    return manager;
+  }
 
   static const _openTimeout = Duration(seconds: 3);
 
