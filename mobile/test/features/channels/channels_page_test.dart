@@ -495,11 +495,22 @@ void main() {
       find.descendant(of: popover, matching: find.byType(PopupMenuDivider)),
       findsNothing,
     );
-    final selectedCheck = find.byKey(const ValueKey('sort-selected-check'));
+    final selectedItem = find.ancestor(
+      of: find.text('Sort: A–Z'),
+      matching: find.byType(CheckedPopupMenuItem<String>),
+    );
+    expect(
+      tester.widget<CheckedPopupMenuItem<String>>(selectedItem).checked,
+      isTrue,
+    );
+    final selectedCheck = find.descendant(
+      of: selectedItem,
+      matching: find.byIcon(Icons.done),
+    );
     expect(selectedCheck, findsOneWidget);
     expect(
       tester.getCenter(selectedCheck).dx,
-      greaterThan(tester.getCenter(find.text('Sort: A–Z')).dx),
+      lessThan(tester.getTopLeft(find.text('Sort: A–Z')).dx),
     );
 
     for (final label in ['general', 'Alice']) {
