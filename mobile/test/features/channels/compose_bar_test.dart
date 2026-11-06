@@ -5244,6 +5244,32 @@ void main() {
         expect(textField.controller!.text, '');
         expect(textField.controller!.value.composing, TextRange.empty);
 
+        // Two backspaces can arrive before a frame redraws the composer.
+        // The second still removes the whole chip.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot ',
+          selection: TextSelection.collapsed(offset: 12),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo',
+            selection: TextSelection.collapsed(offset: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '');
+
         // A selection covering part of a chip grows to cover all of it, and
         // edits over a selection replace exactly the selection, so typed
         // text is kept and Cut removes only what it copies.

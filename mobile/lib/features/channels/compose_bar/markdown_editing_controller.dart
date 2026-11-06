@@ -30,6 +30,10 @@ class _MarkdownEditingController extends TextEditingController {
   List<TextRange> _chipRanges = const [];
   final List<TextRange> _pendingChipRanges = [];
 
+  /// Where [buildTextSpan] last ran, so the chip ranges can be brought up
+  /// to date when edits arrive faster than frames.
+  BuildContext? _lastBuildContext;
+
   /// Start of the link [buildTextSpan] last drew as raw text for the caret.
   int? _revealedLinkStart;
 
@@ -248,6 +252,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextStyle? style,
     required bool withComposing,
   }) {
+    _lastBuildContext = context;
     final baseStyle = style ?? const TextStyle();
     final composingRange =
         withComposing && value.composing.isValid && !value.composing.isCollapsed
@@ -372,6 +377,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
+    _refreshChipRanges(oldValue.text);
     final oldSelection = oldValue.selection;
     if (_chipRanges.isEmpty ||
         _chipRangesText != oldValue.text ||
@@ -410,6 +416,24 @@ class _MarkdownEditingController extends TextEditingController {
     return TextEditingValue(
       text: oldValue.text.replaceRange(expandedStart, expandedEnd, ''),
       selection: TextSelection.collapsed(offset: expandedStart),
+    );
+  }
+
+  /// Rebuilds the span for [text], recording its chip ranges, when an edit
+  /// arrives before a frame has drawn the previous one. IME batches can
+  /// send two backspaces in a row.
+  void _refreshChipRanges(String text) {
+    final context = _lastBuildContext;
+    if (_chipRangesText == text ||
+        value.text != text ||
+        context == null ||
+        !context.mounted) {
+      return;
+    }
+    buildTextSpan(
+      context: context,
+      style: _cachedBaseStyle,
+      withComposing: true,
     );
   }
 
