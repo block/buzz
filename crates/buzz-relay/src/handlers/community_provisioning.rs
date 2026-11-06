@@ -321,13 +321,11 @@ pub async fn provision_community(
             requires_nip_fi = record.requires_nip_fi,
             "community provisioned via operator endpoint"
         );
-        if record.created {
-            record_binding_creation(
-                state.nip_fi_resolver.as_deref(),
-                &record.host,
-                nip_fi_issuers,
-            );
-        }
+        record_binding_creation(
+            state.nip_fi_resolver.as_deref(),
+            &record.host,
+            nip_fi_issuers,
+        );
         state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
         fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
         return Ok(ProvisionCommunityResponse {

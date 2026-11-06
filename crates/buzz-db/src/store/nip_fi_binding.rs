@@ -694,13 +694,14 @@ mod postgres_tests {
         }
         for bindings in [vec![], vec![String::new()]] {
             let host = unique_host("refused-initial-policy");
-            assert!(
-                db.create_community_with_owner_and_nip_fi_policy(
-                    &host, OWNER, &bindings, true, &keys,
-                )
-                .await
-                .is_err()
-            );
+            let refusal = db
+                .create_community_with_owner_and_nip_fi_policy(&host, OWNER, &bindings, true, &keys)
+                .await;
+            if bindings.is_empty() {
+                assert!(matches!(refusal, Err(crate::DbError::NipFiBindingRequired)));
+            } else {
+                assert!(refusal.is_err());
+            }
             assert!(!community_exists(&db, &host).await);
         }
     }

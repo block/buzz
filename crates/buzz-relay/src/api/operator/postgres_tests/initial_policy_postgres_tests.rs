@@ -116,6 +116,24 @@ mod postgres_tests {
         .await;
         assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
         assert_eq!(read_json(refused).await["code"], "reserved_host");
+        let outside = format!("outside-{}.example", Uuid::new_v4().simple());
+        let refusal = create(
+            &state,
+            &operator,
+            &owner,
+            &outside,
+            true,
+            Some(Value::Bool(true)),
+        )
+        .await;
+        assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(read_json(refusal).await["code"], "nip_fi_binding_required");
+        assert!(state
+            .db
+            .lookup_community_by_host(&outside)
+            .await
+            .unwrap()
+            .is_none());
         let host = control.replacen("acme.", "policy-3.", 1);
         let record = state
             .db
