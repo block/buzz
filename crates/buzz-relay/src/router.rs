@@ -2393,6 +2393,92 @@ mod tests {
         nip_fi_state(buzz_auth::NipFiMode::Off).await
     }
 
+    #[tokio::test]
+    async fn git_policy_guards_preserve_unmatched_routes() {
+        use axum::{body::to_bytes, extract::ConnectInfo, http::Request};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let app = build_router(nip_fi_off_state().await);
+        let localhost: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let remote: SocketAddr = "192.0.2.1:12345".parse().unwrap();
+        // Exercise the merged production router, including its default fallback.
+        for peer in [None, Some(remote), Some(localhost)] {
+            for method in ["GET", "POST"] {
+                for path in ["/operator/communities/nip-fi-upgrade", "/unknown-route"] {
+                    let mut req = Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("content-length", 1024 * 1024 + 1)
+                        .body(Body::from(vec![b' '; 1024 * 1024 + 1]))
+                        .unwrap();
+                    if let Some(peer) = peer {
+                        req.extensions_mut().insert(ConnectInfo(peer));
+                    }
+                    let res = app.clone().oneshot(req).await.unwrap();
+                    let status = res.status();
+                    let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+                    assert_eq!(
+                        status,
+                        StatusCode::NOT_FOUND,
+                        "{method} {path}, peer={peer:?}, body={body:?}"
+                    );
+                }
+            }
+        }
+        for (peer, size, expected) in [
+            (None, 2, StatusCode::FORBIDDEN),
+            (Some(remote), 1024 * 1024 + 1, StatusCode::FORBIDDEN),
+            (
+                Some(localhost),
+                1024 * 1024 + 1,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            // A small JSON object reaches the real handler's JSON extractor.
+            (Some(localhost), 2, StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            let mut payload = b"{}".to_vec();
+            payload.resize(size, b' ');
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/internal/git/policy")
+                .header("content-type", "application/json")
+                .header("content-length", size)
+                .body(Body::from(payload))
+                .unwrap();
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            let res = app.clone().oneshot(req).await.unwrap();
+            let status = res.status();
+            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                status, expected,
+                "peer={peer:?}, size={size}, body={body:?}"
+            );
+            if expected == StatusCode::FORBIDDEN {
+                assert_eq!(&body[..], b"internal endpoint: localhost only");
+            }
+        }
+        // The path's method fallback remains protected, too.
+        for (peer, expected) in [
+            (None, StatusCode::FORBIDDEN),
+            (Some(remote), StatusCode::FORBIDDEN),
+            (Some(localhost), StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let mut req = Request::builder()
+                .uri("/internal/git/policy")
+                .body(Body::empty())
+                .unwrap();
+            if let Some(peer) = peer {
+                req.extensions_mut().insert(ConnectInfo(peer));
+            }
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), expected, "GET policy, peer={peer:?}");
+        }
+    }
+
     async fn nip_fi_state(mode: buzz_auth::NipFiMode) -> Arc<AppState> {
         use crate::nip_fi_config::NipFiRelayConfig;
         use buzz_auth::IssuerRegistry;
