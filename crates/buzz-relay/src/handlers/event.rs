@@ -367,28 +367,53 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
 #[tracing::instrument(skip_all)]
 pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
-    // The Redis topic carries the tenant-local routing scope explicitly:
-    // `Channel(id)` for a per-channel event, `Global` for a channel-less one.
-    // Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
-    // `Global` selects the global subscriber index.
+    if take_local_echo(state, &channel_event) {
+        return;
+    }
+    deliver_pubsub_event(state, channel_event).await;
+}
+
+/// Report whether `channel_event` is the Redis echo of an event this relay
+/// already fanned out in-process, consuming the echo record if so.
+///
+/// The dedup key is `(community_id, event_id)` — a same-id event arriving for a
+/// *different* community is a distinct delivery and must not be suppressed.
+/// The cache has TTL-based eviction (60s) so entries are bounded regardless of
+/// subscriber health.
+pub(crate) fn take_local_echo(state: &AppState, channel_event: &buzz_pubsub::ChannelEvent) -> bool {
+    let echo_key = (
+        channel_event.community_id,
+        channel_event.event.id.to_bytes(),
+    );
+    if state.local_event_ids.get(&echo_key).is_some() {
+        state.local_event_ids.invalidate(&echo_key);
+        return true;
+    }
+    false
+}
+
+/// The `StoredEvent` a Redis event fans out as.
+///
+/// The Redis topic carries the tenant-local routing scope explicitly:
+/// `Channel(id)` for a per-channel event, `Global` for a channel-less one.
+/// Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
+/// `Global` selects the global subscriber index.
+pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> StoredEvent {
     let channel_id = match channel_event.topic {
         buzz_pubsub::EventTopic::Channel(id) => Some(id),
         buzz_pubsub::EventTopic::Global => None,
     };
-    let community_id = channel_event.community_id;
-    let stored = StoredEvent::new(channel_event.event, channel_id);
+    StoredEvent::new(channel_event.event, channel_id)
+}
 
-    // Skip events that were already fanned out in-process (local echo). The
-    // dedup key is `(community_id, event_id)` — a same-id event arriving for a
-    // *different* community is a distinct delivery and must not be suppressed.
-    // The cache has TTL-based eviction (60s) so entries are bounded regardless
-    // of subscriber health.
-    let event_id_bytes = stored.event.id.to_bytes();
-    let echo_key = (community_id, event_id_bytes);
-    if state.local_event_ids.get(&echo_key).is_some() {
-        state.local_event_ids.invalidate(&echo_key);
-        return;
-    }
+/// Deliver one Redis event that is not a local echo to this relay's local
+/// subscribers, through the access gate.
+pub(crate) async fn deliver_pubsub_event(
+    state: &Arc<AppState>,
+    channel_event: buzz_pubsub::ChannelEvent,
+) {
+    let community_id = channel_event.community_id;
+    let stored = pubsub_stored_event(channel_event);
 
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
     let matches = route_fanout_matches(state, community_id, &stored, matches, None).await;
