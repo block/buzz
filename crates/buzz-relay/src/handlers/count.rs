@@ -42,13 +42,10 @@ pub async fn handle_count(
     };
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
-    // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
+    // #p or authors naming only the caller — same enforcement as WS REQ handler.
     let authed_pubkey_hex = hex::encode(&pubkey_bytes);
     if !super::req::p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-        conn.send(RelayMessage::closed(
-            &sub_id,
-            "restricted: p-gated kinds require #p tag matching your pubkey",
-        ));
+        conn.send(RelayMessage::closed(&sub_id, super::req::P_GATED_REFUSAL));
         access.deny("p_gated");
         return;
     }
