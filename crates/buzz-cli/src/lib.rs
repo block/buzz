@@ -129,7 +129,10 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: the relay an agent's inherited
-                     Buzz desktop credential acts on, else http://localhost:3000]
+                     Buzz desktop credential acts on; else, with no private key,
+                     the one relay a running Buzz desktop accepts this CLI's
+                     pairing for (see `buzz auth desktop list`); else
+                     http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
   BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
@@ -147,7 +150,8 @@ Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"
 struct Cli {
     /// Relay URL (http:// or https://). Overrides BUZZ_RELAY_URL env var.
     /// Without either, the relay an agent's inherited Buzz desktop credential
-    /// acts on; otherwise http://localhost:3000.
+    /// acts on; else, with no private key, the one relay a running Buzz
+    /// desktop accepts this CLI's pairing for; otherwise http://localhost:3000.
     #[arg(long, env = "BUZZ_RELAY_URL")]
     relay: Option<String>,
 
@@ -376,23 +380,58 @@ enum DesktopAuthCmd {
         #[arg(long)]
         instance: Option<String>,
     },
+    /// List this CLI's pairings: instance, relays, pubkey, and whether a
+    /// running Buzz desktop accepts each now. Never prints tokens; needs no
+    /// relay.
+    List,
 }
 
 /// The relay for a command given none: the one an agent's inherited Buzz
-/// desktop credential acts on, else `http://localhost:3000`. Local-only
-/// unpairing never asks the desktop.
-async fn default_relay(command: &Cmd) -> Result<String, CliError> {
+/// desktop credential acts on; else, without an explicit key, the one relay
+/// a running Buzz desktop still accepts this CLI's pairing for; else
+/// `http://localhost:3000`. Local-only unpairing never asks the desktop,
+/// and pairing never asks for other pairings.
+async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<String, CliError> {
+    #[cfg(unix)]
+    let (inherited, paired) = (
+        desktop_provider::inherited_relay(),
+        desktop_provider::paired_relay(),
+    );
+    #[cfg(not(unix))]
+    let (inherited, paired) = (async { Ok(None) }, async { Ok(None) });
+    default_relay_with(command, explicit_key, inherited, paired).await
+}
+
+/// [`default_relay`], with the agent and paired-person selectors (each
+/// awaited only when needed) parameters so a test can run it against a fake
+/// desktop.
+pub(crate) async fn default_relay_with(
+    command: &Cmd,
+    explicit_key: bool,
+    inherited: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+    paired: impl std::future::Future<Output = Result<Option<String>, CliError>>,
+) -> Result<String, CliError> {
     #[cfg(unix)]
     if !matches!(
         command,
         Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Unpair { .. }))
     ) {
-        if let Some(relay) = desktop_provider::inherited_relay().await? {
+        if let Some(relay) = inherited.await? {
             return Ok(relay);
+        }
+        // Pairing asks its own desktop; another desktop's answer is moot.
+        let pairing = matches!(
+            command,
+            Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Pair { .. }))
+        );
+        if !explicit_key && !pairing {
+            if let Some(relay) = paired.await? {
+                return Ok(relay);
+            }
         }
     }
     #[cfg(not(unix))]
-    let _ = command;
+    let _ = (command, explicit_key, inherited, paired);
     Ok("http://localhost:3000".to_owned())
 }
 
@@ -404,9 +443,32 @@ async fn run_auth(cmd: AuthCmd, relay_url: &str) -> Result<(), CliError> {
             desktop_provider::pair(relay_url, &name, instance.as_deref()).await?
         }
         DesktopAuthCmd::Unpair { instance } => desktop_provider::unpair(instance.as_deref())?,
+        DesktopAuthCmd::List => unreachable!("listing runs before any relay is chosen"),
     };
     println!("{out}");
     Ok(())
+}
+
+/// `auth desktop list`, in `format`: `compact` drops the pubkey.
+#[cfg(unix)]
+async fn list_pairings(format: &OutputFormat) -> Result<(), CliError> {
+    let mut listed = desktop_provider::list().await?;
+    if matches!(format, OutputFormat::Compact) {
+        for pairing in &mut listed {
+            if let Some(fields) = pairing.as_object_mut() {
+                fields.remove("pubkey");
+            }
+        }
+    }
+    println!("{}", serde_json::Value::Array(listed));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn list_pairings(_: &OutputFormat) -> Result<(), CliError> {
+    Err(CliError::Usage(
+        "the Buzz desktop credential provider is not available on Windows yet".into(),
+    ))
 }
 
 #[cfg(not(unix))]
@@ -2566,9 +2628,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         ..Default::default()
     }
     .with_env_evidence();
+    // Listing pairings is local: it needs no relay and runs no discovery.
+    if let Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::List)) = cli.command {
+        return list_pairings(&cli.format).await;
+    }
+    let explicit_key = settings.private_key.is_some();
     let relay = match cli.relay {
         Some(relay) => relay,
-        None => default_relay(&cli.command).await?,
+        None => default_relay(&cli.command, explicit_key).await?,
     };
     let Some((command, client)) = connect(&relay, cli.command, run_auth, async |relay| {
         credentials::resolve(settings, relay).await
@@ -2679,6 +2746,38 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// Relay selection asks only what a command needs: an explicit key never
+    /// asks for a pairing, unpairing asks nothing, pairing asks for no other
+    /// pairing, and an agent's inherited relay comes first. `None` for
+    /// `inherited` means it must not be asked; the paired lookup never is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relay_selection_asks_only_what_a_command_needs() {
+        use clap::Parser;
+        const INHERITED: &str = "wss://inherited.example/";
+        const DEFAULT: &str = "http://localhost:3000";
+        let cases = [
+            ("users get", true, Some(None), DEFAULT),
+            ("auth desktop unpair", false, None, DEFAULT),
+            ("auth desktop pair", false, Some(None), DEFAULT),
+            ("users get", false, Some(Some(INHERITED)), INHERITED),
+        ];
+        for (args, explicit_key, inherited, want) in cases {
+            let argv = std::iter::once("buzz").chain(args.split(' '));
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let inherited = async move {
+                Ok(inherited
+                    .unwrap_or_else(|| panic!("`{args}` asked for an inherited relay"))
+                    .map(str::to_owned))
+            };
+            let paired = async { panic!("`{args}` asked for a paired relay") };
+            let relay = default_relay_with(&cli.command, explicit_key, inherited, paired)
+                .await
+                .unwrap();
+            assert_eq!(relay, want, "`{args}`");
+        }
     }
 
     #[test]
