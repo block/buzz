@@ -84,6 +84,46 @@ async fn effective_edit_uses_target_index_and_fresh_channel_authorization() {
         .await
         .unwrap()
         .is_none());
+    db.ensure_user(community, outsider.public_key().as_bytes())
+        .await
+        .unwrap();
+    db.add_member(
+        community,
+        channel,
+        outsider.public_key().as_bytes(),
+        crate::channel::MemberRole::Member,
+        Some(owner.public_key().as_bytes()),
+    )
+    .await
+    .unwrap();
+    assert!(db
+        .message_edit_state(
+            community,
+            channel,
+            original.id.as_bytes(),
+            outsider.public_key().as_bytes()
+        )
+        .await
+        .unwrap()
+        .is_some());
+    db.remove_member(
+        community,
+        channel,
+        outsider.public_key().as_bytes(),
+        owner.public_key().as_bytes(),
+    )
+    .await
+    .unwrap();
+    assert!(db
+        .message_edit_state(
+            community,
+            channel,
+            original.id.as_bytes(),
+            outsider.public_key().as_bytes()
+        )
+        .await
+        .unwrap()
+        .is_none());
     let sql = format!("EXPLAIN (FORMAT JSON) {}", latest_message_edit_sql());
     let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(community.as_uuid())
@@ -93,7 +133,16 @@ async fn effective_edit_uses_target_index_and_fresh_channel_authorization() {
         .await
         .unwrap();
     let plan = plan.to_string();
-    assert!(plan.contains("media_edit_target"), "{plan}");
+    let child_indexes: Vec<String> = sqlx::query_scalar("SELECT child.relname FROM pg_inherits inheritance JOIN pg_class child ON child.oid=inheritance.inhrelid WHERE inheritance.inhparent='idx_events_media_edit_target'::regclass")
+        .fetch_all(&pool).await.unwrap();
+    assert!(
+        child_indexes.iter().any(|index| plan.contains(index)),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("decode(lower("),
+        "target must be an index condition: {plan}"
+    );
     assert!(!plan.contains("Seq Scan"), "{plan}");
     db.soft_delete_event_and_update_thread(community, edit.id.as_bytes(), None, None)
         .await

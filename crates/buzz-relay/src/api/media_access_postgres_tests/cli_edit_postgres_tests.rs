@@ -1,6 +1,58 @@
 //! Exercise the real CLI, HTTP bridge, ingest, and media reads in enforce mode.
 use super::*;
 
+// Keep the large ingest future off the enclosing test thread's stack.
+async fn publish(
+    state: &Arc<AppState>,
+    tenant: &buzz_core::TenantContext,
+    keys: &Keys,
+    event: nostr::Event,
+) -> Result<crate::handlers::ingest::IngestResult, crate::handlers::ingest::IngestError> {
+    Box::pin(post(state, tenant, keys, event)).await
+}
+
+async fn lookup(
+    state: &Arc<AppState>,
+    host: &str,
+    keys: &Keys,
+    channel: Uuid,
+    target: nostr::EventId,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::to_vec(&serde_json::json!([{"kinds":[9,40002],"ids":[target.to_hex()],"#h":[channel.to_string()],"effective_edit":1,"consistency":"strong"}])).unwrap();
+    let proof = EventBuilder::new(Kind::Custom(27235), "")
+        .tags([
+            Tag::parse(["u", &format!("http://{host}/query")]).unwrap(),
+            Tag::parse(["method", "POST"]).unwrap(),
+            Tag::parse(["payload", &hex::encode(Sha256::digest(&body))]).unwrap(),
+            Tag::parse(["nonce", &Uuid::new_v4().to_string()]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header(header::HOST, host)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(
+            header::AUTHORIZATION,
+            format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD.encode(proof.as_json())
+            ),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = crate::router::build_router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    (
+        status,
+        serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap(),
+    )
+}
+
 async fn cli_edit(url: &str, keys: &Keys, id: nostr::EventId, clear: bool, content: &str) {
     let mut args = vec![
         "buzz".to_owned(),
@@ -18,7 +70,11 @@ async fn cli_edit(url: &str, keys: &Keys, id: nostr::EventId, clear: bool, conte
     if clear {
         args.push("--clear-attachments".into());
     }
-    assert_eq!(buzz_cli::run_from_args(args).await, 0, "CLI edit failed");
+    assert_eq!(
+        Box::pin(buzz_cli::run_from_args(args)).await,
+        0,
+        "CLI edit failed"
+    );
 }
 async fn readable(
     state: &Arc<AppState>,
@@ -141,7 +197,7 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 20))
         .sign_with_keys(&owner)
         .unwrap();
-    post(&state, &tenant, &owner, original.clone())
+    publish(&state, &tenant, &owner, original.clone())
         .await
         .unwrap();
     let url = format!("http://{host}");
@@ -183,7 +239,7 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 5))
         .sign_with_keys(&owner)
         .unwrap();
-    post(&state, &tenant, &owner, partial.clone())
+    publish(&state, &tenant, &owner, partial.clone())
         .await
         .unwrap();
     for _ in 0..2 {
@@ -205,9 +261,8 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
             .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 20))
             .sign_with_keys(&owner)
             .unwrap();
-    // The removed file no longer has publication authority: reupload proof
-    // is needed to publish a restoration, so insert this historical event
-    // through the database test seam rather than granting new upload proof.
+    // Seed a historical deleted replacement without publishing a new live
+    // restoration. The uploader still has authority to republish these bytes.
     state
         .db
         .insert_event(tenant.community(), &deleted, Some(channel))
@@ -247,13 +302,15 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         )
         .sign_with_keys(&owner)
         .unwrap();
-    post(&state, &tenant, &owner, second.clone()).await.unwrap();
+    publish(&state, &tenant, &owner, second.clone())
+        .await
+        .unwrap();
     let restored = buzz_sdk::build_edit_with_media(channel, original.id, "both", &media)
         .unwrap()
         .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 30))
         .sign_with_keys(&owner)
         .unwrap();
-    post(&state, &tenant, &owner, restored).await.unwrap();
+    publish(&state, &tenant, &owner, restored).await.unwrap();
     let mixed = original
         .id
         .to_hex()
@@ -276,7 +333,7 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 31))
         .sign_with_keys(&owner)
         .unwrap();
-    post(&state, &tenant, &owner, removal).await.unwrap();
+    publish(&state, &tenant, &owner, removal).await.unwrap();
     cli_edit(&url, &owner, original.id, false, "after mixed-case removal").await;
     let current = state
         .db
@@ -340,9 +397,16 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
             .unwrap()
             .sign_with_keys(&outsider)
             .unwrap();
-    assert!(post(&state, &tenant, &outsider, owner_edit).await.is_err());
+    let error = publish(&state, &tenant, &outsider, owner_edit)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::handlers::ingest::IngestError::Rejected(ref reason)
+        if reason == "restricted: attachment is not accessible"),
+        "{error:?}"
+    );
     assert_ne!(
-        buzz_cli::run_from_args(vec![
+        Box::pin(buzz_cli::run_from_args(vec![
             "buzz".to_string(),
             "--relay".into(),
             url.clone(),
@@ -354,7 +418,7 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
             original.id.to_hex(),
             "--content".into(),
             "owner edit".into()
-        ])
+        ]))
         .await,
         0
     );
@@ -379,14 +443,14 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         .tags([Tag::parse(["h", &open.to_string()]).unwrap()])
         .sign_with_keys(&outsider)
         .unwrap();
-    post(&state, &tenant, &outsider, harmless.clone())
+    publish(&state, &tenant, &outsider, harmless.clone())
         .await
         .unwrap();
     let copied = buzz_sdk::build_edit_with_media(open, harmless.id, "stolen", &media)
         .unwrap()
         .sign_with_keys(&outsider)
         .unwrap();
-    assert!(post(&state, &tenant, &outsider, copied).await.is_err());
+    assert!(publish(&state, &tenant, &outsider, copied).await.is_err());
     readable(
         &state,
         host,
@@ -395,6 +459,40 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         &[StatusCode::NOT_FOUND; 2],
     )
     .await;
+    let forbidden = lookup(&state, host, &outsider, channel, original.id).await;
+    let missing = lookup(
+        &state,
+        host,
+        &outsider,
+        channel,
+        nostr::EventId::from_byte_array([0x42; 32]),
+    )
+    .await;
+    assert_eq!(
+        forbidden, missing,
+        "inaccessible and missing states must be indistinguishable"
+    );
+    assert_eq!(forbidden.0, StatusCode::NOT_FOUND);
+    state
+        .db
+        .remove_member(
+            tenant.community(),
+            channel,
+            member.public_key().as_bytes(),
+            owner.public_key().as_bytes(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        lookup(&state, host, &member, channel, original.id).await,
+        missing,
+        "fresh snapshot must reject a removed member"
+    );
+    assert_eq!(
+        lookup(&state, host, &member, open, harmless.id).await.0,
+        StatusCode::OK,
+        "open-channel reader needs no membership"
+    );
     http_server.abort();
     s3_server.abort();
 }

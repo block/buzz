@@ -22,7 +22,9 @@ The version-1 envelope is:
 `original` and a non-null `edit` are complete signed Nostr events. `edit` is the
 latest live kind 40003 in the same channel targeting the live kind 9/40002
 original. Targets use the first valid 64-character hex `e` tag in signed order,
-ignoring casing. The greatest `(created_at,id)` wins. An empty imeta set on that
+ignoring casing. The greatest `(created_at,id)` wins. Upload proof can still authorize
+republication by the uploader after removal; correct state resolution prevents
+accidental restoration even when publication would be authorized. An empty imeta set on that
 edit is authoritative; it never falls back to original attachments.
 
 Original liveness, fresh channel authorization, and edit selection share a

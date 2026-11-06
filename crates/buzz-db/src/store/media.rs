@@ -63,6 +63,8 @@ impl Db {
         sqlx::raw_sql(MEDIA_LOOKUP_SETTINGS_SQL)
             .execute(&mut *tx)
             .await?;
+        // Mirrors channel_members::{get_accessible_channel_ids,
+        // get_readable_named_only_channels}.
         // The channel is explicitly named by this read, so open unlisted and
         // named-only channels follow the normal explicit-channel read policy.
         let original = sqlx::query("SELECT e.* FROM events e JOIN channels c ON c.community_id=e.community_id AND c.id=e.channel_id WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3 AND e.kind IN (9,40002) AND e.deleted_at IS NULL AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.community_id=c.community_id AND cm.channel_id=c.id AND cm.pubkey=$4 AND cm.removed_at IS NULL))")
