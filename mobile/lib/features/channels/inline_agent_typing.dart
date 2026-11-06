@@ -35,13 +35,13 @@ class InlineAgentTyping extends ConsumerWidget {
     final visibleKeys = keys.take(keys.length > 4 ? 3 : 4).toList();
     final profiles = ref.watch(userCacheProvider);
     final bots = ref.watch(agentMentionPubkeysProvider(channelId));
-    // Only the owner's registry confirms where an agent runs.
+    // Only the owner's registry confirms where an agent runs. Like desktop's
+    // typing byline, the cues are for a lone confirmed remote agent, so a
+    // mixed group never reads as all remote.
+    final remoteAgents = ref.watch(availableRemoteAgentsProvider).value;
     final remote =
-        ref
-            .watch(availableRemoteAgentsProvider)
-            .value
-            ?.contains(visibleKeys.first) ??
-        false;
+        keys.length == 1 &&
+        (remoteAgents?.contains(visibleKeys.first) ?? false);
     final labels = watchChannelIdentityLabels(
       ref,
       channelId,
@@ -53,11 +53,9 @@ class InlineAgentTyping extends ConsumerWidget {
     final title = keys.length == 1
         ? name
         : '$name and ${keys.length - 1} ${keys.length == 2 ? 'other' : 'others'}';
-    // Like desktop's typing byline: only a lone confirmed remote agent.
-    final remoteByline = remote && keys.length == 1;
     return Semantics(
       liveRegion: true,
-      label: remoteByline
+      label: remote
           ? '$title, remote, is typing'
           : '$title ${keys.length == 1 ? 'is' : 'are'} typing',
       child: ExcludeSemantics(
@@ -115,7 +113,7 @@ class InlineAgentTyping extends ConsumerWidget {
                             ),
                           ),
                           // A long name truncates before the location does.
-                          if (remoteByline)
+                          if (remote)
                             Text(
                               ' \u00b7 Remote',
                               maxLines: 1,

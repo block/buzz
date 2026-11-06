@@ -402,6 +402,24 @@ void main() {
       findsOneWidget,
     );
 
+    // With others typing too, neither cue implies they are all remote.
+    await tester.pumpWidget(
+      surface(
+        remote: true,
+        entries: const [
+          TypingEntry(pubkey: agent, expiresAtMs: 8000),
+          TypingEntry(pubkey: 'person-1', expiresAtMs: 8000),
+        ],
+      ),
+    );
+    await tester.pump();
+    expect(cloud, findsNothing);
+    expect(find.text(' \u00b7 Remote'), findsNothing);
+    expect(
+      find.bySemanticsLabel('Test agent and 1 other are typing'),
+      findsOneWidget,
+    );
+
     await tester.pumpWidget(surface(remote: true, reduced: true));
     await tester.pumpAndSettle();
     expect(opacity(), 1);
