@@ -943,7 +943,8 @@ void main() {
         const Offset(-500, 0),
       );
       await tester.pumpAndSettle();
-      expect(threadMarker(), now - 300);
+      // With the agent reply read too, the synced marker covers both.
+      expect(threadMarker(), now - 200);
       await chooseSender('Anyone');
       expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
     },

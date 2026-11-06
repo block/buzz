@@ -1,7 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
-import 'dart:math' show max, min;
+import 'dart:math' show max;
 
 import '../../shared/widgets/ios_message_create_button.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
@@ -213,9 +213,11 @@ class ActivityPage extends HookConsumerWidget {
       return null;
     }, [preloadPubkeysKey]);
 
-    // A filtered row holds only part of its conversation. Advance its synced
-    // thread or channel marker only up to the first unread event the filter
-    // hides, and give shown events past that point local per-message marks.
+    // A filtered row holds only part of its conversation. Its synced thread
+    // or channel marker is one watermark, so advance it through every event
+    // that is now read (shown here, or already read) and stop just before the
+    // first unread event the filter hides. Shown events past that point get
+    // local per-message marks until the hidden one is read too.
     void markPartialRowRead(
       InboxItem item,
       String channelId, {
@@ -231,21 +233,30 @@ class ActivityPage extends HookConsumerWidget {
           (rootId == null ||
               (isThreadReply(e.tags) &&
                   threadReferenceOf(e.tags).rootId == rootId));
-      var cap = item.latestActivityAt;
-      for (final e in allItems.expand((i) => i.groupItems)) {
-        if (shown.containsKey(e.id) ||
-            !inContext(e) ||
-            isInboxEventRead(e, markerOf: markerOf)) {
-          continue;
+      final events = {
+        for (final e in [
+          ...allItems.expand((i) => i.groupItems),
+          ...shown.values,
+        ])
+          if (inContext(e)) e.id: e,
+      }.values.toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      int? cap;
+      for (final e in events) {
+        if (!shown.containsKey(e.id) &&
+            !isInboxEventRead(e, markerOf: markerOf)) {
+          cap = e.createdAt - 1;
+          break;
         }
-        cap = min(cap, e.createdAt - 1);
+        cap = e.createdAt;
       }
-      notifier.markContextRead(
-        rootId == null ? channelId : threadContextKey(rootId),
-        cap,
-      );
+      if (cap != null) {
+        notifier.markContextRead(
+          rootId == null ? channelId : threadContextKey(rootId),
+          cap,
+        );
+      }
       for (final e in shown.values) {
-        if (inContext(e) && e.createdAt <= cap) continue;
+        if (inContext(e) && cap != null && e.createdAt <= cap) continue;
         notifier.markContextRead(msgContextKey(e.id), e.createdAt);
       }
     }
