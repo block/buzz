@@ -1,5 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
+import '../../shared/me/hold_to_talk.dart';
+import '../../shared/widgets/app_toggle_row.dart';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
@@ -31,6 +33,7 @@ part 'settings_page/profile_section.dart';
 part 'settings_page/status_section.dart';
 part 'settings_page/connection_section.dart';
 part 'settings_page/notifications_section.dart';
+part 'settings_page/voice_section.dart';
 
 Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
 
@@ -127,6 +130,7 @@ class SettingsPage extends HookConsumerWidget {
               onEditProfileDescription: onEditProfileDescription,
             ),
             const _NotificationsSection(),
+            const _VoiceSection(),
             _ConnectionSection(
               identityRecoveryPageBuilder: identityRecoveryPageBuilder,
             ),

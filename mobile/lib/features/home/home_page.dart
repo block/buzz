@@ -1,4 +1,5 @@
 import '../../shared/widgets/android_expanding_menu_button.dart';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -55,6 +56,10 @@ class HomePage extends HookConsumerWidget {
         (route?.isCurrent ?? true) && coveringProgress == 0;
 
     final communitySurfaceProgress = useState(0.0);
+    final recordingFocus = useState(false);
+    final onRecordingChanged = useCallback((bool value) {
+      if (context.mounted) recordingFocus.value = value;
+    }, const []);
     final filter = useState('All');
     final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
@@ -122,7 +127,9 @@ class HomePage extends HookConsumerWidget {
         return [
           SizedBox(
             key: avatarKey,
-            child: defaultTargetPlatform == TargetPlatform.iOS
+            child:
+                defaultTargetPlatform == TargetPlatform.iOS &&
+                    !recordingFocus.value
                 ? IosMessageCreateButton(
                     actions: moreActions,
                     dividerBefore: const {1},
@@ -152,6 +159,7 @@ class HomePage extends HookConsumerWidget {
         ];
       },
       messagesFilters: MessagesFilters(
+        useNativeGlass: !recordingFocus.value,
         selected: filter.value,
         onSelected: (value) {
           filter.value = value;
@@ -191,6 +199,7 @@ class HomePage extends HookConsumerWidget {
               ? Center(
                   child: MessagesNavigationBar(
                     onSearch: openSearch,
+                    onRecordingChanged: onRecordingChanged,
                     agent: defaultAgentBuilder(context),
                     creationActions: [
                       (
@@ -241,7 +250,10 @@ class HomePage extends HookConsumerWidget {
               // The switcher uses a transparent route for its avatar flight.
               // Keep Home laid out, but do not paint it through UIKit glass.
               opacity: communitySurfaceProgress.value == 0 ? 1 : 0,
-              child: messages,
+              child: ExcludeSemantics(
+                excluding: recordingFocus.value,
+                child: messages,
+              ),
             ),
           ),
           Positioned(
@@ -252,6 +264,21 @@ class HomePage extends HookConsumerWidget {
               child: MobileTabFooterBackdrop(
                 height: mobileTabFooterBackdropHeight(context),
                 tint: context.controlSurface,
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: !recordingFocus.value,
+              child: BackdropFilter(
+                key: const ValueKey('voice-recording-focus'),
+                enabled: recordingFocus.value,
+                filter: ui.ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                child: ColoredBox(
+                  color: recordingFocus.value
+                      ? context.colors.surface.withValues(alpha: 0.18)
+                      : Colors.transparent,
+                ),
               ),
             ),
           ),

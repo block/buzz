@@ -33,6 +33,8 @@ import os.log
   private var communityKeyboardChannel: FlutterMethodChannel?
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
+  private let voiceStartFeedback = UIImpactFeedbackGenerator(style: .medium)
+  private let voiceCancelFeedback = UIImpactFeedbackGenerator(style: .rigid)
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -138,14 +140,30 @@ import os.log
       name: "buzz/haptics",
       binaryMessenger: messenger
     )
-    hapticsChannel?.setMethodCallHandler { call, result in
-      guard call.method == "success" || call.method == "error" else {
+    hapticsChannel?.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
         result(FlutterMethodNotImplemented)
         return
       }
-      let generator = UINotificationFeedbackGenerator()
-      generator.prepare()
-      generator.notificationOccurred(call.method == "error" ? .error : .success)
+      switch call.method {
+      case "voicePrepareStart":
+        self.voiceStartFeedback.prepare()
+      case "voicePrepareCancel":
+        self.voiceCancelFeedback.prepare()
+      case "voiceStart":
+        self.voiceStartFeedback.impactOccurred(intensity: 1)
+        self.voiceCancelFeedback.prepare()
+      case "voiceCancel":
+        self.voiceCancelFeedback.impactOccurred(intensity: 1)
+        self.voiceCancelFeedback.prepare()
+      case "success", "error":
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(call.method == "error" ? .error : .success)
+      default:
+        result(FlutterMethodNotImplemented)
+        return
+      }
       result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(
@@ -238,6 +256,10 @@ import os.log
         NavigationGlassButtonFactory(messenger: messenger),
         withId: "buzz/navigation_glass"
       )
+    }
+
+    if let switchRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativeSwitch") {
+      switchRegistrar.register(NativeSwitchFactory(messenger: messenger), withId: "buzz/switch")
     }
 
     if let segmentedControlRegistrar = engineBridge.pluginRegistry.registrar(

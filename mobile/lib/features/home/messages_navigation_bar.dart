@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../../shared/widgets/agent_navigation_overlay.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -18,87 +19,125 @@ class MessagesNavigationBar extends HookWidget {
     required this.onSearch,
     required this.creationActions,
     required this.agent,
+    this.onRecordingChanged,
   });
   final VoidCallback onSearch;
   final Widget agent;
+  final ValueChanged<bool>? onRecordingChanged;
   final List<({String label, String symbol, VoidCallback? onPressed})>
   creationActions;
 
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return SizedBox(
-        width: 256,
-        height: 56,
-        child: Stack(
-          children: [
-            IosMessageCreateButton(
-              mergingNavigation: true,
-              onMenuVisibilityChanged: (visible) => menuOpen.value = visible,
-              actions: creationActions,
-              dividerBefore: const {2},
-              sectionTitles: const {0: 'Solo', 2: 'Team'},
-              label: 'New',
-              showIconWithLabel: true,
-              accessibilityLabel: 'New',
+    final overlay = useState(false);
+    Widget hideDuringVoice(Widget child) => ExcludeSemantics(
+      excluding: overlay.value,
+      child: IgnorePointer(
+        ignoring: overlay.value,
+        child: Opacity(opacity: overlay.value ? 0 : 1, child: child),
+      ),
+    );
+    return AgentNavigationOverlay(
+      active: overlay,
+      onRecordingChanged: onRecordingChanged,
+      child: Builder(
+        builder: (context) {
+          if (defaultTargetPlatform == TargetPlatform.iOS) {
+            return SizedBox(
               width: 256,
               height: 56,
-              plain: false,
-            ),
-            Positioned(
-              left: 0,
-              width: 72,
-              top: 0,
-              bottom: 0,
-              child: ClipRect(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: _MenuNudge(
-                    offset: menuOpen.value ? 100 : 0,
-                    menuOpen: menuOpen.value,
-                    alignment: Alignment.center,
-                    child: _search(context),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  hideDuringVoice(
+                    IosMessageCreateButton(
+                      mergingNavigation: true,
+                      onMenuVisibilityChanged: (visible) =>
+                          menuOpen.value = visible,
+                      actions: creationActions,
+                      dividerBefore: const {2},
+                      sectionTitles: const {0: 'Solo', 2: 'Team'},
+                      label: 'New',
+                      showIconWithLabel: true,
+                      accessibilityLabel: 'New',
+                      width: 256,
+                      height: 56,
+                      plain: false,
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    width: 72,
+                    top: 0,
+                    bottom: 0,
+                    child: ClipRect(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: _MenuNudge(
+                          offset: menuOpen.value ? 100 : 0,
+                          menuOpen: menuOpen.value,
+                          alignment: Alignment.center,
+                          child: hideDuringVoice(_search(context)),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    right: 0,
+                    width: 256,
+                    top: 0,
+                    bottom: 0,
+                    child: OverflowBox(
+                      alignment: Alignment.centerRight,
+                      minWidth: 0,
+                      maxWidth: 256,
+                      child: Align(
+                        widthFactor: 1,
+                        alignment: Alignment.centerRight,
+                        child: _MenuNudge(
+                          offset: menuOpen.value ? -100 : 0,
+                          menuOpen: menuOpen.value,
+                          alignment: Alignment.center,
+                          child: NavigationGlassGroup(child: agent),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+          return SizedBox(
+            width: 224 + Grid.xs * 2,
+            height: 56,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                hideDuringVoice(
+                  Builder(
+                    builder: (controlsContext) => Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        NavigationButtonSurface(child: _search(context)),
+                        const SizedBox(width: Grid.xs),
+                        AndroidExpandingMenuButton(
+                          expansionBoundsContext: controlsContext,
+                          actions: creationActions,
+                          dividerBefore: const {2},
+                          sectionTitles: const {0: 'Solo', 2: 'Team'},
+                        ),
+                        const SizedBox(width: Grid.xs),
+                        const SizedBox.square(dimension: 56),
+                      ],
+                    ),
                   ),
                 ),
-              ),
+                Positioned(right: 0, top: 0, child: agent),
+              ],
             ),
-            Positioned(
-              right: 0,
-              width: 72,
-              top: 0,
-              bottom: 0,
-              child: ClipRect(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: _MenuNudge(
-                    offset: menuOpen.value ? -100 : 0,
-                    menuOpen: menuOpen.value,
-                    alignment: Alignment.center,
-                    child: NavigationGlassGroup(child: agent),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    return Builder(
-      builder: (controlsContext) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          NavigationButtonSurface(child: _search(context)),
-          const SizedBox(width: Grid.xs),
-          AndroidExpandingMenuButton(
-            expansionBoundsContext: controlsContext,
-            actions: creationActions,
-            dividerBefore: const {2},
-            sectionTitles: const {0: 'Solo', 2: 'Team'},
-          ),
-          const SizedBox(width: Grid.xs),
-          agent,
-        ],
+          );
+        },
       ),
     );
   }

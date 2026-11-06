@@ -44,33 +44,12 @@ class _NotificationsSection extends ConsumerWidget {
             subtitle: 'You can keep using Buzz. Tap to retry notifications.',
             onTap: () => retryBuzzPushSetup(ref),
           ),
-        MergeSemantics(
+        AppToggleRow(
           key: const ValueKey('push-notifications-setting'),
-          child: Stack(
-            alignment: Alignment.centerRight,
-            children: [
-              AppListRow(
-                key: const ValueKey('push-notifications-enabled'),
-                title: 'Notifications',
-                // Reserve horizontal room without letting the switch's 48dp
-                // layout height expand this single-line row.
-                trailing: const SizedBox(width: 60),
-                onTap: canToggle
-                    ? () => setEnabled(!community.pushNotificationsEnabled)
-                    : null,
-              ),
-              Positioned.fill(
-                right: Grid.xs,
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: Switch.adaptive(
-                    value: community.pushNotificationsEnabled,
-                    onChanged: canToggle ? setEnabled : null,
-                  ),
-                ),
-              ),
-            ],
-          ),
+          rowKey: const ValueKey('push-notifications-enabled'),
+          title: 'Notifications',
+          value: community.pushNotificationsEnabled,
+          onChanged: canToggle ? setEnabled : null,
         ),
       ],
     );
