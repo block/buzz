@@ -12,9 +12,19 @@
 -- before clearing legacy_admission on every invite row. Skipped communities
 -- retain the marker and remain fail-closed until a later run. The script is
 -- idempotent; rerun it after a failure.
+-- statement_timeout bounds the entire DO invocation, including all batches;
+-- COMMIT does not restart it. On timeout, committed batches remain repaired,
+-- the current batch rolls back, and ON_ERROR_STOP skips the final zero check.
+-- Keep admission closed and rerun. If scanning the repaired prefix consumes
+-- the budget, choose a larger finite invocation budget with psql's
+-- -v invite_repair_timeout=10min (the default is 2min).
 \set ON_ERROR_STOP on
+\if :{?invite_repair_timeout}
+\else
+\set invite_repair_timeout 2min
+\endif
 SET lock_timeout = '5s';
-SET statement_timeout = '2min';
+SET statement_timeout = :'invite_repair_timeout';
 
 DO $$
 DECLARE
