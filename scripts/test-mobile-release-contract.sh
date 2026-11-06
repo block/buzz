@@ -36,6 +36,7 @@ case "${1:-}:${2:-}" in
   api:repos/block/buzz/rulesets/26588677)
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
+      *'.target'*) printf '%s\n' "${GH_TAG_RULESET_TARGET:-tag}" ;;
       *'.current_user_can_bypass'*) printf '%s\n' "${GH_CURRENT_USER_CAN_BYPASS-always}" ;;
       *'[.rules[].type]'*) printf '%s\n' "${GH_TAG_RULE_TYPES:-creation,deletion,non_fast_forward,update}" ;;
       *'.conditions.ref_name.include[]'*) printf '%s\n' "${GH_TAG_INCLUDES:-refs/tags/mobile-*}" ;;
@@ -242,6 +243,9 @@ assert_no_candidate_tag 9.9.7
 # Any other ruleset drift also fails before a tag is created.
 if GH_TAG_RULESET_STATE=disabled run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
   fail "candidate succeeded with an inactive mobile tag ruleset"
+fi
+if GH_TAG_RULESET_TARGET=branch run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
+  fail "candidate succeeded with a mobile ruleset that targets branches"
 fi
 if GH_TAG_RULE_TYPES=creation,deletion run_release "$operator" candidate 9.9.7 >/dev/null 2>&1; then
   fail "candidate succeeded with weakened mobile tag rules"

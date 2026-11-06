@@ -35,7 +35,7 @@ require_canonical_repository() {
 }
 
 require_mobile_release_tag_ruleset() {
-  local ruleset_endpoint state can_bypass rule_types includes excludes
+  local ruleset_endpoint state target can_bypass rule_types includes excludes
 
   [[ "$MOBILE_RELEASE_TAG_RULESET_ID" =~ ^[0-9]+$ ]] || \
     fail_release_ruleset "MOBILE_RELEASE_TAG_RULESET_ID in scripts/release-rulesets.sh must be numeric (got '$MOBILE_RELEASE_TAG_RULESET_ID')" || return 1
@@ -46,6 +46,13 @@ require_mobile_release_tag_ruleset() {
     fail_release_ruleset "could not verify mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID" || return 1
   [[ "$state" == "active" ]] || \
     fail_release_ruleset "mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID is '$state'" || return 1
+
+  # Rulesets carry their target (branch, tag or push) independently of their
+  # ref patterns; a retargeted ruleset would leave candidate tags unprotected.
+  target="$(gh api "$ruleset_endpoint" --jq .target)" || \
+    fail_release_ruleset "could not verify mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID target" || return 1
+  [[ "$target" == "tag" ]] || \
+    fail_release_ruleset "mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID must target tags, not '$target'" || return 1
 
   can_bypass="$(gh api "$ruleset_endpoint" --jq .current_user_can_bypass)" || \
     fail_release_ruleset "could not verify your bypass of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID" || return 1
