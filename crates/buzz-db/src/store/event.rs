@@ -3834,9 +3834,9 @@ mod postgres_tests {
         let ids: Vec<_> = page.into_iter().map(|r| r.event.id).collect();
         assert_eq!(ids, recent);
         let prepared: Vec<String> = sqlx::query_scalar(
-            "SELECT statement FROM pg_prepared_statements \
-             WHERE statement LIKE '%JOIN event_mentions%'",
+            "SELECT statement FROM pg_prepared_statements WHERE statement LIKE $1",
         )
+        .bind("%JOIN event_mentions%")
         .fetch_all(&mut *conn)
         .await
         .expect("read prepared statements");
