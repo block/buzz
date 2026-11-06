@@ -1,6 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
+import '../../shared/me/hold_to_talk.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,6 +39,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final preference = ref.watch(defaultAgentProvider);
+    final holdToTalk = ref.watch(holdToTalkProvider);
     final scope = ref.watch(meSyncProvider);
     final scopeIdentity =
         '${scope.community}:${ref.watch(myPubkeyProvider) ?? 'signed-out'}';
@@ -270,6 +272,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         key: ValueKey((scope, pubkey)),
         draftIdentity: draftIdentity,
         enabled:
+            holdToTalk &&
             pubkey != null &&
             !opening.value &&
             !preference.isLoading &&

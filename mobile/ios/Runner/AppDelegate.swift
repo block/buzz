@@ -258,6 +258,10 @@ import os.log
       )
     }
 
+    if let switchRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativeSwitch") {
+      switchRegistrar.register(NativeSwitchFactory(messenger: messenger), withId: "buzz/switch")
+    }
+
     if let segmentedControlRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeSegmentedControl"
     ) {

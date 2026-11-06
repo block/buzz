@@ -1,3 +1,5 @@
+import 'package:buzz/shared/me/hold_to_talk.dart';
+import 'package:buzz/features/settings/settings_page.dart';
 import 'dart:async';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
@@ -120,10 +122,39 @@ void main() {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: Scaffold(body: DefaultAgentLauncher(onChooseAgent: () {})),
+          home: Scaffold(
+            body: Column(
+              children: [
+                DefaultAgentLauncher(onChooseAgent: () {}),
+                Builder(
+                  builder: (context) => TextButton(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => SettingsPage(
+                          profileHeader: const SizedBox.shrink(),
+                          identityRecoveryPageBuilder: (_) =>
+                              const SizedBox.shrink(),
+                        ),
+                      ),
+                    ),
+                    child: const Text('Settings'),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       );
       await tester.pumpWidget(app());
+      await tester.pumpAndSettle();
+      expect(find.text('Retry voice note'), findsOneWidget);
+      await tester.tap(find.text('Settings'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Hold to talk to Bestie'));
+      await tester.tap(find.text('Hold to talk to Bestie'));
+      await tester.pumpAndSettle();
+      expect(prefs.getBool(HoldToTalkPreference.storageKey), isFalse);
+      await tester.tap(find.byTooltip('Close settings'));
       await tester.pumpAndSettle();
       expect(find.text('Retry voice note'), findsOneWidget);
       selected = other;
@@ -155,6 +186,22 @@ void main() {
       await tester.tap(find.byTooltip('Discard voice note'));
       await tester.pumpAndSettle();
       expect(notes, isEmpty);
+      selected = agent;
+      preferences.add(selected);
+      await tester.pumpAndSettle();
+      haptics.clear();
+      await tester.longPress(find.byType(DefaultAgentLauncher));
+      await tester.pumpAndSettle();
+      expect(haptics, isEmpty);
+      expect(tester.takeException(), isNull);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(DefaultAgentLauncher)),
+      );
+      expect(container.read(holdToTalkProvider), isFalse);
+      await container.read(holdToTalkProvider.notifier).setEnabled(true);
+      selected = null;
+      preferences.add(selected);
+      await tester.pumpAndSettle();
       haptics.clear();
       await tester.longPress(find.byTooltip('Bestie'));
       await tester.pumpAndSettle();

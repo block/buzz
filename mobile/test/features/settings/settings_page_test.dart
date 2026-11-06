@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_switch.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -84,10 +85,15 @@ void main() {
         find.ancestor(of: version, matching: find.byType(ListView)),
         findsOneWidget,
       );
-      final beforeScroll = tester.getTopLeft(version).dy;
+      final position = tester
+          .state<ScrollableState>(
+            find.ancestor(of: version, matching: find.byType(Scrollable)),
+          )
+          .position;
+      final beforeScroll = position.pixels;
       await tester.drag(find.byType(ListView), const Offset(0, 100));
       await tester.pumpAndSettle();
-      expect(tester.getTopLeft(version).dy, greaterThan(beforeScroll));
+      expect(position.pixels, lessThan(beforeScroll));
       expect(tester.takeException(), isNull);
     });
   }
@@ -199,7 +205,13 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('push-notifications-setting')),
+          matching: find.byType(BuzzSwitch),
+        ),
+        findsNothing,
+      );
       if (outcome == 'absent') {
         capability.complete(null);
       } else {
@@ -208,7 +220,13 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Notifications'), findsNothing);
       expect(find.text('Push notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('push-notifications-setting')),
+          matching: find.byType(BuzzSwitch),
+        ),
+        findsNothing,
+      );
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
@@ -251,7 +269,17 @@ void main() {
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,
     );
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(
+      tester
+          .widget<BuzzSwitch>(
+            find.descendant(
+              of: find.byKey(const ValueKey('push-notifications-setting')),
+              matching: find.byType(BuzzSwitch),
+            ),
+          )
+          .value,
+      isTrue,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -411,7 +439,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final nativeBar = tester.widget<UiKitView>(find.byType(UiKitView));
+    final nativeBar = tester.widget<UiKitView>(
+      find.byWidgetPredicate(
+        (w) => w is UiKitView && w.viewType == 'buzz/ios_navigation_bar',
+      ),
+    );
     expect(nativeBar.viewType, 'buzz/ios_navigation_bar');
     final params = nativeBar.creationParams! as Map<String, Object?>;
     expect(params['title'], 'Settings');
