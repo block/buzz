@@ -23,7 +23,7 @@ class MessagesFilters extends StatelessWidget {
       useNativeGlass: true,
       matchNativeWidths: true,
       side: defaultTargetPlatform == TargetPlatform.android
-          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.1))
+          ? BorderSide(color: context.colors.primary.withValues(alpha: 0.04))
           : BorderSide.none,
       minControlHeight: defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48,
       horizontalPadding: Grid.gutter,
