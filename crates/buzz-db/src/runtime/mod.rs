@@ -1074,10 +1074,10 @@ impl Db {
     /// maintenance dials a replacement.
     ///
     /// The check also closes, rather than returns, a connection still inside
-    /// a transaction. A checkout dropped while its `BEGIN` was in flight (a
-    /// timed-out proof, a cancelled caller) has no `ROLLBACK` queued: sqlx
-    /// counts the transaction only once `BEGIN` is acknowledged. Once the
-    /// reader answers, that connection would otherwise go back to the pool
+    /// a transaction. sqlx rolls back a checkout dropped while its `BEGIN`
+    /// was in flight (a timed-out proof, a cancelled caller) since
+    /// transact-rs/sqlx#4394, so this is a backstop: a connection that still
+    /// came back inside a transaction would otherwise go back to the pool
     /// `idle in transaction`. Closing it ends the session, and the server
     /// rolls the transaction back. Routed reads only begin `REPEATABLE READ`
     /// (see [`Db::proved_reader`]) and reader sessions default to `READ
