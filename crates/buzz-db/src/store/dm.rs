@@ -501,6 +501,10 @@ pub enum DmGrowth {
     /// Another DM, with this ID, already has the grown set of people, so this
     /// DM cannot take its identity. Nothing was written.
     Existing(Uuid),
+    /// This DM has at most one person, and the additions would bring it to
+    /// two or more. Such a DM never gains people in place; the caller starts
+    /// a DM of everyone instead. Nothing was written.
+    PeopleStartNewDm,
 }
 
 /// Add `additions` to the DM `channel_id` in place, keeping its history.
@@ -509,7 +513,8 @@ pub enum DmGrowth {
 /// Otherwise the DM's identity moves to the grown set ([`dm_identity_hash`]), so
 /// opening a DM with the original members afterwards starts a new one. If a DM
 /// with the grown set already exists, nothing is written and that DM is
-/// returned as [`DmGrowth::Existing`], provided `actor` is in it.
+/// returned as [`DmGrowth::Existing`], provided `actor` is in it. People never
+/// join a DM of at most one person: that is [`DmGrowth::PeopleStartNewDm`].
 ///
 /// `actor` must be an active member. The DM must be live and not archived, and
 /// may hold at most [`MAX_DM_PEOPLE`] people afterwards. Re-adding members is
@@ -595,10 +600,17 @@ pub async fn grow_dm(
         )));
     }
 
+    // A DM of at most one person and their agents stays theirs: people
+    // joining it start a DM of everyone instead.
+    let current: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+    if count_people(&current, &agents) < 2 && count_people(&grown, &agents) >= 2 {
+        tx.rollback().await?;
+        return Ok(DmGrowth::PeopleStartNewDm);
+    }
+
     // People move the DM's identity to the grown set of people. So do agents
     // joining a DM of at most one person, which is identified by all members.
     let hash = dm_identity_hash(&grown, &agents);
-    let current: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
     if hash != dm_identity_hash(&current, &agents) {
         let existing = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM channels \

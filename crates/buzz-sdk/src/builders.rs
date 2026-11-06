@@ -1971,8 +1971,9 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
 
 /// Build a DM add-member event (kind 41011).
 ///
-/// With `include_history`, the member joins this DM and sees its history.
-/// Without it, adding anyone starts a new DM of everyone.
+/// With `include_history`, the member joins this DM and sees its history,
+/// unless a person is joining a DM of at most one person and their agents.
+/// Otherwise adding anyone starts a new DM of everyone.
 pub fn build_dm_add_member(
     channel_id: Uuid,
     pubkey: &str,

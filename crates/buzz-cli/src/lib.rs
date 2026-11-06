@@ -1327,7 +1327,8 @@ pub enum DmsCmd {
         #[arg(long)]
         pubkey: String,
         /// Add them to this DM with its history, instead of starting a new DM
-        /// of everyone.
+        /// of everyone. A person added to a DM of one person and their agents
+        /// always starts a new DM.
         #[arg(long)]
         include_history: bool,
     },

@@ -588,7 +588,7 @@ async fn grow_with_agents(
         .map_err(dm_write_error)?
     {
         DmGrowth::Grown { added } => Ok(added),
-        DmGrowth::Existing(_) => Err(IngestError::Internal(
+        DmGrowth::Existing(_) | DmGrowth::PeopleStartNewDm => Err(IngestError::Internal(
             "error: adding agents changed the DM's people".into(),
         )),
     }
@@ -600,7 +600,8 @@ async fn grow_with_agents(
 /// DM's history. People move the DM's identity to the grown set of people, or,
 /// if a DM of those people already exists, that DM is returned instead and
 /// nothing changes here. Without the tag, everyone starts a new DM of exactly
-/// its members (no history), as before. An agent cannot send the tag.
+/// its members (no history), as before. So do people added to a DM of at most
+/// one person, even with the tag. An agent cannot send the tag.
 async fn handle_dm_add_member(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -695,32 +696,38 @@ async fn handle_dm_add_member(
 
     // 5. Execute.
     let addition_refs: Vec<&[u8]> = additions.iter().map(Vec::as_slice).collect();
-    let (target, was_created, added, moved_elsewhere) = if include_history {
+    let growth = if include_history {
         // Grow this DM in place.
-        match state
-            .db
-            .grow_dm(tenant.community(), channel_id, &self_bytes, &addition_refs)
-            .await
-            .map_err(dm_write_error)?
-        {
-            DmGrowth::Grown { added } => (channel_id, false, added, false),
-            // These people already have a DM: the agents join them there.
-            DmGrowth::Existing(other) => {
-                let added = grow_with_agents(tenant, state, other, &self_bytes, &agents).await?;
-                (other, false, added, true)
-            }
-        }
+        Some(
+            state
+                .db
+                .grow_dm(tenant.community(), channel_id, &self_bytes, &addition_refs)
+                .await
+                .map_err(dm_write_error)?,
+        )
     } else {
-        // Start a new DM of everyone (no history); this DM is untouched.
-        let mut all_bytes = members.clone();
-        all_bytes.extend(additions.iter().cloned());
-        let all_refs: Vec<&[u8]> = all_bytes.iter().map(Vec::as_slice).collect();
-        let (channel, created) = state
-            .db
-            .open_dm(tenant.community(), &all_refs, &self_bytes, false)
-            .await
-            .map_err(dm_write_error)?;
-        (channel.id, created, Vec::new(), !created)
+        None
+    };
+    let (target, was_created, added, moved_elsewhere) = match growth {
+        Some(DmGrowth::Grown { added }) => (channel_id, false, added, false),
+        // These people already have a DM: the agents join them there.
+        Some(DmGrowth::Existing(other)) => {
+            let added = grow_with_agents(tenant, state, other, &self_bytes, &agents).await?;
+            (other, false, added, true)
+        }
+        // Start a new DM of everyone (no history); this DM is untouched. A DM
+        // of at most one person never gains people, even with the tag.
+        Some(DmGrowth::PeopleStartNewDm) | None => {
+            let mut all_bytes = members.clone();
+            all_bytes.extend(additions.iter().cloned());
+            let all_refs: Vec<&[u8]> = all_bytes.iter().map(Vec::as_slice).collect();
+            let (channel, created) = state
+                .db
+                .open_dm(tenant.community(), &all_refs, &self_bytes, false)
+                .await
+                .map_err(dm_write_error)?;
+            (channel.id, created, Vec::new(), !created)
+        }
     };
 
     // Finalize the idempotency record after the separate mutation succeeds.
