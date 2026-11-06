@@ -2432,7 +2432,9 @@ fn write_restriction_denial(
 /// for a missed disconnect and for HTTP writes. A timeout has no auth-seam
 /// presence, so this is where it is enforced. It runs per write, so it reads
 /// through [`AppState::restriction_state_cached`]: a restriction change takes
-/// effect within [`crate::state::RESTRICTION_CACHE_MAX_AGE`]. The verdict is
+/// effect when its write invalidates the cache, or within
+/// [`crate::state::RESTRICTION_CACHE_MAX_AGE`] on a pod that misses that
+/// notification. The verdict is
 /// still taken at `now`, so a cached timeout lifts on time. Fails closed on a
 /// DB error.
 pub(crate) async fn enforce_write_restriction(
@@ -7956,11 +7958,9 @@ mod postgres_tests {
             .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
             .await
             .expect("unban owner");
-        // The unban command clears the owner's entry; the agent's entry
-        // carries the owner's ban until it ages out
-        // (`RESTRICTION_CACHE_MAX_AGE`).
-        state.invalidate_restriction_cache(tenant.community(), &owner_bytes);
-        state.invalidate_restriction_cache(tenant.community(), &agent.public_key().to_bytes());
+        // As the unban command does: drops the community's rows, the
+        // agent's (which carries the owner's ban) included.
+        state.invalidate_restrictions_local(tenant.community());
         enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
             .await
             .expect("unbanning the owner restores the agent");
@@ -8010,7 +8010,7 @@ mod postgres_tests {
             .await
             .expect("unban owner");
         // As the unban command does on its own pod.
-        state.invalidate_restriction_cache(tenant.community(), &owner_bytes);
+        state.invalidate_restrictions_local(tenant.community());
         crate::api::relay_members::enforce_relay_membership(
             &state,
             &tenant,
@@ -8136,6 +8136,41 @@ mod postgres_tests {
                 "authorization denied\n".to_owned()
             ))
         );
+    }
+
+    /// Recording an agent's owner drops the agent's cached restriction row.
+    /// HTTP admission caches the agent's row before it links the token
+    /// owner, and only checks bans, so the owner's timeout must still reach
+    /// the agent's first write.
+    /// Mutation: drop `invalidate_restrictions` from
+    /// `disconnect_unowned_agent_clusterwide` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_link_drops_the_agents_cached_restriction_row() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = token_owner_fixture(&state, "owner-link-timeout").await;
+        state
+            .db
+            .timeout_community_member(
+                tenant.community(),
+                owner.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                Utc::now() + chrono::Duration::hours(1),
+                None,
+            )
+            .await
+            .expect("timeout owner");
+
+        http_membership(&state, &tenant, &agent, Some(owner.public_key()))
+            .await
+            .expect("a timeout does not refuse HTTP admission");
+        match enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key()).await {
+            Err(IngestError::AuthFailed(msg)) => assert!(
+                msg.starts_with("restricted: you are timed out until "),
+                "got {msg:?}"
+            ),
+            other => panic!("a timed-out owner's newly linked agent must not write: {other:?}"),
+        }
     }
 
     /// The token owner's ban reaches an agent that is itself a member, on a

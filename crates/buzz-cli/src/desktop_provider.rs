@@ -1049,6 +1049,36 @@ pub async fn discover(relay_url: &str) -> Result<Option<Arc<Provider>>, CliError
     discover_with(inherited()?, &Keychain, advertisements, relay_url).await
 }
 
+/// The relay an agent's inherited credential acts on, for a command given
+/// none. `None` without an inherited token, or when `describe` fails (the
+/// credential chain reports that); bad input when it acts on several relays.
+pub async fn inherited_relay() -> Result<Option<String>, CliError> {
+    let Some((endpoint, token)) = inherited()? else {
+        return Ok(None);
+    };
+    let Ok(raw) = call(&endpoint, Some(&token), true, "describe", &[]).await else {
+        return Ok(None);
+    };
+    let relays = serde_json::from_str::<Describe>(&raw)
+        .map(|d| d.relays)
+        .unwrap_or_default();
+    let mut distinct: Vec<String> = Vec::new();
+    for relay in relays {
+        if !distinct.iter().any(|known| same_relay(known, &relay)) {
+            distinct.push(provider_relay_url(&relay).unwrap_or(relay));
+        }
+    }
+    match distinct.len() {
+        0 => Ok(None),
+        1 => Ok(distinct.pop()),
+        _ => Err(CliError::Usage(format!(
+            "this agent's Buzz credential acts on several relays ({}); pass --relay or set \
+             BUZZ_RELAY_URL",
+            distinct.join(", ")
+        ))),
+    }
+}
+
 async fn discover_with(
     inherited: Option<(Endpoint, String)>,
     store: &dyn PairingStore,
@@ -2022,16 +2052,21 @@ pub(crate) mod tests {
 
         let (endpoint, seen) = desktop(nostr::Keys::generate(), vec![TEAM.into()]).await;
         let cli = parse(&["buzz", "--relay", TEAM, "users", "get"]);
-        let (_, client) = crate::connect(&cli.relay, cli.command, async |_, _| unreachable!(), {
-            let store = &store;
-            async move |relay| {
-                let provider =
-                    discover_with(Some((endpoint, "agent".into())), store, Vec::new, relay)
-                        .await?
-                        .unwrap();
-                crate::credentials::Credentials::from_desktop(provider).await
-            }
-        })
+        let (_, client) = crate::connect(
+            cli.relay.as_deref().unwrap(),
+            cli.command,
+            async |_, _| unreachable!(),
+            {
+                let store = &store;
+                async move |relay| {
+                    let provider =
+                        discover_with(Some((endpoint, "agent".into())), store, Vec::new, relay)
+                            .await?
+                            .unwrap();
+                    crate::credentials::Credentials::from_desktop(provider).await
+                }
+            },
+        )
         .await
         .unwrap()
         .unwrap();
@@ -2050,7 +2085,7 @@ pub(crate) mod tests {
             "buzz", "--relay", TEAM, "auth", "desktop", "pair", "--name", "cli",
         ]);
         let paired = crate::connect(
-            &cli.relay,
+            cli.relay.as_deref().unwrap(),
             cli.command,
             async |sub, relay| {
                 let crate::AuthCmd::Desktop(crate::DesktopAuthCmd::Pair { name, .. }) = sub else {
