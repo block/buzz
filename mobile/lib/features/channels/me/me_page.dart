@@ -40,7 +40,6 @@ import '../channel_actions_sheet.dart';
 import '../channel_detail_page.dart';
 import '../channel_identity_names_provider.dart';
 import '../channel_member_profile_actions.dart';
-import '../channel_sections/channel_sections_provider.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 
@@ -197,10 +196,7 @@ class MePage extends HookConsumerWidget {
                   pubkey: pubkey,
                 ),
               ),
-              sectionId: ref
-                  .read(channelSectionsProvider)
-                  .store
-                  .assignments[channel.id],
+              personalChat: true,
             ),
           );
           final inventorySlivers = <Widget>[

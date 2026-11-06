@@ -174,6 +174,8 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Leave channel'), findsOneWidget);
+    // Solo chats move between Solo workspaces, not channel sections.
+    expect(find.text('Move to section…'), findsNothing);
   });
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (

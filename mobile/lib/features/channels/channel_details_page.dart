@@ -11,6 +11,7 @@ Future<bool?> showChannelDetailsPage({
   required String? currentPubkey,
   required void Function(BuildContext context, String pubkey) onMemberTap,
   String? sectionId,
+  bool personalChat = false,
 }) => Navigator.of(context).push<bool>(
   MaterialPageRoute<bool>(
     builder: (_) => CoveredRouteKeyboardInsets(
@@ -19,6 +20,7 @@ Future<bool?> showChannelDetailsPage({
         currentPubkey: currentPubkey,
         onMemberTap: onMemberTap,
         sectionId: sectionId,
+        personalChat: personalChat,
       ),
     ),
   ),
@@ -32,6 +34,7 @@ Future<bool?> showChannelDetailsSheet({
   required String? currentPubkey,
   required void Function(BuildContext context, String pubkey) onMemberTap,
   String? sectionId,
+  bool personalChat = false,
 }) => showBuzzModalBottomSheet<bool>(
   context: context,
   isScrollControlled: true,
@@ -45,6 +48,7 @@ Future<bool?> showChannelDetailsSheet({
     currentPubkey: currentPubkey,
     onMemberTap: onMemberTap,
     sectionId: sectionId,
+    personalChat: personalChat,
     inSheet: true,
   ),
 );
@@ -57,6 +61,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     required this.currentPubkey,
     required this.onMemberTap,
     this.sectionId,
+    this.personalChat = false,
     this.inSheet = false,
   });
 
@@ -64,6 +69,10 @@ class ChannelDetailsPage extends HookConsumerWidget {
   final String? currentPubkey;
   final void Function(BuildContext context, String pubkey) onMemberTap;
   final String? sectionId;
+
+  /// Solo chats are organized into Solo workspaces, not channel sections, so
+  /// their details omit the channel-section move.
+  final bool personalChat;
 
   /// Renders only the scrolling content, without the page's app bar, for a
   /// bottom sheet that supplies its own drag handle.
@@ -458,19 +467,20 @@ class ChannelDetailsPage extends HookConsumerWidget {
           key: const ValueKey('channel-details-channel-card'),
           verticalPadding: _channelDetailsSectionPadding,
           children: [
-            AppListRow(
-              icon: BuzzIcons.folderInput,
-              title: 'Move to section…',
-              trailing: const _ChannelDetailsChevron(),
-              onTap: () async {
-                await _showMoveSectionSheet(
-                  context,
-                  ref,
-                  channel: resolvedChannel,
-                  sectionId: currentSectionId,
-                );
-              },
-            ),
+            if (!personalChat)
+              AppListRow(
+                icon: BuzzIcons.folderInput,
+                title: 'Move to section…',
+                trailing: const _ChannelDetailsChevron(),
+                onTap: () async {
+                  await _showMoveSectionSheet(
+                    context,
+                    ref,
+                    channel: resolvedChannel,
+                    sectionId: currentSectionId,
+                  );
+                },
+              ),
             AppListRow(
               icon: BuzzIcons.copy,
               title: 'Copy channel name',
