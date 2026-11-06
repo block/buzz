@@ -3308,8 +3308,6 @@ mod tests {
                 .map(|write| write.outcome)
                 .expect("kind:9031 removal");
             seed_relay_member(&state, community, &person, "member").await;
-            let notices_before =
-                member_joined_notice_count(&state, community, announcements, &person).await;
             let (done, done_release) = auto_join_done_hook::arm(community);
             let (reached, release) = auto_join_channel_hook::arm(community);
             let (conn, _ctrl) = registered_pending_conn(&state, community, "roster-raced");
@@ -3342,6 +3340,16 @@ mod tests {
                 .remove_member(community, announcements, &person_key, &person_key)
                 .await
                 .expect("leave again");
+            // A kind:40099 is relay-signed at one-second resolution with fixed
+            // content, so a second `member_joined` in the racing join's second
+            // would share its event id and be dropped on insert. Resume the
+            // admission in a later second, so a notice of its own would count.
+            let notices_after_race =
+                member_joined_notice_count(&state, community, announcements, &person).await;
+            let race_second = chrono::Utc::now().timestamp();
+            while chrono::Utc::now().timestamp() == race_second {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             release.notify_one();
             done.await.expect("task finishes");
             done_release.notify_one();
@@ -3352,7 +3360,7 @@ mod tests {
             );
             assert_eq!(
                 member_joined_notice_count(&state, community, announcements, &person).await,
-                notices_before + 1,
+                notices_after_race,
                 "the racing join's notice is the admission's only one"
             );
         }

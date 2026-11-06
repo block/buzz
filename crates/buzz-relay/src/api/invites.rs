@@ -1272,11 +1272,13 @@ mod postgres_tests {
         );
     }
 
-    /// How many kind:44100 notifications name `member_hex` across the
-    /// community, one per channel the relay joined them to.
+    /// How many kind:44100 notifications name `member_hex` in `channels`,
+    /// one per channel the relay joined them to. Scoped to the channels under
+    /// test, because a roster admission also joins the landing channel.
     async fn added_notification_count(
         state: &AppState,
         community: buzz_core::CommunityId,
+        channels: &[Uuid],
         member_hex: &str,
     ) -> i64 {
         state
@@ -1285,6 +1287,10 @@ mod postgres_tests {
                 kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
                 p_tag_hex: Some(member_hex.to_string()),
                 global_only: true,
+                tag_values: vec![(
+                    "h".to_owned(),
+                    channels.iter().map(Uuid::to_string).collect(),
+                )],
                 ..buzz_db::EventQuery::for_community(community)
             })
             .await
@@ -1453,7 +1459,7 @@ mod postgres_tests {
             "{archived_refusal}"
         );
         assert_eq!(
-            added_notification_count(&state, community, &joiner_hex).await,
+            added_notification_count(&state, community, &channels, &joiner_hex).await,
             0
         );
 
@@ -1480,6 +1486,18 @@ mod postgres_tests {
             [Some("member".to_string()), None, None, None],
             "joined to the effective default channel only"
         );
+        let landing = state
+            .db
+            .get_community_landing(community)
+            .await
+            .expect("landing")
+            .channel_id
+            .expect("the claim designates a landing channel");
+        assert_eq!(
+            channel_roles(&state, community, &[landing], &joiner).await,
+            [Some("member".to_string())],
+            "and to the landing channel"
+        );
         assert!(
             group_state_tags(&state, &tenant, flagged, 39002)
                 .await
@@ -1488,7 +1506,7 @@ mod postgres_tests {
             "kind:39002 of the default channel lists the new member"
         );
         assert_eq!(
-            added_notification_count(&state, community, &joiner_hex).await,
+            added_notification_count(&state, community, &channels, &joiner_hex).await,
             1
         );
         assert_eq!(
@@ -1525,7 +1543,7 @@ mod postgres_tests {
             "a re-claim must not resurrect a kind:9022 leave"
         );
         assert_eq!(
-            added_notification_count(&state, community, &joiner_hex).await,
+            added_notification_count(&state, community, &channels, &joiner_hex).await,
             1
         );
         assert_eq!(
@@ -1552,7 +1570,7 @@ mod postgres_tests {
             [Some("member".to_string()), None, None, None]
         );
         assert_eq!(
-            added_notification_count(&state, community, &v1_joiner_hex).await,
+            added_notification_count(&state, community, &channels, &v1_joiner_hex).await,
             1
         );
     }
@@ -1652,7 +1670,7 @@ mod postgres_tests {
             "kind:39002 must not list the new member"
         );
         assert_eq!(
-            added_notification_count(&state, community, &joiner_hex).await,
+            added_notification_count(&state, community, &[starter], &joiner_hex).await,
             0
         );
         assert_eq!(
@@ -1703,7 +1721,8 @@ mod postgres_tests {
             .expect("seed owner");
         let first = create_channel(&state, &tenant, &owner, &[]).await;
         let second = create_channel(&state, &tenant, &owner, &[]).await;
-        for channel_id in [first, second] {
+        let defaults = [first, second];
+        for channel_id in defaults {
             edit_channel(
                 &state,
                 &tenant,
@@ -1756,16 +1775,16 @@ mod postgres_tests {
             hold.rollback().await.expect("release the held row");
 
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while added_notification_count(&state, community, &joiner_hex).await < 2 {
+            while added_notification_count(&state, community, &defaults, &joiner_hex).await < 2 {
                 assert!(
                     std::time::Instant::now() < deadline,
                     "the auto-join stopped with the dropped claim: {:?}",
-                    channel_roles(&state, community, &[first, second], &joiner).await
+                    channel_roles(&state, community, &defaults, &joiner).await
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             assert_eq!(
-                channel_roles(&state, community, &[first, second], &joiner).await,
+                channel_roles(&state, community, &defaults, &joiner).await,
                 [Some("member".to_string()), Some("member".to_string())]
             );
         }
