@@ -2809,7 +2809,7 @@ mod tests {
 
     // --- (a) auth-suppression regression pair ---
 
-    fn make_auth_tag() -> (Tag, String) {
+    pub(super) fn make_auth_tag() -> (Tag, String) {
         let owner_hex = "a".repeat(64);
         let sig_hex = "b".repeat(128);
         let tag_vec = vec![
@@ -4400,7 +4400,7 @@ mod ws_deadline_tests {
         use crate::desktop_provider::tests::PAIRED_RELAYS;
         let relay = "https://team.example/x/";
         PAIRED_RELAYS.with(|p| *p.borrow_mut() = (vec!["wss://team.example/x/".into()], 0));
-        let (auth_tag, auth_json) = make_auth_tag();
+        let (auth_tag, auth_json) = super::tests::make_auth_tag();
         let agent = BuzzClient::new(
             relay.into(),
             Credentials::from_keys(Keys::generate()).with_auth_tag(auth_tag, auth_json),
