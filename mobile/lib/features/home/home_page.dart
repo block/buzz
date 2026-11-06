@@ -169,8 +169,8 @@ class HomePage extends HookConsumerWidget {
                               clipBehavior: Clip.none,
                               children: [
                                 Positioned(
-                                  top: -2,
-                                  right: 1,
+                                  top: -1,
+                                  right: 3,
                                   child: Container(
                                     key: const Key('home-inbox-dot'),
                                     width: 8,

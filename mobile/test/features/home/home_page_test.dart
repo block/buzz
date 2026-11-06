@@ -323,7 +323,7 @@ void main() {
         expect(
           tester.getCenter(find.byKey(const Key('home-inbox-dot'))) -
               tester.getTopLeft(find.byKey(const Key('home-inbox-badge'))),
-          const Offset(19, 2),
+          const Offset(17, 3),
         );
         final opacity = tester.widget<AnimatedOpacity>(
           find.ancestor(
