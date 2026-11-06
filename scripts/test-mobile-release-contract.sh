@@ -402,14 +402,24 @@ if git --git-dir="$remote" show-ref --verify --quiet refs/tags/mobile-v9.9.9-rc.
   fail "push.followTags published a stray local mobile tag"
 fi
 
-# A push that lands but reports failure keeps the local tag and says the
-# candidate is on origin.
-if GIT_PUSH_LANDS_BUT_FAILS=1 run_release "$operator" candidate 2.0.4 > "$tmp/landed-output" 2>&1; then
-  fail "candidate reported success after a failed push"
-fi
+# A push that lands but reports failure keeps the local tag and goes on to the
+# canonical GitHub check, which confirms the candidate.
+GIT_PUSH_LANDS_BUT_FAILS=1 run_release "$operator" candidate 2.0.4 > "$tmp/landed-output" 2>&1
 grep -Fq 'reported failure, but origin has mobile-v2.0.4-rc.1' "$tmp/landed-output"
+grep -Fq 'Published mobile-v2.0.4-rc.1' "$tmp/landed-output"
 [[ "$(git -C "$operator" cat-file -t refs/tags/mobile-v2.0.4-rc.1)" == tag ]] || \
   fail "the local tag was deleted although the candidate landed"
+# The same ambiguous push into a fork (origin rewritten by insteadOf) must not
+# be declared usable: GitHub has no such tag.
+git -C "$operator" config --unset "url.file://$remote.insteadOf"
+git -C "$operator" config "url.file://$fork_remote.insteadOf" "$canonical_origin"
+if (cd "$operator" && GIT_PUSH_LANDS_BUT_FAILS=1 "$script" candidate 2.0.5 > "$tmp/landed-fork-output" 2>&1); then
+  fail "an ambiguous push into a fork was reported as published"
+fi
+git -C "$operator" config --unset "url.file://$fork_remote.insteadOf"
+grep -Fq 'could not confirm mobile-v2.0.5-rc.1 on canonical block/buzz' "$tmp/landed-fork-output"
+git -C "$operator" tag -d mobile-v2.0.5-rc.1 >/dev/null
+assert_no_candidate_tag 2.0.5
 
 # A shallow operator clone can still pin a verified ancestor outside its
 # local history.

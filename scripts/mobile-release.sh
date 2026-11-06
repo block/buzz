@@ -181,11 +181,13 @@ case "$command" in
       if ! remote_line="$(git ls-remote --refs origin "refs/tags/$tag")"; then
         fail "could not push $tag, and could not check whether origin has it. If GitHub shows $tag, use it and don't rerun; otherwise run 'git tag -d $tag' before retrying"
       fi
-      if [[ -n "$remote_line" ]]; then
-        fail "push of $tag reported failure, but origin has $tag. Check that it points at $source_sha and use it; don't rerun"
+      if [[ -z "$remote_line" ]]; then
+        git tag -d "$tag" >/dev/null
+        fail "could not push $tag; you must be a bypass actor of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (currently the mobile release managers). The local tag was removed so a retry starts clean"
       fi
-      git tag -d "$tag" >/dev/null
-      fail "could not push $tag; you must be a bypass actor of mobile tag ruleset $MOBILE_RELEASE_TAG_RULESET_ID (currently the mobile release managers). The local tag was removed so a retry starts clean"
+      # origin has the tag, but origin may be rewritten to a fork; the checks
+      # below decide whether canonical block/buzz has exactly this candidate.
+      echo "Note: push of $tag reported failure, but origin has $tag; verifying it on canonical block/buzz." >&2
     fi
 
     # git URL rewriting (insteadOf) can send even a canonical-looking origin
