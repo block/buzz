@@ -178,6 +178,42 @@ fn append_workflow_mention_tags(
     Ok(())
 }
 
+/// Load `(display_name, pubkey_hex)` for the channel's members, the names
+/// `@` mentions in `rendered_text` can resolve to.
+///
+/// Every tag [`append_workflow_mention_tags`] emits comes from a mention in
+/// the rendered text, and a mention is anchored on `@`. Rendered text with no
+/// `@` therefore produces no tags whatever the members are, so the member and
+/// user reads are skipped.
+async fn load_mention_candidates(
+    state: &AppState,
+    community: CommunityId,
+    channel_uuid: Uuid,
+    rendered_text: &str,
+) -> Result<Vec<(String, String)>, ActionSinkError> {
+    if !rendered_text.contains('@') {
+        return Ok(Vec::new());
+    }
+    let members = state
+        .db
+        .get_members_for_event_write(community, channel_uuid)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+    let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
+    let users = state
+        .db
+        .get_users_bulk_for_event_write(community, &member_pubkeys)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+    Ok(users
+        .into_iter()
+        .filter_map(|u| {
+            let name = u.display_name?;
+            Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
+        })
+        .collect())
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -374,26 +410,10 @@ impl ActionSink for RelayActionSink {
             // The stored author-written template independently supplies the
             // authority-bearing workflow-mention tags. A trigger may therefore
             // render an `@Name` into visible output, but it cannot borrow the
-            // workflow owner's authority to wake that agent. A resolution failure
-            // must not drop the message, so log and proceed with the base tags.
-            let members = state
-                .db
-                .get_members_for_event_write(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let users = state
-                .db
-                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let named_members: Vec<(String, String)> = users
-                .into_iter()
-                .filter_map(|u| {
-                    let name = u.display_name?;
-                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
-                })
-                .collect();
+            // workflow owner's authority to wake that agent. A member or user
+            // read failure fails the action.
+            let named_members =
+                load_mention_candidates(&state, tenant.community(), channel_uuid, &text).await?;
             append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
@@ -500,6 +520,26 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    /// Text with no `@` resolves to no candidates without reading the
+    /// database (unreachable here); text with `@` still reads and fails.
+    #[tokio::test]
+    async fn mention_candidates_skip_the_database_without_at() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::nil());
+        let channel = Uuid::new_v4();
+        let none = load_mention_candidates(&state, community, channel, "build passed")
+            .await
+            .expect("no '@' must not touch the database");
+        assert!(none.is_empty());
+        assert!(matches!(
+            load_mention_candidates(&state, community, channel, "ping @Robby").await,
+            Err(ActionSinkError::Database(_))
+        ));
     }
 
     #[test]
@@ -772,6 +812,36 @@ mod tests {
 
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
+    }
+
+    /// `load_mention_candidates` skips the member read when the rendered text
+    /// has no `@`. That is only sound while no mention syntax resolves
+    /// without one: if this fails because a new form (say `nostr:npub…`)
+    /// now produces tags, update that guard in the same change.
+    #[test]
+    fn text_without_at_never_resolves_a_mention() {
+        use nostr::nips::nip19::ToBech32;
+
+        let robby = pk('2');
+        let npub = nostr::PublicKey::from_hex(&robby)
+            .expect("member pubkey")
+            .to_bech32()
+            .expect("npub");
+        let members = vec![("Robby".to_string(), robby.clone())];
+        for text in [
+            "Robby".to_string(),
+            "hi Robby, build passed".to_string(),
+            "＠Robby".to_string(),
+            "&#64;Robby".to_string(),
+            format!("nostr:{npub}"),
+            robby.clone(),
+        ] {
+            assert!(!text.contains('@'), "case must not contain '@': {text}");
+            let mut tags = Vec::new();
+            append_workflow_mention_tags(&mut tags, &text, &text, &members)
+                .expect("append mention tags");
+            assert!(tags.is_empty(), "{text:?} produced {tags:?}");
+        }
     }
 }
 

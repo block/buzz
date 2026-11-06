@@ -234,6 +234,13 @@ async fn check_fanout_access(
         matches
     };
 
+    // No local subscriber left: the result is empty whatever the channel's
+    // visibility, so skip the visibility read and membership checks. The
+    // cross-pod consumer runs this for every event on every pod, and most
+    // events have no subscriber on a given pod.
+    if matches.is_empty() {
+        return verified(matches);
+    }
     let Some(channel_id) = stored_event.channel_id else {
         return verified(matches);
     };
@@ -257,6 +264,7 @@ async fn check_fanout_access(
         Err(e) => {
             // Fail closed: if we cannot determine visibility, do not leak a
             // possibly-private channel's events.
+            // The fan-out access test in this file matches this message text.
             warn!(%channel_id, "fan-out access filter: visibility lookup failed: {e}");
             return FanoutAccess {
                 allowed: Vec::new(),
@@ -3179,6 +3187,48 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        /// With no matches the gate returns before the visibility lookup, so
+        /// an unreachable database is never touched. The control call with one
+        /// match proves the same setup does reach (and fail) the lookup.
+        #[tokio::test(flavor = "current_thread")]
+        async fn empty_matches_skip_the_visibility_lookup() {
+            let state = crate::state::tests::test_state_with_unreachable_database_url(
+                "postgres://buzz@127.0.0.1:1/buzz",
+            )
+            .await;
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            let stored = channel_event(Some(Uuid::new_v4()));
+            let (_guard, logs) = crate::access::tests::capture_scoped();
+
+            let access = crate::handlers::event::check_fanout_access(
+                &state,
+                community_id,
+                &stored,
+                Vec::new(),
+                None,
+            )
+            .await;
+            assert!(access.allowed.is_empty() && access.unverified.is_empty());
+            assert!(
+                !logs.raw().contains("visibility lookup failed"),
+                "zero matches must not read channel visibility: {}",
+                logs.raw()
+            );
+
+            let conn = register_conn(&state, Some(vec![1u8; 32]));
+            let matches = vec![(conn, "s".to_string())];
+            let access = crate::handlers::event::check_fanout_access(
+                &state,
+                community_id,
+                &stored,
+                matches.clone(),
+                None,
+            )
+            .await;
+            assert_eq!(access.unverified, matches);
+            assert!(logs.raw().contains("visibility lookup failed"));
         }
 
         /// The shared gate used by same-pod dispatch and Redis delivery keeps
