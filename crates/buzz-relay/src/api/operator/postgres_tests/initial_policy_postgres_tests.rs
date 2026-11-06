@@ -69,7 +69,7 @@ mod postgres_tests {
             let response = create(
                 &state,
                 &operator,
-                &owner,
+                owner,
                 &host,
                 true,
                 Some(Value::Bool(!required)),
@@ -93,7 +93,7 @@ mod postgres_tests {
             let response = create(
                 &state,
                 &operator,
-                &owner,
+                owner,
                 &control,
                 false,
                 Some(Value::Bool(value)),
@@ -108,7 +108,7 @@ mod postgres_tests {
         let refused = create(
             &state,
             &operator,
-            &owner,
+            owner,
             &reserved,
             true,
             Some(Value::Bool(true)),
@@ -120,7 +120,7 @@ mod postgres_tests {
         let refusal = create(
             &state,
             &operator,
-            &owner,
+            owner,
             &outside,
             true,
             Some(Value::Bool(true)),
@@ -154,7 +154,7 @@ mod postgres_tests {
         let response = create(
             &state,
             &operator,
-            &owner,
+            owner,
             &host,
             true,
             Some(Value::Bool(true)),
@@ -177,7 +177,7 @@ mod postgres_tests {
         let response = create(
             &state,
             &operator,
-            &owner,
+            owner,
             &outside,
             true,
             Some(Value::Bool(true)),
@@ -194,7 +194,7 @@ mod postgres_tests {
         let unauthorized = create(
             &state,
             &Keys::generate(),
-            &owner,
+            owner,
             &outside,
             true,
             Some(Value::Bool(true)),
