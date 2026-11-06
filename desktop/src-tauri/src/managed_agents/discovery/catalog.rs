@@ -46,6 +46,7 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_token_env_vars: &[],
     },
     KnownAcpRuntime {
         id: "claude",
@@ -81,6 +82,7 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
+        auth_token_env_vars: &["CLAUDE_CODE_OAUTH_TOKEN"],
     },
     KnownAcpRuntime {
         id: "codex",
@@ -117,6 +119,7 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+        auth_token_env_vars: &[],
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -152,5 +155,6 @@ pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_token_env_vars: &[],
     },
 ];
