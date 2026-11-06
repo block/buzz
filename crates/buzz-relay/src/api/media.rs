@@ -6,6 +6,7 @@
 //!   GET  /media/{sha256_ext}    — BUD-01 serve blob
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -928,34 +929,10 @@ pub(crate) async fn serve_blob_for_tenant(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
-    let content_type = if let Some((parent_hash, thumb)) = Thumb::parse(sha256_ext) {
-        let _ = state
-            .media_storage
-            .read_sidecar_mime(tenant, parent_hash)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        thumb.mime.to_string()
-    } else {
-        // For explicit paths (hash.ext), verify the requested extension matches
-        // the sidecar's canonical extension — sidecar is authoritative.
-        let sidecar_mime = state
-            .media_storage
-            .read_sidecar_mime(tenant, sha256_ext)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        if sha256_ext.contains('.') {
-            let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
-            let sidecar = state
-                .media_storage
-                .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
-                .await
-                .map_err(|_| MediaError::NotFound)?;
-            if requested_ext != sidecar.ext {
-                return Err(MediaError::NotFound);
-            }
-        }
-        sidecar_mime
-    };
+    // For explicit paths (hash.ext), the requested extension must match the
+    // sidecar's canonical extension — sidecar is authoritative.
+    let MediaReadTarget { content_type, key } =
+        resolve_s3_read(&state.media_storage, tenant, sha256_ext).await?;
 
     // Images and video render inline; generic files force download. This is the
     // primary defence for non-previewable types — combined with `nosniff` and
@@ -966,8 +943,6 @@ pub(crate) async fn serve_blob_for_tenant(
     } else {
         "attachment"
     };
-
-    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -1227,34 +1202,8 @@ pub(crate) async fn head_blob(
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
-    let content_type = if let Some((parent_hash, thumb)) = Thumb::parse(&sha256_ext) {
-        let _ = state
-            .media_storage
-            .read_sidecar_mime(&tenant, parent_hash)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        thumb.mime.to_string()
-    } else {
-        let sidecar_mime = state
-            .media_storage
-            .read_sidecar_mime(&tenant, &sha256_ext)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        if sha256_ext.contains('.') {
-            let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
-            let sidecar = state
-                .media_storage
-                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
-                .await
-                .map_err(|_| MediaError::NotFound)?;
-            if requested_ext != sidecar.ext {
-                return Err(MediaError::NotFound.into());
-            }
-        }
-        sidecar_mime
-    };
-
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
+    let MediaReadTarget { content_type, key } =
+        resolve_s3_read(&state.media_storage, &tenant, &sha256_ext).await?;
     match head_or_regenerate_thumb(&state, &tenant, &sha256_ext, &key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -1340,31 +1289,80 @@ async fn regenerate_thumbs(
     Ok(true)
 }
 
-/// Resolve the S3 key from a URL path segment.
+/// Content type and object key for a media read, derived from one sidecar read.
+struct MediaReadTarget {
+    content_type: String,
+    key: String,
+}
+
+/// Resolve the served content type and S3 key from a URL path segment,
+/// calling `fetch_sidecar` exactly once with the bare hash.
 ///
-/// - `sha256.ext`       → used as-is (already validated by `validate_media_path`)
-/// - `sha256` (no dot)  → read sidecar to get extension, return `sha256.ext`
+/// - thumbnail (`sha256.thumb.*`) → sidecar must exist; mime is the thumb's
+/// - `sha256.ext` → requested ext must equal the sidecar's ext, key used as-is
+/// - `sha256`     → key is `sha256.<sidecar ext>`
 ///
-/// Sidecar-derived extensions are validated as safe tokens to prevent
-/// object-key confusion if sidecar data is ever tampered with.
+/// Any sidecar failure is 404 so a tenant cannot distinguish another tenant's
+/// blob from a missing one. Sidecar-derived extensions are validated as safe
+/// tokens to prevent object-key confusion if sidecar data is ever tampered with.
+async fn resolve_media_read<F, Fut>(
+    sha256_ext: &str,
+    fetch_sidecar: F,
+) -> Result<MediaReadTarget, MediaError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<buzz_media::BlobMeta, buzz_media::MediaError>>,
+{
+    if let Some((parent_hash, thumb)) = Thumb::parse(sha256_ext) {
+        fetch_sidecar(parent_hash.to_string())
+            .await
+            .map_err(|_| MediaError::NotFound)?;
+        return Ok(MediaReadTarget {
+            content_type: thumb.mime.to_string(),
+            key: sha256_ext.to_string(),
+        });
+    }
+    let (hash, requested_ext) = match sha256_ext.split_once('.') {
+        Some((hash, _)) => (hash, sha256_ext.rsplit('.').next()),
+        None => (sha256_ext, None),
+    };
+    let sidecar = fetch_sidecar(hash.to_string())
+        .await
+        .map_err(|_| MediaError::NotFound)?;
+    let key = match requested_ext {
+        Some(ext) if ext == sidecar.ext => sha256_ext.to_string(),
+        Some(_) => return Err(MediaError::NotFound),
+        // Validate sidecar ext — never trust storage as authoritative for path construction.
+        None if is_safe_ext(&sidecar.ext) => format!("{hash}.{}", sidecar.ext),
+        None => return Err(MediaError::NotFound),
+    };
+    Ok(MediaReadTarget {
+        content_type: sidecar.mime_type,
+        key,
+    })
+}
+
+/// Resolve content type and S3 key against storage with one sidecar read.
+async fn resolve_s3_read(
+    storage: &buzz_media::MediaStorage,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+) -> Result<MediaReadTarget, MediaError> {
+    resolve_media_read(sha256_ext, |hash| async move {
+        storage.get_sidecar(tenant, &hash).await
+    })
+    .await
+}
+
+/// Resolve the S3 key from a URL path segment; see [`resolve_media_read`].
 async fn resolve_s3_key(
     storage: &buzz_media::MediaStorage,
     tenant: &TenantContext,
     sha256_ext: &str,
 ) -> Result<String, MediaError> {
-    if sha256_ext.contains('.') {
-        Ok(sha256_ext.to_string())
-    } else {
-        let sidecar = storage
-            .get_sidecar(tenant, sha256_ext)
-            .await
-            .map_err(|_| MediaError::NotFound)?;
-        // Validate sidecar ext — never trust storage as authoritative for path construction
-        if !is_safe_ext(&sidecar.ext) {
-            return Err(MediaError::NotFound);
-        }
-        Ok(format!("{}.{}", sha256_ext, sidecar.ext))
-    }
+    resolve_s3_read(storage, tenant, sha256_ext)
+        .await
+        .map(|target| target.key)
 }
 
 /// A fixed access-log code for a rejected Blossom proof.
@@ -1436,6 +1434,80 @@ mod tests {
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    /// Drive `resolve_media_read` with a fixed sidecar, returning the result
+    /// and the hashes it read sidecars for.
+    async fn resolve_with_sidecar(
+        path: &str,
+        sidecar: Option<buzz_media::BlobMeta>,
+    ) -> (Result<MediaReadTarget, MediaError>, Vec<String>) {
+        let reads = std::sync::Mutex::new(Vec::new());
+        let result = resolve_media_read(path, |hash| {
+            reads.lock().expect("reads lock").push(hash);
+            async move { sidecar.ok_or(MediaError::NotFound) }
+        })
+        .await;
+        (result, reads.into_inner().expect("reads lock"))
+    }
+
+    fn png_sidecar() -> buzz_media::BlobMeta {
+        buzz_media::BlobMeta {
+            ext: "png".into(),
+            mime_type: "image/png".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn media_read_explicit_ext_reads_sidecar_once() {
+        let path = format!("{VALID_HASH}.png");
+        let (result, reads) = resolve_with_sidecar(&path, Some(png_sidecar())).await;
+        let target = result.expect("matching ext resolves");
+        assert_eq!(target.content_type, "image/png");
+        assert_eq!(target.key, path);
+        assert_eq!(reads, vec![VALID_HASH.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn media_read_bare_hash_reads_sidecar_once() {
+        let (result, reads) = resolve_with_sidecar(VALID_HASH, Some(png_sidecar())).await;
+        let target = result.expect("bare hash resolves");
+        assert_eq!(target.content_type, "image/png");
+        assert_eq!(target.key, format!("{VALID_HASH}.png"));
+        assert_eq!(reads, vec![VALID_HASH.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn media_read_ext_mismatch_is_not_found() {
+        let path = format!("{VALID_HASH}.jpg");
+        let (result, reads) = resolve_with_sidecar(&path, Some(png_sidecar())).await;
+        assert!(matches!(result, Err(MediaError::NotFound)));
+        assert_eq!(reads.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn media_read_missing_sidecar_or_unsafe_ext_is_not_found() {
+        let (missing, _) = resolve_with_sidecar(VALID_HASH, None).await;
+        assert!(matches!(missing, Err(MediaError::NotFound)));
+        let unsafe_sidecar = buzz_media::BlobMeta {
+            ext: "../x".into(),
+            ..png_sidecar()
+        };
+        let (unsafe_ext, _) = resolve_with_sidecar(VALID_HASH, Some(unsafe_sidecar)).await;
+        assert!(matches!(unsafe_ext, Err(MediaError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn media_read_thumbnail_gates_on_parent_sidecar_once() {
+        let path = format!("{VALID_HASH}.thumb.webp");
+        let (result, reads) = resolve_with_sidecar(&path, Some(png_sidecar())).await;
+        let target = result.expect("thumbnail resolves");
+        assert_eq!(target.key, path);
+        assert_eq!(target.content_type, "image/webp");
+        assert_eq!(reads, vec![VALID_HASH.to_string()]);
+        let (missing, _) = resolve_with_sidecar(&path, None).await;
+        assert!(matches!(missing, Err(MediaError::NotFound)));
+    }
 
     // ── MediaDenial response-shape tests (NIP-FI §755-773) ──────────────────
     // These tests pin the byte-exact response contract for Strict mode and
@@ -3745,7 +3817,7 @@ mod tests {
         // ── HEAD /media: Enforce mode, same-key admission → reaches handler ─
         //
         // Same-key Blossom get-auth + assertion → admission passes → handler
-        // attempts sidecar lookup → `read_sidecar_mime` yields `None` → 404.
+        // attempts sidecar lookup → `get_sidecar` fails → 404.
         //
         // Falsifying mutation: always-deny key pairing → 403 → assertion fires.
         #[test]
