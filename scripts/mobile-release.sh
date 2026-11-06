@@ -96,12 +96,17 @@ remote_tag_commit_sha() {
 }
 
 remote_source_commit_sha() {
-  local ref="refs/heads/$MOBILE_RELEASE_SOURCE_BRANCH" fetched_oid commit
-  # Fetch a single snapshot. A later branch advance does not invalidate it.
-  git fetch -q --no-tags origin "$ref" || return 1
-  fetched_oid="$(git rev-parse --verify FETCH_HEAD)" || return 1
-  commit="$(git rev-parse --verify 'FETCH_HEAD^{commit}')" || return 1
-  [[ "$commit" == "$fetched_oid" ]] || \
+  local ref="refs/heads/$MOBILE_RELEASE_SOURCE_BRANCH" line oid commit
+  # Take a single snapshot of the branch tip from origin itself. A later branch
+  # advance does not invalidate it. The shared FETCH_HEAD is never read: a
+  # concurrent fetch in this checkout could replace it with another branch.
+  line="$(git ls-remote --refs origin "$ref")" || return 1
+  [[ -n "$line" && "$line" != *$'\n'* ]] || return 1
+  oid="${line%%$'\t'*}"
+  [[ "$oid" =~ ^[0-9a-f]{40}$ ]] || return 1
+  git fetch -q --no-tags origin "$oid" || return 1
+  commit="$(git rev-parse --verify "$oid^{commit}")" || return 1
+  [[ "$commit" == "$oid" ]] || \
     fail "origin/$MOBILE_RELEASE_SOURCE_BRANCH did not resolve directly to a commit"
   printf '%s' "$commit"
 }

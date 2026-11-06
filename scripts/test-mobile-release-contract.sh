@@ -68,6 +68,12 @@ if [[ "\${GIT_PUSH_LANDS_BUT_FAILS:-}" == 1 && " \$* " == *" push "* ]]; then
   "$real_git" "\$@"
   exit 1
 fi
+# Simulates another fetch of main finishing right after the release script's
+# own fetch, replacing the checkout's shared FETCH_HEAD.
+if [[ "\${GIT_RACING_MAIN_FETCH:-}" == 1 && " \$* " == *" fetch "* ]]; then
+  "$real_git" "\$@" || exit
+  exec "$real_git" fetch -q --no-tags origin refs/heads/main
+fi
 exec "$real_git" "\$@"
 GIT
 chmod +x "$bin/git"
@@ -154,6 +160,10 @@ if GH_BRANCH_POLICY='{}' run_release "$operator" candidate 1.2.4 --source-branch
 fi
 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2
 [[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.4-rc.1^{commit}')" == "$stable_sha" ]]
+# A concurrent fetch of main in the same checkout cannot swap the source.
+GIT_RACING_MAIN_FETCH=1 run_release "$operator" candidate 1.2.4 --source-branch mobile-v1.2 >/dev/null
+[[ "$(git --git-dir="$remote" rev-parse 'refs/tags/mobile-v1.2.4-rc.2^{commit}')" == "$stable_sha" ]] || \
+  fail "a concurrent fetch of main changed the stable candidate's source"
 # Existing mismatched refs must be rejected by the guard, not missing-ref errors.
 for source in mobile-v1.3 mobile-v2.2 mobile-v01.2 arbitrary; do
   git -C "$work" switch -q -c "$source"
