@@ -2168,7 +2168,7 @@ void main() {
         debugDefaultTargetPlatformOverride = TargetPlatform.android;
         try {
           for (final down in [true, false]) {
-            ServicesBinding.instance.keyEventManager.handleKeyData(
+            tester.binding.platformDispatcher.onKeyData!(
               ui.KeyData(
                 type: down ? ui.KeyEventType.down : ui.KeyEventType.up,
                 physical: 0x1100000042,
