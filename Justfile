@@ -645,6 +645,10 @@ test-unit:
                 + test(/^api::nip_fi::/)'
         # Invitation drain/cutoff boundary contracts are infra-free.
         cargo nextest run -p buzz-relay --lib -E 'test(/^invite_token::/) + test(/^config::invite_cutoff_tests::/)'
+        # Runtime concurrency caps: the flag controller, provider selection and
+        # the AUTH shed through handle_auth, whose stub database refuses at
+        # once. Infra-free. Keep scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-relay --lib -E 'test(/^concurrency_limits::tests::/) + test(/^feature_flags::tests::/) + test(=handlers::auth::tests::auth_cap_sheds_a_verified_login_with_a_bare_close)'
         # Relay read caches: the admitted-connection index, the shared-read
         # gates (open set, restriction, tenant host), the community-active
         # cache, tenant host cache, the
