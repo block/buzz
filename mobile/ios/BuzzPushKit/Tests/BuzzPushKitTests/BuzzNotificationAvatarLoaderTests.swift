@@ -39,7 +39,9 @@ struct BuzzNotificationAvatarLoaderTests {
             id: "community", name: "Test", relayUrl: relay, pubkey: "account", policies: [],
             notificationSessionID: "session")))
       let url = try #require(URL(string: "\(media)/media/\(hash).png"))
-      #expect((BuzzNotificationAvatarLoader.thumbnailURL(url, scope: scope) != nil) == expected)
+      #expect(
+        BuzzNotificationAvatarLoader.thumbnailURLs(url, scope: scope).map(\.lastPathComponent)
+          == (expected ? ["\(hash).thumb.webp", "\(hash).thumb.jpg"] : []))
     }
   }
 
