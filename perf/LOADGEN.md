@@ -170,16 +170,17 @@ largest ramp step, and the hot-thread root and authors in its channel. It
 sends kind:9000 events of up to 100 members, `seed_concurrency` at a time,
 signed by the channel's creator, before posting any history. A rerun adds
 nobody new, and any member the relay refuses fails the seed. Seeded history
-and replies in a private channel are posted by its creator.
+in a private channel is posted by its own human members, or by its creator
+when it has none.
 
 The relay limits HTTP calls per pubkey, so `seed` spreads its writes across
-channel creators. The community owner creates its first 8 channels and each
-further block of 8 has its own creator identity, derived from `run_id`. A
-creator signs its channels' creation, member adds and thread roots (`run`
-looks roots up by it), plus, in private channels, their history and replies.
-Each signer stays at a few hundred seed writes in total, whatever the
-community's channel count. History and replies in open channels rotate
-across all humans.
+signers. The community owner creates its first 8 channels and each further
+block of 8 has its own creator identity, derived from `run_id`. A creator
+signs its channels' creation, member adds and thread roots (`run` looks roots
+up by it), so no creator nears the quota however many channels the community
+has. History and replies rotate across humans. A write the relay still
+throttles waits out the window the relay names and is retried, up to 10
+times, before it counts as failed.
 
 ## Desktop clients
 
