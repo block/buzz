@@ -481,19 +481,6 @@ impl MediaStorage {
         self.put(&key, &meta_json, "application/json").await
     }
 
-    /// Convenience: read just the MIME type from the community sidecar.
-    ///
-    /// Returns `None` for both absent sidecars and storage read failures. Public
-    /// read handlers intentionally collapse that distinction to 404 so an
-    /// A-bound request cannot distinguish a B-only blob from a missing blob.
-    pub async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
-        let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
-        self.get_sidecar(ctx, sha256)
-            .await
-            .ok()
-            .map(|m| m.mime_type)
-    }
-
     /// Probe object-store connectivity and bucket access.
     pub async fn ping(&self) -> Result<(), MediaError> {
         self.list_page(None, 1).await.map(|_| ())
