@@ -416,6 +416,7 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     link_preview_tags: Option<Vec<Vec<String>>>,
     sent_from_thread_tag: Option<Vec<String>>,
+    broadcast: Option<bool>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     expected_relay_url: Option<String>,
@@ -453,6 +454,12 @@ pub async fn send_channel_message(
     }
     if root_event_id.is_some() && parent_event_id.is_none() {
         return Err("root_event_id requires parent_event_id".into());
+    }
+    let broadcast = broadcast.unwrap_or(false);
+    if broadcast
+        && (parent_event_id.is_none() || kind_num != buzz_core_pkg::kind::KIND_STREAM_MESSAGE)
+    {
+        return Err("broadcast requires a stream message reply".into());
     }
 
     let mut resolved_root: Option<String> = None;
@@ -516,6 +523,11 @@ pub async fn send_channel_message(
                 &relay_base,
             )?
         }
+    };
+    let builder = if broadcast {
+        builder.tag(events::broadcast_tag()?)
+    } else {
+        builder
     };
 
     // `created_at` is the signed event's own second, not a post-publication

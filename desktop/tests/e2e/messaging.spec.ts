@@ -3446,6 +3446,122 @@ test("thread reply appears after relay closes and restores its live subscription
   await expect(threadPanel).toContainText(reply);
 });
 
+test("thread reply sent with Also send to channel is one event in both places", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const seed = `Also send seed ${Date.now()}`;
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText(seed);
+
+  const rootMessage = timeline.getByTestId("message-row").last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const alsoSend = threadPanel.getByTestId("thread-also-send-to-channel");
+  await expect(alsoSend).toHaveAccessibleName("Also send to #general");
+  await expect(alsoSend).toHaveAttribute("aria-pressed", "false");
+  await alsoSend.click();
+  await expect(alsoSend).toHaveAttribute("aria-pressed", "true");
+
+  const reply = `Also send reply ${Date.now()}`;
+  await threadPanel.getByTestId("message-input").fill(reply);
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (content) =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) =>
+              entry.command === "send_channel_message" &&
+              (entry.payload as { content?: string } | undefined)?.content ===
+                content,
+          )?.payload as Record<string, unknown> | undefined,
+        reply,
+      ),
+    )
+    .toMatchObject({ broadcast: true, content: reply });
+  await expect(alsoSend).toHaveAttribute("aria-pressed", "false");
+
+  const threadReplyRow = threadPanel
+    .locator("[data-message-id]")
+    .filter({ hasText: reply })
+    .last();
+  await expect(threadReplyRow).toBeVisible();
+  const replyId = await threadReplyRow.getAttribute("data-message-id");
+  expect(replyId).toMatch(/^[0-9a-f]{64}$/);
+  await expect(
+    timeline.locator(`[data-message-id="${replyId}"]`),
+  ).toContainText(reply);
+
+  await threadReplyRow.hover();
+  await threadReplyRow.getByRole("button", { name: "Reply" }).click();
+  await expect(threadPanel.getByTestId("reply-target")).toBeVisible();
+  await expect(alsoSend).toHaveCount(0);
+  await threadPanel.getByTestId("reply-target").getByRole("button").click();
+  await expect(alsoSend).toHaveAttribute("aria-pressed", "false");
+
+  const plainReply = `Thread-only reply ${Date.now()}`;
+  await threadPanel.getByTestId("message-input").fill(plainReply);
+  await threadPanel.getByTestId("send-message").click();
+  await expect(threadPanel).toContainText(plainReply);
+  await expect(
+    timeline.getByTestId("message-row").filter({ hasText: plainReply }),
+  ).toHaveCount(0);
+});
+
+test("Also send to channel stays on when the thread reply fails to send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    sendMessageErrors: ["Mock relay rejected the event."],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      (window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+      }) ??
+        false),
+  );
+  const seed = `Also send failure seed ${Date.now()}`;
+  const rootId = await page.evaluate(
+    ({ alicePubkey, content }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      return emit({ channelName: "general", content, pubkey: alicePubkey }).id;
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey, content: seed },
+  );
+  const rootRow = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${rootId}"]`);
+  await rootRow.hover();
+  await rootRow.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const alsoSend = threadPanel.getByTestId("thread-also-send-to-channel");
+  await alsoSend.click();
+  await expect(alsoSend).toHaveAttribute("aria-pressed", "true");
+
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill("Reply that fails");
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(threadInput).toContainText("Reply that fails");
+  await expect(alsoSend).toHaveAttribute("aria-pressed", "true");
+});
+
 test("thread composer keeps focus after sending a thread reply", async ({
   page,
 }) => {

@@ -218,6 +218,7 @@ export function ProjectConversationPanel({
       threadContext?: {
         parentEventId: string | null;
         threadHeadId: string | null;
+        broadcast?: boolean;
       } | null,
     ) => {
       if (!activeChannel || !rootId) return;
@@ -230,6 +231,7 @@ export function ProjectConversationPanel({
         mentionPubkeys,
         parentEventId,
         targetChannel: activeChannel,
+        broadcast: threadContext?.broadcast === true,
       });
       setReplyTargetId(rootId);
       setExpandedReplyIds((current) => new Set(current).add(parentEventId));

@@ -10293,6 +10293,7 @@ async function handleSendChannelMessage(
     mentionTags?: string[][] | null;
     linkPreviewTags?: string[][] | null;
     sentFromThreadTag?: string[] | null;
+    broadcast?: boolean | null;
     suppressLinkPreviews?: boolean;
     expectedRelayUrl?: string | null;
     expectedSignerPubkey?: string | null;
@@ -10370,6 +10371,7 @@ async function handleSendChannelMessage(
     ...mentionTags,
     ...linkPreviewTags,
     ...(args.sentFromThreadTag ? [args.sentFromThreadTag] : []),
+    ...(args.broadcast && args.parentEventId ? [["broadcast", "1"]] : []),
     ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
   ];
   const identity = getIdentity(config);
