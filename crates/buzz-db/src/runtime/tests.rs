@@ -4218,6 +4218,9 @@ mod listed_channel_name_postgres_tests;
 #[path = "tests/reader_pool_postgres_tests.rs"]
 mod reader_pool_postgres_tests;
 
+#[path = "tests/writer_pool_postgres_tests.rs"]
+mod writer_pool_postgres_tests;
+
 #[path = "tests/event_hydration_postgres_tests.rs"]
 mod event_hydration_postgres_tests;
 
