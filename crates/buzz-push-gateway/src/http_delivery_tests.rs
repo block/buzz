@@ -400,27 +400,43 @@ async fn cancelled_deliveries_keep_capacity_and_leave_v1_challenge_and_revoke_la
         release: release.clone(),
     })))
     .await;
-    for n in 0..8 {
+    let mut admitted = 0;
+    for n in 0..128 {
         let mut value: serde_json::Value = serde_json::from_slice(&template).unwrap();
         value["request_id"] = Uuid::new_v4().to_string().into();
         let body = serde_json::to_vec(&value).unwrap();
         let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
         let mut req = request(DIRECT_URL, None, auth, body);
-        // Two concurrent requests per source, four independent sources.
+        // Two requests per source; try another if its bucket is already full.
         req.extensions_mut().insert(axum::extract::ConnectInfo(
             format!("192.0.2.{}:1234", n / 2 + 1)
                 .parse::<std::net::SocketAddr>()
                 .unwrap(),
         ));
-        let task = tokio::spawn(app.clone().oneshot(req));
-        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        let mut task = tokio::spawn(app.clone().oneshot(req));
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                permit = entered.acquire() => Some(permit.unwrap()),
+                response = &mut task => {
+                    let response = response.unwrap().unwrap();
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    assert_eq!(response.headers()["retry-after"], "1");
+                    None
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let Some(permit) = permit else { continue };
+        permit.forget();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        admitted += 1;
+        if admitted == 8 {
+            break;
+        }
     }
+    assert_eq!(admitted, 8);
     let response = app
         .clone()
         .oneshot(
