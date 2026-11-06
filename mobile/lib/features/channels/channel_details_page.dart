@@ -138,6 +138,20 @@ class ChannelDetailsPage extends HookConsumerWidget {
         !membersAsync.hasError &&
         !resolvedChannel.isArchived &&
         resolvedChannel.canAddMembers(currentMember?.role);
+    // The relay's moderation DM only carries its notices; no one joins it.
+    final relayUrl = ref.watch(activeCommunityProvider).asData?.value?.relayUrl;
+    final relayAuthor = relayUrl == null
+        ? null
+        : ref.watch(relayAuthorProvider(relayUrl)).asData?.value;
+    final isModerationDm =
+        resolvedChannel.isDm &&
+        relayAuthor != null &&
+        (resolvedChannel.participantPubkeys.any(
+              (pubkey) => pubkey.toLowerCase() == relayAuthor,
+            ) ||
+            members.any(
+              (member) => member.pubkey.toLowerCase() == relayAuthor,
+            ));
     // People join a DM only through the DM add, which any member can use.
     final canAddToDm =
         resolvedChannel.isDm &&
@@ -398,24 +412,26 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     onTap: toggleMute,
                   ),
                 ),
-                const SizedBox(width: Grid.xxs),
-                Expanded(
-                  child: resolvedChannel.isDm
-                      ? BuzzActionTile(
-                          key: const ValueKey('channel-details-add-action'),
-                          icon: BuzzIcons.userPlus,
-                          label: 'Add',
-                          isEnabled: canAddToDm,
-                          onTap: openAddMembers,
-                        )
-                      : BuzzActionTile(
-                          key: const ValueKey('channel-details-edit-action'),
-                          icon: BuzzIcons.pencil,
-                          label: 'Edit',
-                          isEnabled: canEdit,
-                          onTap: openManageChannel,
-                        ),
-                ),
+                if (!isModerationDm) ...[
+                  const SizedBox(width: Grid.xxs),
+                  Expanded(
+                    child: resolvedChannel.isDm
+                        ? BuzzActionTile(
+                            key: const ValueKey('channel-details-add-action'),
+                            icon: BuzzIcons.userPlus,
+                            label: 'Add',
+                            isEnabled: canAddToDm,
+                            onTap: openAddMembers,
+                          )
+                        : BuzzActionTile(
+                            key: const ValueKey('channel-details-edit-action'),
+                            icon: BuzzIcons.pencil,
+                            label: 'Edit',
+                            isEnabled: canEdit,
+                            onTap: openManageChannel,
+                          ),
+                  ),
+                ],
               ],
             ),
           ),
