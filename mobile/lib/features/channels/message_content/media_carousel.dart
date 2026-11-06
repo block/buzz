@@ -151,6 +151,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
     final currentIndex = useState(0);
     final mediaAuth = ref.watch(mediaGetAuthServiceProvider);
     final mediaClient = ref.watch(mediaHttpClientProvider);
+    final mediaDiskCache = ref.watch(mediaDiskCacheProvider);
 
     return MessageGalleryFrame(
       count: items.length,
@@ -189,6 +190,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
                     url: items[index].url,
                     auth: mediaAuth,
                     client: mediaClient,
+                    diskCache: mediaDiskCache,
                   ),
                 ),
             ];

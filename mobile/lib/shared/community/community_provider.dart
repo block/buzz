@@ -14,6 +14,7 @@ import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
+import '../relay/media_disk_cache.dart';
 import '../relay/signed_event_relay.dart';
 import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
 import 'community.dart';
@@ -264,6 +265,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     unawaited(_removeOrphanChannelListSnapshots(communities));
+    unawaited(_removeOrphanMediaCaches(fallback: communities));
     await syncCommunitySnapshot(ref, communities);
     return communities;
   }
@@ -289,14 +291,17 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         pubkey: community.pubkey,
         nsec: community.nsec,
       );
-      if (_channelSnapshotPubkey(existing)?.toLowerCase() !=
-          _channelSnapshotPubkey(updated)?.toLowerCase()) {
-        await _removeChannelListSnapshot(existing);
-      }
+      final identityChanged =
+          _channelSnapshotPubkey(existing)?.toLowerCase() !=
+          _channelSnapshotPubkey(updated)?.toLowerCase();
+      if (identityChanged) await _removeChannelListSnapshot(existing);
       await storage.save(updated);
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
+      // The new account has its own image cache; drop the previous one's in
+      // the background.
+      if (identityChanged) unawaited(_removeOrphanMediaCaches());
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
@@ -353,6 +358,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           ref.invalidate(authProvider);
         }
       }
+      // Deleting up to a full cache can take a while; never hold the removal
+      // on it. The launch sweep retries a failure.
+      unawaited(_removeOrphanMediaCaches());
       if (revocationJournaled) {
         unawaited(
           ref.read(communityPushLeaseRevocationTriggerProvider)().catchError((
@@ -397,6 +405,44 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         if (_channelSnapshotPubkey(community) case final pubkey?)
           ChannelListSnapshotStorage.key(pubkey, community.relayUrl),
     });
+  }
+
+  /// Deletes the image caches of communities no longer in the list, and of
+  /// accounts a community no longer signs in as. A failure, or a
+  /// write that lands after the delete, is swept on the next launch.
+  ///
+  /// Sweeps run one at a time, each keeping what the community list holds
+  /// when it starts, so an older sweep can never delete a newer account's
+  /// cache. [fallback] stands in for the list while it is still loading.
+  Future<void> _removeOrphanMediaCaches({List<Community>? fallback}) =>
+      _mediaSweep = _mediaSweep.then((_) => _sweepMediaCaches(fallback));
+
+  Future<void> _mediaSweep = Future.value();
+
+  Future<void> _sweepMediaCaches(List<Community>? fallback) async {
+    try {
+      final root = await ref.read(mediaCacheRootProvider.future);
+      if (root == null) return;
+      List<Community>? current() =>
+          state.isLoading ? fallback ?? state.value : state.value;
+      var communities = current();
+      if (communities == null) return;
+      await MediaDiskCache.removeOrphans(root, () {
+        // A list briefly unavailable mid-sweep keeps the last one seen.
+        communities = current() ?? communities;
+        return {
+          for (final community in communities!)
+            community.id: _channelSnapshotPubkey(community)?.toLowerCase(),
+        };
+      });
+    } catch (error, stackTrace) {
+      developer.log(
+        'Media cache deletion failed; the next launch will retry',
+        name: 'buzz.community',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   Future<void> switchCommunity(String id) {

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -10,6 +11,7 @@ import 'package:http/http.dart' as http;
 import '../hosted/hosted_relay_auth.dart';
 import '../utils/bounded_fetch.dart';
 import 'media_auth.dart';
+import 'media_disk_cache.dart';
 
 /// Shared, keep-alive HTTP client for media fetches. One client per container
 /// so TLS connections are reused across images instead of re-handshaking per
@@ -48,6 +50,10 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   /// Excluded from equality: transport, not identity.
   final http.Client client;
 
+  /// Where loaded bytes persist across launches, or null to keep them in
+  /// memory only. Excluded from equality: storage, not identity.
+  final MediaDiskCache? diskCache;
+
   /// Longest wait for response headers or the next body chunk. A slow link
   /// that keeps delivering bytes finishes; one that stops is aborted without
   /// closing the shared client.
@@ -61,6 +67,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     required this.url,
     required this.auth,
     required this.client,
+    this.diskCache,
     this.onBytesLoaded,
     this.scale = 1.0,
     this.stallTimeout = defaultStallTimeout,
@@ -75,6 +82,19 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
 
   static final Map<String, DateTime> _cooldownUntil = {};
   static final Map<(String, MediaGetAuthService), _SharedFetch> _inFlight = {};
+
+  /// Background refreshes of stale disk bytes running or queued, per cache
+  /// and URL.
+  static final Set<(MediaDiskCache, String)> _refreshing = {};
+  static final _refreshQueue = Queue<Future<void> Function()>();
+  static var _runningRefreshes = 0;
+
+  /// Most background refreshes at once; the rest wait in a queue.
+  static const _maxRefreshes = 2;
+
+  /// Most refreshes waiting. A stale image dropped past this keeps its
+  /// saved bytes and refreshes the next time it loads from disk.
+  static const _maxQueuedRefreshes = 64;
 
   /// Injectable clock for cooldown tests.
   @visibleForTesting
@@ -97,14 +117,28 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     ImageDecoderCallback decode,
   ) {
     final abandoned = Completer<void>();
+    _SharedFetch? fetched;
     // The image cache listens to a pending load, so this fires mid-download
     // only once a consumer evicts the entry and stops listening (see
     // [abandonPendingImage]), as [MediaImage] does when it stops showing an
     // image before its first frame. Abort the download then.
     return _MediaImageStreamCompleter(
-      codec: _loadAsync(key, decode, abandoned.future),
+      codec: _loadAsync(
+        key,
+        decode,
+        abandoned.future,
+        onFetch: (fetch) => fetched = fetch,
+      ),
       scale: key.scale,
       debugLabel: url,
+      // Save only bytes this load decoded a frame from (a codec can open
+      // from bytes whose frames then fail to decode), and drop saved bytes
+      // that no longer decode. Then drop the fetch: the cached completer
+      // must not keep the encoded bytes alive.
+      onSettled: (decoded) {
+        fetched?.settle(decoded: decoded);
+        fetched = null;
+      },
     )..addOnLastListenerRemovedCallback(() {
       if (!abandoned.isCompleted) abandoned.complete();
     });
@@ -113,8 +147,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   Future<ui.Codec> _loadAsync(
     MediaImageProvider key,
     ImageDecoderCallback decode,
-    Future<void> abandoned,
-  ) async {
+    Future<void> abandoned, {
+    required void Function(_SharedFetch) onFetch,
+  }) async {
     var wasAbandoned = false;
     try {
       // Each decode size is its own cache entry (see [ResizeImage]), so one
@@ -122,12 +157,13 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       // fetching the same bytes once per size.
       final fetchKey = (url, auth);
       final fetch = _inFlight[fetchKey] ??= _SharedFetch(
-        _fetchBytes,
+        _loadBytes,
         onFinished: (fetch) {
           if (_inFlight[fetchKey] == fetch) _inFlight.remove(fetchKey);
         },
       );
       fetch.join();
+      onFetch(fetch);
       var left = false;
       void leave() {
         if (left) return;
@@ -164,6 +200,96 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       });
       rethrow;
     }
+  }
+
+  /// [url]'s bytes from [diskCache] when saved there, else downloaded (and
+  /// saved once they decode). Stale saved bytes are shown, and once they
+  /// decode a background download replaces them; saved bytes that fail to
+  /// decode are removed instead.
+  Future<Uint8List> _loadBytes(_SharedFetch fetch) async {
+    final cache = diskCache;
+    if (cache == null) return _fetchBytes(fetch.aborted);
+    final hit = await cache.read(url);
+    if (hit != null) {
+      // Refresh only after the decode, so a refresh can never land before
+      // the removal of bytes that failed it.
+      if (hit.isStale) fetch.onDecoded = () => _scheduleRefresh(cache);
+      fetch.onFailed = () => unawaited(cache.remove(url));
+      return hit.bytes;
+    }
+    final bytes = await _fetchBytes(fetch.aborted);
+    final immutable = _isContentAddressed;
+    fetch.onDecoded = () =>
+        unawaited(cache.write(url, bytes, immutable: immutable));
+    return bytes;
+  }
+
+  void _scheduleRefresh(MediaDiskCache cache) {
+    final key = (cache, url);
+    if (_refreshQueue.length >= _maxQueuedRefreshes || !_refreshing.add(key)) {
+      return;
+    }
+    _refreshQueue.add(() async {
+      try {
+        await _refresh(cache);
+      } finally {
+        _refreshing.remove(key);
+      }
+    });
+    _pumpRefreshes();
+  }
+
+  static void _pumpRefreshes() {
+    while (_runningRefreshes < _maxRefreshes && _refreshQueue.isNotEmpty) {
+      final refresh = _refreshQueue.removeFirst();
+      _runningRefreshes++;
+      unawaited(
+        refresh().whenComplete(() {
+          _runningRefreshes--;
+          _pumpRefreshes();
+        }),
+      );
+    }
+  }
+
+  Future<void> _refresh(MediaDiskCache cache) async {
+    try {
+      // Nobody is waiting on it, so it stops only when its cache retires.
+      if (cache.isClosed) return;
+      final bytes = await _fetchBytes(cache.closed);
+      // Nothing displays these bytes yet, so check they decode before they
+      // replace the saved copy. A tiny target keeps the check from
+      // allocating a full-resolution frame.
+      try {
+        final codec = await ui.instantiateImageCodec(
+          bytes,
+          targetWidth: 1,
+          targetHeight: 1,
+          allowUpscaling: false,
+        );
+        try {
+          (await codec.getNextFrame()).image.dispose();
+        } finally {
+          codec.dispose();
+        }
+      } on Object {
+        // A body that never decodes is a failed fetch: back off.
+        _cooldownUntil[url] = debugNow().add(_defaultCooldown);
+        rethrow;
+      }
+      await cache.write(url, bytes, immutable: _isContentAddressed);
+    } on Object catch (error) {
+      // The stale bytes stay; the next load after the cooldown retries.
+      debugPrint('[MediaImageProvider] refresh of $url failed: $error');
+    }
+  }
+
+  /// A relay blob or its thumbnail: named by content hash, so its bytes
+  /// never change.
+  bool get _isContentAddressed {
+    if (!auth.isRelayMediaUrl(url)) return false;
+    final uri = Uri.parse(url);
+    return !uri.hasQuery && _relayContentPath.hasMatch(uri.path);
   }
 
   /// Downloads [url]. Completing [abort] means every load waiting for this
@@ -275,10 +401,46 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
   _MediaImageStreamCompleter({
     required super.codec,
     required super.scale,
+    required this.onSettled,
     super.debugLabel,
   });
 
+  /// Called once: with true when the first frame has decoded, or with false
+  /// when the load fails before it. A codec can be created from bytes whose
+  /// frames then fail to decode.
+  void Function(bool decoded)? onSettled;
+
+  void _settle({required bool decoded}) {
+    final settled = onSettled;
+    onSettled = null;
+    settled?.call(decoded);
+  }
+
   final _listeners = <ImageStreamListener>[];
+
+  @override
+  void setImage(ImageInfo image) {
+    _settle(decoded: true);
+    super.setImage(image);
+  }
+
+  @override
+  void reportError({
+    DiagnosticsNode? context,
+    required Object exception,
+    StackTrace? stack,
+    InformationCollector? informationCollector,
+    bool silent = false,
+  }) {
+    _settle(decoded: false);
+    super.reportError(
+      context: context,
+      exception: exception,
+      stack: stack,
+      informationCollector: informationCollector,
+      silent: silent,
+    );
+  }
 
   @override
   void addListener(ImageStreamListener listener) {
@@ -298,10 +460,10 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
 /// download.
 class _SharedFetch {
   _SharedFetch(
-    Future<Uint8List> Function(Future<void> abort) fetch, {
+    Future<Uint8List> Function(_SharedFetch fetch) load, {
     required this.onFinished,
   }) {
-    bytes = fetch(_abort.future).whenComplete(() {
+    bytes = load(this).whenComplete(() {
       _done = true;
       onFinished(this);
     });
@@ -314,6 +476,24 @@ class _SharedFetch {
   late final Future<Uint8List> bytes;
   var _waiting = 0;
   var _done = false;
+
+  /// Completes when every load waiting for this download was abandoned.
+  Future<void> get aborted => _abort.future;
+
+  /// Run by the first load that decodes a frame: saves downloaded bytes,
+  /// or refreshes stale saved ones.
+  VoidCallback? onDecoded;
+
+  /// Run when a load fails before decoding a frame: removes saved bytes.
+  VoidCallback? onFailed;
+
+  /// Runs [onDecoded] or [onFailed] once, by whether a load decoded a frame.
+  void settle({required bool decoded}) {
+    final pending = decoded ? onDecoded : onFailed;
+    onDecoded = null;
+    onFailed = null;
+    pending?.call();
+  }
 
   void join() => _waiting++;
 
@@ -338,6 +518,10 @@ class MediaImageCooldownException implements Exception {
   String toString() =>
       'MediaImageCooldownException: $url is cooling down until $until';
 }
+
+final _relayContentPath = RegExp(
+  r'^/media/[0-9a-f]{64}(?:\.thumb\.jpg|\.[a-z0-9]{1,8})?$',
+);
 
 final _relayBlobPath = RegExp(r'^/media/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$');
 
@@ -426,10 +610,12 @@ class MediaImage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
+    final diskCache = ref.watch(mediaDiskCacheProvider);
     MediaImageProvider providerFor(String source) => MediaImageProvider(
       url: source,
       auth: auth,
       client: client,
+      diskCache: diskCache,
       onBytesLoaded: onBytesLoaded,
     );
 
