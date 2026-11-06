@@ -321,4 +321,37 @@ mod management_postgres_tests {
         pool.close().await;
         drop_schema(&schema).await;
     }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn endpoint_rotation_response_loss_retries_the_exact_target_only() {
+        let (pool, schema) = full_schema(2).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let id = Uuid::from_u128(1);
+        let now = Utc::now().timestamp();
+        store
+            .rotate_endpoint(id, 1, 2, vec![9], [9; 32], assertion(0, 1, None, now))
+            .await
+            .unwrap();
+        store
+            .rotate_endpoint(id, 1, 2, vec![10], [9; 32], assertion(1, 2, None, now))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .rotate_endpoint(id, 1, 2, vec![11], [11; 32], assertion(2, 3, None, now))
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+        let installation = store.installation(id, now).await.unwrap();
+        assert_eq!(installation.assertion_counter, 2);
+        assert_eq!(installation.token_fingerprint, [9; 32]);
+        assert_eq!(
+            installation.token_ciphertext,
+            vec![9],
+            "exact retry does not overwrite the original committed token"
+        );
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
 }
