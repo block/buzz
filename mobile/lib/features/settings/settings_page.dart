@@ -214,16 +214,7 @@ class SettingsPage extends HookConsumerWidget {
                         for (final section in sections)
                           AppListRow(
                             title: section.$1,
-                            trailing:
-                                ConversationPaneScope.maybeOf(
-                                      paneContext,
-                                    )?.selectedId ==
-                                    section.$1
-                                ? const Icon(
-                                    Icons.check,
-                                    semanticLabel: 'Selected',
-                                  )
-                                : null,
+                            trailing: const _RowChevron(),
                             onTap: () => controller.open(
                               section.$1,
                               (_) => detail(section.$1, section.$2),

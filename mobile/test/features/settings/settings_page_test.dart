@@ -11,6 +11,7 @@ import 'package:buzz/shared/community/community_membership_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -75,8 +76,43 @@ void main() {
       workspaceTheme.colorScheme.surface,
     );
 
+    final categoryRows = find.byWidgetPredicate(
+      (w) =>
+          w is AppListRow &&
+          [
+            'Status',
+            'Profile',
+            'Notifications',
+            'Connection',
+          ].contains(w.title),
+    );
+    final categoryBounds = <String, Rect>{
+      for (final element in categoryRows.evaluate())
+        (element.widget as AppListRow).title: tester.getRect(
+          find.byWidget(element.widget),
+        ),
+    };
+    expect(categoryBounds.length, greaterThanOrEqualTo(3));
+    for (final element in categoryRows.evaluate()) {
+      expect(
+        find.descendant(
+          of: find.byWidget(element.widget),
+          matching: find.byIcon(BuzzIcons.chevronRight),
+        ),
+        findsOneWidget,
+      );
+    }
+    expect(find.byIcon(Icons.check), findsNothing);
+
     await tester.tap(find.text('Profile'));
     await tester.pumpAndSettle();
+    for (final entry in categoryBounds.entries) {
+      final row = find.byWidgetPredicate(
+        (w) => w is AppListRow && w.title == entry.key,
+      );
+      expect(tester.getRect(row), entry.value);
+    }
+    expect(find.byIcon(Icons.check), findsNothing);
     await tester.tap(find.text('Status'));
     await tester.pumpAndSettle();
     expect(find.text('Set status'), findsOneWidget);
