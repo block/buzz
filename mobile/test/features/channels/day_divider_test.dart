@@ -77,6 +77,10 @@ void main() {
     tester,
   ) async {
     final stickyDayTimestamp = ValueNotifier<int?>(null);
+    final scrollVisible = ValueNotifier(false);
+    final semantics = tester.ensureSemantics();
+    addTearDown(semantics.dispose);
+    addTearDown(scrollVisible.dispose);
     addTearDown(stickyDayTimestamp.dispose);
 
     await tester.pumpWidget(
@@ -87,6 +91,7 @@ void main() {
             label: 'Today',
             dayTimestamp: 1000,
             stickyDayTimestamp: stickyDayTimestamp,
+            scrollVisible: scrollVisible,
           ),
         ),
       ),
@@ -101,9 +106,19 @@ void main() {
     stickyDayTimestamp.value = 1000;
     await tester.pump();
 
+    expect(opacity().opacity, 1);
+    expect(find.bySemanticsLabel('Today'), findsOneWidget);
+    scrollVisible.value = true;
+    await tester.pump();
     expect(opacity().opacity, 0);
+    expect(find.bySemanticsLabel('Today'), findsNothing);
     expect(opacity().duration, const Duration(milliseconds: 120));
     expect(opacity().curve, Curves.easeOutCubic);
+
+    scrollVisible.value = false;
+    await tester.pumpAndSettle();
+    expect(opacity().opacity, 1);
+    expect(find.bySemanticsLabel('Today'), findsOneWidget);
 
     stickyDayTimestamp.value = null;
     await tester.pump();

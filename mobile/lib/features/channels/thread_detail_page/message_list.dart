@@ -100,6 +100,7 @@ class _ThreadMessageList extends HookWidget {
             label: formatDayHeading(head.createdAt),
             dayTimestamp: head.createdAt,
             stickyDayTimestamp: stickyDayTimestamp,
+            scrollVisible: dateScrollActivity,
           ),
           _ThreadMessage(
             message: head,
@@ -310,6 +311,7 @@ class _ThreadMessageList extends HookWidget {
                                       label: formatDayHeading(reply.createdAt),
                                       dayTimestamp: reply.createdAt,
                                       stickyDayTimestamp: stickyDayTimestamp,
+                                      scrollVisible: dateScrollActivity,
                                     ),
                                   _ThreadMessage(
                                     message: reply,

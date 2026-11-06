@@ -1085,6 +1085,7 @@ class _MessageList extends HookConsumerWidget {
                             label: formatDayHeading(message.createdAt),
                             dayTimestamp: message.createdAt,
                             stickyDayTimestamp: stickyDayTimestamp,
+                            scrollVisible: dateScrollActivity,
                           ),
                         if (message.isSystem)
                           _SystemMessageRow(
