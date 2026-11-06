@@ -100,14 +100,18 @@ pub fn welcome_message_error(text: &str) -> Option<&'static str> {
 }
 
 /// Why `text` cannot be a custom welcome title, or `None` when it can: one
-/// line of text, with no control character at all. The caller handles the
-/// empty string, which restores the default.
+/// line of text, with no control character and no Unicode line or paragraph
+/// separator (U+2028, U+2029). The caller handles the empty string, which
+/// restores the default.
 pub fn welcome_title_error(text: &str) -> Option<&'static str> {
     if text.trim().is_empty() {
         Some("welcome title must not be blank")
     } else if text.chars().count() > WELCOME_TITLE_MAX_CHARS {
         Some("welcome title is too long (max 120 characters)")
-    } else if text.chars().any(char::is_control) {
+    } else if text
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
         Some("welcome title must be a single line without control characters")
     } else {
         None
@@ -609,6 +613,9 @@ mod tests {
             ("Two\nlines", control),
             ("tab\there", control),
             ("bell\u{7}", control),
+            // Not `char::is_control`, but a line break all the same.
+            ("line\u{2028}separator", control),
+            ("paragraph\u{2029}separator", control),
         ];
         for (text, expected) in cases {
             assert_eq!(welcome_title_error(text), *expected, "{text:?}");
