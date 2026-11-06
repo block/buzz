@@ -150,21 +150,23 @@ class ActivityPage extends HookConsumerWidget {
           (sender.value == 'Agents' ? isAgent : !isAgent);
     }
 
-    // Mentions shows the actual mention, not a later unmentioned reply from
-    // the same conversation. Filtering happens before sender/read filtering.
+    // Mentions and sender filters apply to each event before regrouping, so
+    // a row shows the matching activity rather than a later unrelated reply
+    // from the same conversation.
     final candidates = buildInboxItems(
       allItems
           .expand((i) => i.groupItems)
           .where(
             (e) =>
-                filter.value != InboxFilter.mention || e.category == 'mention',
+                (filter.value != InboxFilter.mention ||
+                    e.category == 'mention') &&
+                includesSender(e.pubkey),
           ),
       isDmChannel: (id) => channelById[id]?.isDm ?? false,
     );
     final visibleItems = [
       for (final item in candidates)
-        if (includesSender(item.item.pubkey) &&
-            matchesInboxFilter(item, filter.value) &&
+        if (matchesInboxFilter(item, filter.value) &&
             (!unreadOnly.value || !isDone(item)))
           item,
     ];
@@ -186,7 +188,11 @@ class ActivityPage extends HookConsumerWidget {
       ref
           .read(inboxLocalStateProvider.notifier)
           .clearUnread(groupedInboxItemIds(item));
-      final threadRootId = item.threadRootId;
+      // A DM row can group replies under several thread roots; its channel
+      // marker reads all of them.
+      final threadRootId = item.conversationId.startsWith('dm:')
+          ? null
+          : item.threadRootId;
       if (threadRootId != null) {
         notifier.markContextRead(
           threadContextKey(threadRootId),

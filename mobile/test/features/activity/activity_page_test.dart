@@ -605,6 +605,113 @@ void main() {
     expect(find.textContaining('dm body dm-a'), findsNothing);
   });
 
+  testWidgets('marking a DM row read covers replies under every thread root', (
+    tester,
+  ) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
+    );
+    FeedItem reply(String id, String root, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
+      content: 'dm reply $id',
+      createdAt: now - age,
+      channelId: 'dm1',
+      channelName: '',
+      tags: [
+        ['e', root, '', 'root'],
+        ['e', root, '', 'reply'],
+      ],
+      category: 'activity',
+    );
+    const rootA =
+        'aaaa000000000000000000000000000000000000000000000000000000000001';
+    const rootB =
+        'bbbb000000000000000000000000000000000000000000000000000000000002';
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [reply('dm-r1', rootA, 300), reply('dm-r2', rootB, 200)],
+          agentActivity: const [],
+        ),
+        channels: [...testChannels, dmChannel],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('inbox-unread-dot-dm-r2')),
+      findsOneWidget,
+    );
+
+    await tester.drag(
+      find.byKey(const ValueKey('inbox-row-dm-r2')),
+      const Offset(-500, 0),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inbox-unread-dot-dm-r2')), findsNothing);
+  });
+
+  testWidgets(
+    'sender filter keeps a person\'s message under a later agent reply',
+    (tester) async {
+      FeedItem threadEvent(String id, String pubkey, String body, int age) =>
+          FeedItem(
+            id: id,
+            kind: 9,
+            pubkey: pubkey,
+            content: body,
+            createdAt: now - age,
+            channelId: 'ch1',
+            channelName: 'general',
+            tags: const [
+              ['e', threadIdRoot1, '', 'root'],
+              ['e', threadIdRoot1, '', 'reply'],
+            ],
+            category: 'mention',
+          );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          knownAgentPubkeys: const {'agent_pk'},
+          feed: HomeFeedResponse(
+            mentions: [
+              threadEvent('p1', 'bob_pk', 'person asks', 300),
+              threadEvent('g1', 'agent_pk', 'agent answers', 200),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('agent answers'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('People').last);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('person asks'), findsOneWidget);
+      expect(find.textContaining('agent answers'), findsNothing);
+    },
+  );
+
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
