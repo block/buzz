@@ -375,6 +375,30 @@ of the channel's messages: `buzz:workflow-owner` also names the owner. A
 marked `p` tag on any other event, for example a kind:39002 member list role,
 matches `#p` normally. See `docs/buzz-push.md` for the push rules.
 
+### Workflow Mentions
+
+A workflow message may carry `["buzz:workflow-mention", <pubkey>]` tags. Each
+one names a channel member whom the workflow's owner named in the stored text of
+the step, as opposed to text substituted into it when the step ran. The relay adds
+a plain `["p", <pubkey>]` for every member that the rendered text mentions, and a
+`buzz:workflow-mention` tag only for members that the stored text also names.
+
+A `buzz:workflow-mention` tag is the relay's statement that the message may
+direct the named agent on the owner's behalf. An agent acts on a workflow
+message only if the relay signed it, `buzz:workflow-owner` names the agent's
+owner, and a `buzz:workflow-mention` tag names the agent. A plain `p` tag on a
+workflow message notifies the member but does not direct an agent.
+
+A relay may withhold `buzz:workflow-mention` tags under a policy. The message
+still posts with its `p` tags. In secure workflows mode, the relay adds the tags
+only when both of these hold:
+
+- the workflow's owner caused the run, or a schedule did. For an event trigger,
+  the cause is the event's signer: for a reaction, the reactor, not the author
+  of the message reacted to. A webhook call has no known cause.
+- every step of the definition is `send_message` or `delay`, and the run did
+  not resume after an approval.
+
 ### Sending Messages
 
 ```bash

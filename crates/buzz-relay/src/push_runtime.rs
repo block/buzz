@@ -1224,6 +1224,7 @@ mod postgres_tests {
                     text,
                     &owner.public_key().to_hex(),
                     None,
+                    true,
                 )
                 .await
                 .expect("send workflow message");

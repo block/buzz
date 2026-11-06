@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use buzz_core::tenant::CommunityId;
+use buzz_db::workflow::RunCause;
 use evalexpr::HashMapContext;
 use nostr::ToBech32;
 use serde_json::Value as JsonValue;
@@ -527,6 +528,29 @@ fn resolve_send_message_channel(
     Ok(trigger_channel.trim().to_string())
 }
 
+/// Whether every step of `def` is an action that takes no input from outside
+/// the owner's control. An allowlist: any other action, including one added
+/// later, makes the definition ineligible to direct agents.
+pub fn definition_may_direct_agents(def: &WorkflowDef) -> bool {
+    def.steps.iter().all(|step| {
+        matches!(
+            step.action,
+            ActionDef::SendMessage { .. } | ActionDef::Delay { .. }
+        )
+    })
+}
+
+/// Whether a run's recorded cause lets its messages direct the owner's agents:
+/// a timer, or an event or manual trigger signed by the owner. Webhook calls
+/// and runs with no recorded cause never qualify.
+pub fn cause_may_direct_agents(cause: Option<&RunCause>, owner_pubkey: &[u8]) -> bool {
+    match cause {
+        Some(RunCause::Schedule) => true,
+        Some(RunCause::Event(pubkey) | RunCause::Manual(pubkey)) => pubkey == owner_pubkey,
+        Some(RunCause::Webhook) | None => false,
+    }
+}
+
 /// Dispatch a resolved action and return its output.
 ///
 /// For MVP, most actions log their intent and return a success output.
@@ -541,6 +565,7 @@ pub async fn dispatch_action(
     community_id: CommunityId,
     run_id: Uuid,
     trigger_ctx: &TriggerContext,
+    definition_may_direct_agents: bool,
 ) -> Result<StepResult, WorkflowError> {
     use ActionDef::*;
 
@@ -600,6 +625,8 @@ pub async fn dispatch_action(
                         workflow.channel_id,
                     )?;
                     let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+                    let may_direct_agents = definition_may_direct_agents
+                        && cause_may_direct_agents(wf_run.cause.as_ref(), &workflow.owner_pubkey);
 
                     // Thread the reply onto the triggering message when requested.
                     // The trigger must carry the event to reply to; schema
@@ -642,6 +669,7 @@ pub async fn dispatch_action(
                             authored_text,
                             &owner_pubkey_hex,
                             reply_to,
+                            may_direct_agents,
                         )
                         .await
                         .map_err(WorkflowError::from)?;
@@ -1093,7 +1121,17 @@ pub async fn execute_run(
             )
         })?;
 
-    execute_steps(engine, community_id, run_id, def, trigger_ctx, 0, None).await
+    execute_steps(
+        engine,
+        community_id,
+        run_id,
+        def,
+        trigger_ctx,
+        0,
+        None,
+        false,
+    )
+    .await
 }
 
 /// Resume execution from a specific step index (used for approval resume).
@@ -1116,6 +1154,7 @@ pub async fn execute_from_step(
     trigger_ctx: &TriggerContext,
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
+    resumed_after_approval: bool,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
@@ -1163,6 +1202,7 @@ pub async fn execute_from_step(
         trigger_ctx,
         start_index,
         initial_outputs,
+        resumed_after_approval,
     )
     .await
 }
@@ -1181,7 +1221,9 @@ async fn execute_steps(
     trigger_ctx: &TriggerContext,
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
+    resumed_after_approval: bool,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    let definition_may_direct_agents = !resumed_after_approval && definition_may_direct_agents(def);
     let mut step_outputs: HashMap<String, JsonValue> = initial_outputs.unwrap_or_default();
     let mut trace: Vec<JsonValue> = Vec::new();
 
@@ -1243,6 +1285,7 @@ async fn execute_steps(
                 community_id,
                 run_id,
                 trigger_ctx,
+                definition_may_direct_agents,
             ),
         )
         .await;
@@ -1982,5 +2025,71 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+    fn def_with_steps(steps: &str) -> WorkflowDef {
+        crate::WorkflowEngine::parse_yaml(&format!(
+            "name: eligibility\ntrigger:\n  on: message_posted\nsteps:\n{steps}"
+        ))
+        .expect("parse definition")
+        .0
+    }
+
+    #[test]
+    fn only_send_message_and_delay_definitions_may_direct_agents() {
+        let send = "  - id: send\n    action: send_message\n    text: '@Agent go'\n";
+        let delay = "  - id: wait\n    action: delay\n    duration: 1m\n";
+        assert!(definition_may_direct_agents(&def_with_steps(&format!(
+            "{send}{delay}"
+        ))));
+
+        // A webhook response can choose fixed text through `if:` without
+        // contributing any rendered characters; the whole definition is out.
+        let webhook_selects_text = format!(
+            "  - id: hook\n    action: call_webhook\n    url: https://example.com/x\n\
+             {send}    if: steps.hook.output.status == 200\n"
+        );
+        assert!(!definition_may_direct_agents(&def_with_steps(
+            &webhook_selects_text
+        )));
+
+        for other in [
+            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: ok?\n",
+            "  - id: react\n    action: add_reaction\n    emoji: eyes\n",
+            "  - id: dm\n    action: send_dm\n    to: '@manager'\n    text: hi\n",
+            "  - id: topic\n    action: set_channel_topic\n    topic: hi\n",
+        ] {
+            assert!(
+                !definition_may_direct_agents(&def_with_steps(&format!("{send}{other}"))),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_owner_and_timer_causes_may_direct_agents() {
+        let owner = vec![1u8; 32];
+        let other = vec![2u8; 32];
+        assert!(cause_may_direct_agents(Some(&RunCause::Schedule), &owner));
+        assert!(cause_may_direct_agents(
+            Some(&RunCause::Event(owner.clone())),
+            &owner
+        ));
+        assert!(cause_may_direct_agents(
+            Some(&RunCause::Manual(owner.clone())),
+            &owner
+        ));
+        assert!(!cause_may_direct_agents(
+            Some(&RunCause::Event(other.clone())),
+            &owner
+        ));
+        assert!(!cause_may_direct_agents(
+            Some(&RunCause::Manual(other)),
+            &owner
+        ));
+        assert!(!cause_may_direct_agents(Some(&RunCause::Webhook), &owner));
+        assert!(
+            !cause_may_direct_agents(None, &owner),
+            "legacy runs have no cause"
+        );
     }
 }

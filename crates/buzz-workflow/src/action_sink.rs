@@ -63,6 +63,9 @@ pub trait ActionSink: Send + Sync {
     /// - `reply_to`: when `Some(event_id_hex)`, the message is posted as a
     ///   threaded reply to that event (NIP-10 root/reply tags + real thread
     ///   metadata); when `None`, it is a top-level channel message.
+    /// - `may_direct_agents`: whether this run's cause and definition let the
+    ///   message direct the owner's agents. A relay enforcing secure workflows
+    ///   attaches agent-directing mention tags only when this is `true`.
     ///
     /// Returns the event ID hex string on success.
     fn send_message(
@@ -73,5 +76,6 @@ pub trait ActionSink: Send + Sync {
         authored_text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
+        may_direct_agents: bool,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

@@ -327,6 +327,15 @@ pub struct Config {
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
     pub audit_enabled: bool,
 
+    /// Secure workflows mode. When on, a workflow message carries
+    /// `buzz:workflow-mention` tags only if its run was caused by the
+    /// workflow's owner or by a timer and every step of the definition is
+    /// `send_message` or `delay`. Turn it on when people other than a
+    /// workflow's owner can trigger it.
+    ///
+    /// Default: `false`. Set via `BUZZ_SECURE_WORKFLOWS=true`.
+    pub secure_workflows: bool,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -1239,6 +1248,7 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let secure_workflows = parse_bool("BUZZ_SECURE_WORKFLOWS", false)?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1499,6 +1509,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             audit_enabled,
+            secure_workflows,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,

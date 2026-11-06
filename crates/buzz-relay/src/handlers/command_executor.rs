@@ -933,6 +933,7 @@ async fn handle_workflow_trigger(
             workflow_id,
             Some(&event_id_bytes),
             trigger_ctx_json.as_ref(),
+            &buzz_db::workflow::RunCause::Manual(self_bytes.clone()),
         )
         .await
         .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
@@ -980,6 +981,7 @@ async fn handle_workflow_trigger(
             &trigger_ctx_clone,
             0,
             None,
+            false,
         )
         .await;
         engine
@@ -1374,6 +1376,7 @@ async fn resume_workflow_after_approval(
         &trigger_ctx,
         resume_index,
         Some(initial_outputs),
+        true,
     )
     .await;
     engine

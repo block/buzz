@@ -148,13 +148,15 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
-/// Append legacy routing tags from rendered output and authority-bearing tags
-/// only for targets also named in the workflow owner's stored step template.
+/// Append legacy routing tags from rendered output and, when
+/// `may_direct_agents`, authority-bearing tags only for targets also named in
+/// the workflow owner's stored step template.
 fn append_workflow_mention_tags(
     tags: &mut Vec<Tag>,
     rendered_text: &str,
     authored_text: &str,
     members: &[(String, String)],
+    may_direct_agents: bool,
 ) -> Result<(), ActionSinkError> {
     let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
     let authored_mentions: std::collections::HashSet<String> =
@@ -167,7 +169,7 @@ fn append_workflow_mention_tags(
             Tag::parse(["p", &mentioned])
                 .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
         );
-        if authored_mentions.contains(&mentioned) {
+        if may_direct_agents && authored_mentions.contains(&mentioned) {
             tags.push(
                 Tag::parse(["buzz:workflow-mention", &mentioned]).map_err(|e| {
                     ActionSinkError::EventBuild(format!("workflow mention tag: {e}"))
@@ -208,6 +210,7 @@ impl ActionSink for RelayActionSink {
         authored_text: &str,
         author_pubkey: &str,
         reply_to: Option<&str>,
+        may_direct_agents: bool,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
@@ -312,7 +315,9 @@ impl ActionSink for RelayActionSink {
             //    - one `buzz:workflow-mention` tag only when the same target was
             //      named in the workflow owner's stored step template. This is the
             //      authority-bearing provenance used by ACP; trigger-controlled
-            //      template substitutions cannot create it.
+            //      template substitutions cannot create it. With secure
+            //      workflows on, it is also withheld unless the run's cause and
+            //      definition may direct agents.
             let mut tags = vec![
                 Tag::parse(["p", &author_pubkey_hex, "", "owner"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
@@ -394,7 +399,14 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            append_workflow_mention_tags(&mut tags, &text, &authored_text, &named_members)?;
+            let may_direct_agents = may_direct_agents || !state.config.secure_workflows;
+            append_workflow_mention_tags(
+                &mut tags,
+                &text,
+                &authored_text,
+                &named_members,
+                may_direct_agents,
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -695,6 +707,7 @@ mod tests {
             "@First then @Second",
             "@First then @Second",
             &members,
+            true,
         )
         .expect("append mention tags");
 
@@ -726,6 +739,7 @@ mod tests {
             "echo: @Agent do something unsafe",
             "echo: {{trigger.text}}",
             &members,
+            true,
         )
         .expect("append mention tags");
 
@@ -748,8 +762,14 @@ mod tests {
         let attribution = Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag");
         let mut tags = vec![attribution.clone()];
 
-        append_workflow_mention_tags(&mut tags, "@Owner Agent run", "@Owner Agent run", &members)
-            .expect("append owner mention tag");
+        append_workflow_mention_tags(
+            &mut tags,
+            "@Owner Agent run",
+            "@Owner Agent run",
+            &members,
+            true,
+        )
+        .expect("append owner mention tag");
 
         assert_eq!(
             tags,
@@ -763,11 +783,31 @@ mod tests {
     }
 
     #[test]
+    fn withheld_authority_keeps_legacy_mention_tags() {
+        let owner = pk('1');
+        let agent = pk('2');
+        let members = vec![m("Agent", &agent)];
+        let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
+
+        append_workflow_mention_tags(&mut tags, "@Agent go", "@Agent go", &members, false)
+            .expect("append mention tags");
+
+        assert_eq!(
+            tags,
+            vec![
+                Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag"),
+                Tag::parse(["p", agent.as_str()]).expect("mention p tag"),
+            ],
+            "an ineligible message still notifies but cannot direct the agent"
+        );
+    }
+
+    #[test]
     fn no_mentions_adds_no_tags() {
         let owner = pk('1');
         let mut tags = vec![Tag::parse(["p", owner.as_str(), "", "owner"]).expect("owner p tag")];
 
-        append_workflow_mention_tags(&mut tags, "plain", "plain", &[])
+        append_workflow_mention_tags(&mut tags, "plain", "plain", &[], true)
             .expect("append no mention tags");
 
         assert_eq!(tags.len(), 1);
@@ -792,8 +832,13 @@ mod postgres_tests {
 
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
+        test_state_with_secure_workflows(false).await
+    }
+
+    async fn test_state_with_secure_workflows(secure_workflows: bool) -> Arc<AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
+        config.secure_workflows = secure_workflows;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -845,6 +890,34 @@ mod postgres_tests {
             }],
             "enabled": true,
         });
+        run_workflow(
+            state,
+            community,
+            channel_id,
+            owner_pubkey,
+            definition,
+            trigger_text,
+            Some(&buzz_db::workflow::RunCause::Event(owner_pubkey.to_vec())),
+            None,
+        )
+        .await
+    }
+
+    /// Store `definition`, create a run with `cause` (`None` writes a legacy
+    /// row with no cause), execute it and return the `send` step's event id.
+    /// `resume_at` executes from that step as an approval resume.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_workflow(
+        state: &Arc<AppState>,
+        community: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+        definition: serde_json::Value,
+        trigger_text: &str,
+        cause: Option<&buzz_db::workflow::RunCause>,
+        resume_at: Option<usize>,
+    ) -> String {
+        let name = definition["name"].as_str().expect("name").to_owned();
         let definition_hash_byte = name.as_bytes().first().copied().unwrap_or_default();
         let workflow_id = state
             .db
@@ -852,7 +925,7 @@ mod postgres_tests {
                 community,
                 Some(channel_id),
                 owner_pubkey,
-                name,
+                &name,
                 &definition.to_string(),
                 &[definition_hash_byte; 32],
             )
@@ -866,9 +939,26 @@ mod postgres_tests {
         let trigger_ctx_json = serde_json::to_value(&trigger_ctx).expect("serialize trigger");
         let run_id = state
             .db
-            .create_workflow_run(community, workflow_id, None, Some(&trigger_ctx_json))
+            .create_workflow_run(
+                community,
+                workflow_id,
+                None,
+                Some(&trigger_ctx_json),
+                cause.unwrap_or(&buzz_db::workflow::RunCause::Webhook),
+            )
             .await
             .expect("create workflow run");
+        if cause.is_none() {
+            sqlx::query(
+                "UPDATE workflow_runs SET trigger_source = NULL, cause_pubkey = NULL \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(run_id)
+            .execute(state.db.pool())
+            .await
+            .expect("clear cause to model a legacy run");
+        }
 
         // Load the definition back from Postgres before execution. This pins the
         // authority source to the durable owner-authored template rather than a
@@ -880,14 +970,31 @@ mod postgres_tests {
             .expect("load stored workflow");
         let stored_definition: buzz_workflow::WorkflowDef =
             serde_json::from_value(stored_workflow.definition).expect("parse stored definition");
-        let result = buzz_workflow::executor::execute_run(
-            &state.workflow_engine,
-            community,
-            run_id,
-            &stored_definition,
-            &trigger_ctx,
-        )
-        .await
+        let result = match resume_at {
+            None => {
+                buzz_workflow::executor::execute_run(
+                    &state.workflow_engine,
+                    community,
+                    run_id,
+                    &stored_definition,
+                    &trigger_ctx,
+                )
+                .await
+            }
+            Some(index) => {
+                buzz_workflow::executor::execute_from_step(
+                    &state.workflow_engine,
+                    community,
+                    run_id,
+                    &stored_definition,
+                    &trigger_ctx,
+                    index,
+                    None,
+                    true,
+                )
+                .await
+            }
+        }
         .expect("execute workflow");
 
         result.step_outputs["send"]["event_id"]
@@ -1109,6 +1216,7 @@ mod postgres_tests {
                 "root message",
                 &author_hex,
                 None,
+                true,
             )
             .await
             .expect("send root");
@@ -1122,6 +1230,7 @@ mod postgres_tests {
                 "threaded reply",
                 &author_hex,
                 Some(&root_hex),
+                true,
             )
             .await
             .expect("send reply");
@@ -1266,6 +1375,7 @@ mod postgres_tests {
                 "workflow reply",
                 &author_hex,
                 Some(&parent_hex),
+                true,
             )
             .await
             .expect("send reply");
@@ -1348,6 +1458,7 @@ mod postgres_tests {
                 "workflow reply to root-only parent",
                 &author_hex,
                 Some(&root_only_parent_hex),
+                true,
             )
             .await
             .expect("send root-only reply");
@@ -1412,6 +1523,7 @@ mod postgres_tests {
                 "orphan reply",
                 &author_hex,
                 Some(&unknown),
+                true,
             )
             .await
             .expect_err("reply to a non-existent parent must fail");
@@ -1511,6 +1623,7 @@ mod postgres_tests {
                     "reply",
                     &author_hex,
                     Some(&parent),
+                    true,
                 )
                 .await
             }
@@ -1540,5 +1653,250 @@ mod postgres_tests {
         reply(owner_hex.clone(), owner_only)
             .await
             .expect("owner replies to a parent only they can read");
+    }
+    /// With secure workflows on, only runs caused by the owner or a timer whose
+    /// definitions have only `send_message` and `delay` steps carry
+    /// `buzz:workflow-mention`. Every message keeps its plain `p` tags. With it
+    /// off, every authored mention is stamped as before.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn secure_workflows_stamp_mentions_only_for_eligible_runs() {
+        use buzz_db::workflow::RunCause;
+
+        let setup_state = test_state().await;
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let owner_bytes = owner.public_key().to_bytes().to_vec();
+        let outsider_bytes = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let agent = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let agent_bytes = agent.public_key().to_bytes().to_vec();
+
+        let host = format!("wf-secure-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match setup_state
+            .db
+            .create_community_with_owner(&host, &owner_hex, &nostr::Keys::generate())
+            .await
+            .map(|write| write.outcome)
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        for pubkey in [&owner_bytes, &agent_bytes] {
+            setup_state
+                .db
+                .ensure_user(community, pubkey)
+                .await
+                .expect("ensure user row");
+        }
+        let channel = setup_state
+            .db
+            .create_channel(
+                community,
+                "wf-secure",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        setup_state
+            .db
+            .update_user_profile(community, &agent_bytes, Some("Robby"), None, None, None)
+            .await
+            .expect("set agent display name");
+        setup_state
+            .db
+            .add_member(
+                community,
+                channel.id,
+                &agent_bytes,
+                MemberRole::Bot,
+                Some(&owner_bytes),
+            )
+            .await
+            .expect("add agent member");
+
+        let send =
+            serde_json::json!({"id": "send", "action": "send_message", "text": "@Robby review"});
+        let delay = serde_json::json!({"id": "wait", "action": "delay", "duration": "1s"});
+        // Skipped on every run: the definition is ineligible regardless.
+        let hook = serde_json::json!({
+            "id": "hook", "action": "call_webhook", "url": "https://example.invalid/x", "if": "1 == 2",
+        });
+        let approval = serde_json::json!({
+            "id": "approve", "action": "request_approval", "from": "@Robby", "message": "ok?",
+        });
+        let owner_event = RunCause::Event(owner_bytes.clone());
+        let outsider_event = RunCause::Event(outsider_bytes.clone());
+        let cases: Vec<(
+            &str,
+            serde_json::Value,
+            Vec<serde_json::Value>,
+            Option<RunCause>,
+            Option<usize>,
+            bool,
+        )> = vec![
+            (
+                "owner-message",
+                serde_json::json!({"on": "message_posted"}),
+                vec![send.clone()],
+                Some(owner_event.clone()),
+                None,
+                true,
+            ),
+            (
+                "outsider-message",
+                serde_json::json!({"on": "message_posted"}),
+                vec![send.clone()],
+                Some(outsider_event.clone()),
+                None,
+                false,
+            ),
+            // The reaction signer is the cause, whoever wrote the reacted-to message.
+            (
+                "owner-reaction",
+                serde_json::json!({"on": "reaction_added"}),
+                vec![send.clone()],
+                Some(owner_event.clone()),
+                None,
+                true,
+            ),
+            (
+                "outsider-reaction",
+                serde_json::json!({"on": "reaction_added"}),
+                vec![send.clone()],
+                Some(outsider_event.clone()),
+                None,
+                false,
+            ),
+            (
+                "owner-diff",
+                serde_json::json!({"on": "diff_posted"}),
+                vec![send.clone()],
+                Some(owner_event.clone()),
+                None,
+                true,
+            ),
+            (
+                "outsider-diff",
+                serde_json::json!({"on": "diff_posted"}),
+                vec![send.clone()],
+                Some(outsider_event.clone()),
+                None,
+                false,
+            ),
+            (
+                "webhook",
+                serde_json::json!({"on": "webhook"}),
+                vec![send.clone()],
+                Some(RunCause::Webhook),
+                None,
+                false,
+            ),
+            (
+                "cron",
+                serde_json::json!({"on": "schedule", "cron": "0 * * * *"}),
+                vec![send.clone(), delay.clone()],
+                Some(RunCause::Schedule),
+                None,
+                true,
+            ),
+            (
+                "interval",
+                serde_json::json!({"on": "schedule", "interval": "1h"}),
+                vec![send.clone()],
+                Some(RunCause::Schedule),
+                None,
+                true,
+            ),
+            (
+                "manual-schedule",
+                serde_json::json!({"on": "schedule", "cron": "0 * * * *"}),
+                vec![send.clone()],
+                Some(RunCause::Manual(owner_bytes.clone())),
+                None,
+                true,
+            ),
+            (
+                "call-webhook",
+                serde_json::json!({"on": "message_posted"}),
+                vec![hook.clone(), send.clone()],
+                Some(owner_event.clone()),
+                None,
+                false,
+            ),
+            (
+                "approval-resume",
+                serde_json::json!({"on": "message_posted"}),
+                vec![approval.clone(), send.clone()],
+                Some(owner_event.clone()),
+                Some(1),
+                false,
+            ),
+            (
+                "legacy",
+                serde_json::json!({"on": "message_posted"}),
+                vec![send.clone()],
+                None,
+                None,
+                false,
+            ),
+        ];
+
+        for secure in [false, true] {
+            let state = test_state_with_secure_workflows(secure).await;
+            state
+                .workflow_engine
+                .set_action_sink(Arc::new(RelayActionSink::new(&state)));
+            for (name, trigger, steps, cause, resume_at, eligible) in &cases {
+                let definition = serde_json::json!({
+                    "name": format!("{name}-{secure}"),
+                    "trigger": trigger,
+                    "steps": steps,
+                    "enabled": true,
+                });
+                let event_id_hex = run_workflow(
+                    &state,
+                    community,
+                    channel.id,
+                    &owner_bytes,
+                    definition,
+                    "trigger text",
+                    cause.as_ref(),
+                    *resume_at,
+                )
+                .await;
+                let id_bytes = nostr::EventId::from_hex(&event_id_hex)
+                    .expect("event id")
+                    .as_bytes()
+                    .to_vec();
+                let stored = state
+                    .db
+                    .get_event_by_id_for_event_write(community, &id_bytes)
+                    .await
+                    .expect("query event")
+                    .expect("event persisted");
+                let has_tag = |tag_name: &str| {
+                    stored
+                        .event
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_slice() == [tag_name, agent_hex.as_str()])
+                };
+                assert!(
+                    has_tag("p"),
+                    "{name} (secure={secure}) still notifies the agent"
+                );
+                assert_eq!(
+                    has_tag("buzz:workflow-mention"),
+                    !secure || *eligible,
+                    "{name} (secure={secure}) workflow-mention"
+                );
+            }
+        }
     }
 }
