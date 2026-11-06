@@ -2556,8 +2556,10 @@ pub(crate) mod tests {
             let topic = EventTopic::Channel(channel);
             handlers::req::claim_live_subscription(
                 "s",
-                &[nostr::Filter::new().kind(Kind::TextNote)],
-                Some(&[channel]),
+                vec![(
+                    nostr::Filter::new().kind(Kind::TextNote),
+                    crate::subscription::SubscriptionScope::channels([channel]),
+                )],
                 &conn,
                 &state,
             )
@@ -2652,8 +2654,10 @@ pub(crate) mod tests {
             let topic = EventTopic::Channel(channel);
             handlers::req::claim_live_subscription(
                 "s",
-                &[nostr::Filter::new().kind(Kind::TextNote)],
-                Some(&[channel]),
+                vec![(
+                    nostr::Filter::new().kind(Kind::TextNote),
+                    crate::subscription::SubscriptionScope::channels([channel]),
+                )],
                 &conn,
                 &state,
             )
@@ -2742,8 +2746,10 @@ pub(crate) mod tests {
             let (conn, _rx) = test_conn_with_auth(AuthState::Failed);
             handlers::req::claim_live_subscription(
                 "s",
-                &[nostr::Filter::new().kind(Kind::TextNote)],
-                None,
+                vec![(
+                    nostr::Filter::new().kind(Kind::TextNote),
+                    crate::subscription::SubscriptionScope::global(),
+                )],
                 &conn,
                 &state,
             )
