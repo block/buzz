@@ -69,16 +69,11 @@ class _ActivityMenuButton<T> extends StatelessWidget {
             surfaceKey: ValueKey(popoverKey),
             items: [
               for (final entry in options.entries)
-                PopupMenuItem(
+                CheckedPopupMenuItem(
                   value: entry.key,
                   height: Grid.xl,
-                  child: Row(
-                    children: [
-                      Expanded(child: Text(entry.value)),
-                      if (value == entry.key)
-                        const Icon(BuzzIcons.check, size: 16),
-                    ],
-                  ),
+                  checked: value == entry.key,
+                  child: Text(entry.value),
                 ),
             ],
           );
