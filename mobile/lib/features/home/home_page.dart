@@ -170,7 +170,7 @@ class HomePage extends HookConsumerWidget {
                               children: [
                                 Positioned(
                                   top: 0,
-                                  right: 3,
+                                  right: 2,
                                   child: Container(
                                     key: const Key('home-inbox-dot'),
                                     width: 10,
