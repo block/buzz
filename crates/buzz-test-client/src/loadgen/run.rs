@@ -1,6 +1,6 @@
 //! Drives the simulated population through the scenario's ramp.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,7 +16,8 @@ use buzz_core::kind::{
 use buzz_core::observer::{
     encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY,
 };
-use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
+use buzz_ws_client::connection::PUBLISH_OK_TIMEOUT_SECS;
+use buzz_ws_client::{NostrWsConnection, OkResponse, RelayMessage, WsClientError};
 use nostr::{
     Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, SingleLetterTag, Tag, Timestamp,
 };
@@ -28,7 +29,7 @@ use super::identity::{self, Role};
 use super::net::{http_reason, Net};
 use super::scenario::{AgentTurn, Community, HumanProfile, Members, Scenario, WideSplit};
 use super::seed::{find_roots, hot_root_keys, reply_tags, HOT_ROOT_PREFIX, ROOT_PREFIX};
-use super::stats::{abort_reason, ops_json, Op, Stats};
+use super::stats::{abort_reason, ops_json, Op, Pending, Stats};
 
 /// Content prefix of timed messages: `lg:<send unix micros>`.
 const TIMED_PREFIX: &str = "lg:";
@@ -1171,11 +1172,107 @@ fn every(secs: f64, from: Instant) -> Option<Instant> {
     (secs > 0.0).then(|| from + Duration::from_secs_f64(secs))
 }
 
+/// The most socket publishes an agent leaves awaiting their `OK`; past it, a
+/// publish is an error instead of sent. A relay that answers within the
+/// publish timeout keeps an agent far below it.
+const MAX_UNACKED: usize = 128;
+
+/// An agent's socket publishes awaiting their `OK`, oldest first. An agent
+/// sends a frame and moves on, as a harness does, so a slow `OK` holds up
+/// neither its HTTP action nor its next frame. Each `OK` is matched as it
+/// arrives; one not back within [`PUBLISH_OK_TIMEOUT_SECS`] is an error.
+struct Unacked<'a> {
+    stats: &'a Stats,
+    /// Event id, the publish's timing and its deadline. Identical frames sent
+    /// within a second share an id; each `OK` settles the oldest.
+    waiting: VecDeque<(String, Pending<'a>, Instant)>,
+}
+
+impl<'a> Unacked<'a> {
+    fn new(stats: &'a Stats) -> Self {
+        Self {
+            stats,
+            waiting: VecDeque::new(),
+        }
+    }
+
+    /// Sends `event` as `op` without waiting for its `OK`.
+    async fn send(
+        &mut self,
+        conn: &mut NostrWsConnection,
+        op: Op,
+        event: Result<Event, String>,
+    ) -> Result<(), WsClientError> {
+        let event = match event {
+            Ok(event) => event,
+            Err(e) => {
+                self.stats.err(op, &e);
+                return Ok(());
+            }
+        };
+        if self.waiting.len() >= MAX_UNACKED {
+            self.stats.err(op, "too many publishes awaiting OK");
+            return Ok(());
+        }
+        let pending = self.stats.begin(op);
+        if let Err(e) = conn.send_raw(&json!(["EVENT", event])).await {
+            // The caller records the broken socket.
+            pending.forget();
+            return Err(e);
+        }
+        let deadline = Instant::now() + Duration::from_secs(PUBLISH_OK_TIMEOUT_SECS);
+        self.waiting
+            .push_back((event.id.to_hex(), pending, deadline));
+        Ok(())
+    }
+
+    /// Settles the oldest publish `ok` answers, if any.
+    fn answer(&mut self, ok: &OkResponse) {
+        let Some(at) = self.waiting.iter().position(|(id, ..)| *id == ok.event_id) else {
+            return;
+        };
+        if let Some((_, pending, _)) = self.waiting.remove(at) {
+            if ok.accepted {
+                pending.ok();
+            } else {
+                pending.err(&ok.message);
+            }
+        }
+    }
+
+    /// When the oldest publish times out.
+    fn deadline(&self) -> Option<Instant> {
+        self.waiting.front().map(|(.., deadline)| *deadline)
+    }
+
+    /// Fails each publish whose `OK` is overdue at `now`.
+    fn expire(&mut self, now: Instant) {
+        while let Some((.., deadline)) = self.waiting.front() {
+            if *deadline > now {
+                break;
+            }
+            if let Some((_, pending, _)) = self.waiting.pop_front() {
+                pending.err("OK timeout");
+            }
+        }
+    }
+
+    /// Leaves every publish unjudged once its socket is gone: a broken
+    /// socket is recorded as such, and an `OK` cut off by the stop is not
+    /// judged, as a read abandoned at the stop is not.
+    fn forget(&mut self) {
+        for (_, pending, _) in self.waiting.drain(..) {
+            pending.forget();
+        }
+    }
+}
+
 /// An agent client: NIP-OA authenticated socket with its mentions, then
 /// either HTTP polling, posts and observer frames on Poisson schedules, or
 /// turns of work (see [`AgentTurn`]), or both. One HTTP action at a time
-/// runs beside the socket, so presence, typing and frames keep their
-/// schedule while a request is slow, as a harness's do.
+/// runs beside the socket, and socket publishes do not wait for their `OK`
+/// (see [`Unacked`]), so presence, typing, frames and requests keep their
+/// schedule while a request or an `OK` is slow, as a harness's do.
 async fn agent(shared: Arc<Shared>, global: usize) {
     let scenario = &shared.scenario;
     let profile = &scenario.agent;
@@ -1248,6 +1345,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         // connects together does not heartbeat together.
         let mut next_presence = every(profile.presence_interval_secs * rng.unit(), Instant::now())
             .or_else(|| every(profile.presence_interval_secs, Instant::now()));
+        let mut unacked = Unacked::new(&shared.stats);
 
         while ok && !stopped(&shared) {
             // While an HTTP action runs, only socket work is waited for.
@@ -1259,6 +1357,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 turn.as_ref().map_or(if_idle(next_turn), |t| t.due(idle)),
                 if_idle(next_query),
                 if_idle(next_post),
+                unacked.deadline(),
             ]
             .into_iter()
             .flatten()
@@ -1276,6 +1375,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 }
             };
             match received {
+                Some(Ok(RelayMessage::Ok(answer))) => unacked.answer(&answer),
                 Some(Ok(message)) => {
                     if live(&shared.stats, &message, subscribed, &mut last_message).is_err() {
                         ok = false;
@@ -1292,6 +1392,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 }
             }
             let now = Instant::now();
+            unacked.expire(now);
             let idle = busy.is_none();
             // One action per wakeup; anything else due runs on the next pass.
             // An HTTP action only starts with none in flight.
@@ -1299,19 +1400,22 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 next_presence = every(profile.presence_interval_secs, now);
                 let event =
                     EventBuilder::new(kind(KIND_PRESENCE_UPDATE), "online").sign_with_keys(&keys);
-                send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
+                let event = event.map_err(|e| format!("sign: {e}"));
+                unacked.send(&mut conn, Op::PublishEphemeral, event).await
             } else if let Some(step) = turn.as_mut().and_then(|t| t.step(now, &profile.turn, idle))
             {
                 match step {
                     TurnStep::Typing(channel) => {
                         let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
                             .tags([tag(["h", &channel])])
-                            .sign_with_keys(&keys);
-                        send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
+                            .sign_with_keys(&keys)
+                            .map_err(|e| format!("sign: {e}"));
+                        unacked.send(&mut conn, Op::PublishEphemeral, event).await
                     }
                     TurnStep::Frame => {
                         let frame = observer_frame(&keys, &owner, profile.turn.frame_bytes);
-                        publish_frame(&shared.stats, &mut conn, frame).await
+                        let frame = frame.map_err(|e| format!("observer: {e}"));
+                        unacked.send(&mut conn, Op::PublishEphemeral, frame).await
                     }
                     TurnStep::Read(channel) => {
                         let filters = json!([{
@@ -1323,7 +1427,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                             query(sh, Op::HttpQuery, k, community, &filters, a).await;
                             Outcome::Done
                         }));
-                        Ok(true)
+                        Ok(())
                     }
                     TurnStep::End => {
                         if let Some(ended) = turn.take() {
@@ -1332,7 +1436,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                                 Outcome::Ended
                             }));
                         }
-                        Ok(true)
+                        Ok(())
                     }
                 }
             } else if idle && turn.is_none() && next_turn.is_some_and(|t| t <= now) {
@@ -1341,7 +1445,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 busy = Some(Box::pin(async move {
                     Outcome::Started(Box::new(start_turn(sh, community, k, a, plan).await))
                 }));
-                Ok(true)
+                Ok(())
             } else if idle && next_query.is_some_and(|t| t <= now) {
                 next_query = rng.after(query_per_hour);
                 let channel = &channels[rng.below(channels.len())];
@@ -1354,7 +1458,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     query(sh, Op::HttpQuery, k, community, &filters, a).await;
                     Outcome::Done
                 }));
-                Ok(true)
+                Ok(())
             } else if idle && next_post.is_some_and(|t| t <= now) {
                 next_post = rng.after(profile.events_per_hour);
                 let channel = &channels[rng.below(channels.len())];
@@ -1367,13 +1471,14 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     submit(sh, community, k, a, event, Op::HttpEvents).await;
                     Outcome::Done
                 }));
-                Ok(true)
+                Ok(())
             } else if next_frame.is_some_and(|t| t <= now) {
                 next_frame = rng.after(profile.observer_frames_per_hour);
                 let frame = observer_frame(&keys, &owner, 0);
-                publish_frame(&shared.stats, &mut conn, frame).await
+                let frame = frame.map_err(|e| format!("observer: {e}"));
+                unacked.send(&mut conn, Op::PublishEphemeral, frame).await
             } else {
-                Ok(true)
+                Ok(())
             };
             if let Err(e) = sent {
                 shared
@@ -1382,6 +1487,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 ok = false;
             }
         }
+        unacked.forget();
         let _ = conn.disconnect().await;
         // The action in flight finishes before the agent reconnects or
         // stops; each checks the stop between its requests.
@@ -1428,7 +1534,7 @@ async fn start_turn(
         .as_ref()
         .and_then(|t| buzz_core::nip10::parse_thread_markers(&t.tags).resolve())
         .map(|(root, _)| root);
-    if let Some(root) = root.filter(|_| !stopped(shared)) {
+    if let Some(root) = root {
         thread_context(shared, community, keys, auth, &channel, &root).await;
     }
     let author = target.as_ref().map(|e| e.pubkey.to_hex());
@@ -1438,15 +1544,10 @@ async fn start_turn(
         json!([{ "kinds": [KIND_GIT_REPO_ANNOUNCEMENT], "#buzz-channel": [channel] }]),
         json!([{ "kinds": [KIND_PROFILE], "authors": [author.unwrap_or_else(|| keys.public_key().to_hex())] }]),
     ];
-    // Each request checks the stop, so a turn starting at the stop sends
-    // nothing more than the request under way.
     for filters in reads {
-        if stopped(shared) {
-            break;
-        }
         query(shared, Op::TurnContext, keys, community, &filters, auth).await;
     }
-    if let Some(target) = target.as_ref().filter(|_| !stopped(shared)) {
+    if let Some(target) = &target {
         for emoji in TURN_REACTIONS {
             let event = EventBuilder::new(kind(KIND_REACTION), emoji)
                 .tags([tag(["h", &channel]), tag(["e", &target.id.to_hex()])]);
@@ -1545,7 +1646,7 @@ async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Ta
     )
     .tags(tags);
     submit(shared, community, keys, auth, reply, Op::HttpEvents).await;
-    let Some(target) = turn.target.filter(|_| !stopped(shared)) else {
+    let Some(target) = turn.target else {
         return;
     };
     let mine = json!([{
@@ -1554,9 +1655,6 @@ async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Ta
         "#e": [target.id.to_hex()],
     }]);
     for _ in TURN_REACTIONS {
-        if stopped(shared) {
-            return;
-        }
         let found = query(shared, Op::HttpQuery, keys, community, &mine, auth)
             .await
             .unwrap_or_default();
@@ -1590,23 +1688,10 @@ fn observer_frame(keys: &Keys, owner: &Keys, pad: usize) -> Result<Event, String
         .map_err(|e| e.to_string())
 }
 
-async fn publish_frame(
-    stats: &Stats,
-    conn: &mut NostrWsConnection,
-    frame: Result<Event, String>,
-) -> Result<bool, WsClientError> {
-    match frame {
-        Ok(event) => publish(stats, conn, Op::PublishEphemeral, event).await,
-        Err(e) => {
-            stats.err(Op::PublishEphemeral, &format!("observer: {e}"));
-            Ok(false)
-        }
-    }
-}
-
-/// Signs and submits `event` through HTTP `/events` as `op`. A reaction the
-/// relay already holds counts as answered: an earlier turn cut short by the
-/// stop left it, and the next removal deletes it.
+/// Signs and submits `event` through HTTP `/events` as `op`; as with
+/// [`query`], none starts after the stop. A reaction the relay already holds
+/// counts as answered: an earlier turn cut short by the stop left it, and
+/// the next removal deletes it.
 async fn submit(
     shared: &Shared,
     community: &Community,
@@ -1615,6 +1700,9 @@ async fn submit(
     event: EventBuilder,
     op: Op,
 ) {
+    if stopped(shared) {
+        return;
+    }
     let event = match event.sign_with_keys(keys) {
         Ok(event) => event,
         Err(e) => return shared.stats.err(op, &format!("sign: {e}")),
@@ -1764,7 +1852,9 @@ async fn http<T: serde::de::DeserializeOwned>(
     }
 }
 
-/// An agent's HTTP `/query` as `op`; the events it returned.
+/// An agent's HTTP `/query` as `op`; the events it returned. None starts
+/// after the stop, so an action under way at the stop sends nothing more
+/// than the request already in flight.
 async fn query(
     shared: &Shared,
     op: Op,
@@ -1773,6 +1863,9 @@ async fn query(
     filters: &Value,
     auth: &Tag,
 ) -> Option<Vec<Event>> {
+    if stopped(shared) {
+        return None;
+    }
     http(shared, op, keys, community, "/query", filters, Some(auth)).await
 }
 
@@ -2079,6 +2172,9 @@ hold_secs = 1
         history_delay: Duration,
         /// From this long after the handshake, each `OK` takes this long.
         slow_ok: Option<(Duration, Duration)>,
+        /// Each EVENT's `OK` follows this long after `ok_delay`, without
+        /// holding up the frames after it.
+        ok_lag: Duration,
     }
 
     impl FakeRelay {
@@ -2087,6 +2183,7 @@ hold_secs = 1
             ok_delay: Some(Duration::ZERO),
             history_delay: Duration::ZERO,
             slow_ok: None,
+            ok_lag: Duration::ZERO,
         };
     }
 
@@ -2117,6 +2214,16 @@ hold_secs = 1
                     if ws.send(Message::Text(challenge.into())).await.is_err() {
                         return;
                     }
+                    let (mut sink, mut ws) = ws.split();
+                    let (out, mut replies) = tokio::sync::mpsc::unbounded_channel::<Value>();
+                    tokio::spawn(async move {
+                        while let Some(reply) = replies.recv().await {
+                            let text = Message::Text(reply.to_string().into());
+                            if sink.send(text).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
                     while let Some(Ok(Message::Text(text))) = ws.next().await {
                         let frame: Value = serde_json::from_str(&text).unwrap();
                         let reply = match frame[0].as_str() {
@@ -2147,15 +2254,20 @@ hold_secs = 1
                                     }
                                 }
                                 tokio::time::sleep(delay).await;
-                                json!(["OK", frame[1]["id"], true, ""])
+                                let ok = json!(["OK", frame[1]["id"], true, ""]);
+                                if !relay.ok_lag.is_zero() {
+                                    let out = out.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(relay.ok_lag).await;
+                                        let _ = out.send(ok);
+                                    });
+                                    continue;
+                                }
+                                ok
                             }
                             _ => continue,
                         };
-                        if ws
-                            .send(Message::Text(reply.to_string().into()))
-                            .await
-                            .is_err()
-                        {
+                        if out.send(reply).is_err() {
                             return;
                         }
                     }
@@ -2606,7 +2718,30 @@ hold_secs = 3
     /// live reactions, and is slow to answer tool reads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agent_turns_read_react_stream_reply_and_remove_their_reactions() {
-        let (ws, seen) = fake_ws_relay(FakeRelay::PROMPT).await;
+        agent_turns_against(FakeRelay::PROMPT).await;
+    }
+
+    /// The same turns when every socket `OK` is slower than the agent's
+    /// heartbeat, though well inside the abort ceiling: nothing waits for an
+    /// `OK`, so tool reads, typing and frames all keep their schedule.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_turns_keep_moving_while_socket_oks_lag() {
+        let lag = Duration::from_millis(1500);
+        let report = agent_turns_against(FakeRelay {
+            ok_lag: lag,
+            ..FakeRelay::PROMPT
+        })
+        .await;
+        let acked = &report["steps"][0]["ops"]["publish_ephemeral_ok"];
+        assert!(acked["count"].as_u64() > Some(0), "{report}");
+        assert_eq!(acked["errors"], 0, "{report}");
+        let p50 = acked["p50_ms"].as_f64().unwrap();
+        assert!(p50 >= lag.as_millis() as f64, "{report}");
+    }
+
+    /// Runs one agent's turns against `relay` and checks what they sent.
+    async fn agent_turns_against(relay: FakeRelay) -> Value {
+        let (ws, seen) = fake_ws_relay(relay).await;
         let channel = identity::channel_id("t", 0, 0);
         let me = identity::keys("t", Role::Agent, 0).public_key().to_hex();
         // A human's thread reply: only a `reply` marker, naming the root.
@@ -2783,6 +2918,7 @@ hold_secs = 3
             queries.iter().any(|q| q[0]["limit"] == json!(50)),
             "{queries:?}"
         );
+        report
     }
 
     /// A relay that answers every `/query` with 200 and a body that is not
@@ -2820,6 +2956,89 @@ hold_secs = 3
             posted.iter().all(|e| e.kind != kind(KIND_REACTION)),
             "{posted:?}"
         );
+    }
+
+    /// Runs one agent's turns against a relay that holds one top-level
+    /// channel message and the agent's live reactions, and holds the first
+    /// request `held` picks past the stop. Returns every request's path and
+    /// body, in order, and where the held one is among them.
+    async fn turns_stopped_during(held: fn(&str, &Value) -> bool) -> (Vec<(String, Value)>, usize) {
+        let (ws, _) = fake_ws_relay(FakeRelay::PROMPT).await;
+        let channel = identity::channel_id("t", 0, 0);
+        let target = EventBuilder::new(kind(KIND_STREAM_MESSAGE), "question")
+            .tags([tag(["h", &channel])])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let log: Log<(String, Value)> = Default::default();
+        let at: Arc<std::sync::Mutex<Option<usize>>> = Default::default();
+        let (requests, held_at) = (log.clone(), at.clone());
+        // Released after the 3 s hold has stopped the run, well inside the
+        // shutdown grace.
+        let release = Instant::now() + Duration::from_millis(4500);
+        let http = super::super::seed::tests::fake_http(move |_, path, body| {
+            let body: Value = serde_json::from_slice(body).unwrap();
+            let hold = {
+                let mut requests = requests.lock().unwrap();
+                requests.push((path.to_string(), body.clone()));
+                let mut held_at = held_at.lock().unwrap();
+                let hold = held_at.is_none() && held(path, &body);
+                if hold {
+                    *held_at = Some(requests.len() - 1);
+                }
+                hold
+            };
+            if hold {
+                tokio::task::block_in_place(|| {
+                    std::thread::sleep(release.saturating_duration_since(Instant::now()));
+                });
+            }
+            if path == "/events" {
+                return (200, json!({"accepted": true, "message": ""}).to_string());
+            }
+            let found = match body[0]["kinds"][0].as_u64() {
+                Some(k) if k == u64::from(KIND_STREAM_MESSAGE) => json!([target]),
+                Some(k) if k == u64::from(KIND_REACTION) => {
+                    let posted = requests.lock().unwrap();
+                    let reactions = posted
+                        .iter()
+                        .filter(|(path, e)| path == "/events" && e["kind"] == json!(KIND_REACTION));
+                    json!(reactions.map(|(_, e)| e).collect::<Vec<_>>())
+                }
+                _ => json!([]),
+            };
+            (200, found.to_string())
+        })
+        .await;
+        let scenario = agent_turn_scenario(&ws, &http, "");
+        let net = Net::new(&scenario).await.unwrap();
+        let shard = Shard::parse("0/1").unwrap();
+        let report = run_with(scenario, net, shard, Duration::from_secs(5))
+            .await
+            .expect("a turn cut by the stop does not fail the run");
+        assert_eq!(report["clients_cancelled"], 0, "{report}");
+        let log = log.lock().unwrap().clone();
+        let at = at.lock().unwrap().expect("the request was made and held");
+        (log, at)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_stopped_while_adding_a_reaction_sends_nothing_more() {
+        let (log, at) = turns_stopped_during(|path, body| {
+            path == "/events" && body["kind"] == json!(KIND_REACTION)
+        })
+        .await;
+        assert_eq!(at + 1, log.len(), "requests after the stop: {log:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_stopped_while_reading_its_reactions_deletes_none() {
+        let (log, at) = turns_stopped_during(|path, body| {
+            path == "/query" && body[0]["kinds"][0] == json!(KIND_REACTION)
+        })
+        .await;
+        assert_eq!(at + 1, log.len(), "requests after the stop: {log:?}");
+        let deleted = log.iter().any(|(_, e)| e["kind"] == json!(KIND_DELETION));
+        assert!(!deleted, "{log:?}");
     }
 
     /// Holds `/events` responses until opened, counting the requests held.

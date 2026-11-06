@@ -129,9 +129,18 @@ does around a prompt:
    the message and a kind:5 deletion of each one found.
 
 An agent makes one HTTP request sequence at a time, and the socket keeps
-running beside it: presence, typing and frames stay on schedule while a
-request is slow, as a harness's do. A read counts as an error when its
-response is not valid JSON of the expected shape.
+running beside it: presence, typing and frames are sent without waiting for
+their `OK`, so they stay on schedule while a request or an `OK` is slow, as a
+harness's do. An `OK` not back within 30 seconds is an error. A read counts
+as an error when its response is not valid JSON of the expected shape.
+Requests do not start after the stop; one under way finishes.
+
+The request mix is an approximation of sustained turns, not a replay of the
+harness. Every turn reads as a first prompt does. A harness that keeps
+working in one thread reads 25 replies instead of 13, batches profile
+lookups across prompts and caches project-home lookups for 30 seconds, so
+the turn context here reads profiles and project homes more often than a
+busy harness does.
 
 For a harness-like agent, also set `agent.query_interval_secs = 0` (no
 polling) and `events_per_hour = observer_frames_per_hour = 0`, so turns are
