@@ -63,10 +63,10 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
     const railBoxBeforeCollapse = await communityRail.boundingBox();
     expect(railBoxBeforeCollapse).not.toBeNull();
 
-    // Observe the transition before triggering it, then hold every animated
-    // sidebar-content property at its midpoint. This keeps the regression
-    // causal without making its assertions depend on Playwright or rAF
-    // scheduler latency.
+    // Observe the transition before triggering it, then hold the gap, sliding
+    // panel, and content fade at their shared midpoint. This keeps the
+    // regression causal without making its assertions depend on Playwright or
+    // rAF scheduler latency.
     const transition = await communityButton.evaluate(async (button) => {
       const rail = button.closest('[data-testid="community-rail"]');
       const trigger = document.querySelector<HTMLElement>(
@@ -75,7 +75,17 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
       const sidebarContent = document.querySelector<HTMLElement>(
         "[data-sidebar-transition-content]",
       );
-      if (!(rail instanceof HTMLElement) || !trigger || !sidebarContent) {
+      const sidebarPanel = sidebarContent?.closest<HTMLElement>(
+        '[data-testid="app-sidebar"]',
+      );
+      const sidebarGap = sidebarPanel?.previousElementSibling;
+      if (
+        !(rail instanceof HTMLElement) ||
+        !trigger ||
+        !sidebarContent ||
+        !sidebarPanel ||
+        !(sidebarGap instanceof HTMLElement)
+      ) {
         return null;
       }
 
@@ -87,12 +97,21 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
       trigger.click();
       await transitionStarted;
 
-      const animations = sidebarContent.getAnimations();
+      const animations = [sidebarGap, sidebarPanel, sidebarContent].flatMap(
+        (element) => element.getAnimations(),
+      );
       await Promise.all(animations.map((animation) => animation.ready));
       for (const animation of animations) {
         animation.pause();
-        animation.currentTime = 100;
+        animation.currentTime = 120;
       }
+
+      const standardDuration = getComputedStyle(document.documentElement)
+        .getPropertyValue("--motion-duration-standard")
+        .trim();
+      const standardDurationMs = standardDuration.endsWith("ms")
+        ? Number.parseFloat(standardDuration)
+        : Number.parseFloat(standardDuration) * 1000;
 
       const buttonBox = button.getBoundingClientRect();
       const railBox = rail.getBoundingClientRect();
@@ -106,11 +125,16 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
         durations: animations.map(
           (animation) => animation.effect?.getTiming().duration,
         ),
+        properties: animations.map((animation) =>
+          animation instanceof CSSTransition
+            ? animation.transitionProperty
+            : null,
+        ),
+        standardDuration,
+        standardDurationMs,
         hitRail: hit === rail || rail.contains(hit),
         opacity: railStyle.opacity,
         sidebarOpacity: Number.parseFloat(sidebarStyle.opacity),
-        sidebarScale: sidebarStyle.scale,
-        sidebarTranslateX: Number.parseFloat(sidebarStyle.translate),
         visibility: railStyle.visibility,
         x: railBox.x,
         y: railBox.y,
@@ -120,7 +144,16 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
       return result;
     });
     expect(transition).not.toBeNull();
-    expect(transition?.durations).toEqual([200, 200, 200]);
+    expect(transition?.standardDurationMs).toBe(240);
+    expect(transition?.properties).toEqual([
+      "width",
+      "left",
+      "visibility",
+      "opacity",
+    ]);
+    expect(transition?.durations).toEqual(
+      Array(4).fill(transition?.standardDurationMs),
+    );
     expect(transition).toMatchObject({
       hitRail: true,
       opacity: "1",
@@ -130,18 +163,14 @@ for (const theme of ["buzz", "buzz-dark", "vesper"]) {
     });
     expect(transition?.sidebarOpacity).toBeGreaterThan(0);
     expect(transition?.sidebarOpacity).toBeLessThan(1);
-    expect(transition?.sidebarScale).not.toBe("none");
-    expect(transition?.sidebarScale).not.toBe("0.95");
-    expect(transition?.sidebarTranslateX).toBeGreaterThan(0);
-    expect(transition?.sidebarTranslateX).toBeLessThan(24);
 
     const shell = page.locator(
       '[data-state="collapsed"][data-collapsible="offcanvas"]',
     );
     await expect(shell).toHaveCount(1);
 
-    // Let the 200ms slide finish; visibility flips at the transition's end.
-    await page.waitForTimeout(250);
+    // Let the 240ms slide finish; visibility flips at the transition's end.
+    await page.waitForTimeout(290);
 
     // Second direct child = the sliding sidebar container (first is the gap).
     const offscreenSidebar = shell.locator("> div").nth(1);
