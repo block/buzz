@@ -612,7 +612,7 @@ jobs:
           status=$?
           set -e
           test "$status" -eq 1
-          [[ "$output" == *'Missing("BUZZ_PUSH_TOKEN_KEYS")'* ]]
+          [[ "$output" == *'Missing("BUZZ_PUSH_GATEWAY_ORIGIN")'* ]]
 
   push-gateway-merge:
     name: Publish public push gateway image

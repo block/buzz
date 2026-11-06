@@ -4,7 +4,7 @@
 
 ## Network and health
 
-- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the deployment hostname to this port; the binary needs no public-origin setting.
+- Public listener: `BUZZ_PUSH_BIND_ADDR` (default `0.0.0.0:8080`). Route the deployment hostname to this port and set `BUZZ_PUSH_GATEWAY_ORIGIN` to its canonical public origin.
 - Private health listener: `BUZZ_PUSH_HEALTH_ADDR` (default `0.0.0.0:8081`). Probe `/_liveness` and `/_readiness`; do not expose this port publicly. The chart has no pod-ingress allowance for 8081; Kubernetes node/kubelet-origin probe traffic is exempt from NetworkPolicy. Add a narrowly selected monitoring source only if the target CNI requires pod-origin health scraping.
 - Readiness fails when PostgreSQL authority is unavailable. Graceful shutdown stops accepting new requests before draining in-flight APNs calls.
 
@@ -12,6 +12,7 @@
 
 | Variable | Purpose |
 |---|---|
+| `BUZZ_PUSH_GATEWAY_ORIGIN` | Required canonical public origin bound by management assertions; HTTPS in production. |
 | `DATABASE_URL` | PostgreSQL authority/admission store. Runtime credentials need DML on the six gateway tables, not DDL. |
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
@@ -20,6 +21,7 @@
 | `BUZZ_PUSH_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
 | `BUZZ_PUSH_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
 | `BUZZ_PUSH_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
+| `BUZZ_PUSH_GATEWAY_ORIGIN` | Required canonical public origin, without a trailing slash; bound into every management assertion. |
 | `BUZZ_PUSH_TOKEN_KEYS` | APNs token-custody AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 
 Each gateway serves one configured Apple application. App Attest validates
@@ -393,3 +395,5 @@ query, fragment or credentials. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.
+
+Management uses v2 assertions binding operation, registered audience, gateway origin, all parameters, expected versions and a request expiry at most five minutes ahead. Enrollment alone consumes a one-use challenge. Issuance response loss retries with a fresh assertion against the reported current generation; hashes cannot reconstruct grants.

@@ -40,7 +40,13 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   func testEnrollmentPinsTranscriptsAndPersistsOpaqueGrant() async throws {
     let store = MemoryGrantStore()
     let appAttest = RecordingAppAttest()
-    let driver = try makeDriver(store: store, appAttest: appAttest)
+    let deviceNow = Self.now + 2
+    let driver = try makeDriver(
+      gatewayBaseURL: URL(string: "http://push.example:80/")!,
+      store: store, appAttest: appAttest,
+      now: { Date(timeIntervalSince1970: TimeInterval(deviceNow)) },
+      lifetimeSeconds: Self.expiresAt - deviceNow
+    )
     var challengeCount = 0
     URLProtocolStub.handler = { request in
       switch (request.httpMethod, request.url?.absoluteString) {
@@ -96,10 +102,17 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
         let body = try Self.body(request)
         XCTAssertEqual(body["relay_pubkey"] as? String, Self.relayPubkey)
         XCTAssertEqual(body["installation_handle"] as? String, Self.installationHandle)
-        XCTAssertEqual(body["challenge_id"] as? String, Self.secondChallengeId)
-        XCTAssertEqual(body["challenge"] as? String, Self.challenge)
+        XCTAssertEqual(body["v"] as? Int, 2)
+        XCTAssertEqual(body["gateway_origin"] as? String, Self.gatewayOrigin)
+        let requestExpiry = try XCTUnwrap(body["request_expires_at"] as? Int64)
+        XCTAssertEqual(requestExpiry, deviceNow + 240)
+        guard requestExpiry <= Self.now + 300 else {
+          return Self.response(request, status: 400, json: ["error": "invalid_request_expiry"])
+        }
+        XCTAssertNil(body["challenge_id"])
+        XCTAssertNil(body["challenge"])
         XCTAssertEqual(body["endpoint_epoch"] as? Int, 1)
-        XCTAssertEqual(body["not_before"] as? Int64, Self.now)
+        XCTAssertEqual(body["not_before"] as? Int64, deviceNow)
         XCTAssertEqual(body["expires_at"] as? Int64, Self.expiresAt)
         XCTAssertEqual(body["assertion"] as? String, Self.assertion)
         XCTAssertEqual(body["generation"] as? Int, 1)
@@ -133,15 +146,15 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
         replacements: []
       )
     )
-    try assertMatchesVector(
-      "delegate",
-      actual: appAttest.clientData[1],
-      expectedSHA256: "f186db11cb53e4e80f09489c11dd18afc9b641683c3d72a67113c57d32fca323",
-      fixture: makeFixtureTranscript(
-        name: "delegate",
-        replacements: [
-          (Self.firstChallengeId, Self.secondChallengeId)
-        ]
+    XCTAssertEqual(challengeCount, 1, "only enrollment uses the public challenge budget")
+    XCTAssertEqual(
+      appAttest.clientData[1],
+      try BuzzPushTranscript.delegate(
+        gatewayOrigin: Self.gatewayURL,
+        requestExpiresAt: deviceNow + 240,
+        installationHandle: UUID(uuidString: Self.installationHandle)!,
+        endpointEpoch: 1, expectedGeneration: 0, generation: 1, relayPubkey: Self.relayPubkey,
+        notBefore: deviceNow, expiresAt: Self.expiresAt
       )
     )
     XCTAssertEqual(
@@ -163,6 +176,62 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     )
     XCTAssertEqual(store.saved, [record])
   }
+
+  func testLostGrantResponseReissuesAtNewerGenerationWhetherOrNotCommitted() async throws {
+    for committed in [false, true] {
+      let store = MemoryGrantStore()
+      let appAttest = RecordingAppAttest()
+      let driver = try makeDriver(store: store, appAttest: appAttest)
+      var current: Int64 = 0
+      var requests = 0
+      var challenges = 0
+      URLProtocolStub.handler = { request in
+        switch request.url?.path {
+        case "/":
+          return Self.response(request, status: 200, json: ["push":["keys":[["pubkey":Self.relayPubkey,"current":true]]]])
+        case "/v1/installations/challenges":
+          challenges += 1
+          return Self.response(request, status: 200, json: ["challenge_id":Self.firstChallengeId,"challenge":Self.challenge,"expires_at":Self.now+300])
+        case "/v1/installations":
+          return Self.response(request, status: 201, json: ["installation_handle":Self.installationHandle,"endpoint_epoch":1,"expires_at":Self.expiresAt])
+        case "/v1/delegations":
+          requests += 1
+          let body = try Self.body(request)
+          let generation = try XCTUnwrap(body["generation"] as? Int64)
+          let expected = try XCTUnwrap(body["expected_generation"] as? Int64)
+          XCTAssertEqual(store.pending.first?.delegationGeneration, generation)
+          if requests == 1 {
+            if committed { current = generation }
+            throw URLError(.networkConnectionLost)
+          }
+          if expected != current {
+            return Self.response(request, status: 409, json: ["error":"stale_generation","current_generation":current])
+          }
+          XCTAssertGreaterThan(generation, current)
+          current = generation
+          return Self.response(request, status: 201, json: ["endpoint_grant":"new-random-grant-\(generation)"])
+        default:
+          XCTFail("Unexpected request \(request.url!)")
+          return Self.response(request, status: 500, json: [:])
+        }
+      }
+      do {
+        _ = try await driver.enroll(deviceToken: Data((1...32).map(UInt8.init)), relayURL: Self.relayURL)
+        XCTFail("Expected lost grant response")
+      } catch { XCTAssertEqual((error as NSError).domain, NSURLErrorDomain) }
+      XCTAssertTrue(store.saved.isEmpty)
+      XCTAssertEqual(store.pending.first?.delegationGeneration, 1)
+      let record = try await driver.enroll(deviceToken: Data((1...32).map(UInt8.init)), relayURL: Self.relayURL)
+      XCTAssertEqual(record.generation, committed ? 3 : 2)
+      XCTAssertEqual(record.endpointGrant, "new-random-grant-\(record.generation)")
+      XCTAssertEqual(challenges, 1)
+      XCTAssertTrue(store.pending.isEmpty)
+    }
+  }
+
+
+
+
 
   func testCommittedInstallationRecoversAfterFinalGrantSaveFailure() async throws {
     let store = MemoryGrantStore(grantSaveFailuresRemaining: 1)
@@ -316,7 +385,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       relayURL: Self.relayURL
     )
 
-    XCTAssertEqual(challengeCount, 2)
+    XCTAssertEqual(challengeCount, 1)
     XCTAssertEqual(installationCount, 2)
     XCTAssertEqual(recovered.endpointGrant, "opaque-grant")
     XCTAssertTrue(store.pending.isEmpty)
@@ -1052,6 +1121,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertEqual(store.saved.count, 2)
   }
 
+
   func testExpiringGrantRenewsExistingInstallationAndReusesRelayLeaseAddress() async throws {
     let existing = BuzzPushEndpointGrantRecord(
       gatewayOrigin: Self.gatewayOrigin,
@@ -1408,7 +1478,8 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
       challenge: journal.challenge,
       keyId: journal.keyId,
       attestation: journal.attestation,
-      delegationGeneration: journal.delegationGeneration
+      delegationGeneration: journal.delegationGeneration,
+      expectedDelegationGeneration: journal.expectedDelegationGeneration
     )
   }
 
@@ -1472,6 +1543,8 @@ private final class MemoryGrantStore: BuzzPushEndpointGrantStore {
     self.pendingRemoveFailuresRemaining = pendingRemoveFailuresRemaining
   }
   func records() throws -> [BuzzPushEndpointGrantRecord] { saved }
+  func pendingEnrollments() throws -> [BuzzPushPendingEnrollmentRecord] { pending }
+  func replaceAll(_ records: [BuzzPushEndpointGrantRecord]) throws { saved = records }
   func save(_ record: BuzzPushEndpointGrantRecord) throws {
     if grantSaveFailuresRemaining > 0 {
       grantSaveFailuresRemaining -= 1

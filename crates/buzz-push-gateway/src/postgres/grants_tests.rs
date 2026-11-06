@@ -20,7 +20,14 @@ mod grants_postgres_tests {
             expires_at: now + 600,
             revoked: false,
         };
-        store.upsert_delegation(d.clone()).await.unwrap();
+        store
+            .upsert_delegation(
+                d.clone(),
+                crate::authority::test_assertion(&store, d.installation_id, Some(d.generation - 1))
+                    .await,
+            )
+            .await
+            .unwrap();
         let stored: Vec<u8> = sqlx::query_scalar("SELECT grant_hash FROM push_gateway_delegations")
             .fetch_one(&pool)
             .await
@@ -94,7 +101,12 @@ mod grants_postgres_tests {
             .await
             .unwrap();
         store
-            .revoke_delegation(d.installation_id, RELAY_HEX, 2)
+            .revoke_delegation(
+                d.installation_id,
+                RELAY_HEX,
+                2,
+                crate::authority::test_assertion(&store, d.installation_id, None).await,
+            )
             .await
             .unwrap();
         assert!(

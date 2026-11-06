@@ -326,6 +326,9 @@ struct BuzzDCAppAttestProvider: BuzzDevAppAttesting {
 /// Enrollment and delegation driver for real App Attest and the gated debug bypass.
 public final class BuzzDevPushEnrollmentDriver {
   public static let endpointEpoch: Int64 = 1
+
+  // Leave clock-skew margin within the gateway's 300-second freshness cap.
+  private static let managementRequestLifetimeSeconds: Int64 = 240
   /// Minimum age before a journaled installation request the gateway rejected
   /// is replaced. It doubles with each consecutive replacement, which bounds
   /// fresh App Attest keys while rejections persist.
@@ -668,7 +671,8 @@ public final class BuzzDevPushEnrollmentDriver {
   private func completeEnrollment(
     _ journal: BuzzPushPendingEnrollmentRecord,
     storedRecords: [BuzzPushEndpointGrantRecord],
-    relayMetadataPubkey: String?
+    relayMetadataPubkey: String?,
+    retryStaleGeneration: Bool = true
   ) async throws -> BuzzPushEndpointGrantRecord {
     var pending = journal
     let endpoint = pending.endpoint
@@ -732,6 +736,7 @@ public final class BuzzDevPushEnrollmentDriver {
         keyId: pending.keyId,
         attestation: pending.attestation,
         delegationGeneration: pending.delegationGeneration,
+        expectedDelegationGeneration: pending.expectedDelegationGeneration,
         preparedAt: pending.preparedAt,
         rejectedReplacements: pending.rejectedReplacements
       )
@@ -747,7 +752,8 @@ public final class BuzzDevPushEnrollmentDriver {
       }
       .map(\.generation)
       .max()
-    let generationBase = max(currentGeneration ?? 0, pending.delegationGeneration)
+    let expectedGeneration = pending.expectedDelegationGeneration ?? currentGeneration ?? 0
+    let generationBase = max(expectedGeneration, max(currentGeneration ?? 0, pending.delegationGeneration))
     let generation: Int64
     if generationBase > 0 {
       let (next, overflow) = generationBase.addingReportingOverflow(1)
@@ -772,6 +778,7 @@ public final class BuzzDevPushEnrollmentDriver {
       keyId: pending.keyId,
       attestation: pending.attestation,
       delegationGeneration: generation,
+      expectedDelegationGeneration: expectedGeneration,
       preparedAt: pending.preparedAt,
       rejectedReplacements: pending.rejectedReplacements
     )
@@ -779,13 +786,13 @@ public final class BuzzDevPushEnrollmentDriver {
     // save failure is retried at a strictly higher generation.
     try store.savePendingEnrollment(pending)
 
-    let delegationChallenge = try await challenge()
+    let requestExpiresAt = nowSeconds + Self.managementRequestLifetimeSeconds
     let delegationClientData = try BuzzPushTranscript.delegate(
       gatewayOrigin: gatewayBaseURL,
-      challengeId: delegationChallenge.id,
-      challenge: delegationChallenge.value,
+      requestExpiresAt: requestExpiresAt,
       installationHandle: installation,
       endpointEpoch: Self.endpointEpoch,
+      expectedGeneration: expectedGeneration,
       generation: generation,
       relayPubkey: relayPubkey,
       notBefore: nowSeconds,
@@ -798,15 +805,35 @@ public final class BuzzDevPushEnrollmentDriver {
       keyId: appAttestKeyId,
       clientData: delegationClientData
     )
-    let endpointGrant = try await delegate(
-      challenge: delegationChallenge,
-      installationHandle: installation,
-      relayPubkey: relayPubkey,
-      generation: generation,
-      notBefore: nowSeconds,
-      expiresAt: pending.expiresAt,
-      assertion: assertion
-    )
+    let endpointGrant: String
+    do {
+      endpointGrant = try await delegate(
+        requestExpiresAt: requestExpiresAt,
+        installationHandle: installation,
+        endpointEpoch: Self.endpointEpoch,
+        relayPubkey: relayPubkey,
+        expectedGeneration: expectedGeneration,
+        generation: generation,
+        notBefore: nowSeconds,
+        expiresAt: pending.expiresAt,
+        assertion: assertion
+      )
+    } catch let error as BuzzDevPushEnrollmentError {
+      if case .unexpectedStatus(route: "v1/delegations", _, 409, let body) = error,
+        let conflict = try? JSONDecoder().decode(DelegationConflict.self, from: Data(body.utf8)),
+        conflict.error == "stale_generation", conflict.currentGeneration >= 0
+      {
+        pending = pending.with(expectedDelegationGeneration: conflict.currentGeneration)
+        try store.savePendingEnrollment(pending)
+        if retryStaleGeneration {
+          return try await completeEnrollment(
+            pending, storedRecords: storedRecords, relayMetadataPubkey: relayMetadataPubkey,
+            retryStaleGeneration: false
+          )
+        }
+      }
+      throw error
+    }
 
     let record = BuzzPushEndpointGrantRecord(
       gatewayOrigin: gatewayOrigin,
@@ -887,9 +914,11 @@ public final class BuzzDevPushEnrollmentDriver {
   }
 
   private func delegate(
-    challenge: Challenge,
+    requestExpiresAt: Int64,
     installationHandle: UUID,
+    endpointEpoch: Int64,
     relayPubkey: String,
+    expectedGeneration: Int64,
     generation: Int64,
     notBefore: Int64,
     expiresAt: Int64,
@@ -899,11 +928,12 @@ public final class BuzzDevPushEnrollmentDriver {
       route: "v1/delegations",
       expectedStatus: 201,
       body: DelegationRequest(
-        v: 1,
-        challengeId: challenge.id.uuidString.lowercased(),
-        challenge: challenge.value,
+        v: 2,
+        gatewayOrigin: gatewayOrigin,
+        requestExpiresAt: requestExpiresAt,
         installationHandle: installationHandle.uuidString.lowercased(),
-        endpointEpoch: Self.endpointEpoch,
+        endpointEpoch: endpointEpoch,
+        expectedGeneration: expectedGeneration,
         generation: generation,
         relayPubkey: relayPubkey,
         notBefore: notBefore,
@@ -1106,10 +1136,11 @@ private struct InstallationResponse: Decodable {
 }
 private struct DelegationRequest: Encodable {
   let v: Int
-  let challengeId: String
-  let challenge: String
+  let gatewayOrigin: String
+  let requestExpiresAt: Int64
   let installationHandle: String
   let endpointEpoch: Int64
+  let expectedGeneration: Int64
   let generation: Int64
   let relayPubkey: String
   let notBefore: Int64
@@ -1117,10 +1148,11 @@ private struct DelegationRequest: Encodable {
   let assertion: String
   enum CodingKeys: String, CodingKey {
     case v
-    case challengeId = "challenge_id"
-    case challenge
+    case gatewayOrigin = "gateway_origin"
+    case requestExpiresAt = "request_expires_at"
     case installationHandle = "installation_handle"
     case endpointEpoch = "endpoint_epoch"
+    case expectedGeneration = "expected_generation"
     case generation
     case relayPubkey = "relay_pubkey"
     case notBefore = "not_before"
@@ -1162,7 +1194,10 @@ private struct RelayKeys {
 
 extension BuzzPushPendingEnrollmentRecord {
   /// This journal with only its replacement bookkeeping changed.
-  fileprivate func with(preparedAt: Int64?, rejectedReplacements: Int) -> Self {
+  fileprivate func with(
+    preparedAt: Int64? = nil, rejectedReplacements: Int? = nil,
+    expectedDelegationGeneration: Int64? = nil
+  ) -> Self {
     Self(
       gatewayOrigin: gatewayOrigin,
       relayOrigin: relayOrigin,
@@ -1177,8 +1212,18 @@ extension BuzzPushPendingEnrollmentRecord {
       keyId: keyId,
       attestation: attestation,
       delegationGeneration: delegationGeneration,
-      preparedAt: preparedAt,
-      rejectedReplacements: rejectedReplacements
+      expectedDelegationGeneration: expectedDelegationGeneration ?? self.expectedDelegationGeneration,
+      preparedAt: preparedAt ?? self.preparedAt,
+      rejectedReplacements: rejectedReplacements ?? self.rejectedReplacements
     )
+  }
+}
+
+private struct DelegationConflict: Decodable {
+  let error: String
+  let currentGeneration: Int64
+  enum CodingKeys: String, CodingKey {
+    case error
+    case currentGeneration = "current_generation"
   }
 }

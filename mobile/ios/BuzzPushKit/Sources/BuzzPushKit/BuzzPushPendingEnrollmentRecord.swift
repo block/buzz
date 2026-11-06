@@ -28,6 +28,8 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
   public let attestation: String?
   /// Highest delegation generation reserved before a network request.
   public let delegationGeneration: Int64
+  /// Last gateway generation observed before preparing delegation CAS; nil before observation.
+  public let expectedDelegationGeneration: Int64?
   /// Unix time the journaled installation request was prepared, or its latest
   /// replacement attempt began; nil when there is none or the journal predates
   /// this field.
@@ -52,6 +54,7 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     keyId: String? = nil,
     attestation: String? = nil,
     delegationGeneration: Int64 = 0,
+    expectedDelegationGeneration: Int64? = nil,
     preparedAt: Int64? = nil,
     rejectedReplacements: Int? = nil
   ) {
@@ -68,6 +71,7 @@ public struct BuzzPushPendingEnrollmentRecord: Codable, Equatable, Sendable {
     self.keyId = keyId
     self.attestation = attestation
     self.delegationGeneration = delegationGeneration
+    self.expectedDelegationGeneration = expectedDelegationGeneration
     self.preparedAt = preparedAt
     self.rejectedReplacements = rejectedReplacements
   }

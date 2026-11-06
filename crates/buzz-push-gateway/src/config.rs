@@ -37,6 +37,7 @@ pub struct KeyConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub gateway_origin: String,
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
     pub max_grant_lifetime_seconds: i64,
@@ -155,6 +156,15 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .ok_or(ConfigError::Missing(k))
         }
+        let gateway_origin = req(e, "BUZZ_PUSH_GATEWAY_ORIGIN")?.to_owned();
+        let origin = url::Url::parse(&gateway_origin)
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"))?;
+        if !matches!(origin.scheme(), "http" | "https")
+            || origin.host_str().is_none()
+            || origin.origin().ascii_serialization() != gateway_origin
+        {
+            return Err(ConfigError::Invalid("BUZZ_PUSH_GATEWAY_ORIGIN"));
+        }
         let token_keys = parse_keyring(e, "BUZZ_PUSH_TOKEN_KEYS")?;
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
@@ -199,6 +209,7 @@ impl Config {
             .parse::<SocketAddr>()
             .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?;
         Ok(Self {
+            gateway_origin,
             bind_addr,
             health_addr,
             max_grant_lifetime_seconds,
@@ -260,6 +271,10 @@ mod tests {
     fn base() -> HashMap<String, String> {
         HashMap::from([
             (
+                "BUZZ_PUSH_GATEWAY_ORIGIN".into(),
+                "https://push.buzz.xyz".into(),
+            ),
+            (
                 "BUZZ_PUSH_TOKEN_KEYS".into(),
                 format!(
                     "current-token:{},old-token:{}",
@@ -317,8 +332,18 @@ mod tests {
     }
 
     #[test]
-    fn startup_needs_no_origin_and_transcript_audiences_stay_registered() {
-        assert!(!base().contains_key("BUZZ_PUSH_GATEWAY_ORIGIN"));
+    fn management_requires_canonical_origin_and_audiences_stay_registered() {
+        for invalid in [
+            "",
+            "https://push.example/",
+            "https://user@push.example",
+            "ftp://push.example",
+            "https://push.example/path",
+        ] {
+            let mut env = base();
+            env.insert("BUZZ_PUSH_GATEWAY_ORIGIN".into(), invalid.into());
+            assert!(Config::from_map(&env).is_err(), "{invalid}");
+        }
         Config::from_map(&base()).unwrap();
         assert_eq!(ENROLL_AUDIENCE, "https://push.buzz.xyz/v1/installations");
         assert_eq!(DELEGATE_AUDIENCE, "https://push.buzz.xyz/v1/delegations");
