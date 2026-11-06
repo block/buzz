@@ -57,20 +57,30 @@ async fn begin_cancelled_in_flight_leaves_no_writer_transaction_open() {
         proxy.set_paused(false);
 
         let mut next = pool.acquire().await.expect("checkout after cancel");
-        let outside_transaction: bool =
-            sqlx::query_scalar("SELECT pg_catalog.now() = pg_catalog.statement_timestamp()")
-                .fetch_one(&mut *next)
-                .await
-                .expect("probe transaction state");
-        assert!(
-            outside_transaction,
-            "{form}: the next borrower runs inside the cancelled BEGIN's transaction"
-        );
-        sqlx::query("INSERT INTO begin_cancel_probe (n) VALUES ($1)")
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *next)
+            .await
+            .expect("next borrower's backend pid");
+        // A leftover `READ ONLY` transaction fails this write; a read-write one
+        // leaves it uncommitted (checked below).
+        if let Err(e) = sqlx::query("INSERT INTO begin_cancel_probe (n) VALUES ($1)")
             .bind(n)
             .execute(&mut *next)
             .await
-            .expect("autocommit write after cancel");
+        {
+            panic!("{form}: the next borrower's autocommit write failed: {e}");
+        }
+        let state: Option<String> =
+            sqlx::query_scalar("SELECT state FROM pg_stat_activity WHERE pid = $1")
+                .bind(pid)
+                .fetch_one(&seed)
+                .await
+                .expect("read the next borrower's backend state");
+        assert_eq!(
+            state.as_deref(),
+            Some("idle"),
+            "{form}: the next borrower runs inside the cancelled BEGIN's transaction"
+        );
     }
 
     // Read from a connection outside the proxied pool: an autocommit write
