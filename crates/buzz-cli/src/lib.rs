@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod federated;
 mod help_tree;
 mod links;
 mod validate;
@@ -127,6 +128,7 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+  BUZZ_FEDERATED_IDENTITY  NIP-FI assertion (compact JWS)  [optional]
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -146,6 +148,11 @@ struct Cli {
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
+
+    /// NIP-FI identity assertion (compact JWS), sent as
+    /// `Nostr-Federated-Identity: Bearer <jws>` on authenticated relay requests.
+    #[arg(long, env = "BUZZ_FEDERATED_IDENTITY", hide_env_values = true)]
+    federated_identity: Option<String>,
 
     /// Output format: 'json' (default, full fields), 'compact' (reduced fields),
     /// or 'agent' (event reads without signature material). Defaults to
@@ -332,6 +339,31 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Sign in for NIP-FI relays (NIP-FA), as Buzz Desktop does
+    #[command(subcommand)]
+    Identity(IdentityCmd),
+}
+
+#[derive(Subcommand)]
+pub enum IdentityCmd {
+    /// Sign in through the identity adapter in a browser and save the session on this device
+    Login {
+        /// Adapter base URL, e.g. https://block.builderlab.xyz/api/goose
+        #[arg(long, env = "BUZZ_FI_ADAPTER")]
+        adapter: String,
+        /// Agent-grant dialect: `nip-fa` as specified, or `builderlab` for Builderlab's adapter
+        #[arg(long, value_enum, default_value = "nip-fa")]
+        protocol: federated::Protocol,
+        /// Print the login URL instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Enroll this agent key (BUZZ_PRIVATE_KEY + BUZZ_AUTH_TAG) under the signed-in owner
+    EnrollAgent,
+    /// Show the saved sign-in and agent enrollments (no secrets)
+    Status,
+    /// Delete the saved sign-in and agent grants from this device (enrollments stay on the adapter)
+    Logout,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2296,6 +2328,71 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
+/// Whether the relay's NIP-11 document says it requires NIP-FI.
+async fn relay_requires_nip_fi(client: &BuzzClient) -> Result<bool, CliError> {
+    let info: serde_json::Value = serde_json::from_str(&client.get_public("/").await?)
+        .map_err(|e| CliError::Other(format!("relay info document is not valid JSON: {e}")))?;
+    Ok(info.get("requires_nip_fi") == Some(&serde_json::Value::Bool(true)))
+}
+
+/// `identity login`, `status` and `logout` touch only this device's sign-in,
+/// so they run without a key or auth tag (and recover from a stale one).
+async fn run_local_identity(sub: &IdentityCmd) -> Option<Result<(), CliError>> {
+    if matches!(sub, IdentityCmd::EnrollAgent) {
+        return None;
+    }
+    Some(run_identity(sub, None, None).await)
+}
+
+async fn run_identity(
+    sub: &IdentityCmd,
+    keys: Option<&Keys>,
+    auth_tag_json: Option<&str>,
+) -> Result<(), CliError> {
+    let store = federated::Store::default_location()?;
+    let output = match sub {
+        IdentityCmd::Login {
+            adapter,
+            protocol,
+            no_browser,
+        } => {
+            federated::login(&store, adapter, *protocol, |url| {
+                eprintln!("Sign in at: {url}");
+                if !no_browser {
+                    let _ = std::process::Command::new(if cfg!(target_os = "macos") {
+                        "open"
+                    } else {
+                        "xdg-open"
+                    })
+                    .arg(url)
+                    .status();
+                }
+            })
+            .await?
+        }
+        IdentityCmd::EnrollAgent => {
+            let auth_tag_json = auth_tag_json.ok_or_else(|| {
+                CliError::Auth(
+                    "enroll-agent requires BUZZ_AUTH_TAG (the agent's owner attestation)".into(),
+                )
+            })?;
+            let owner = buzz_sdk::nip_oa::parse_auth_tag(auth_tag_json)
+                .ok()
+                .and_then(|t| t.as_slice().get(1).cloned())
+                .ok_or_else(|| CliError::Auth("BUZZ_AUTH_TAG has no owner".into()))?;
+            let keys = keys.ok_or_else(|| CliError::Auth("BUZZ_PRIVATE_KEY is required".into()))?;
+            federated::enroll_agent(&store, keys, &owner, auth_tag_json).await?
+        }
+        IdentityCmd::Status => federated::status(&store)?,
+        IdentityCmd::Logout => {
+            store.logout()?;
+            serde_json::json!({ "signed_out": true })
+        }
+    };
+    println!("{output}");
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -2305,6 +2402,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+    if let Cmd::Identity(ref sub) = cli.command {
+        if let Some(result) = run_local_identity(sub).await {
+            return result;
+        }
     }
 
     // Auth: private key is required for all relay operations.
@@ -2342,7 +2444,25 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    if let Cmd::Identity(ref sub) = cli.command {
+        return run_identity(sub, Some(&keys), auth_tag_json.as_deref()).await;
+    }
+
+    let owner = auth_tag.as_ref().and_then(|t| t.as_slice().get(1).cloned());
+    let mut client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    match cli.federated_identity.as_deref() {
+        Some(jws) if !jws.is_empty() => client = client.with_federated_identity(jws)?,
+        _ => {
+            // Mint through a saved sign-in, when there is one and the relay requires NIP-FI.
+            let store = federated::Store::default_location()?;
+            if store.has_credentials() && relay_requires_nip_fi(&client).await? {
+                let jws =
+                    federated::mint(&store, client.keys(), owner.as_deref(), client.relay_url())
+                        .await?;
+                client = client.with_federated_identity(&jws)?;
+            }
+        }
+    }
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
@@ -2368,7 +2488,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Identity(_) => unreachable!("handled above"),
     }
 }
 
@@ -2568,6 +2688,7 @@ mod tests {
             "feed",
             "gifs",
             "huddles",
+            "identity",
             "issues",
             "media",
             "mem",
@@ -2798,6 +2919,7 @@ mod tests {
             ("upload", 1),
             ("users", 6),
             ("workflows", 8),
+            ("identity", 4),
         ];
 
         let cmd = Cli::command();
@@ -2821,7 +2943,9 @@ mod tests {
     /// Collect all args (recursing into subcommands) whose env var name looks
     /// like a credential but does NOT have `hide_env_values` set.
     fn collect_unhidden_secret_args(cmd: &clap::Command) -> Vec<(String, String)> {
-        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+        const SECRET_PATTERNS: &[&str] = &[
+            "KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH", "IDENTITY",
+        ];
 
         let mut violations: Vec<(String, String)> = Vec::new();
 
@@ -2842,7 +2966,7 @@ mod tests {
         violations
     }
 
-    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH/IDENTITY
     /// must set `hide_env_values = true` to prevent credential leakage in --help.
     #[test]
     fn secret_env_args_hide_their_values_in_help() {
