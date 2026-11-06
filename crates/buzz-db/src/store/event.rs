@@ -588,7 +588,7 @@ pub(crate) async fn query_events_on(
     // Recent-first (see `recent_pass`): the newest partitions answer a page
     // that fills there; older rows are read only for what is still missing.
     // A thread-reply read is a `#e` lookup, which is never split.
-    let rows = match (root, recent_pass_floor(q, Utc::now())) {
+    let rows = match (root, recent_pass_split(q, Utc::now())) {
         (Some(root), _) => {
             let mut qb = build_thread_reply_sql(q, root);
             fetch_with_read_deadline(conn, qb.build().persistent(persistent), deadline).await?
@@ -597,10 +597,10 @@ pub(crate) async fn query_events_on(
             let mut qb = build_query_events_sql(q, Range::All, limit);
             fetch_with_read_deadline(conn, qb.build().persistent(persistent), deadline).await?
         }
-        (None, Some(floor)) => {
+        (None, Some(split)) => {
             let mut read = ReadTransaction::begin(conn, deadline).await?;
             let mut rows = Vec::new();
-            let mut pass = Some((Range::Recent(floor), limit));
+            let mut pass = Some((Range::Recent(split), limit));
             while let Some((range, pass_limit)) = pass {
                 let mut qb = build_query_events_sql(q, range, pass_limit);
                 rows.extend(read.fetch(qb.build().persistent(persistent)).await?);
@@ -648,12 +648,15 @@ pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent
     matches_nothing.then(|| Ok(vec![]))
 }
 
-/// The floor to split `q` at ([`crate::store::recent_pass`]), or `None` to
-/// read it whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
+/// Where to split `q` ([`crate::store::recent_pass`]), or `None` to read it
+/// whole. Lookups by id, `e` tag or `d` tag, and fetch-everything
 /// reads (`max_limit`, the COUNT fallback) match a fixed set of rows wherever
 /// they sit, so a recent pass rarely fills their page. An `OFFSET` skips rows
 /// on both sides of the floor, so its split point is unknown.
-fn recent_pass_floor(q: &EventQuery, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+fn recent_pass_split(
+    q: &EventQuery,
+    now: DateTime<Utc>,
+) -> Option<crate::store::recent_pass::Split> {
     let lookup = q.offset.is_some_and(|o| o > 0)
         || q.ids.is_some()
         || q.e_tags.is_some()
@@ -664,7 +667,7 @@ fn recent_pass_floor(q: &EventQuery, now: DateTime<Utc>) -> Option<DateTime<Utc>
     if lookup {
         return None;
     }
-    crate::store::recent_pass::floor_for(now, q.kinds.as_deref(), q.since, q.until)
+    crate::store::recent_pass::split_for(now, q.kinds.as_deref(), q.since, q.until)
 }
 
 /// The `LIMIT` [`query_events_on`] applies: the requested page, clamped.
@@ -3037,13 +3040,19 @@ mod e_tag_filter_shape_tests {
         assert!(!qb.sql().as_str().contains("MATERIALIZED"));
     }
 
-    /// Each pass bounds `created_at` with a literal so Postgres prunes
-    /// partitions while planning; a `#p` read bounds the mention side too.
-    /// An unsplit read and the COUNT carry no bound.
+    /// Each pass bounds `created_at` with literals so Postgres prunes
+    /// partitions while planning: the recent pass on both sides, the older
+    /// pass below the floor. A `#p` read bounds the mention side too. An
+    /// unsplit read and the COUNT carry no bound.
     #[test]
     fn split_passes_bound_created_at_with_a_literal() {
-        let floor = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 1, 0, 0, 0).unwrap();
-        let lit = "'2026-10-01T00:00:00Z'::timestamptz";
+        let at = |m| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, m, 1, 0, 0, 0).unwrap();
+        let split = crate::store::recent_pass::Split {
+            floor: at(10),
+            ceiling: Some(at(12)),
+        };
+        let floor = "'2026-10-01T00:00:00Z'::timestamptz";
+        let ceiling = "'2026-12-01T00:00:00Z'::timestamptz";
         let sql = |q: &EventQuery, range| {
             build_query_events_sql(q, range, 7)
                 .sql()
@@ -3052,25 +3061,34 @@ mod e_tag_filter_shape_tests {
         };
         let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
         q.kinds = Some(vec![9]);
-        let recent = sql(&q, Range::Recent(floor));
+        let recent = sql(&q, Range::Recent(split));
+        for bound in [
+            format!(" AND created_at >= {floor}"),
+            format!(" AND created_at < {ceiling}"),
+        ] {
+            assert!(recent.contains(&bound), "{recent}");
+        }
+        let older = sql(&q, Range::Older(split.floor));
         assert!(
-            recent.contains(&format!(" AND created_at >= {lit}")),
-            "{recent}"
-        );
-        let older = sql(&q, Range::Older(floor));
-        assert!(
-            older.contains(&format!(" AND created_at < {lit}")),
+            older.contains(&format!(" AND created_at < {floor}")),
             "{older}"
         );
+        assert!(!older.contains(ceiling), "{older}");
         let whole = sql(&q, Range::All);
         assert!(!whole.contains("::timestamptz"), "{whole}");
 
         q.p_tag_hex = Some("ab".repeat(32));
-        for (range, op) in [(Range::Recent(floor), ">="), (Range::Older(floor), "<")] {
+        let bounds = [
+            (Range::Recent(split), vec![(">=", floor), ("<", ceiling)]),
+            (Range::Older(split.floor), vec![("<", floor)]),
+        ];
+        for (range, ops) in bounds {
             let mention = sql(&q, range);
             for column in ["e.created_at", "m.event_created_at"] {
-                let bound = format!(" AND {column} {op} {lit}");
-                assert!(mention.contains(&bound), "{mention}");
+                for &(op, lit) in &ops {
+                    let bound = format!(" AND {column} {op} {lit}");
+                    assert!(mention.contains(&bound), "{mention}");
+                }
             }
         }
         let count = count_events_sql(&q).sql().as_str().to_owned();
@@ -3087,10 +3105,10 @@ mod e_tag_filter_shape_tests {
             q.kinds = Some(vec![9]);
             q
         };
-        assert!(recent_pass_floor(&base(), now).is_some(), "page read");
+        assert!(recent_pass_split(&base(), now).is_some(), "page read");
         let mut first_page = base();
         first_page.offset = Some(0);
-        assert!(recent_pass_floor(&first_page, now).is_some(), "offset 0");
+        assert!(recent_pass_split(&first_page, now).is_some(), "offset 0");
         type Narrow = fn(&mut EventQuery);
         let lookups: [(&str, Narrow); 7] = [
             ("offset", |q| q.offset = Some(1)),
@@ -3106,7 +3124,7 @@ mod e_tag_filter_shape_tests {
         for (label, set) in lookups {
             let mut q = base();
             set(&mut q);
-            assert!(recent_pass_floor(&q, now).is_none(), "{label}");
+            assert!(recent_pass_split(&q, now).is_none(), "{label}");
         }
     }
 
@@ -3630,6 +3648,106 @@ mod postgres_tests {
         assert_eq!(ids(page), expected[..7]);
     }
 
+    /// The recent pass of a regular-kind read locks only the partitions
+    /// between its floor and ceiling, even as a cached generic plan. Without
+    /// the ceiling (a read that may match latest-state kinds) it also locks
+    /// the monthlies made ahead of time and the open-ended last partition.
+    /// Mutation: drop the ceiling from `Range::predicate`, or set it for
+    /// every split read → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn recent_pass_locks_only_the_partitions_below_its_ceiling() {
+        use crate::store::recent_pass::{ceiling_at, split_for};
+        let pool = setup_pool().await;
+        let db = crate::Db::from_pool(pool.clone());
+        // The layout a running relay keeps: dated monthlies through the
+        // months ahead, then an open-ended catch-all.
+        db.maintain_partitions(
+            crate::partition::PARTITION_MANAGER_MONTHS_AHEAD,
+            crate::partition::PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+
+        let now = Utc::now();
+        let ceiled = split_for(now, Some(&[9]), None, None).expect("split");
+        let open = split_for(now, Some(&[9, 39002]), None, None).expect("split");
+        assert_eq!(ceiled.ceiling, Some(ceiling_at(now)));
+        assert_eq!(open.ceiling, None);
+
+        // One row at each edge of the ceiled range names its partitions.
+        let author = Keys::generate();
+        let mut expected = std::collections::BTreeSet::new();
+        let last = ceiling_at(now) - chrono::Duration::seconds(1);
+        for at in [ceiled.floor, now, last] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(nostr::Timestamp::from(at.timestamp() as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel))
+                .await
+                .expect("insert");
+            let partition: String =
+                sqlx::query_scalar("SELECT tableoid::regclass::text FROM events WHERE id = $1")
+                    .bind(event.id.as_bytes().to_vec())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("partition");
+            expected.insert(partition);
+        }
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::query("SET plan_cache_mode = force_generic_plan")
+            .execute(&mut *conn)
+            .await
+            .expect("force generic plans");
+        let q = EventQuery {
+            kinds: Some(vec![9]),
+            channel_id: Some(channel),
+            ..EventQuery::for_community(community)
+        };
+        async fn locked(
+            conn: &mut sqlx::PgConnection,
+            q: &EventQuery,
+            split: crate::store::recent_pass::Split,
+        ) -> std::collections::BTreeSet<String> {
+            let mut tx = sqlx::Connection::begin(conn).await.expect("begin");
+            let mut qb = build_query_events_sql(q, Range::Recent(split), 10);
+            let rows = qb
+                .build()
+                .persistent(true)
+                .fetch_all(&mut *tx)
+                .await
+                .expect("recent pass");
+            assert_eq!(rows.len(), 3, "the recent pass reads every row");
+            let locked: Vec<String> = sqlx::query_scalar(
+                "SELECT c.relname::text FROM pg_locks l \
+                 JOIN pg_class c ON c.oid = l.relation \
+                 JOIN pg_inherits i ON i.inhrelid = c.oid \
+                 WHERE l.pid = pg_backend_pid() \
+                   AND i.inhparent = 'events'::regclass",
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .expect("locked partitions");
+            tx.rollback().await.expect("rollback");
+            locked.into_iter().collect()
+        }
+        let ceiled_locks = locked(&mut conn, &q, ceiled).await;
+        assert_eq!(ceiled_locks, expected, "partitions below the ceiling");
+        let open_locks = locked(&mut conn, &q, open).await;
+        assert!(
+            open_locks.is_superset(&ceiled_locks) && open_locks.len() > ceiled_locks.len(),
+            "without the ceiling the pass also locks the later partitions: {open_locks:?}"
+        );
+    }
+
     /// A newest-first page read split at the floor returns the rows the
     /// unsplit read returns: the recent pass alone when it fills the page,
     /// otherwise followed by the older pass for just the missing rows.
@@ -3676,8 +3794,17 @@ mod postgres_tests {
             ..EventQuery::for_community(community)
         };
         let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
-        let recent = "%FROM events WHERE%created_at >= '%::timestamptz%";
-        let older = "%FROM events WHERE%created_at < '%::timestamptz%";
+        // The recent pass of this kind:9 read also stops at the ceiling, so
+        // the older pass is told apart by its `<` bound at the floor.
+        let floor_lit =
+            crate::store::recent_pass::floor_at(Utc::now()).format("%Y-%m-%dT%H:%M:%SZ");
+        let ceiling_lit =
+            crate::store::recent_pass::ceiling_at(Utc::now()).format("%Y-%m-%dT%H:%M:%SZ");
+        let recent = &format!(
+            "%FROM events WHERE%created_at >= '{floor_lit}'::timestamptz \
+             AND created_at < '{ceiling_lit}'::timestamptz%"
+        );
+        let older = &format!("%FROM events WHERE%created_at < '{floor_lit}'::timestamptz%");
         let all = "%FROM events WHERE%";
 
         // Full recent page: answered by the recent pass alone.
