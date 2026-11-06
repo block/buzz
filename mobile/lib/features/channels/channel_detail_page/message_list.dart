@@ -1,6 +1,7 @@
 part of '../channel_detail_page.dart';
 
 class _MessageList extends HookConsumerWidget {
+  final DateHeaderScrollActivity dateScrollActivity;
   final ValueNotifier<StickyDateHeaderState> stickyDateHeaderState;
   final List<MainTimelineEntry> entries;
   final List<TypingEntry> inlineTyping;
@@ -28,6 +29,7 @@ class _MessageList extends HookConsumerWidget {
   final VoidCallback? restoreComposerFocus;
 
   const _MessageList({
+    required this.dateScrollActivity,
     required this.entries,
     this.inlineTyping = const [],
     this.threadWorking = const {},
@@ -914,6 +916,7 @@ class _MessageList extends HookConsumerWidget {
               return false;
             }
             if (notification is! ScrollNotification) return false;
+            dateScrollActivity.onNotification(notification);
             timelineViewportHeight.value =
                 notification.metrics.viewportDimension;
             distanceFromLatest.value = max(

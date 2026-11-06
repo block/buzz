@@ -6746,6 +6746,19 @@ void main() {
           ),
           findsOneWidget,
         );
+        final floatingOpacity = find
+            .descendant(
+              of: stickyHeader,
+              matching: find.byType(AnimatedOpacity),
+            )
+            .first;
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+        await tester.drag(messageList, const Offset(0, 60));
+        await tester.pump();
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 1);
+        await tester.pumpAndSettle();
+        await tester.pump(const Duration(seconds: 1));
+        expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
       },
     );
 
@@ -15281,6 +15294,17 @@ void main() {
         ),
         findsOneWidget,
       );
+
+      final floatingOpacity = find
+          .descendant(of: stickyHeader, matching: find.byType(AnimatedOpacity))
+          .first;
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
+      await tester.drag(listFinder, const Offset(0, -60));
+      await tester.pump();
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 1);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.widget<AnimatedOpacity>(floatingOpacity).opacity, 0);
 
       list.itemScrollController!.jumpTo(index: 70);
       await tester.pumpAndSettle();

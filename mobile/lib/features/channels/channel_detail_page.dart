@@ -101,6 +101,7 @@ import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'small_avatar.dart';
 import 'sticky_date_header.dart';
+import 'date_header_scroll_activity.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
 import 'reading_marks.dart';
@@ -303,6 +304,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final messagesProvider = personalChat
         ? meMessagesProvider(channel.id)
         : channelMessagesProvider(channel.id);
+    final dateScrollActivity = useDateHeaderScrollActivity(channel.id);
     final stickyDateHeaderState = useValueNotifier(
       StickyDateHeaderState.hidden,
       [channel.id],
@@ -727,6 +729,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: StickyDateHeader(
                     key: const ValueKey('channel-sticky-date-header'),
                     state: stickyDateHeaderState,
+                    scrollVisible: dateScrollActivity,
                   ),
                 ),
               ],
@@ -887,6 +890,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   : const [],
                               threadWorking: threadWorking,
                               stickyDateHeaderState: stickyDateHeaderState,
+                              dateScrollActivity: dateScrollActivity,
                               entries: timelineEntries,
                               allMessages: timelineMessages,
                               initialMessageId: personalChat

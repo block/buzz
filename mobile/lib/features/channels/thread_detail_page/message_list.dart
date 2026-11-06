@@ -1,6 +1,7 @@
 part of '../thread_detail_page.dart';
 
 class _ThreadMessageList extends HookWidget {
+  final DateHeaderScrollActivity dateScrollActivity;
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
@@ -32,6 +33,7 @@ class _ThreadMessageList extends HookWidget {
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
+    required this.dateScrollActivity,
     required this.headHeight,
     required this.onHeadHeightChanged,
     required this.viewport,
@@ -182,7 +184,7 @@ class _ThreadMessageList extends HookWidget {
       }
     });
 
-    return LaidOutViewportReporter(
+    final content = LaidOutViewportReporter(
       viewport: viewport,
       child: KeyboardDismissOnDrag(
         onUserScrollStart: onUserScrollStart,
@@ -412,6 +414,10 @@ class _ThreadMessageList extends HookWidget {
           ),
         ),
       ),
+    );
+    return NotificationListener<ScrollNotification>(
+      onNotification: dateScrollActivity.onNotification,
+      child: content,
     );
   }
 }
