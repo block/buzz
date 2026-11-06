@@ -1,14 +1,16 @@
 //! Drives the simulated population through the scenario's ramp.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use buzz_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_DELETION, KIND_GIT_REPO_ANNOUNCEMENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_METADATA, KIND_PRESENCE_UPDATE,
-    KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TYPING_INDICATOR,
+    KIND_AGENT_OBSERVER_FRAME, KIND_DELETION, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_METADATA,
+    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TYPING_INDICATOR,
     KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
@@ -1052,6 +1054,9 @@ const AGENT_READ_KINDS: [u32; 2] = [KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2]
 /// Reactions a turn adds to the event it answers and removes at its end:
 /// "seen" and "working".
 const TURN_REACTIONS: [&str; 2] = ["👀", "💬"];
+/// Replies a harness puts in a thread's context, as its default context
+/// message limit. It fetches one more, and counts the thread when it gets it.
+const THREAD_CONTEXT_REPLIES: usize = 12;
 
 /// An agent's turn under way: the channel it works in, the event it
 /// answers, and when its next typing indicator, observer frame and tool
@@ -1075,17 +1080,20 @@ enum TurnStep {
 }
 
 impl Turn {
-    fn due(&self) -> Option<Instant> {
-        [self.next_typing, self.next_frame, self.reads.last().copied()]
+    /// When the turn next has something to do. Without `http`, only its
+    /// socket steps count: typing and frames.
+    fn due(&self, http: bool) -> Option<Instant> {
+        let http_due = http.then(|| self.reads.last().copied().unwrap_or(self.ends));
+        [self.next_typing, self.next_frame, http_due]
             .into_iter()
             .flatten()
-            .chain([self.ends])
             .min()
     }
 
     /// The step due at `now`, if any, with its next one scheduled. Typing,
     /// frames and reads run before the end, so none is lost to a late wakeup.
-    fn step(&mut self, now: Instant, profile: &AgentTurn) -> Option<TurnStep> {
+    /// Without `http`, reads and the end wait.
+    fn step(&mut self, now: Instant, profile: &AgentTurn, http: bool) -> Option<TurnStep> {
         let due = |t: Option<Instant>| t.is_some_and(|t| t <= now);
         if due(self.next_typing) {
             self.next_typing = every(profile.typing_secs, now).filter(|t| *t < self.ends);
@@ -1093,12 +1101,68 @@ impl Turn {
         } else if due(self.next_frame) {
             self.next_frame = every(profile.frame_secs, now).filter(|t| *t < self.ends);
             Some(TurnStep::Frame)
+        } else if !http {
+            None
         } else if due(self.reads.last().copied()) {
             self.reads.pop();
             Some(TurnStep::Read(self.channel.clone()))
         } else {
             (self.ends <= now).then_some(TurnStep::End)
         }
+    }
+}
+
+/// A turn's random draws, made before its requests start.
+struct TurnPlan {
+    channel: String,
+    length: Duration,
+    /// Each tool read's offset into the turn, as a fraction of its length.
+    reads: Vec<f64>,
+}
+
+impl TurnPlan {
+    fn draw(channels: &[String], profile: &AgentTurn, rng: &mut Rng) -> Self {
+        let channel = channels[rng.below(channels.len())].clone();
+        let length = Duration::from_secs_f64(profile.mean_secs * (0.5 + rng.unit()));
+        let reads = (0..profile.reads).map(|_| rng.unit()).collect();
+        Self {
+            channel,
+            length,
+            reads,
+        }
+    }
+}
+
+/// How an agent's HTTP action finished.
+enum Outcome {
+    Started(Box<Turn>),
+    Ended,
+    Done,
+}
+
+/// An agent's HTTP action in flight. One runs at a time, beside the socket.
+type Busy<'a> = Option<Pin<Box<dyn Future<Output = Outcome> + Send + 'a>>>;
+
+/// The in-flight action's outcome; never resolves when there is none.
+async fn settle(busy: &mut Busy<'_>) -> Outcome {
+    match busy {
+        Some(action) => action.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Applies a finished HTTP action to the agent's turn state.
+fn land(
+    outcome: Outcome,
+    turn: &mut Option<Turn>,
+    next_turn: &mut Option<Instant>,
+    profile: &AgentTurn,
+    rng: &mut Rng,
+) {
+    match outcome {
+        Outcome::Started(started) => *turn = Some(*started),
+        Outcome::Ended => *next_turn = rng.after(profile.per_hour),
+        Outcome::Done => {}
     }
 }
 
@@ -1109,7 +1173,9 @@ fn every(secs: f64, from: Instant) -> Option<Instant> {
 
 /// An agent client: NIP-OA authenticated socket with its mentions, then
 /// either HTTP polling, posts and observer frames on Poisson schedules, or
-/// turns of work (see [`AgentTurn`]), or both.
+/// turns of work (see [`AgentTurn`]), or both. One HTTP action at a time
+/// runs beside the socket, so presence, typing and frames keep their
+/// schedule while a request is slow, as a harness's do.
 async fn agent(shared: Arc<Shared>, global: usize) {
     let scenario = &shared.scenario;
     let profile = &scenario.agent;
@@ -1123,6 +1189,8 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     let auth = identity::nip_oa_tag(&owner, &keys);
     let channels = scenario.member_channels(community.index, Role::Agent, global);
     let me = keys.public_key().to_hex();
+    // What HTTP actions borrow; each owns everything else it needs.
+    let (sh, k, a): (&Shared, &Keys, &Tag) = (&shared, &keys, &auth);
     let mut rng = Rng::new(u64::MAX - global as u64);
     let mut backoff = Backoff::new();
     let mut last_message = None;
@@ -1138,6 +1206,7 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     // A turn outlives a dropped socket, as a harness keeps working while it
     // reconnects.
     let mut turn: Option<Turn> = None;
+    let mut busy: Busy<'_> = None;
 
     while let Some(mut conn) = connect(
         &shared,
@@ -1177,19 +1246,19 @@ async fn agent(shared: Arc<Shared>, global: usize) {
         }
         // Presence starts at a random point of its interval, so a fleet that
         // connects together does not heartbeat together.
-        let mut next_presence = every(
-            profile.presence_interval_secs * rng.unit(),
-            Instant::now(),
-        )
-        .or_else(|| every(profile.presence_interval_secs, Instant::now()));
+        let mut next_presence = every(profile.presence_interval_secs * rng.unit(), Instant::now())
+            .or_else(|| every(profile.presence_interval_secs, Instant::now()));
 
         while ok && !stopped(&shared) {
+            // While an HTTP action runs, only socket work is waited for.
+            let idle = busy.is_none();
+            let if_idle = |t: Option<Instant>| t.filter(|_| idle);
             let due = [
-                next_query,
-                next_post,
-                next_frame,
                 next_presence,
-                turn.as_ref().map_or(next_turn, Turn::due),
+                next_frame,
+                turn.as_ref().map_or(if_idle(next_turn), |t| t.due(idle)),
+                if_idle(next_query),
+                if_idle(next_post),
             ]
             .into_iter()
             .flatten()
@@ -1198,15 +1267,23 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 .map(|d| d.saturating_duration_since(Instant::now()))
                 .unwrap_or(MAX_IDLE)
                 .min(MAX_IDLE);
-            match conn.next_event(wait).await {
-                Ok(message) => {
+            let received = tokio::select! {
+                received = conn.next_event(wait) => Some(received),
+                outcome = settle(&mut busy), if busy.is_some() => {
+                    busy = None;
+                    land(outcome, &mut turn, &mut next_turn, &profile.turn, &mut rng);
+                    None
+                }
+            };
+            match received {
+                Some(Ok(message)) => {
                     if live(&shared.stats, &message, subscribed, &mut last_message).is_err() {
                         ok = false;
                         break;
                     }
                 }
-                Err(WsClientError::Timeout) => {}
-                Err(e) => {
+                Some(Err(WsClientError::Timeout)) | None => {}
+                Some(Err(e)) => {
                     shared
                         .stats
                         .err(Op::WsConnect, &format!("disconnected: {e}"));
@@ -1215,13 +1292,16 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                 }
             }
             let now = Instant::now();
+            let idle = busy.is_none();
             // One action per wakeup; anything else due runs on the next pass.
+            // An HTTP action only starts with none in flight.
             let sent = if next_presence.is_some_and(|t| t <= now) {
                 next_presence = every(profile.presence_interval_secs, now);
                 let event =
                     EventBuilder::new(kind(KIND_PRESENCE_UPDATE), "online").sign_with_keys(&keys);
                 send(&shared.stats, &mut conn, Op::PublishEphemeral, event).await
-            } else if let Some(step) = turn.as_mut().and_then(|t| t.step(now, &profile.turn)) {
+            } else if let Some(step) = turn.as_mut().and_then(|t| t.step(now, &profile.turn, idle))
+            {
                 match step {
                     TurnStep::Typing(channel) => {
                         let event = EventBuilder::new(kind(KIND_TYPING_INDICATOR), "")
@@ -1239,23 +1319,30 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                             "#h": [channel],
                             "limit": 50,
                         }]);
-                        query(&shared, Op::HttpQuery, &keys, community, &filters, &auth).await;
+                        busy = Some(Box::pin(async move {
+                            query(sh, Op::HttpQuery, k, community, &filters, a).await;
+                            Outcome::Done
+                        }));
                         Ok(true)
                     }
                     TurnStep::End => {
-                        if let Some(t) = turn.take() {
-                            end_turn(&shared, community, &keys, &auth, t).await;
+                        if let Some(ended) = turn.take() {
+                            busy = Some(Box::pin(async move {
+                                end_turn(sh, community, k, a, ended).await;
+                                Outcome::Ended
+                            }));
                         }
-                        next_turn = rng.after(profile.turn.per_hour);
                         Ok(true)
                     }
                 }
-            } else if turn.is_none() && next_turn.is_some_and(|t| t <= now) {
+            } else if idle && turn.is_none() && next_turn.is_some_and(|t| t <= now) {
                 next_turn = None;
-                let channel = channels[rng.below(channels.len())].clone();
-                turn = Some(start_turn(&shared, community, &keys, &auth, channel, &mut rng).await);
+                let plan = TurnPlan::draw(&channels, &profile.turn, &mut rng);
+                busy = Some(Box::pin(async move {
+                    Outcome::Started(Box::new(start_turn(sh, community, k, a, plan).await))
+                }));
                 Ok(true)
-            } else if next_query.is_some_and(|t| t <= now) {
+            } else if idle && next_query.is_some_and(|t| t <= now) {
                 next_query = rng.after(query_per_hour);
                 let channel = &channels[rng.below(channels.len())];
                 let window = Timestamp::now().as_secs().saturating_sub(3600);
@@ -1263,18 +1350,12 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     { "kinds": [KIND_STREAM_MESSAGE], "#h": [channel], "since": window, "limit": 20 },
                     { "#p": [me], "since": window, "limit": 20 },
                 ]);
-                http(
-                    &shared,
-                    Op::HttpQuery,
-                    &keys,
-                    community,
-                    "/query",
-                    &filters,
-                    Some(&auth),
-                )
-                .await;
+                busy = Some(Box::pin(async move {
+                    query(sh, Op::HttpQuery, k, community, &filters, a).await;
+                    Outcome::Done
+                }));
                 Ok(true)
-            } else if next_post.is_some_and(|t| t <= now) {
+            } else if idle && next_post.is_some_and(|t| t <= now) {
                 next_post = rng.after(profile.events_per_hour);
                 let channel = &channels[rng.below(channels.len())];
                 let event = EventBuilder::new(
@@ -1282,7 +1363,10 @@ async fn agent(shared: Arc<Shared>, global: usize) {
                     format!("{TIMED_PREFIX}{} {me}", now_micros()),
                 )
                 .tags([tag(["h", channel])]);
-                submit(&shared, community, &keys, &auth, event, Op::HttpEvents).await;
+                busy = Some(Box::pin(async move {
+                    submit(sh, community, k, a, event, Op::HttpEvents).await;
+                    Outcome::Done
+                }));
                 Ok(true)
             } else if next_frame.is_some_and(|t| t <= now) {
                 next_frame = rng.after(profile.observer_frames_per_hour);
@@ -1299,6 +1383,17 @@ async fn agent(shared: Arc<Shared>, global: usize) {
             }
         }
         let _ = conn.disconnect().await;
+        // The action in flight finishes before the agent reconnects or
+        // stops; each checks the stop between its requests.
+        if let Some(action) = busy.take() {
+            land(
+                action.await,
+                &mut turn,
+                &mut next_turn,
+                &profile.turn,
+                &mut rng,
+            );
+        }
         if stopped(&shared) {
             return;
         }
@@ -1310,25 +1405,33 @@ async fn agent(shared: Arc<Shared>, global: usize) {
     }
 }
 
-/// Starts a turn in `channel` the way an agent harness starts a prompt:
-/// HTTP `/query` reads of the channel's newest messages, its metadata, its
-/// project home (two reads) and the newest author's profile, then two
-/// reactions on the newest message. The reads are `turn_context`.
+/// Starts a turn the way an agent harness starts a prompt. The loadgen first
+/// finds the event to answer, the channel's newest message, where a harness
+/// is handed it by its subscription. Then, as `turn_context`: a threaded
+/// target's thread context (see [`thread_context`]), the channel's metadata,
+/// its project home (two reads) and the target author's profile, and then
+/// two reactions on the target.
 async fn start_turn(
     shared: &Shared,
     community: &Community,
     keys: &Keys,
     auth: &Tag,
-    channel: String,
-    rng: &mut Rng,
+    plan: TurnPlan,
 ) -> Turn {
     let profile = &shared.scenario.agent.turn;
-    let context = json!([{ "kinds": AGENT_READ_KINDS, "#h": [channel], "limit": 13 }]);
-    let newest: Option<Event> = query(shared, Op::TurnContext, keys, community, &context, auth)
+    let channel = plan.channel;
+    let newest = json!([{ "kinds": AGENT_READ_KINDS, "#h": [channel], "limit": 1 }]);
+    let target: Option<Event> = query(shared, Op::HttpQuery, keys, community, &newest, auth)
         .await
-        .and_then(|body| serde_json::from_str::<Vec<Event>>(&body).ok())
         .and_then(|events| events.into_iter().max_by_key(|e| e.created_at));
-    let author = newest.as_ref().map(|e| e.pubkey.to_hex());
+    let root = target
+        .as_ref()
+        .and_then(|t| buzz_core::nip10::parse_thread_markers(&t.tags).resolve())
+        .map(|(root, _)| root);
+    if let Some(root) = root.filter(|_| !stopped(shared)) {
+        thread_context(shared, community, keys, auth, &channel, &root).await;
+    }
+    let author = target.as_ref().map(|e| e.pubkey.to_hex());
     let reads = [
         json!([{ "kinds": [KIND_NIP29_GROUP_METADATA], "#d": [channel], "limit": 1 }]),
         json!([{ "kinds": [KIND_PROJECT], "#buzz-channel": [channel] }]),
@@ -1343,7 +1446,7 @@ async fn start_turn(
         }
         query(shared, Op::TurnContext, keys, community, &filters, auth).await;
     }
-    if let Some(target) = newest.as_ref().filter(|_| !stopped(shared)) {
+    if let Some(target) = target.as_ref().filter(|_| !stopped(shared)) {
         for emoji in TURN_REACTIONS {
             let event = EventBuilder::new(kind(KIND_REACTION), emoji)
                 .tags([tag(["h", &channel]), tag(["e", &target.id.to_hex()])]);
@@ -1351,19 +1454,73 @@ async fn start_turn(
         }
     }
     let now = Instant::now();
-    let length = Duration::from_secs_f64(profile.mean_secs * (0.5 + rng.unit()));
-    let mut reads: Vec<Instant> = (0..profile.reads)
-        .map(|_| now + length.mul_f64(rng.unit()))
+    let mut reads: Vec<Instant> = plan
+        .reads
+        .iter()
+        .map(|at| now + plan.length.mul_f64(*at))
         .collect();
     reads.sort_unstable_by(|a, b| b.cmp(a));
     Turn {
         channel,
-        target: newest,
-        ends: now + length,
+        target,
+        ends: now + plan.length,
         next_typing: every(profile.typing_secs, now).map(|_| now),
         next_frame: every(profile.frame_secs, now).map(|_| now),
         reads,
     }
+}
+
+/// A harness's thread context read, as `turn_context`: one `/query` for the
+/// root, the thread's newest replies (one past the context limit) and the
+/// agent's own newest reply, then a `/count` of the replies when the window
+/// overflowed.
+async fn thread_context(
+    shared: &Shared,
+    community: &Community,
+    keys: &Keys,
+    auth: &Tag,
+    channel: &str,
+    root: &str,
+) {
+    let replies = json!({
+        "kinds": AGENT_READ_KINDS,
+        "#e": [root],
+        "#h": [channel],
+        "limit": THREAD_CONTEXT_REPLIES + 1,
+    });
+    let mut mine = replies.clone();
+    mine["authors"] = json!([keys.public_key().to_hex()]);
+    mine["limit"] = json!(1);
+    let filters = json!([{ "ids": [root] }, replies, mine]);
+    let Some(events) = query(shared, Op::TurnContext, keys, community, &filters, auth).await else {
+        return;
+    };
+    let fetched: HashSet<_> = events
+        .iter()
+        .map(|e| e.id.to_hex())
+        .filter(|id| id != root)
+        .collect();
+    if fetched.len() > THREAD_CONTEXT_REPLIES && !stopped(shared) {
+        let mut count = replies;
+        count["limit"] = json!(0);
+        http::<CountReply>(
+            shared,
+            Op::TurnContext,
+            keys,
+            community,
+            "/count",
+            &json!([count]),
+            Some(auth),
+        )
+        .await;
+    }
+}
+
+/// A `/count` response.
+#[derive(serde::Deserialize)]
+struct CountReply {
+    #[serde(rename = "count")]
+    _count: u64,
 }
 
 /// Ends a turn: a timed reply in the answered message's thread (or the
@@ -1373,10 +1530,12 @@ async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Ta
     let me = keys.public_key().to_hex();
     let mut tags = vec![tag(["h", &turn.channel])];
     if let Some(target) = &turn.target {
-        // A reply carrying only a `reply` marker answers the root directly.
+        // A threaded target is answered in its thread; a top-level one
+        // becomes the root of a new thread.
         let id = target.id.to_hex();
-        let markers = buzz_core::nip10::parse_thread_markers(&target.tags);
-        let root = markers.root.or(markers.reply).unwrap_or_else(|| id.clone());
+        let root = buzz_core::nip10::parse_thread_markers(&target.tags)
+            .resolve()
+            .map_or_else(|| id.clone(), |(root, _)| root);
         tags.extend(reply_tags(&root, &id));
     }
     let reply = EventBuilder::new(
@@ -1399,7 +1558,6 @@ async fn end_turn(shared: &Shared, community: &Community, keys: &Keys, auth: &Ta
         }
         let found = query(shared, Op::HttpQuery, keys, community, &mine, auth)
             .await
-            .and_then(|body| serde_json::from_str::<Vec<Event>>(&body).ok())
             .unwrap_or_default();
         // The first pass deletes every reaction found, so the second only
         // reads, as the harness's second removal finds nothing left.
@@ -1551,7 +1709,7 @@ async fn hot_author(shared: Arc<Shared>, index: usize) {
             }
         } else {
             next_fetch = rng.after(profile.fetches_per_hour);
-            http(
+            http::<Vec<Event>>(
                 &shared,
                 Op::ThreadFetch,
                 &keys,
@@ -1565,7 +1723,10 @@ async fn hot_author(shared: Arc<Shared>, index: usize) {
     }
 }
 
-async fn http(
+/// An HTTP POST of `body` to `path` as `op`; its response decoded as `T`.
+/// The op succeeds only when the relay answered 2xx with a body that
+/// decodes, so a malformed answer is an error rather than an empty result.
+async fn http<T: serde::de::DeserializeOwned>(
     shared: &Shared,
     op: Op,
     keys: &Keys,
@@ -1573,7 +1734,7 @@ async fn http(
     path: &str,
     body: &Value,
     auth: Option<&Tag>,
-) -> Option<String> {
+) -> Option<T> {
     let pending = shared.stats.begin(op);
     let body = serde_json::to_vec(body).expect("serialize JSON body");
     match shared
@@ -1581,10 +1742,16 @@ async fn http(
         .post(keys, &community.http_url, path, body, auth)
         .await
     {
-        Ok((status, text)) if status.is_success() => {
-            pending.ok();
-            Some(text)
-        }
+        Ok((status, text)) if status.is_success() => match serde_json::from_str(&text) {
+            Ok(decoded) => {
+                pending.ok();
+                Some(decoded)
+            }
+            Err(e) => {
+                pending.err(&format!("decode {path}: {e}"));
+                None
+            }
+        },
         Ok((status, text)) => {
             pending.err(&http_reason(status, &text));
             None
@@ -1596,7 +1763,7 @@ async fn http(
     }
 }
 
-/// An agent's HTTP `/query` as `op`; the response body when it succeeded.
+/// An agent's HTTP `/query` as `op`; the events it returned.
 async fn query(
     shared: &Shared,
     op: Op,
@@ -1604,7 +1771,7 @@ async fn query(
     community: &Community,
     filters: &Value,
     auth: &Tag,
-) -> Option<String> {
+) -> Option<Vec<Event>> {
     http(shared, op, keys, community, "/query", filters, Some(auth)).await
 }
 
@@ -1963,7 +2130,7 @@ hold_secs = 1
                             }
                             Some("EVENT") => {
                                 if let Some(k) = frame[1]["kind"].as_u64() {
-                                    seen.kinds.lock().unwrap().push(k);
+                                    seen.kinds.lock().unwrap().push((k, Instant::now()));
                                 }
                                 let tags = frame[1]["tags"].as_array().cloned().unwrap_or_default();
                                 if let Some(h) = tags.iter().find(|t| t[0] == "h") {
@@ -2004,8 +2171,8 @@ hold_secs = 1
         closed: AtomicUsize,
         /// The `h` tag of every EVENT that had one.
         channels: std::sync::Mutex<Vec<String>>,
-        /// The kind of every EVENT.
-        kinds: std::sync::Mutex<Vec<u64>>,
+        /// The kind of every EVENT, with when it arrived.
+        kinds: std::sync::Mutex<Vec<(u64, Instant)>>,
     }
 
     impl Seen {
@@ -2393,53 +2560,10 @@ hold_secs = 2
         channel: String,
     }
 
-    /// Holds `/events` responses until opened, counting the requests held.
-    /// One agent running turns over a fake socket and a fake HTTP relay
-    /// that holds one channel message and the agent's live reactions.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn agent_turns_read_react_stream_reply_and_remove_their_reactions() {
-        let (ws, seen) = fake_ws_relay(FakeRelay::PROMPT).await;
-        let channel = identity::channel_id("t", 0, 0);
-        // A human's thread reply: only a `reply` marker, naming the root.
-        let author = Keys::generate();
-        let root_id = "a".repeat(64);
-        let target = EventBuilder::new(kind(KIND_STREAM_MESSAGE), "question")
-            .tags([tag(["h", &channel]), tag(["e", &root_id, "", "reply"])])
-            .sign_with_keys(&author)
-            .unwrap();
-        let posted: Log<Event> = Default::default();
-        let queries: Log<Value> = Default::default();
-        let (post_log, query_log, held) = (posted.clone(), queries.clone(), target.clone());
-        let http = super::super::seed::tests::fake_http(move |_, path, body| {
-            if path == "/events" {
-                let event: Event = serde_json::from_slice(body).unwrap();
-                post_log.lock().unwrap().push(event);
-                return (200, json!({"accepted": true, "message": ""}).to_string());
-            }
-            let filters: Value = serde_json::from_slice(body).unwrap();
-            query_log.lock().unwrap().push(filters.clone());
-            let found = match filters[0]["kinds"][0].as_u64() {
-                Some(k) if k == u64::from(KIND_STREAM_MESSAGE) => json!([held]),
-                // Reactions not deleted since they were posted. Two turns in
-                // one second post the same reaction id again.
-                Some(k) if k == u64::from(KIND_REACTION) => {
-                    let mut live: Vec<Event> = Vec::new();
-                    for e in post_log.lock().unwrap().iter() {
-                        if e.kind == kind(KIND_REACTION) {
-                            live.push(e.clone());
-                        } else if e.kind == kind(KIND_DELETION) {
-                            let gone: Vec<&str> = e.tags.iter().filter_map(|t| t.content()).collect();
-                            live.retain(|r| !gone.contains(&r.id.to_hex().as_str()));
-                        }
-                    }
-                    json!(live)
-                }
-                _ => json!([]),
-            };
-            (200, found.to_string())
-        })
-        .await;
-        let scenario = Scenario::parse(&format!(
+    /// `[agent]` turns for one agent in one channel over `ws` and `http`,
+    /// held for 3 s, with `extra` TOML appended.
+    fn agent_turn_scenario(ws: &str, http: &str, extra: &str) -> Scenario {
+        Scenario::parse(&format!(
             r#"
 run_id = "t"
 [target]
@@ -2467,9 +2591,94 @@ reads = 2
 [[ramp]]
 users = 1.0
 hold_secs = 3
+{extra}
 "#
         ))
-        .unwrap();
+        .unwrap()
+    }
+
+    /// How long the fake relay holds each tool read.
+    const TOOL_READ_HOLD: Duration = Duration::from_millis(250);
+
+    /// One agent running turns over a fake socket and a fake HTTP relay
+    /// that holds one channel message, a full thread window and the agent's
+    /// live reactions, and is slow to answer tool reads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_turns_read_react_stream_reply_and_remove_their_reactions() {
+        let (ws, seen) = fake_ws_relay(FakeRelay::PROMPT).await;
+        let channel = identity::channel_id("t", 0, 0);
+        let me = identity::keys("t", Role::Agent, 0).public_key().to_hex();
+        // A human's thread reply: only a `reply` marker, naming the root.
+        let author = Keys::generate();
+        let root_id = "a".repeat(64);
+        let target = EventBuilder::new(kind(KIND_STREAM_MESSAGE), "question")
+            .tags([tag(["h", &channel]), tag(["e", &root_id, "", "reply"])])
+            .sign_with_keys(&author)
+            .unwrap();
+        // One reply past the context window, so each turn counts the thread.
+        let window: Vec<Event> = (0..=THREAD_CONTEXT_REPLIES)
+            .map(|i| {
+                EventBuilder::new(kind(KIND_STREAM_MESSAGE), format!("reply {i}"))
+                    .tags([tag(["h", &channel]), tag(["e", &root_id, "", "reply"])])
+                    .sign_with_keys(&author)
+                    .unwrap()
+            })
+            .collect();
+        let posted: Log<Event> = Default::default();
+        let queries: Log<Value> = Default::default();
+        let counts: Log<Value> = Default::default();
+        let held: Log<(Instant, Instant)> = Default::default();
+        let (post_log, query_log, count_log, hold_log, newest) = (
+            posted.clone(),
+            queries.clone(),
+            counts.clone(),
+            held.clone(),
+            target.clone(),
+        );
+        let http = super::super::seed::tests::fake_http(move |_, path, body| {
+            if path == "/events" {
+                let event: Event = serde_json::from_slice(body).unwrap();
+                post_log.lock().unwrap().push(event);
+                return (200, json!({"accepted": true, "message": ""}).to_string());
+            }
+            let filters: Value = serde_json::from_slice(body).unwrap();
+            if path == "/count" {
+                count_log.lock().unwrap().push(filters);
+                return (200, json!({"count": 40}).to_string());
+            }
+            query_log.lock().unwrap().push(filters.clone());
+            if filters[0]["limit"] == json!(50) {
+                let start = Instant::now();
+                tokio::task::block_in_place(|| std::thread::sleep(TOOL_READ_HOLD));
+                hold_log.lock().unwrap().push((start, Instant::now()));
+                return (200, "[]".to_string());
+            }
+            if filters[0].get("ids").is_some() {
+                return (200, json!(window).to_string());
+            }
+            let found = match filters[0]["kinds"][0].as_u64() {
+                Some(k) if k == u64::from(KIND_STREAM_MESSAGE) => json!([newest]),
+                // Reactions not deleted since they were posted. Two turns in
+                // one second post the same reaction id again.
+                Some(k) if k == u64::from(KIND_REACTION) => {
+                    let mut live: Vec<Event> = Vec::new();
+                    for e in post_log.lock().unwrap().iter() {
+                        if e.kind == kind(KIND_REACTION) {
+                            live.push(e.clone());
+                        } else if e.kind == kind(KIND_DELETION) {
+                            let gone: Vec<&str> =
+                                e.tags.iter().filter_map(|t| t.content()).collect();
+                            live.retain(|r| !gone.contains(&r.id.to_hex().as_str()));
+                        }
+                    }
+                    json!(live)
+                }
+                _ => json!([]),
+            };
+            (200, found.to_string())
+        })
+        .await;
+        let scenario = agent_turn_scenario(&ws, &http, "");
         let net = Net::new(&scenario).await.unwrap();
         let shard = Shard::parse("0/1").unwrap();
         let report = run_with(scenario, net, shard, Duration::from_secs(5))
@@ -2481,9 +2690,30 @@ hold_secs = 3
         // Mentions plus one channel subscription on the one session.
         assert_eq!(seen.reqs_after(1).await, 2);
         let kinds = seen.kinds.lock().unwrap().clone();
-        for k in [KIND_TYPING_INDICATOR, KIND_AGENT_OBSERVER_FRAME, KIND_PRESENCE_UPDATE] {
-            assert!(kinds.contains(&u64::from(k)), "no kind {k} over the socket: {kinds:?}");
+        for k in [
+            KIND_TYPING_INDICATOR,
+            KIND_AGENT_OBSERVER_FRAME,
+            KIND_PRESENCE_UPDATE,
+        ] {
+            assert!(
+                kinds.iter().any(|(seen, _)| *seen == u64::from(k)),
+                "no kind {k} over the socket: {kinds:?}"
+            );
         }
+        // Typing and frames keep streaming while a tool read is held.
+        let held = held.lock().unwrap().clone();
+        assert!(!held.is_empty(), "no tool read made");
+        let streaming = [KIND_TYPING_INDICATOR, KIND_AGENT_OBSERVER_FRAME].map(u64::from);
+        let during = kinds.iter().filter(|(k, at)| {
+            streaming.contains(k)
+                && held
+                    .iter()
+                    .any(|(start, end)| *at > *start + TOOL_READ_HOLD / 5 && at < end)
+        });
+        assert!(
+            during.count() > 0,
+            "nothing streamed during {held:?}: {kinds:?}"
+        );
 
         let posted = posted.lock().unwrap().clone();
         let of = |k: u32| posted.iter().filter(move |e| e.kind == kind(k));
@@ -2505,24 +2735,93 @@ hold_secs = 3
             assert_eq!(markers.reply.as_deref(), Some(target_id.as_str()));
         }
         let deleted: Vec<String> = of(KIND_DELETION)
-            .flat_map(|e| e.tags.iter().filter_map(|t| t.content()).map(str::to_string))
+            .flat_map(|e| {
+                e.tags
+                    .iter()
+                    .filter_map(|t| t.content())
+                    .map(str::to_string)
+            })
             .collect();
         assert_eq!(deleted.len(), 2 * replies.len(), "{posted:?}");
         let ids: Vec<String> = reactions.iter().map(|e| e.id.to_hex()).collect();
         assert!(deleted.iter().all(|id| ids.contains(id)), "{deleted:?}");
 
-        // Each turn reads its context: metadata, project home and profile.
+        // Each turn reads its thread's context as the harness does, and
+        // counts the thread when the window overflows.
         let queries = queries.lock().unwrap().clone();
+        let replies_filter = json!({
+            "kinds": AGENT_READ_KINDS,
+            "#e": [root_id],
+            "#h": [channel],
+            "limit": THREAD_CONTEXT_REPLIES + 1,
+        });
+        let mut mine = replies_filter.clone();
+        mine["authors"] = json!([me]);
+        mine["limit"] = json!(1);
+        let context = json!([{ "ids": [root_id] }, replies_filter.clone(), mine]);
+        assert!(queries.contains(&context), "{queries:?}");
+        let mut count = replies_filter;
+        count["limit"] = json!(0);
+        let counts = counts.lock().unwrap().clone();
+        assert!(!counts.is_empty(), "no thread count");
+        assert!(counts.iter().all(|c| *c == json!([count])), "{counts:?}");
+        // Then the channel's metadata, project home and the author's profile.
         let has = |k: u32| queries.iter().any(|q| q[0]["kinds"][0] == json!(k));
-        for k in [KIND_NIP29_GROUP_METADATA, KIND_PROJECT, KIND_GIT_REPO_ANNOUNCEMENT] {
+        for k in [
+            KIND_NIP29_GROUP_METADATA,
+            KIND_PROJECT,
+            KIND_GIT_REPO_ANNOUNCEMENT,
+        ] {
             assert!(has(k), "no kind {k} read: {queries:?}");
         }
-        let profile = json!([{ "kinds": [KIND_PROFILE], "authors": [author.public_key().to_hex()] }]);
+        let profile =
+            json!([{ "kinds": [KIND_PROFILE], "authors": [author.public_key().to_hex()] }]);
         assert!(queries.contains(&profile), "{queries:?}");
         // Tool reads fetch the channel's newest 50 messages.
-        assert!(queries.iter().any(|q| q[0]["limit"] == json!(50)), "{queries:?}");
+        assert!(
+            queries.iter().any(|q| q[0]["limit"] == json!(50)),
+            "{queries:?}"
+        );
     }
 
+    /// A relay that answers every `/query` with 200 and a body that is not
+    /// events: each read is an error, and a turn has nothing to answer.
+    #[tokio::test]
+    async fn agent_turn_reads_that_do_not_decode_are_errors() {
+        let (ws, _) = fake_ws_relay(FakeRelay::PROMPT).await;
+        let posted: Log<Event> = Default::default();
+        let post_log = posted.clone();
+        let http = super::super::seed::tests::fake_http(move |_, path, body| {
+            if path == "/events" {
+                post_log
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_slice(body).unwrap());
+                return (200, json!({"accepted": true, "message": ""}).to_string());
+            }
+            (200, json!({"events": "none"}).to_string())
+        })
+        .await;
+        let scenario = agent_turn_scenario(&ws, &http, "[abort]\nmax_error_rate = 1.0");
+        let net = Net::new(&scenario).await.unwrap();
+        let shard = Shard::parse("0/1").unwrap();
+        let report = run_with(scenario, net, shard, Duration::from_secs(5))
+            .await
+            .expect("the run tolerates every error");
+        let ops = &report["steps"][0]["ops"];
+        for op in ["turn_context", "http_query"] {
+            assert!(ops[op]["errors"].as_u64() > Some(0), "{op}: {report}");
+            assert_eq!(ops[op]["count"], 0, "{op}: {report}");
+        }
+        // No target was found, so no turn reacted.
+        let posted = posted.lock().unwrap();
+        assert!(
+            posted.iter().all(|e| e.kind != kind(KIND_REACTION)),
+            "{posted:?}"
+        );
+    }
+
+    /// Holds `/events` responses until opened, counting the requests held.
     #[derive(Default)]
     struct Gate {
         arrived: AtomicUsize,

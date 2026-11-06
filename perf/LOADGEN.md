@@ -109,10 +109,15 @@ one of its channels on a Poisson schedule and runs one turn at a time. A
 turn lasts 0.5–1.5 times `agent.turn.mean_secs` and does what the harness
 does around a prompt:
 
-1. **Start** (`turn_context`): HTTP `/query` reads of the channel's newest
-   13 messages, its kind:39000 metadata, its project home (kind:30621 and
-   kind:30617, one read each) and the newest message's author profile.
-   Then two kind:7 reactions on that message through HTTP `/events`.
+1. **Start**: an HTTP `/query` for the channel's newest message, the one
+   the turn answers. A harness is handed it by its subscription, so this
+   read is `http_query`, not `turn_context`. Then, as `turn_context`, the
+   harness's own reads. For a message in a thread, one `/query` for the
+   root, the thread's newest 13 replies and the agent's own newest reply,
+   then a `/count` of the replies when all 13 came back. After that, the
+   channel's kind:39000 metadata, its project home (kind:30621 and
+   kind:30617, one read each) and the message author's profile. Then two
+   kind:7 reactions on the message through HTTP `/events`.
 2. **Work**: a typing indicator every `typing_secs` and an encrypted
    observer frame of `frame_bytes` plaintext every `frame_secs` over the
    socket, plus `reads` HTTP `/query` reads of the channel's newest 50
@@ -120,6 +125,11 @@ does around a prompt:
 3. **End**: a timed reply in the message's thread through HTTP `/events`,
    then each reaction's removal: a `/query` for the agent's reactions on
    the message and a kind:5 deletion of each one found.
+
+An agent makes one HTTP request sequence at a time, and the socket keeps
+running beside it: presence, typing and frames stay on schedule while a
+request is slow, as a harness's do. A read counts as an error when its
+response is not valid JSON of the expected shape.
 
 For a harness-like agent, also set `agent.query_interval_secs = 0` (no
 polling) and `events_per_hour = observer_frames_per_hour = 0`, so turns are

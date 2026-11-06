@@ -508,7 +508,11 @@ impl Scenario {
         }
         // Agent intervals are 0 (off) or slow enough to schedule.
         let intervals = [
-            ("agent.presence_interval_secs", a.presence_interval_secs, 1.0),
+            (
+                "agent.presence_interval_secs",
+                a.presence_interval_secs,
+                1.0,
+            ),
             ("agent.turn.frame_secs", a.turn.frame_secs, 0.1),
             ("agent.turn.typing_secs", a.turn.typing_secs, 0.1),
         ];
@@ -518,7 +522,9 @@ impl Scenario {
             }
         }
         if a.turn.frame_bytes > MAX_FRAME_BYTES {
-            return Err(format!("agent.turn.frame_bytes must be at most {MAX_FRAME_BYTES}"));
+            return Err(format!(
+                "agent.turn.frame_bytes must be at most {MAX_FRAME_BYTES}"
+            ));
         }
         let non_negative = [
             ("human.typing_per_hour", h.typing_per_hour),
