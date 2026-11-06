@@ -58,19 +58,27 @@ const MAX_THROTTLED_RETRIES: usize = 10;
 /// per-pubkey quota. A throttled write waits out the window the relay names
 /// (`retry in <n>s`) and tries again, at most [`MAX_THROTTLED_RETRIES`] times,
 /// so a signer whose writes bunch up slows down instead of failing the seed.
-async fn paced<F, Fut>(mut write: F) -> anyhow::Result<()>
+/// With `stats`, each retried rejection counts as a throttled seed write.
+/// Returns how long the accepted attempt took, without the waits before it.
+async fn paced<F, Fut>(stats: Option<&Stats>, mut write: F) -> anyhow::Result<Duration>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
     let mut retries = 0;
     loop {
+        let t0 = Instant::now();
         match write().await {
+            Ok(()) => return Ok(t0.elapsed()),
             Err(e) if retries < MAX_THROTTLED_RETRIES && is_throttle(&e.to_string()) => {
+                let reason = e.to_string();
+                if let Some(stats) = stats {
+                    stats.err(Op::Seed, &reason);
+                }
                 retries += 1;
-                tokio::time::sleep(retry_after(&e.to_string())).await;
+                tokio::time::sleep(retry_after(&reason)).await;
             }
-            outcome => return outcome,
+            Err(e) => return Err(e),
         }
     }
 }
@@ -184,10 +192,9 @@ async fn post_all(
                     previous = None;
                     continue;
                 };
-                let t0 = Instant::now();
-                match paced(|| net.submit(&keys, community, &event, None)).await {
-                    Ok(()) => {
-                        stats.ok(Op::Seed, t0.elapsed());
+                match paced(Some(stats), || net.submit(&keys, community, &event, None)).await {
+                    Ok(latency) => {
+                        stats.ok(Op::Seed, latency);
                         let id = event.id.to_hex();
                         accepted.push(((post.community, post.channel, post.seq), id.clone()));
                         previous = Some(id);
@@ -298,7 +305,7 @@ async fn create_channels(
                     tag(["visibility", visibility]),
                 ])
                 .sign_with_keys(&creator)?;
-            match paced(|| net.submit(&creator, community, &event, None)).await {
+            match paced(None, || net.submit(&creator, community, &event, None)).await {
                 Err(e) if !e.to_string().contains("already exists") => Err(e),
                 _ => Ok(()),
             }
@@ -351,10 +358,12 @@ async fn add_members(
         .sum();
     let failures: Vec<String> = stream::iter(adds)
         .map(|(creator, channel, people)| async move {
-            paced(|| put_users(net, community, &creator, &channel, &people))
-                .await
-                .err()
-                .map(|e| format!("{channel}: {e}"))
+            paced(None, || {
+                put_users(net, community, &creator, &channel, &people)
+            })
+            .await
+            .err()
+            .map(|e| format!("{channel}: {e}"))
         })
         .buffer_unordered(scenario.shape.seed_concurrency)
         .filter_map(|failure| async move { failure })
@@ -1046,7 +1055,7 @@ hold_secs = 1
         scenario: &str,
         throttles: usize,
         retry_secs: u64,
-    ) -> (anyhow::Result<()>, Tries) {
+    ) -> (anyhow::Result<()>, Tries, Arc<Stats>) {
         let tries: Arc<std::sync::Mutex<Tries>> = Default::default();
         let seen = tries.clone();
         let addr = fake_http(move |_, _, body| {
@@ -1064,25 +1073,27 @@ hold_secs = 1
         .await;
         let scenario = Scenario::parse(&scenario.replace("{addr}", &addr)).unwrap();
         let net = Net::new(&scenario).await.unwrap();
-        let outcome = seed(&scenario, &net, &Arc::new(Stats::default())).await;
+        let stats = Arc::new(Stats::default());
+        let outcome = seed(&scenario, &net, &stats).await;
         let tries = tries.lock().unwrap().clone();
-        (outcome, tries)
+        (outcome, tries, stats)
     }
 
     #[tokio::test]
     async fn throttled_writes_wait_out_the_quota_and_a_lasting_quota_fails_the_seed() {
-        let (outcome, tries) = seed_throttled(PRIVATE, 2, 0).await;
+        let (outcome, tries, _) = seed_throttled(PRIVATE, 2, 0).await;
         outcome.expect("throttled writes are retried");
         assert!(tries.values().all(|at| at.len() == 3), "{tries:?}");
 
-        let (outcome, tries) = seed_throttled(PRIVATE, usize::MAX, 0).await;
+        let (outcome, tries, _) = seed_throttled(PRIVATE, usize::MAX, 0).await;
         let err = outcome.expect_err("a quota that never clears fails the seed");
         assert!(err.to_string().contains("quota exceeded"), "{err}");
         let most = MAX_THROTTLED_RETRIES + 1;
         assert!(tries.values().all(|at| at.len() == most), "{tries:?}");
 
-        // A retry waits out the window the relay names; one channel and one
-        // post keep the wait short.
+        // A retry waits out the window the relay names, and the post's
+        // rejection counts as throttled without its wait counting as latency;
+        // one channel and one post keep the wait short.
         let one = r#"
 run_id = "t"
 [target]
@@ -1100,7 +1111,7 @@ channels_per_member = 1
 users = 1.0
 hold_secs = 1
 "#;
-        let (outcome, tries) = seed_throttled(one, 1, 1).await;
+        let (outcome, tries, stats) = seed_throttled(one, 1, 1).await;
         outcome.expect("throttled writes are retried");
         assert_eq!(tries.len(), 2, "{tries:?}");
         for at in tries.values() {
@@ -1109,6 +1120,10 @@ hold_secs = 1
             };
             assert!(retry - first >= Duration::from_secs(1), "{at:?}");
         }
+        let posts = stats.snapshot().since(&Snapshot::default());
+        let (_, posts) = posts.iter().find(|(op, _)| *op == Op::Seed).unwrap();
+        assert_eq!((posts.count, posts.throttled, posts.errors), (1, 1, 0));
+        assert!(posts.max_ms < 1000.0, "{posts:?}");
     }
 
     #[test]

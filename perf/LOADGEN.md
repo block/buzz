@@ -180,7 +180,8 @@ signs its channels' creation, member adds and thread roots (`run` looks roots
 up by it), so no creator nears the quota however many channels the community
 has. History and replies rotate across humans. A write the relay still
 throttles waits out the window the relay names and is retried, up to 10
-times, before it counts as failed.
+times, before it counts as failed. Each rejected attempt of a seed post counts as throttled,
+and the post's latency covers only its accepted attempt.
 
 A private fixture with more than 8 channels per community that was seeded
 before channels had creators cannot be reseeded, and `run` finds none of its
