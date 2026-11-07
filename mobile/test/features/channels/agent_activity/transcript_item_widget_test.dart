@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gpt_markdown/custom_widgets/link_button.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/features/channels/agent_activity/transcript_item_widget.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -10,6 +10,21 @@ Widget _testable(Widget child) {
     theme: AppTheme.light(),
     home: Scaffold(body: SingleChildScrollView(child: child)),
   );
+}
+
+/// Whether any paragraph in the tree draws a link.
+bool _rendersLink(WidgetTester tester) {
+  // Not `visitChildren`: it only visits spans that carry their own text, and
+  // a link wrapping its parsed label carries none.
+  bool walk(InlineSpan span) =>
+      span is LinkTextSpan ||
+      (span is TextSpan && (span.children?.any(walk) ?? false));
+
+  return tester
+      .widgetList<RichText>(
+        find.byWidgetPredicate((widget) => widget is RichText),
+      )
+      .any((rich) => walk(rich.text));
 }
 
 void main() {
@@ -30,7 +45,7 @@ void main() {
       ),
     );
 
-    expect(find.byType(LinkButton), findsNothing);
+    expect(_rendersLink(tester), isFalse);
   });
 
   testWidgets('leaves a bare URL in a thought as plain text', (tester) async {
@@ -47,6 +62,6 @@ void main() {
       ),
     );
 
-    expect(find.byType(LinkButton), findsNothing);
+    expect(_rendersLink(tester), isFalse);
   });
 }
