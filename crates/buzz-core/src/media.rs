@@ -2,6 +2,10 @@
 use nostr::Event;
 use std::collections::BTreeSet;
 
+/// Original event kinds whose latest live edit replaces attachment references.
+/// Shared by clients, the effective-edit lookup and media-read authorization.
+pub const EDIT_GOVERNED_KINDS: [u16; 5] = [9, 40002, 40008, 45001, 45003];
+
 /// Parse a local media URL, returning its parent hash (also for thumbnails).
 /// Only the tenant's canonical base and root-relative paths count.
 pub fn local_hash(value: &str, base: &str) -> Option<String> {

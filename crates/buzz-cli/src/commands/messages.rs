@@ -1,3 +1,5 @@
+mod edit;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -895,29 +897,6 @@ pub async fn cmd_delete_message(
     Ok(())
 }
 
-/// Edit a message you previously sent.
-pub async fn cmd_edit_message(
-    client: &BuzzClient,
-    event_id: &str,
-    content: &str,
-) -> Result<(), CliError> {
-    validate_hex64(event_id)?;
-    validate_content_size(content)?;
-
-    // Resolve channel_id from the event's h-tag
-    let channel_uuid = resolve_channel_id(client, event_id).await?;
-    let target_eid = parse_event_id(event_id)?;
-
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
-        .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
-
-    let event = client.sign_event(builder).await?;
-
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
-}
-
 /// Vote on a forum post or comment.
 pub async fn cmd_vote_on_post(
     client: &BuzzClient,
@@ -1014,7 +993,11 @@ pub async fn dispatch(
             )
             .await
         }
-        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Edit {
+            event,
+            content,
+            clear_attachments,
+        } => edit::edit_message(client, &event, &content, clear_attachments).await,
         MessagesCmd::Delete {
             event,
             action_id,
