@@ -466,6 +466,7 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
         spawn_config: seeded_with_sentinels(),
         setup_mode: false,
         adapter_availability: None,
+        dial_relay_url: "wss://relay.example".to_string(),
         start_nonce: "test-nonce".to_string(),
         #[cfg(windows)]
         job: None,

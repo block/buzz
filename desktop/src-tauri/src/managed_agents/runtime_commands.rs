@@ -272,7 +272,7 @@ fn start_pair<R: tauri::Runtime>(
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let (key, dial_relay_url) = super::runtime::spawn_relay_identity(&pubkey, &relay_url)?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -295,7 +295,10 @@ fn start_pair<R: tauri::Runtime>(
     let mut process = spawn_agent_child(
         &app,
         record,
-        &key.relay_url,
+        super::runtime::SpawnRelay {
+            key: &key,
+            dial_url: &dial_relay_url,
+        },
         &admitted,
         lazy,
         owner.as_deref(),
@@ -443,7 +446,9 @@ async fn probe_agent_relay_access(
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
+    // Probe the tenant this pair was requested on, not the canonical pair-key
+    // spelling: loopback aliases are distinct communities at the relay.
+    let api_base = crate::relay::relay_http_base_url(requested_relay_url.trim());
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
@@ -546,7 +551,7 @@ pub async fn reconcile_managed_agent_runtimes(
                 Ok((record, key, requested)) => {
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         &admission,
@@ -775,3 +780,7 @@ mod tests {
 #[cfg(all(test, not(target_os = "windows")))]
 #[path = "runtime_commands_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "runtime_commands_spawn_tests.rs"]
+mod spawn_tests;
