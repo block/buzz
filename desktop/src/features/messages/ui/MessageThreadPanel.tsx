@@ -32,7 +32,9 @@ import {
   THREAD_PANEL_MESSAGE_GUTTER_CLASS,
 } from "@/features/messages/lib/messageThreadPanelLayout";
 import { Button } from "@/shared/ui/button";
+import { HashArrowIn } from "@/shared/ui/icons";
 import { Separator } from "@/shared/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
@@ -93,6 +95,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
     threadContext?: {
       parentEventId: string | null;
       threadHeadId: string | null;
+      broadcast?: boolean;
     } | null,
     forceRest?: boolean,
   ) => Promise<void>;
@@ -238,12 +241,43 @@ export function MessageThreadPanel({
   const replyTargetMessageRef = React.useRef(replyTargetMessage);
   replyTargetMessageRef.current = replyTargetMessage;
 
+  const [broadcastThreadHeadId, setBroadcastThreadHeadId] = React.useState<
+    string | null
+  >(null);
+  const canAlsoSendToChannel =
+    threadHead?.depth === 0 &&
+    (!replyTargetMessage || replyTargetMessage.id === threadHeadId);
+  const alsoSendToChannel =
+    canAlsoSendToChannel &&
+    threadHeadId !== null &&
+    broadcastThreadHeadId === threadHeadId;
+  const alsoSendToChannelLabel =
+    channel?.channelType === "dm"
+      ? "Also send to conversation"
+      : `Also send to #${channelName}`;
+  const alsoSendToChannelRef = React.useRef(alsoSendToChannel);
+  alsoSendToChannelRef.current = alsoSendToChannel;
+
   const onCaptureSendContext = React.useCallback(
     () => ({
       parentEventId: replyTargetMessageRef.current?.id ?? threadHeadId,
       threadHeadId,
+      broadcast: alsoSendToChannelRef.current,
     }),
     [threadHeadId],
+  );
+
+  const handleSend = React.useCallback<typeof onSend>(
+    async (...args) => {
+      await onSend(...args);
+      const threadContext = args[4];
+      if (threadContext?.broadcast) {
+        setBroadcastThreadHeadId((current) =>
+          current === threadContext.threadHeadId ? null : current,
+        );
+      }
+    },
+    [onSend],
   );
 
   const collapseThreadHeadReplies = React.useCallback(() => {
@@ -855,7 +889,7 @@ export function MessageThreadPanel({
               onCaptureSendContext={onCaptureSendContext}
               onEditLastOwnMessage={onEditLastOwnMessage}
               onEditSave={onEditSave}
-              onSend={onSend}
+              onSend={handleSend}
               placeholder={
                 isHuddleTranscript
                   ? "Message the huddle"
@@ -864,6 +898,33 @@ export function MessageThreadPanel({
               profiles={profiles}
               recentMentionPubkeys={recentMentionPubkeys}
               replyTarget={composerReplyTarget}
+              toolbarExtraActions={
+                isHuddleTranscript ||
+                editTarget ||
+                !canAlsoSendToChannel ? undefined : (
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label={alsoSendToChannelLabel}
+                        aria-pressed={alsoSendToChannel}
+                        data-testid="thread-also-send-to-channel"
+                        disabled={disabled || isSending || !channelId}
+                        onClick={() =>
+                          setBroadcastThreadHeadId(
+                            alsoSendToChannel ? null : threadHead.id,
+                          )
+                        }
+                        size="icon"
+                        type="button"
+                        variant={alsoSendToChannel ? "default" : "ghost"}
+                      >
+                        <HashArrowIn aria-hidden="true" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{alsoSendToChannelLabel}</TooltipContent>
+                  </Tooltip>
+                )
+              }
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />

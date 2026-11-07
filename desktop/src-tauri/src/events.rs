@@ -313,6 +313,10 @@ pub fn build_message_with_client_tags(
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
 
+pub fn broadcast_tag() -> Result<Tag, String> {
+    tag(vec!["broadcast", "1"])
+}
+
 /// Kind 45001 — forum post.
 pub fn build_forum_post(
     channel_id: Uuid,

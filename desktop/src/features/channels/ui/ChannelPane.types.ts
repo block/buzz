@@ -155,6 +155,7 @@ export type ChannelPaneProps = {
     threadContext?: {
       parentEventId: string | null;
       threadHeadId: string | null;
+      broadcast?: boolean;
     } | null,
   ) => Promise<void>;
   onTargetReached?: (messageId: string) => void;

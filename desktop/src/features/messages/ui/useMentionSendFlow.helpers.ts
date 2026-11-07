@@ -75,6 +75,7 @@ export type PendingNonMemberMentionSend = {
   capturedThreadContext: {
     parentEventId: string | null;
     threadHeadId: string | null;
+    broadcast?: boolean;
   } | null;
   trimmed: string;
   mentionPubkeys: string[];

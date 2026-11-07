@@ -13,6 +13,7 @@ import {
   threadRepliesKey,
 } from "@/features/messages/lib/messageQueryKeys";
 import {
+  buildBroadcastTag,
   buildReplyTags,
   getThreadReference,
   isBroadcastReply,
@@ -114,6 +115,7 @@ export function createOptimisticMessage(
   mediaTags: string[][] = [],
   sentFromThreadRootId: string | null = null,
   sentFromThreadRootExcerpt: string | null = null,
+  broadcast = false,
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
@@ -146,6 +148,9 @@ export function createOptimisticMessage(
     tags.push(
       buildSentFromThreadTag(sentFromThreadRootId, sentFromThreadRootExcerpt),
     );
+  }
+  if (broadcast && parentEventId) {
+    tags.push(buildBroadcastTag());
   }
 
   return {
@@ -492,6 +497,7 @@ export function useSendMessageMutation(
       forceRest?: boolean;
       sentFromThreadRootId?: string | null;
       sentFromThreadRootExcerpt?: string | null;
+      broadcast?: boolean;
       transport?: "auto" | "http";
     },
     MessageQueryContext | undefined
@@ -506,6 +512,7 @@ export function useSendMessageMutation(
       forceRest,
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
+      broadcast = false,
       transport = "auto",
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
@@ -553,6 +560,9 @@ export function useSendMessageMutation(
         throw new Error(
           "A thread message can only be sent as a top-level message.",
         );
+      }
+      if (broadcast && !parentEventId) {
+        throw new Error("Only a thread reply can also be sent to the channel.");
       }
 
       const sentFromThreadTag = sentFromThreadRootId
@@ -602,6 +612,7 @@ export function useSendMessageMutation(
           undefined,
           undefined,
           suppliedRootEventId,
+          broadcast,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -641,6 +652,7 @@ export function useSendMessageMutation(
             ...mentionTags,
             ...linkPreviewTags,
             ...(sentFromThreadTag ? [sentFromThreadTag] : []),
+            ...(broadcast ? [buildBroadcastTag()] : []),
           ],
           content: content.trim(),
           sig: "",
@@ -663,6 +675,7 @@ export function useSendMessageMutation(
       mediaTags,
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
+      broadcast,
     }) => {
       // Mirror mutationFn's target resolution so the optimistic message lands
       // in the cache for the same channel as the real send. A caller-supplied
@@ -706,6 +719,7 @@ export function useSendMessageMutation(
         mediaTags ?? [],
         sentFromThreadRootId ?? null,
         sentFromThreadRootExcerpt ?? null,
+        broadcast ?? false,
       );
 
       const nextWindow = mergeLiveChannelWindowEvent(

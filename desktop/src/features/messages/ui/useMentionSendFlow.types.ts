@@ -39,6 +39,7 @@ export type UseMentionSendFlowOptions = {
       threadContext?: {
         parentEventId: string | null;
         threadHeadId: string | null;
+        broadcast?: boolean;
       } | null,
       forceRest?: boolean,
     ) => Promise<void>

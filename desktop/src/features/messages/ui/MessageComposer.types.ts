@@ -83,6 +83,7 @@ export type MessageComposerProps = {
   onCaptureSendContext?: () => {
     parentEventId: string | null;
     threadHeadId: string | null;
+    broadcast?: boolean;
   } | null;
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onPreparingMentionSendChange?: (isPreparing: boolean) => void;
@@ -94,6 +95,7 @@ export type MessageComposerProps = {
     threadContext?: {
       parentEventId: string | null;
       threadHeadId: string | null;
+      broadcast?: boolean;
     } | null,
     /** Route through the REST publisher even when best-effort enrichment settled empty. */
     forceRest?: boolean,
