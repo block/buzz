@@ -6,6 +6,7 @@ use std::{io::Read, io::Write};
 use crate::managed_agents::{is_npm_global_install, InstallStepResult};
 
 const MANAGED_NODE_VERSION: &str = "v24.18.0";
+const MANAGED_NODE_MAJOR: u64 = 24;
 const MANAGED_NODE_MAX_BYTES: u64 = 90 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -102,14 +103,109 @@ fn managed_node_failed_step(stderr: String) -> InstallStepResult {
     }
 }
 
-pub(super) fn managed_node_runtime_ready() -> bool {
-    let Some(node) = crate::managed_agents::buzz_managed_node_bin_path() else {
-        return false;
+fn configured_node_failed_step(stderr: String) -> InstallStepResult {
+    InstallStepResult {
+        step: "node".to_string(),
+        command: "configured Node.js runtime".to_string(),
+        success: false,
+        stdout: String::new(),
+        stderr,
+        exit_code: None,
+        hint: Some(format!(
+            "Set {} to an absolute Node.js 24 bin directory containing executable node and npm, restart Buzz, then click Install again.",
+            crate::managed_agents::BUZZ_NODE_BIN_DIR_ENV
+        )),
+    }
+}
+
+fn managed_node_readiness_failed_step(stderr: String) -> InstallStepResult {
+    InstallStepResult {
+        step: "node".to_string(),
+        command: "managed Node.js runtime".to_string(),
+        success: false,
+        stdout: String::new(),
+        stderr,
+        exit_code: None,
+        hint: Some(format!(
+            "This system could not run Buzz's private Node.js binary. Set {} to a trusted Node.js 24 bin directory, restart Buzz, then click Install again.",
+            crate::managed_agents::BUZZ_NODE_BIN_DIR_ENV
+        )),
+    }
+}
+
+fn node_executable(bin_dir: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        bin_dir.join("node.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        bin_dir.join("node")
+    }
+}
+
+fn parse_node_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.strip_prefix('v')?.split('.');
+    let parse = |part: &str| {
+        (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    };
+    let parsed = (
+        parse(parts.next()?)?,
+        parse(parts.next()?)?,
+        parse(parts.next()?)?,
+    );
+    parts.next().is_none().then_some(parsed)
+}
+
+fn override_node_version_supported(version: &str) -> bool {
+    parse_node_version(version).is_some_and(|(major, _, _)| major == MANAGED_NODE_MAJOR)
+}
+
+fn managed_node_version_supported(version: &str) -> bool {
+    version == MANAGED_NODE_VERSION
+}
+
+fn active_node_runtime_result() -> Result<(), String> {
+    let override_dir = crate::managed_agents::buzz_node_bin_dir_override()?;
+    let (node, is_override) = match override_dir {
+        Some(dir) => (node_executable(&dir), true),
+        None => (
+            crate::managed_agents::buzz_managed_node_bin_path()
+                .ok_or_else(|| "failed to resolve managed Node.js executable".to_string())?,
+            false,
+        ),
     };
     if !node.is_file() {
-        return false;
+        return Err(format!(
+            "Node.js executable does not exist: {}",
+            node.display()
+        ));
     }
-    probe_node(&node, MANAGED_NODE_VERSION, Duration::from_secs(3))
+
+    let actual = probe_node_result(&node, Duration::from_secs(3))?;
+    let supported = if is_override {
+        override_node_version_supported(&actual)
+    } else {
+        managed_node_version_supported(&actual)
+    };
+    if supported {
+        Ok(())
+    } else if is_override {
+        Err(format!(
+            "{} must provide Node.js 24, but node --version returned {actual:?}",
+            crate::managed_agents::BUZZ_NODE_BIN_DIR_ENV
+        ))
+    } else {
+        Err(format!(
+            "managed node --version returned {actual:?}, expected {MANAGED_NODE_VERSION:?}"
+        ))
+    }
+}
+
+pub(super) fn managed_node_runtime_ready() -> bool {
+    active_node_runtime_result().is_ok()
 }
 
 /// Run `executable --version` with a bounded deadline and return `true` only
@@ -123,34 +219,44 @@ pub(super) fn managed_node_runtime_ready() -> bool {
 /// so an unconditional group SIGKILL on every exit path terminates all
 /// descendants.  On Windows, `terminate_process` issues `taskkill /T /F` for
 /// tree-wide cleanup.  SIGKILL to an already-dead group returns ESRCH (no-op).
+#[cfg(test)]
 pub(super) fn probe_node(
     executable: &std::path::Path,
     expected_version: &str,
     timeout: Duration,
 ) -> bool {
-    let tmp = match tempfile::NamedTempFile::new() {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let out_file = match tmp.reopen() {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
+    probe_node_result(executable, timeout).is_ok_and(|version| version == expected_version)
+}
+
+pub(super) fn probe_node_result(
+    executable: &std::path::Path,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut stdout = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("create node probe stdout file: {error}"))?;
+    let out_file = stdout
+        .reopen()
+        .map_err(|error| format!("open node probe stdout file: {error}"))?;
+    let mut stderr = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("create node probe stderr file: {error}"))?;
+    let err_file = stderr
+        .reopen()
+        .map_err(|error| format!("open node probe stderr file: {error}"))?;
 
     let mut cmd = std::process::Command::new(executable);
     cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(out_file))
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::from(err_file));
     crate::util::configure_no_window(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let Ok(mut child) = cmd.spawn() else {
-        return false;
-    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("run '{} --version': {error}", executable.display()))?;
 
     let deadline = std::time::Instant::now() + timeout;
     let exit_status = loop {
@@ -160,14 +266,20 @@ pub(super) fn probe_node(
                 if std::time::Instant::now() >= deadline {
                     kill_probe_group(child.id());
                     let _ = child.wait();
-                    return false;
+                    return Err(format!(
+                        "'{} --version' timed out after {timeout:?}",
+                        executable.display()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(_) => {
+            Err(error) => {
                 kill_probe_group(child.id());
                 let _ = child.wait();
-                return false;
+                return Err(format!(
+                    "wait for '{} --version': {error}",
+                    executable.display()
+                ));
             }
         }
     };
@@ -175,15 +287,25 @@ pub(super) fn probe_node(
     // Group-kill unconditionally: SIGKILL to a dead group is ESRCH (no-op).
     kill_probe_group(child.id());
 
+    let mut error_output = String::new();
+    if let Err(error) = stderr.as_file_mut().read_to_string(&mut error_output) {
+        return Err(format!("read node probe stderr: {error}"));
+    }
     if !exit_status.success() {
-        return false;
+        let detail = error_output.trim();
+        return Err(if detail.is_empty() {
+            format!("node --version exited with {exit_status}")
+        } else {
+            format!("node --version exited with {exit_status}: {detail}")
+        });
     }
 
     let mut output = String::new();
-    if std::io::Read::read_to_string(&mut tmp.as_file(), &mut output).is_err() {
-        return false;
-    }
-    output.trim() == expected_version
+    stdout
+        .as_file_mut()
+        .read_to_string(&mut output)
+        .map_err(|error| format!("read node probe stdout: {error}"))?;
+    Ok(output.trim().to_string())
 }
 
 /// Kill the probe's process group/tree unconditionally (no TERM grace — this
@@ -212,7 +334,9 @@ fn kill_probe_group(pid: u32) {
 /// missing forces `ensure_managed_node_runtime_blocking` to re-download Node and
 /// npm to reinstall the shims.
 pub(super) fn managed_node_orphaned() -> bool {
-    managed_node_runtime_supported() && !managed_node_runtime_ready()
+    crate::managed_agents::buzz_node_bin_dir_override().is_ok()
+        && managed_node_runtime_supported()
+        && !managed_node_runtime_ready()
 }
 
 /// Returns `true` when an adapter at `resolved` should be invalidated.
@@ -258,11 +382,32 @@ fn managed_node_install_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn node_runtime_supported(
+    managed_artifact_available: bool,
+    override_is_set: bool,
+    managed_bin_dir_available: bool,
+) -> bool {
+    override_is_set || (managed_artifact_available && managed_bin_dir_available)
+}
+
 pub(super) fn managed_node_runtime_supported() -> bool {
-    MANAGED_NODE_ARTIFACT.is_some() && crate::managed_agents::buzz_managed_node_bin_dir().is_some()
+    node_runtime_supported(
+        MANAGED_NODE_ARTIFACT.is_some(),
+        crate::managed_agents::buzz_node_bin_dir_override_is_set(),
+        crate::managed_agents::buzz_managed_node_bin_dir().is_some(),
+    )
 }
 
 pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallStepResult>> {
+    match crate::managed_agents::buzz_node_bin_dir_override() {
+        Err(error) => return Err(Box::new(configured_node_failed_step(error))),
+        Ok(Some(_)) => {
+            return active_node_runtime_result()
+                .map_err(|error| Box::new(configured_node_failed_step(error)));
+        }
+        Ok(None) => {}
+    }
+
     if managed_node_runtime_ready() {
         return Ok(());
     }
@@ -288,13 +433,11 @@ pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallSt
 
     install_managed_node_runtime(&root, artifact)
         .map_err(|err| Box::new(managed_node_failed_step(err)))?;
-    if managed_node_runtime_ready() {
-        Ok(())
-    } else {
-        Err(Box::new(managed_node_failed_step(
-            "managed Node.js runtime did not pass readiness after install".to_string(),
+    active_node_runtime_result().map_err(|error| {
+        Box::new(managed_node_readiness_failed_step(format!(
+            "managed Node.js runtime did not pass readiness after install: {error}"
         )))
-    }
+    })
 }
 
 fn install_managed_node_runtime(
