@@ -40,7 +40,7 @@ use std::fmt::{Display, Formatter};
 ///
 /// When a computation combines inputs, their reader sets are intersected so
 /// its output is restricted to principals allowed to read every input.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ReaderSet<Principal> {
     /// Every principal in the universe may read the value.
     Everyone,
@@ -103,7 +103,7 @@ impl<Principal: Ord> ReaderSet<Principal> {
 }
 
 /// A reader-set confidentiality label inside one isolated universe.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ConfidentialityLabel<Universe, Principal> {
     universe: Universe,
     readers: ReaderSet<Principal>,
