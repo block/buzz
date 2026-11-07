@@ -146,6 +146,29 @@ void main() {
   });
 
   group('fetching agent.json', () {
+    if (HostedEnvironment.avatarsCdnOrigin == null) {
+      test(
+        'missing custom CDN reports unavailable without network access',
+        () async {
+          await expectLater(
+            AgentCreationDraft.fetch(
+              const AgentCreationDeepLink('av_1'),
+              MockClient(
+                (_) async => fail('No CDN request without configuration'),
+              ),
+            ),
+            throwsA(
+              isA<AgentCardException>().having(
+                (e) => e.message,
+                'message',
+                'Agent cards aren’t available in this build.',
+              ),
+            ),
+          );
+        },
+      );
+      return;
+    }
     const link = AgentCreationDeepLink('av_1');
     final big = 'x' * (maxAgentCardBytes + 1);
 
@@ -180,7 +203,7 @@ void main() {
               'v': 1,
               'id': 'av_1',
               'name': 'Scout',
-              'avatarUrl': HostedEnvironment.avatarsCdnOrigin
+              'avatarUrl': HostedEnvironment.avatarsCdnOrigin!
                   .replace(path: '/av_1/r/avatar.png')
                   .toString(),
             }),
@@ -190,7 +213,7 @@ void main() {
       expect(result, isA<AgentCreationDraft>());
       expect(
         seen.url,
-        HostedEnvironment.avatarsCdnOrigin.replace(path: '/av_1/agent.json'),
+        HostedEnvironment.avatarsCdnOrigin!.replace(path: '/av_1/agent.json'),
       );
       expect(seen.followRedirects, isFalse);
     });

@@ -53,7 +53,10 @@ void main() {
     () async {
       final staging =
           HostedEnvironment.origin.host == 'app.builderlabstaging.xyz';
-      final matching = staging
+      const configuredHosts = String.fromEnvironment('BUZZ_HOSTED_RELAY_HOSTS');
+      final matching = configuredHosts.isNotEmpty
+          ? configuredHosts.split(',').first
+          : staging
           ? 'team.communities.public.builderlabstaging.xyz'
           : 'team.communities.buzz.xyz';
       final opposite = staging

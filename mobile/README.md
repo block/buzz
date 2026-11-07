@@ -25,9 +25,8 @@ authentication remains in place. `BUZZ_BUILDERLAB_URL` selects the backend; sett
 it alone does not enable Builderlab features.
 
 Entries match the domain itself and its subdomains, case-insensitively. Use DNS
-names, not URLs or wildcards. The list does not add trusted account servers:
-configured domains outside the supported Builderlab realm cannot use hosted
-setup. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
+names, not URLs or wildcards. The list does not itself add trusted account servers: domains must also
+match the public defaults or the distributor mappings below. `BUZZ_BUILDERLAB_URL` still selects the trusted account environment.
 
 ## Agent creation links
 
@@ -76,6 +75,38 @@ however long the instructions are.
 
 The parser is `lib/shared/deeplink/agent_creation_link.dart`; the card reader
 is `lib/features/agents/agent_creation_draft.dart`.
+
+### Distributor account configuration
+
+Public production and staging keep their existing account, community-domain and
+agent-card CDN defaults when no overrides are supplied. A distributor can bake
+its own endpoints into a build without putting private hostnames in this repo:
+
+```bash
+flutter build ipa --release \
+  --dart-define=BUZZ_BUILDERLAB_URL=https://accounts.example.com \
+  --dart-define=BUZZ_HOSTED_RELAY_HOSTS=relay.example.com \
+  --dart-define=BUZZ_AUTH_DOMAINS=relay.example.com
+```
+
+- `BUZZ_BUILDERLAB_URL`: HTTPS account origin (no path, credentials, query or
+  fragment). The service must implement the existing mobile login, identity,
+  backup/recovery and community APIs; these settings do not provision them.
+- `BUZZ_HOSTED_RELAY_HOSTS`: comma-separated **exact** relay DNS names mapped to
+  that account. Subdomains are not implicitly trusted.
+- `BUZZ_HOSTED_COMMUNITY_DOMAIN`: optional DNS suffix for hosted communities;
+  only its subdomains map to the account. Also enables creation at
+  `<name>.<domain>`. Custom accounts with only exact relay hosts do not offer
+  community creation.
+- `BUZZ_AVATARS_CDN_URL`: optional HTTPS origin for agent cards in custom builds.
+  Without it, card links report unavailable instead of contacting a public CDN.
+
+Custom account origins require at least one relay host or a community domain.
+Invalid configuration fails closed. These values are trusted compile-time inputs,
+never read from invites or relay metadata. Keep distributor-specific values in
+its release repository. `BUZZ_AUTH_DOMAINS` remains the independent opt-in: omit
+it (and all overrides) for the existing self-hosted, Nostr-only build. Configuring
+endpoints alone does not enable account login or automatic backup.
 
 ## Hosted relay authentication
 

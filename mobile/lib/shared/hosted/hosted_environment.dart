@@ -1,44 +1,32 @@
+import 'hosted_account_config.dart';
+
 /// Trusted build configuration, never supplied by a deep link or relay.
 abstract final class HostedEnvironment {
   /// Account UI and startup work are opt-in, independently of the backend URL.
   static bool get enabled => authDomains.isNotEmpty;
 
-  static final Uri origin = _origin();
-  static const _communityAccounts = {
-    'communities.buzz.xyz': 'https://app.builderlab.xyz',
-    'communities.public.builderlabstaging.xyz':
-        'https://app.builderlabstaging.xyz',
-  };
+  static final _account = HostedAccountConfig(
+    accountUrl: const String.fromEnvironment(
+      'BUZZ_BUILDERLAB_URL',
+      defaultValue: 'https://app.builderlab.xyz',
+    ),
+    relayHosts: const String.fromEnvironment('BUZZ_HOSTED_RELAY_HOSTS'),
+    communityDomain: const String.fromEnvironment(
+      'BUZZ_HOSTED_COMMUNITY_DOMAIN',
+    ),
+    avatarsCdnUrl: const String.fromEnvironment('BUZZ_AVATARS_CDN_URL'),
+  );
 
-  /// Public CDN serving each published Builderlab agent card's
-  /// `<id>/agent.json` and images, for this build's account environment.
-  static Uri get avatarsCdnOrigin => Uri.parse(switch (origin.host) {
-    'app.builderlab.xyz' => 'https://d2z0pbxrxbsiz5.cloudfront.net',
-    'app.builderlabstaging.xyz' => 'https://d10hx6rb3fdt3l.cloudfront.net',
-    _ => throw StateError('Unsupported hosted account environment'),
-  });
+  static Uri get origin => _account.origin;
+  static Uri? get avatarsCdnOrigin => _account.avatarsCdnOrigin;
+  static bool get canCreateCommunity =>
+      enabled && _account.communityDomain != null;
+  static String get communitySuffix =>
+      _account.communityDomain ??
+      (throw StateError('This build has no hosted community creation domain'));
 
-  /// Shortens hostname fallbacks for display without changing relay identity.
-  static String communityDisplayName(String name, String relayUrl) {
-    final relay = Uri.tryParse(relayUrl);
-    if (relay == null ||
-        name != relay.host ||
-        accountOriginFor(relay) == null) {
-      return name;
-    }
-    for (final domain in _communityAccounts.keys) {
-      final suffix = '.$domain';
-      if (name.endsWith(suffix)) {
-        return name.substring(0, name.length - suffix.length);
-      }
-    }
-    return name;
-  }
-
-  /// Creation and admission use the same trusted build-specific host mapping.
-  static String get communitySuffix => _communityAccounts.entries
-      .singleWhere((entry) => Uri.parse(entry.value) == origin)
-      .key;
+  static String communityDisplayName(String name, String relayUrl) =>
+      _account.communityDisplayName(name, relayUrl);
 
   /// Comma-separated DNS domains requiring Builderlab authentication.
   /// Empty builds keep Nostr-only entry available, including hosted QR pairing.
@@ -70,39 +58,9 @@ abstract final class HostedEnvironment {
     );
   }
 
-  /// Explicit community-to-account mapping. Never infer an account endpoint
-  /// from arbitrary relay metadata or send this build's session across realms.
-  static Uri? accountOriginFor(Uri relay) {
-    if (!['wss', 'https'].contains(relay.scheme) ||
-        relay.userInfo.isNotEmpty ||
-        relay.hasQuery ||
-        relay.hasFragment ||
-        (relay.path.isNotEmpty && relay.path != '/') ||
-        (relay.hasPort && relay.port != 443)) {
-      return null;
-    }
-    final host = relay.host.toLowerCase();
-    for (final entry in _communityAccounts.entries) {
-      if (host.endsWith('.${entry.key}')) return Uri.parse(entry.value);
-    }
-    return null;
-  }
+  /// Explicit build configuration, never inferred from relay metadata.
+  static Uri? accountOriginFor(Uri relay) => _account.accountOriginFor(relay);
 
   /// Whether this build can use its account session for this relay.
   static bool supportsRelay(Uri relay) => accountOriginFor(relay) == origin;
-
-  static Uri _origin() {
-    const configured = String.fromEnvironment(
-      'BUZZ_BUILDERLAB_URL',
-      defaultValue: 'https://app.builderlab.xyz',
-    );
-    final uri = Uri.parse(configured);
-    if (!{
-      'https://app.builderlab.xyz',
-      'https://app.builderlabstaging.xyz',
-    }.contains(configured)) {
-      throw StateError('Unsupported hosted account environment');
-    }
-    return uri;
-  }
 }

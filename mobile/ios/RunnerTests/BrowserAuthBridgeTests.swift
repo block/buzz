@@ -43,6 +43,40 @@ final class BrowserAuthBridgeTests: XCTestCase {
     messenger.invoke("cancel", arguments: [:]) { _ in }
   }
 
+  @MainActor
+  func testConfiguredAccountOriginReachesNativeBrowserSession() {
+    let messenger = BrowserAuthTestMessenger()
+    var starts = 0
+    let bridge = BuzzBrowserAuthBridge(messenger: messenger, isActive: { true },
+      startSession: { _ in starts += 1; return true })
+    defer { withExtendedLifetime(bridge) {} }
+    let origin = "https://accounts.example.com"
+    for refused in [
+      "https://accounts.example.com.attacker.test/auth/native",
+      "https://child.accounts.example.com/auth/native",
+      "https://accounts.example.com/other",
+      "http://accounts.example.com/auth/native",
+      "https://user@accounts.example.com/auth/native",
+      "https://accounts.example.com:8443/auth/native",
+      "https://accounts.example.com/auth/native#fragment",
+    ] {
+      messenger.invoke("start", arguments: ["url": refused,
+        "configuredAccountOrigin": origin]) {
+        XCTAssertEqual(($0 as? FlutterError)?.code, "unavailable", refused)
+      }
+    }
+    XCTAssertEqual(starts, 0)
+    messenger.invoke("start", arguments: ["url": origin + "/auth/native?state=test",
+      "configuredAccountOrigin": origin]) { _ in }
+    XCTAssertEqual(starts, 1)
+    messenger.invoke("cancel", arguments: [:]) { _ in }
+    for malformedOrigin in ["http://accounts.example.com", origin + "/path",
+      origin + "?query=1", origin + "#fragment", "https://user@accounts.example.com"] {
+      XCTAssertFalse(BuzzBrowserAuthBridge.allowsLogin(URL(string: origin + "/auth/native")!,
+        configuredAccountOrigin: malformedOrigin))
+    }
+  }
+
   func testAllowsOnlyBuilderlabLoginPages() {
     for allowed in [
       "https://app.builderlab.xyz/auth/native?state=s",
