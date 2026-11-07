@@ -708,7 +708,7 @@ void main() {
                 matching: find.byType(LocalSendBubbleSurface),
               )
               .first,
-          const Offset(220, 0),
+          const Offset(-220, 0),
         );
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsOneWidget);
