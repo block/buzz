@@ -1,7 +1,5 @@
 import type * as React from "react";
 
-import { THREAD_FOCUS_COLUMN_MAX_WIDTH_PX } from "@/features/channels/lib/threadFocusLayout";
-
 export type ThreadPanelLayoutProps = {
   canResetWidth?: boolean;
   columnMaxWidthPx?: number;
@@ -38,7 +36,10 @@ export function getThreadPanelLayout({
 }: ThreadPanelLayoutOptions): ThreadPanelLayoutProps {
   return isFocusDrawer
     ? {
-        columnMaxWidthPx: THREAD_FOCUS_COLUMN_MAX_WIDTH_PX,
+        // Full-bleed to the drawer edge, matching split/channel/inbox views:
+        // an undefined max width drops both the reading-measure cap and the
+        // `mx-auto`/inline-gutter column treatment (see THREAD_PANEL_COLUMN_CLASS).
+        columnMaxWidthPx: undefined,
         headerLeading,
         isFocusMode: true,
         isSinglePanelView: true,
