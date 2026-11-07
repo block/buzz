@@ -29,8 +29,7 @@ use crate::webhook_secret;
 
 use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
-    emit_group_discovery_events, emit_membership_notification, emit_system_message,
-    publish_dm_visibility_snapshot,
+    emit_group_discovery_events, emit_membership_notification, publish_dm_visibility_snapshot,
 };
 
 /// Route a command-kind event to the appropriate handler.
@@ -298,7 +297,6 @@ async fn handle_dm_open(
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let self_hex = hex::encode(&self_bytes);
 
     // 1. Extract participant pubkeys from `p` tags
     let p_tags = extract_p_tags(event);
@@ -354,62 +352,16 @@ async fn handle_dm_open(
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
-    // 5. Side effects if newly created (post-commit, best-effort)
-    if was_created {
-        metrics::counter!(
-            "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
-            "type" => "dm"
-        )
-        .increment(1);
-
-        // Invalidate caches for all participants
-        for pk in &all_bytes {
-            state.invalidate_membership(tenant, channel.id, pk);
-        }
-
-        let participant_hexes: Vec<String> = all_bytes.iter().map(hex::encode).collect();
-        if let Err(e) = emit_system_message(
-            tenant,
-            state,
-            channel.id,
-            serde_json::json!({
-                "type": "dm_created",
-                "actor": self_hex,
-                "participants": participant_hexes,
-            }),
-            chrono::Utc::now(),
-        )
-        .await
-        {
-            warn!("DM open: system message failed: {e}");
-        }
-
-        if let Err(e) = emit_group_discovery_events(tenant, state, channel.id).await {
-            warn!(channel = %channel.id, "DM open: discovery emission failed: {e}");
-        }
-
-        for participant in &all_bytes {
-            if let Err(e) = emit_membership_notification(
-                tenant,
-                state,
-                channel.id,
-                participant,
-                &self_bytes,
-                KIND_MEMBER_ADDED_NOTIFICATION,
-            )
-            .await
-            {
-                warn!("DM open: membership notification failed: {e}");
-            }
-        }
-    } else {
-        // Re-open of an existing DM cleared the caller's hidden_at; refresh
-        // their NIP-DV snapshot so the DM reappears in the sidebar.
-        if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
-            warn!("DM re-open: visibility snapshot failed: {e}");
-        }
-    }
+    // 5. Post-commit, best-effort side effects
+    super::side_effects::dm_open_side_effects(
+        tenant,
+        state,
+        channel.id,
+        &all_bytes,
+        &self_bytes,
+        was_created,
+    )
+    .await;
 
     // 6. Return response
     Ok(IngestResult {

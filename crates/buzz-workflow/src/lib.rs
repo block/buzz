@@ -410,15 +410,8 @@ impl WorkflowEngine {
             return Ok(());
         }
 
-        let trigger_ctx = build_trigger_context(event);
-
-        let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Failed to serialize trigger context: {e}");
-                return Ok(());
-            }
-        };
+        let mut trigger_ctx = build_trigger_context(event);
+        let mut author_name_loaded = false;
 
         for workflow in workflows.iter() {
             let def: WorkflowDef = match serde_json::from_value(workflow.definition.clone()) {
@@ -450,6 +443,29 @@ impl WorkflowEngine {
                 self.log_owner_denial(community_id, workflow.id, "event", &e);
                 continue;
             }
+
+            // Looked up once, and only once a workflow actually fires.
+            if !author_name_loaded {
+                author_name_loaded = true;
+                match self
+                    .db
+                    .get_user(community_id, &event.event.pubkey.to_bytes())
+                    .await
+                {
+                    Ok(user) => {
+                        trigger_ctx.author_name =
+                            user.and_then(|u| u.display_name).unwrap_or_default();
+                    }
+                    Err(e) => tracing::warn!("Failed to load trigger author name: {e}"),
+                }
+            }
+            let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Failed to serialize trigger context: {e}");
+                    return Ok(());
+                }
+            };
 
             let trigger_event_id_bytes = event.event.id.as_bytes().to_vec();
             let run_id = match self
@@ -1067,6 +1083,7 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     executor::TriggerContext {
         text: content,
         author,
+        author_name: String::new(),
         channel_id: event
             .channel_id
             .map(|id| id.to_string())

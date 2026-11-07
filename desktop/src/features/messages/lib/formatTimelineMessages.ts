@@ -211,6 +211,9 @@ function isAuthorizedMessageEdit(
   );
   const signer = normalizePubkey(edit.pubkey);
   if (signer === author) return true;
+  // A key may always edit what it signed itself: the relay editing its own
+  // workflow-posted message, whose attributed author is the workflow owner.
+  if (signer === normalizePubkey(target.pubkey)) return true;
   return normalizePubkey(profiles?.[author]?.ownerPubkey ?? "") === signer;
 }
 

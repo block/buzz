@@ -4708,6 +4708,73 @@ pub async fn publish_nipia_archival_list(
     )
 }
 
+/// Post-open side effects shared by the kind:41010 DM-open command and the
+/// workflow `send_dm` action, so the two cannot drift apart. Best-effort: each
+/// failure is logged. A new DM gets cache invalidation, a `dm_created` system
+/// message, discovery events and member-added notifications; re-opening an
+/// existing DM refreshes the opener's NIP-DV snapshot so it reappears in the
+/// sidebar.
+pub(crate) async fn dm_open_side_effects(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    participants: &[Vec<u8>],
+    actor: &[u8],
+    was_created: bool,
+) {
+    if !was_created {
+        if let Err(e) = publish_dm_visibility_snapshot(tenant, state, actor).await {
+            tracing::warn!("DM re-open: visibility snapshot failed: {e}");
+        }
+        return;
+    }
+    metrics::counter!(
+        "buzz_channels_created_total",
+        "community" => tenant.host().to_owned(),
+        "type" => "dm"
+    )
+    .increment(1);
+
+    for pk in participants {
+        state.invalidate_membership(tenant, channel_id, pk);
+    }
+
+    if let Err(e) = emit_system_message(
+        tenant,
+        state,
+        channel_id,
+        serde_json::json!({
+            "type": "dm_created",
+            "actor": hex::encode(actor),
+            "participants": participants.iter().map(hex::encode).collect::<Vec<_>>(),
+        }),
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        tracing::warn!("DM open: system message failed: {e}");
+    }
+
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        tracing::warn!(channel = %channel_id, "DM open: discovery emission failed: {e}");
+    }
+
+    for participant in participants {
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel_id,
+            participant,
+            actor,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            tracing::warn!("DM open: membership notification failed: {e}");
+        }
+    }
+}
+
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
 /// `viewer`. The event is parameterized-replaceable (`d` = viewer pubkey) and
 /// carries one `h` tag per DM the viewer currently has hidden. Called after any
