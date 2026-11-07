@@ -202,9 +202,9 @@ class HostedRelayAuth extends ChangeNotifier {
   /// relay decides.
   ///
   /// A hosted relay gets an assertion only when its NIP-FI discovery requires
-  /// one. A [fresh] caller (a new socket connection) rereads discovery, so a
-  /// community that starts enforcing is picked up on its next connect; other
-  /// requests reuse the latest discovery.
+  /// one. Every caller opening a new socket passes [fresh] to reread
+  /// discovery, so a community that changes enforcement is picked up on its
+  /// next connect; HTTP requests reuse the latest discovery.
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
