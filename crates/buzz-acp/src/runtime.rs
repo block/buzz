@@ -1,8 +1,8 @@
 //! Shared agent capabilities. Intake and scheduling belong to each entry point;
 //! environment, credentials, adapter settings and prompt equipment belong here.
 use crate::{
-    build_mcp_servers, config::Config, current_working_directory, git, observer, pool, relay,
-    resolve_agent_owner, PromptContext,
+    build_mcp_servers, config::Config, git, observer, pool, relay, resolve_agent_owner,
+    session_working_directory, PromptContext,
 };
 use anyhow::Result;
 use std::{collections::HashMap, time::Duration};
@@ -81,7 +81,7 @@ fn make_prompt_context(
     mode: SessionMode,
 ) -> Result<PromptContext> {
     let base_prompt_content = config.base_prompt_content.as_ref();
-    let cwd = current_working_directory()?;
+    let cwd = session_working_directory()?;
     Ok(PromptContext {
         mcp_servers: build_mcp_servers(config),
         initial_message: config.initial_message.clone(),
