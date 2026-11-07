@@ -721,6 +721,16 @@ pub async fn list_never_joined_auto_join_channels(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    list_never_joined_auto_join_channels_on(&mut connection, community_id, pubkey).await
+}
+
+/// [`list_never_joined_auto_join_channels`] on a caller-held connection.
+/// `idx_channels_auto_join` (migration 0087) serves the outer scan.
+async fn list_never_joined_auto_join_channels_on(
+    connection: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
     let ids = sqlx::query_scalar(
         r#"
         SELECT c.id
@@ -737,7 +747,7 @@ pub async fn list_never_joined_auto_join_channels(
     )
     .bind(community_id.as_uuid())
     .bind(pubkey)
-    .fetch_all(&mut *connection)
+    .fetch_all(connection)
     .await?;
     Ok(ids)
 }
@@ -2141,14 +2151,53 @@ impl Db {
 
     /// Lists the effective `auto_join` channels `pubkey` has never been a
     /// member of, active or removed (see
-    /// [`list_never_joined_auto_join_channels`]).
-    #[datastore_span(name = "list_never_joined_auto_join_channels", system = "postgresql")]
-    pub async fn list_never_joined_auto_join_channels(
+    /// [`list_never_joined_auto_join_channels`]), on the bounded replica arm.
+    ///
+    /// This runs on every admitted human AUTH to a community that does not
+    /// require relay membership, so it stays off the writer. A stale answer
+    /// is safe: [`Db::put_first_member`] decides again under the membership
+    /// lock, so a channel joined or unflagged since is skipped, and a channel
+    /// flagged since is joined on the next admission. Falls back to the writer as
+    /// [`Db::pending_default_channel_join_routed`] does.
+    #[datastore_span(
+        name = "list_never_joined_auto_join_channels_routed",
+        system = "postgresql"
+    )]
+    pub async fn list_never_joined_auto_join_channels_routed(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>> {
-        list_never_joined_auto_join_channels(&self.pool, community_id, pubkey).await
+        let path = "list_never_joined_auto_join_channels";
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::Authorization,
+            )
+            .await?
+        {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match list_never_joined_auto_join_channels_on(&mut tx, community_id, pubkey).await {
+                    Ok(ids) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(ids)
+                    }
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        list_never_joined_auto_join_channels(&self.pool, community_id, pubkey).await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => {
+                list_never_joined_auto_join_channels(&self.pool, community_id, pubkey).await
+            }
+        }
     }
 
     /// Lists channels during startup reconciliation.

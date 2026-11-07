@@ -639,7 +639,8 @@ async fn migration_schema_listed_name_index_validates_a_prebuild() {
     let oid = index_oid(&pool).await;
     // A channel writer holds its lock through the migration. Over a prebuild,
     // 0083 must not request the ShareLock a CREATE INDEX takes, even with
-    // IF NOT EXISTS: that waits behind writers and queues new ones.
+    // IF NOT EXISTS: that waits behind writers and queues new ones. Stop at
+    // 0083: later migrations that build their own index inline need the lock.
     let mut writer = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE channels IN ROW EXCLUSIVE MODE")
         .execute(&mut *writer)
