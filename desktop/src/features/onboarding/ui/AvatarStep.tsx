@@ -275,6 +275,9 @@ export function AvatarStep({
     React.useState<string | null>(null);
   const [isCustomColorPickerOpen, setIsCustomColorPickerOpen] =
     React.useState(false);
+  const [previewDropTargetEl, setPreviewDropTargetEl] =
+    React.useState<HTMLDivElement | null>(null);
+  const [isImageDropActive, setIsImageDropActive] = React.useState(false);
   const hasAvatarDraft = avatar.draftUrl.trim().length > 0;
   const canSubmit = hasAvatarDraft && !isSaving && !isUploadingAvatar;
   const isAutoAdvancingAnimatedAvatar = pendingAnimatedAvatarUrl !== null;
@@ -354,7 +357,16 @@ export function AvatarStep({
           </div>
 
           <div className="mt-12 grid justify-items-center gap-3 lg:justify-items-start">
-            <div className="relative h-48 w-48">
+            <div
+              className={cn(
+                "relative h-48 w-48 rounded-full transition-shadow duration-[250ms] ease-out",
+                isImageDropActive &&
+                  "ring-4 ring-primary/60 ring-offset-4 ring-offset-background",
+              )}
+              data-dragging={isImageDropActive ? "true" : undefined}
+              data-testid="onboarding-avatar-drop-target"
+              ref={setPreviewDropTargetEl}
+            >
               <div
                 className="pointer-events-none absolute inset-0 z-10"
                 data-testid="onboarding-avatar-animated-preview-slot"
@@ -397,11 +409,13 @@ export function AvatarStep({
             disabled={isSaving}
             emojiPickerTheme="auto"
             emojiPickerThemeVars={NEUTRAL_EMOJI_PICKER_THEME_VARS}
+            imageDropTarget={previewDropTargetEl}
             onAnimatedAvatarApply={handleAnimatedAvatarApply}
             onAnimatedPreviewActiveChange={setIsAnimatedPreviewActive}
             onAnimatedPreviewCaptionChange={setAnimatedPreviewCaption}
             onCustomColorPickerOpenChange={setIsCustomColorPickerOpen}
             onEmojiAvatarChange={animateEmojiAvatarChange}
+            onImageDropActiveChange={setIsImageDropActive}
             onModeChange={setAvatarEditorMode}
             onUploadingChange={onUploadingChange}
             onUrlChange={updateAvatarUrl}
