@@ -22,6 +22,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/agents/remote_agents.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_rules.dart';

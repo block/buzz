@@ -61,6 +61,19 @@ bool agentLocationUnknown(
   RemoteAgentController controller,
 ) => supportsRemoteAgents(community) && controller.account.account == null;
 
+/// Whether this community's agent locations are unconfirmed: signed out,
+/// signed in before the registry has returned a listing, or after the latest
+/// listing failed. An agent missing from an unloaded or failed listing may
+/// still be remote, even when an earlier listing succeeded.
+bool agentLocationUnconfirmed(
+  Community? community,
+  RemoteAgentController controller,
+) =>
+    supportsRemoteAgents(community) &&
+    (controller.account.account == null ||
+        !controller.registryLoaded ||
+        controller.listingFailed);
+
 /// Whether to ask the user to sign in to Builderlab: the agent location is
 /// unknown and no load is in flight. A cold start's saved-session restore
 /// runs inside the controller's refresh, so prompting then would start a

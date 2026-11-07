@@ -90,4 +90,70 @@ void messageAuthorVisibilityTests() {
       });
     }
   }
+
+  testWidgets('a confirmed remote agent says Remote between name and time', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final channel = Channel(
+      id: _channelId,
+      name: 'Agents',
+      channelType: 'stream',
+      visibility: 'open',
+      description: '',
+      createdBy: 'self',
+      createdAt: DateTime(2025),
+      memberCount: 3,
+      participantPubkeys: const ['self', 'cloud', 'device'],
+      isMember: true,
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        channel: channel,
+        signingPubkey: 'self',
+        remoteAgents: const {'cloud'},
+        users: const {
+          'cloud': UserProfile(
+            pubkey: 'cloud',
+            displayName: 'Scout',
+            ownerPubkey: 'self',
+          ),
+          'device': UserProfile(
+            pubkey: 'device',
+            displayName: 'Helper',
+            ownerPubkey: 'self',
+          ),
+        },
+        messages: [
+          _textMsg(id: 'remote', pubkey: 'cloud', content: 'On it'),
+          _textMsg(
+            id: 'local',
+            pubkey: 'device',
+            content: 'Me too',
+            createdAt: 1100,
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final remote = find.text('· Remote');
+    expect(remote, findsOneWidget);
+    final name = tester.getRect(
+      find.byKey(const ValueKey('message-author-remote')),
+    );
+    final time = tester.getRect(
+      find.byKey(const ValueKey('message-timestamp-remote')),
+    );
+    final label = tester.getRect(remote);
+    expect(label.left, greaterThan(name.right));
+    expect(label.right, lessThan(time.left));
+    // Screen readers hear "Remote", not the separator.
+    final spoken = tester.getSemantics(remote).label;
+    expect(spoken, contains('Remote'));
+    expect(spoken, isNot(contains('·')));
+    await tester.longPress(remote);
+    await tester.pumpAndSettle();
+    expect(find.text('Runs remotely on Builderlab'), findsOneWidget);
+    semantics.dispose();
+  });
 }

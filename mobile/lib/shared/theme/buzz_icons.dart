@@ -118,6 +118,9 @@ abstract final class BuzzIcons {
   /// Tabler `hourglass`: a channel with a limited lifetime.
   static const clockFading = IconData(0xef93, fontFamily: 'BuzzTabler');
 
+  /// Tabler `cloud`: work that runs on another computer.
+  static const cloud = IconData(0xea76, fontFamily: 'BuzzTabler');
+
   /// Tabler `code`.
   static const code = IconData(0xea77, fontFamily: 'BuzzTabler');
 

@@ -1,5 +1,6 @@
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/features/channels/agent_typing_bubble.dart';
+import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/inline_agent_typing.dart';
@@ -36,6 +37,7 @@ Widget surface({
   bool reduced = false,
   bool typing = true,
   bool bot = true,
+  bool remote = false,
   List<TypingEntry>? entries,
   double textScale = 1,
 }) => ProviderScope(
@@ -44,6 +46,9 @@ Widget surface({
       'chat',
     ).overrideWithValue(bot ? {agent} : <String>{}),
     userCacheProvider.overrideWith(preview ? DemoProfiles.new : Profiles.new),
+    availableRemoteAgentsProvider.overrideWith(
+      (ref) async => remote ? {agent} : <String>{},
+    ),
     channelIdentityNamesProvider('chat').overrideWithValue(
       const IdentityNameSources(profiles: {agent: profile}).scope([agent]),
     ),
@@ -368,5 +373,57 @@ void main() {
     expect(find.byKey(const ValueKey('agent-typing-dot-2')), findsOneWidget);
     expect(find.byType(ShaderMask), findsNothing);
     expect(tester.binding.hasScheduledFrame, isFalse);
+  });
+
+  testWidgets('remote work leads with a cloud that pulses unless reduced', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final cloud = find.byKey(const ValueKey('remote-work-cloud'));
+    double opacity() => tester.widget<FadeTransition>(cloud).opacity.value;
+
+    await tester.pumpWidget(surface());
+    await tester.pump();
+    expect(cloud, findsNothing);
+    expect(find.text(' \u00b7 Remote'), findsNothing);
+    expect(find.bySemanticsLabel('Test agent is typing'), findsOneWidget);
+
+    // A fresh scope, since overrides are fixed for a scope's lifetime.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(surface(remote: true));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(cloud, findsOneWidget);
+    expect(opacity(), closeTo(0.35, 0.01));
+    // Desktop's typing byline, announced once with the typing state.
+    expect(find.text(' \u00b7 Remote'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel('Test agent, remote, is typing'),
+      findsOneWidget,
+    );
+
+    // With others typing too, neither cue implies they are all remote.
+    await tester.pumpWidget(
+      surface(
+        remote: true,
+        entries: const [
+          TypingEntry(pubkey: agent, expiresAtMs: 8000),
+          TypingEntry(pubkey: 'person-1', expiresAtMs: 8000),
+        ],
+      ),
+    );
+    await tester.pump();
+    expect(cloud, findsNothing);
+    expect(find.text(' \u00b7 Remote'), findsNothing);
+    expect(
+      find.bySemanticsLabel('Test agent and 1 other are typing'),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(surface(remote: true, reduced: true));
+    await tester.pumpAndSettle();
+    expect(opacity(), 1);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+    semantics.dispose();
   });
 }
