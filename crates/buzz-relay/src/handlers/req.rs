@@ -867,10 +867,7 @@ async fn handle_search_req(
         let accessible_channels =
             &*super::system_channels::filter_channel_scope(filter, implicit_channels, named_only);
 
-        let limit = filter
-            .limit
-            .map(|l| (l as u32).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32))
-            .unwrap_or(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32);
+        let limit = buzz_core::filter::clamp_limit(filter.limit, PAGE_LIMIT_MAX, PAGE_LIMIT_MAX);
 
         if limit == 0 {
             continue; // NIP-01: limit 0 means "no results from this filter"
@@ -1244,6 +1241,9 @@ fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     values.iter().next()?.parse::<uuid::Uuid>().ok()
 }
 
+/// [`buzz_db::DEFAULT_MAX_PAGE_LIMIT`] as the `u32` that [`buzz_core::filter::clamp_limit`] takes.
+const PAGE_LIMIT_MAX: u32 = buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32;
+
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
 ///
 /// Each filter is queried independently so that per-filter `limit` and time
@@ -1271,10 +1271,11 @@ fn filter_to_query_params(
     let until = filter
         .until
         .and_then(|u| chrono::DateTime::from_timestamp(u.as_secs() as i64, 0));
-    let limit = filter
-        .limit
-        .map(|l| (l as i64).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT))
-        .unwrap_or(buzz_db::DEFAULT_MAX_PAGE_LIMIT);
+    let limit = i64::from(buzz_core::filter::clamp_limit(
+        filter.limit,
+        PAGE_LIMIT_MAX,
+        PAGE_LIMIT_MAX,
+    ));
 
     // Push author filter into SQL. Single-author uses the indexed `pubkey` column;
     // multi-author uses the `authors` IN-list pushdown added in the pure-nostr PR.
@@ -2997,6 +2998,15 @@ mod tests {
         .expect("limitation")
         .max_limit
         .expect("max_limit") as i64
+    }
+
+    #[test]
+    fn huge_filter_limit_is_clamped_to_page_max() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let q = filter_to_query_params(&Filter::new().limit(usize::MAX), None, community);
+        assert_eq!(q.limit, Some(buzz_db::DEFAULT_MAX_PAGE_LIMIT));
+        let q = filter_to_query_params(&Filter::new().limit(0), None, community);
+        assert_eq!(q.limit, Some(0));
     }
 
     #[test]
