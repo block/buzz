@@ -323,7 +323,7 @@ void swipeReplyTests() {
 void swipeReplyLinkTests() {
   for (final onLink in [true, false]) {
     testWidgets(
-      'right drag starting ${onLink ? 'on a link' : 'beside a link'} replies',
+      'left drag starting ${onLink ? 'on a link' : 'beside a link'} replies',
       variant: const TargetPlatformVariant({
         TargetPlatform.iOS,
         TargetPlatform.android,
@@ -346,8 +346,8 @@ void swipeReplyLinkTests() {
             onLink ? find.text('the doc') : find.textContaining('carefully'),
           ),
         );
-        await gesture.moveBy(const Offset(25, 0));
-        await gesture.moveBy(const Offset(100, 0));
+        await gesture.moveBy(const Offset(-25, 0));
+        await gesture.moveBy(const Offset(-100, 0));
         await tester.pump();
         await gesture.up();
         await tester.pumpAndSettle();
