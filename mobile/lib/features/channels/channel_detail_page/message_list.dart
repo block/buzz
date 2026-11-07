@@ -1015,8 +1015,8 @@ class _MessageList extends HookConsumerWidget {
 
                 final showAuthor =
                     !message.isSystem &&
-                    (message.hasAttachments ||
-                        prevMessage?.hasAttachments == true ||
+                    (message.breaksMessageGrouping ||
+                        prevMessage?.breaksMessageGrouping == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
                         showDayDivider ||
@@ -1028,10 +1028,10 @@ class _MessageList extends HookConsumerWidget {
                     ? displayEntries[chronIdx + 1].first.message
                     : null;
                 final showAvatar =
-                    message.hasAttachments ||
+                    message.breaksMessageGrouping ||
                     nextMessage == null ||
                     nextMessage.isSystem ||
-                    nextMessage.hasAttachments ||
+                    nextMessage.breaksMessageGrouping ||
                     !isSameDay(message.createdAt, nextMessage.createdAt) ||
                     nextMessage.pubkey.toLowerCase() !=
                         message.pubkey.toLowerCase() ||
