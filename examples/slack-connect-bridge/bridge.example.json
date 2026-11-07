@@ -1,0 +1,13 @@
+{
+  "listen_addr": "127.0.0.1:3100",
+  "state_path": "./slack-connect-bridge-state.json",
+  "allow_non_shared_channels": false,
+  "replay_lookback_secs": 86400,
+  "channels": [
+    {
+      "slack_team_id": "T0123456789",
+      "slack_channel_id": "C0123456789",
+      "buzz_channel_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}

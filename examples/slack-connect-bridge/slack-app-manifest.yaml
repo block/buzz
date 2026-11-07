@@ -1,0 +1,31 @@
+display_information:
+  name: Buzz Slack Connect Bridge
+  description: Bridges explicitly mapped Slack Connect and Buzz channels.
+  background_color: "#131622"
+features:
+  bot_user:
+    display_name: Buzz Bridge
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - chat:write
+      - users:read
+settings:
+  event_subscriptions:
+    request_url: https://YOUR_BRIDGE_HOST/slack/events
+    bot_events:
+      - channel_id_changed
+      - channel_shared
+      - channel_unshared
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
