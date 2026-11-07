@@ -106,6 +106,62 @@ pub(super) fn forum_reply_from_event(
     }
 }
 
+fn edit_target_id(edit: &nostr::Event) -> Option<String> {
+    edit.tags.iter().find_map(|tag| {
+        let values = tag.as_slice();
+        (values.first().map(String::as_str) == Some("e"))
+            .then(|| values.get(1).cloned())
+            .flatten()
+    })
+}
+
+/// A kind:40003 edit counts only when its signer is the target's author or
+/// that author's verified agent owner — the gate the relay applies on ingest
+/// and the stream timeline applies when it folds edits onto kind:9.
+fn is_authorized_edit(
+    edit: &nostr::Event,
+    target: &nostr::Event,
+    owner_pubkeys: &std::collections::HashMap<String, String>,
+) -> bool {
+    let author = target.pubkey.to_hex();
+    let signer = edit.pubkey.to_hex();
+    signer == author || owner_pubkeys.get(&author) == Some(&signer)
+}
+
+/// Latest authorized kind:40003 edit per target id. Forum posts (45001) and
+/// comments (45003) are edited with the same overlay kind as stream messages,
+/// so the most recent authorized edit supplies the body the row renders.
+pub(super) fn latest_authorized_edits<'a>(
+    originals: &[nostr::Event],
+    edits: &'a [nostr::Event],
+    owner_pubkeys: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, &'a nostr::Event> {
+    let originals_by_id = originals
+        .iter()
+        .map(|event| (event.id.to_hex(), event))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut latest = std::collections::HashMap::<String, &'a nostr::Event>::new();
+    for edit in edits.iter().filter(|event| event.kind.as_u16() == 40003) {
+        let Some(target_id) = edit_target_id(edit) else {
+            continue;
+        };
+        let Some(target) = originals_by_id.get(&target_id) else {
+            continue;
+        };
+        if !is_authorized_edit(edit, target, owner_pubkeys) {
+            continue;
+        }
+        let is_newer = latest
+            .get(&target_id)
+            .is_none_or(|existing| edit.created_at > existing.created_at);
+        if is_newer {
+            latest.insert(target_id, edit);
+        }
+    }
+    latest
+}
+
 pub(super) fn link_preview_suppression_targets(
     originals: &[nostr::Event],
     edits: &[nostr::Event],
@@ -126,16 +182,9 @@ pub(super) fn link_preview_suppression_targets(
                     .any(|tag| tag.as_slice() == ["link-preview".to_string(), "none".to_string()])
         })
         .filter_map(|edit| {
-            let target_id = edit.tags.iter().find_map(|tag| {
-                let values = tag.as_slice();
-                (values.first().map(String::as_str) == Some("e"))
-                    .then(|| values.get(1).cloned())
-                    .flatten()
-            })?;
+            let target_id = edit_target_id(edit)?;
             let target = originals_by_id.get(&target_id)?;
-            let author = target.pubkey.to_hex();
-            let signer = edit.pubkey.to_hex();
-            (signer == author || owner_pubkeys.get(&author) == Some(&signer)).then_some(target_id)
+            is_authorized_edit(edit, target, owner_pubkeys).then_some(target_id)
         })
         .collect()
 }
@@ -151,6 +200,16 @@ pub(super) fn apply_link_preview_suppression(
             .any(|tag| tag.as_slice() == ["link-preview".to_string(), "none".to_string()])
     {
         tags.push(vec!["link-preview".to_string(), "none".to_string()]);
+    }
+}
+
+pub(super) fn apply_edit_content(
+    content: &mut String,
+    event_id: &str,
+    edits: &std::collections::HashMap<String, &nostr::Event>,
+) {
+    if let Some(edit) = edits.get(event_id) {
+        *content = edit.content.clone();
     }
 }
 
@@ -187,10 +246,12 @@ pub async fn get_forum_posts(
     };
     let owner_pubkeys = fetch_agent_owner_pubkeys(&state, &events).await;
     let suppressed = link_preview_suppression_targets(&events, &edits, &owner_pubkeys);
+    let edited = latest_authorized_edits(&events, &edits, &owner_pubkeys);
     let messages: Vec<ForumMessageInfo> = events
         .iter()
         .map(|ev| {
             let mut message = forum_message_from_event(ev, &channel_id);
+            apply_edit_content(&mut message.content, &message.event_id, &edited);
             apply_link_preview_suppression(&mut message.tags, &message.event_id, &suppressed);
             message
         })
@@ -242,16 +303,19 @@ pub async fn get_forum_thread(
     };
     let owner_pubkeys = fetch_agent_owner_pubkeys(&state, &events).await;
     let suppressed = link_preview_suppression_targets(&events, &edits, &owner_pubkeys);
+    let edited = latest_authorized_edits(&events, &edits, &owner_pubkeys);
 
     let mut root: Option<ForumMessageInfo> = None;
     let mut replies: Vec<ForumThreadReplyInfo> = Vec::new();
     for ev in &events {
         if ev.id.to_hex() == event_id {
             let mut message = forum_message_from_event(ev, &channel_id);
+            apply_edit_content(&mut message.content, &message.event_id, &edited);
             apply_link_preview_suppression(&mut message.tags, &message.event_id, &suppressed);
             root = Some(message);
         } else if ev.kind.as_u16() as u32 != 40003 {
             let mut reply = forum_reply_from_event(ev, &channel_id, &event_id);
+            apply_edit_content(&mut reply.content, &reply.event_id, &edited);
             apply_link_preview_suppression(&mut reply.tags, &reply.event_id, &suppressed);
             replies.push(reply);
         }
@@ -282,6 +346,71 @@ mod tests {
             .tags(tags)
             .sign_with_keys(keys)
             .expect("event signs")
+    }
+
+    fn edit_event(
+        keys: &Keys,
+        target: &nostr::Event,
+        content: &str,
+        created_at: u64,
+    ) -> nostr::Event {
+        let tag = nostr::Tag::parse(vec!["e".to_string(), target.id.to_hex()]).expect("valid tag");
+        EventBuilder::new(Kind::Custom(40003), content)
+            .tags([tag])
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("event signs")
+    }
+
+    #[test]
+    fn latest_authorized_edit_folds_onto_forum_post_and_comment() {
+        let author = Keys::generate();
+        let commenter = Keys::generate();
+        let owner = Keys::generate();
+        let attacker = Keys::generate();
+        let post = signed_event(&author, 45001, Vec::new());
+        let comment = signed_event(
+            &commenter,
+            45003,
+            vec![vec!["e".to_string(), post.id.to_hex()]],
+        );
+        let originals = vec![post.clone(), comment.clone()];
+        let edits = vec![
+            edit_event(&author, &post, "post v2", 10),
+            edit_event(&author, &post, "post v3", 20),
+            // Newest of all, but not the author: must never win.
+            edit_event(&attacker, &post, "spoofed", 30),
+            // The commenter is an agent; its verified owner may edit for it.
+            edit_event(&owner, &comment, "comment v2", 10),
+        ];
+        let owners = std::collections::HashMap::from([(
+            commenter.public_key().to_hex(),
+            owner.public_key().to_hex(),
+        )]);
+
+        let edited = latest_authorized_edits(&originals, &edits, &owners);
+
+        let mut root = forum_message_from_event(&post, "channel");
+        apply_edit_content(&mut root.content, &root.event_id, &edited);
+        assert_eq!(root.kind, 45001);
+        assert_eq!(root.content, "post v3");
+
+        let mut reply = forum_reply_from_event(&comment, "channel", &post.id.to_hex());
+        apply_edit_content(&mut reply.content, &reply.event_id, &edited);
+        assert_eq!(reply.kind, 45003);
+        assert_eq!(reply.content, "comment v2");
+
+        // An unedited row keeps its own body. (The extra tag keeps its id
+        // distinct from `post`: same signer, kind, body and second would
+        // otherwise hash to the same event.)
+        let untouched = signed_event(
+            &author,
+            45001,
+            vec![vec!["t".to_string(), "untouched".to_string()]],
+        );
+        let mut untouched_row = forum_message_from_event(&untouched, "channel");
+        apply_edit_content(&mut untouched_row.content, &untouched_row.event_id, &edited);
+        assert_eq!(untouched_row.content, "body");
     }
 
     #[test]
