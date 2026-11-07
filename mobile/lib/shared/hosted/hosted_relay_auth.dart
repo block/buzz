@@ -73,11 +73,11 @@ final hostedHttpClientFactoryProvider = Provider<http.Client Function()>((ref) {
   return () => HostedRelayHttpClient(auth, config);
 });
 
-/// One account session per realm, with a short-lived assertion for the current
-/// relay/key. Hosted communities use [account] when [enabled] and their relay's
-/// NIP-FI discovery requires evidence; the build's organization relays always
-/// use [organization]. Enable alongside backend issuance; legacy and
-/// self-hosted builds stay usable.
+/// The build's one Builderlab session, with a short-lived assertion for the
+/// current relay/key. A public build's hosted communities use [account] when
+/// [enabled] and their relay's NIP-FI discovery requires evidence; an internal
+/// build's organization relays always use [organization]. Enable alongside
+/// backend issuance; self-hosted communities stay usable.
 class HostedRelayAuth extends ChangeNotifier {
   HostedRelayAuth(
     this.account, {
@@ -336,7 +336,11 @@ class HostedRelayAuth extends ChangeNotifier {
     final started = ++_sequence;
     try {
       if (account.account == null && await account.restore() == null) {
-        throw AccountFailure.signedOut;
+        // A push stop pending at sign-out still gets a few attempts.
+        if (!background) throw AccountFailure.signedOut;
+        final value = await account.pushStopAssertion(relay, config.nsec!);
+        if (_disposed) throw AccountFailure.unavailable;
+        return _token(value, pubkey).token;
       }
       final session = account.account!;
       final current = await account.currentIdentity();
@@ -376,20 +380,8 @@ class HostedRelayAuth extends ChangeNotifier {
         config.nsec!,
         expectedSubject: session.subject,
       );
-      final token = value['assertion'];
-      final expiry = value['expires_at'];
-      if (token is! String ||
-          token.isEmpty ||
-          token.length > 16384 ||
-          token.contains(RegExp(r'[\r\n]')) ||
-          value['nostr_pubkey'] != pubkey ||
-          expiry is! int) {
-        throw AccountFailure.invalidResponse;
-      }
+      final (:token, :expiry) = _token(value, pubkey);
       final now = _now().millisecondsSinceEpoch ~/ 1000;
-      if (expiry <= now) {
-        throw AccountFailure.invalidResponse;
-      }
       final expires = DateTime.fromMillisecondsSinceEpoch(
         expiry * 1000,
         isUtc: true,
@@ -428,6 +420,25 @@ class HostedRelayAuth extends ChangeNotifier {
       }
       rethrow;
     }
+  }
+
+  /// An issued assertion for [pubkey], with its expiry in Unix seconds.
+  ({String token, int expiry}) _token(
+    Map<String, dynamic> value,
+    String pubkey,
+  ) {
+    final token = value['assertion'];
+    final expiry = value['expires_at'];
+    if (token is! String ||
+        token.isEmpty ||
+        token.length > 16384 ||
+        token.contains(RegExp(r'[\r\n]')) ||
+        value['nostr_pubkey'] != pubkey ||
+        expiry is! int ||
+        expiry <= _now().millisecondsSinceEpoch ~/ 1000) {
+      throw AccountFailure.invalidResponse;
+    }
+    return (token: token, expiry: expiry);
   }
 
   /// Clear a scoped failure only after this community actually reconnects.
