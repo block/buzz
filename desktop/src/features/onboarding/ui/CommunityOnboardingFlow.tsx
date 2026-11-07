@@ -30,6 +30,7 @@ import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
+import { InviteRedeemForm } from "./InviteRedeemForm";
 import { MembershipDenied } from "./MembershipDenied";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingCard, useOnboardingCardLayout } from "./OnboardingCard";
@@ -525,8 +526,28 @@ export function CommunityOnboardingFlow({
             )}
             data-testid="community-onboarding-body"
           >
-            {transaction.stage === "claiming" ||
-            transaction.stage === "connecting" ? (
+            {transaction.stage === "invite-consent" ? (
+              <>
+                <h1 className="mb-6 text-title font-normal">
+                  Join {transaction.communityName}
+                </h1>
+                <InviteRedeemForm
+                  key={`${transaction.id}:${transaction.inviteCode}`}
+                  initialValue={`buzz://join?${new URLSearchParams({ relay: transaction.relayUrl, code: transaction.inviteCode ?? "" })}`}
+                  readOnlyInvite
+                  error={null}
+                  isRedeeming={false}
+                  onCancel={onCancel}
+                  onRedeem={(_relayUrl, _inviteCode, policyReceipt) =>
+                    update(
+                      { policyReceipt, stage: "claiming", error: undefined },
+                      transaction.id,
+                    )
+                  }
+                />
+              </>
+            ) : transaction.stage === "claiming" ||
+              transaction.stage === "connecting" ? (
               <>
                 <Users className="mx-auto h-10 w-10" />
                 <h1 className="mt-5 text-title font-normal">

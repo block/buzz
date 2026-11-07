@@ -413,3 +413,61 @@ test("persisted deep-link invite hands off to Joining after machine onboarding",
   // The claim was attempted and its failure surfaced with a Retry.
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
 });
+
+test("receipt-less app handoff collects consent before claiming", async ({
+  page,
+}) => {
+  const policy = {
+    version: "policy-v1",
+    terms_markdown: "Terms",
+    privacy_markdown: "Privacy",
+    age_attestation_required: true,
+  };
+  let claims = 0;
+  await page.route("**/api/join-policy", (route) =>
+    route.fulfill({ json: { policy } }),
+  );
+  await page.route("**/api/invites/accept-policy", (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      code: PENDING_JOIN_LINK.code,
+      policy_version: policy.version,
+      age_confirmed: true,
+    });
+    return route.fulfill({ json: { receipt: "native-consent" } });
+  });
+  await page.route("**/api/invites/claim", (route) => {
+    claims++;
+    expect(route.request().postDataJSON()).toEqual({
+      code: PENDING_JOIN_LINK.code,
+      policy_receipt: "native-consent",
+    });
+    return route.fulfill({
+      json: {
+        status: "joined",
+        community_id: "hive",
+        host: "hive.example.com",
+        role: "member",
+      },
+    });
+  });
+  await installMockBridge(page, {
+    pendingCommunityDeepLinks: [PENDING_JOIN_LINK],
+  });
+  await page.goto("/");
+  const age = page.getByRole("checkbox", {
+    name: "I am 18 years of age or older.",
+  });
+  await expect(age).toBeVisible();
+  const accept = page.getByRole("button", { name: "Accept and redeem invite" });
+  await expect(accept).toBeDisabled();
+  expect(claims).toBe(0);
+  await age.check();
+  await page
+    .getByRole("checkbox", {
+      name: /I agree to the Buzz Terms of Service and Privacy Policy/,
+    })
+    .check();
+  await accept.click();
+  await expect.poll(() => claims).toBe(1);
+  await expect(age).toHaveCount(0);
+});

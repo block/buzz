@@ -52,6 +52,7 @@ type InviteRedeemFormProps = {
   defaultRelayUrl?: string;
   error: string | null;
   initialValue?: string;
+  readOnlyInvite?: boolean;
   isRedeeming: boolean;
   onCancel: () => void;
   onConnect?: (relayWsUrl: string) => void;
@@ -64,6 +65,7 @@ export function InviteRedeemForm({
   defaultRelayUrl,
   error,
   initialValue = "",
+  readOnlyInvite = false,
   isRedeeming,
   onCancel,
   onConnect,
@@ -405,7 +407,8 @@ export function InviteRedeemForm({
           <Input
             autoComplete="off"
             autoCorrect="off"
-            autoFocus
+            autoFocus={!readOnlyInvite}
+            readOnly={readOnlyInvite}
             className={
               isAddCommunity
                 ? "h-11 rounded-xl border-input bg-muted/40 px-3 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-visible:border-muted-foreground/50 focus-visible:ring-0"
