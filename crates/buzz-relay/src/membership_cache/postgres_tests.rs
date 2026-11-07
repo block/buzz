@@ -300,3 +300,89 @@ async fn cold_users_wait_for_the_pool_then_reuse_their_snapshots() {
             .unwrap());
     }
 }
+
+/// A fan-out's recipients are checked with one bulk read that matches the
+/// single-user read: removed memberships and deleted channels do not count,
+/// and each user's set is capped so an oversized user takes a point check.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fan_out_bulk_read_matches_single_user_membership() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let state = crate::state::tests::test_state_with_database_pool(pool.clone()).await;
+    let community = state
+        .db
+        .ensure_configured_community(&format!("bulk-{}.local", Uuid::new_v4()))
+        .await
+        .unwrap()
+        .id;
+    let [member, removed, outsider, deleted_only] = [1u8, 2, 3, 4].map(|n| vec![n; 32]);
+    let (channel, deleted) = (Uuid::new_v4(), Uuid::new_v4());
+    sqlx::query("INSERT INTO channels (community_id, id, name, visibility, created_by) SELECT $1, id, id::text, 'private', $3 FROM unnest($2::uuid[]) AS id")
+        .bind(community.as_uuid()).bind([channel, deleted]).bind(&member).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid())
+        .bind(deleted)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (pubkey, channel_id, removed_at) in [
+        (&member, channel, false),
+        (&removed, channel, true),
+        (&deleted_only, deleted, false),
+    ] {
+        sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey, removed_at) VALUES ($1, $2, $3, CASE WHEN $4 THEN NOW() END)")
+            .bind(community.as_uuid()).bind(channel_id).bind(pubkey).bind(removed_at).execute(&pool).await.unwrap();
+    }
+    let recipients = [&member, &removed, &outsider, &deleted_only];
+
+    let members = state
+        .members_cached(community, channel, recipients.map(Vec::clone))
+        .await;
+    assert_eq!(members.members, HashSet::from([member.clone()]));
+    assert!(members.unverified.is_empty());
+    for pubkey in recipients {
+        assert_eq!(
+            state
+                .membership_cache
+                .cached_member(&(community, channel, pubkey.clone())),
+            Some(*pubkey == member),
+            "the bulk read is published"
+        );
+    }
+
+    // Two users above a positive cap each get exactly the cap: a cap on the
+    // whole batch would truncate one of them into false denials.
+    let heavy = [vec![5u8; 32], vec![6u8; 32]];
+    let three = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    sqlx::query("INSERT INTO channels (community_id, id, name, visibility, created_by) SELECT $1, id, id::text, 'private', $3 FROM unnest($2::uuid[]) AS id")
+        .bind(community.as_uuid()).bind(three).bind(&member).execute(&pool).await.unwrap();
+    for pubkey in &heavy {
+        sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey) SELECT $1, id, $3 FROM unnest($2::uuid[]) AS id")
+            .bind(community.as_uuid()).bind(three).bind(pubkey).execute(&pool).await.unwrap();
+    }
+    let capped = state
+        .db
+        .get_active_membership_ids_bulk_read_at(community, &heavy, 2)
+        .await
+        .unwrap();
+    for pubkey in &heavy {
+        let rows = capped.value.iter().filter(|(pk, _)| pk == pubkey).count();
+        assert_eq!(rows, 2, "the cap applies per user");
+    }
+
+    pool.close().await;
+    let uncached = vec![9u8; 32];
+    let failed = state
+        .members_cached(community, channel, [uncached.clone(), member.clone()])
+        .await;
+    assert_eq!(failed.members, HashSet::from([member]), "served from cache");
+    assert_eq!(
+        failed.unverified,
+        HashSet::from([uncached]),
+        "a failed read is unverified, not denied"
+    );
+}
