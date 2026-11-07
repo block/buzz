@@ -1,3 +1,4 @@
+import Flutter
 import UIKit
 import ImageIO
 import CoreText
@@ -202,7 +203,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     button.accessibilityLabel = reaction.map { "\($0["label"] as? String ?? emoji ?? "") \(title)" } ?? title
     if selected { button.accessibilityTraits.insert(.selected) }
     if let reaction {
-      let glyph = NativeMessageGlyph(data: reaction, size: 22)
+      let glyph = NativeMessageGlyph(data: reaction, size: 22, isReaction: true)
       glyph.isUserInteractionEnabled = false
       glyph.translatesAutoresizingMaskIntoConstraints = false
       button.addSubview(glyph)
@@ -326,7 +327,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     label.font = .preferredFont(forTextStyle: .body)
     label.adjustsFontForContentSizeCategory = true
     label.numberOfLines = 0
-    let emoji = NativeMessageGlyph(data: reaction, size: 26)
+    let emoji = NativeMessageGlyph(data: reaction, size: 26, isReaction: true)
     let row = UIStackView(arrangedSubviews: [avatar, label, emoji])
     row.alignment = .center
     row.spacing = 12
@@ -357,14 +358,21 @@ private final class NativeReactionCloseButton: UIButton {
 
 /// Short-lived image loader. Auth is supplied for the specific URL by Buzz's
 /// existing media auth service; redirects are refused to avoid forwarding it.
+/// Encoded `bytes` Flutter already downloaded are shown without a fetch. A
+/// custom emoji ([isReaction] with a `url`) never shows its `:shortcode:` text,
+/// which is illegible at this size: it stays blank while loading and shows
+/// sparkles, like the native emoji picker, if the image cannot be loaded. An
+/// avatar keeps its initial behind the image.
 final class NativeMessageGlyph: UIView {
   private var cancelLoad: (() -> Void)?
   private let label = UILabel()
   private let image = UIImageView()
 
-  init(data: [String: Any], size: CGFloat) {
+  init(data: [String: Any], size: CGFloat, isReaction: Bool = false) {
     super.init(frame: .zero)
-    label.text = data["emoji"] as? String
+    let raw = data["url"] as? String
+    let customEmoji = isReaction && raw != nil
+    label.text = customEmoji ? nil : data["emoji"] as? String
     label.textAlignment = .center
     label.font = .systemFont(ofSize: size)
     label.adjustsFontSizeToFitWidth = true
@@ -380,16 +388,37 @@ final class NativeMessageGlyph: UIView {
         child.bottomAnchor.constraint(equalTo: bottomAnchor),
       ])
     }
-    guard let raw = data["url"] as? String, let url = URL(string: raw),
-      ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { return }
+    guard let raw else { return }
+    let fallback = { [weak self] in
+      guard let self, customEmoji else { return }
+      image.image = NativeTabler.image("sparkles", size: size)
+      image.tintColor = .secondaryLabel
+      image.contentMode = .center
+    }
+    if let bytes = data["bytes"] as? FlutterStandardTypedData {
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let decoded = NativeMessageImageLoader.decode(bytes.data)
+        DispatchQueue.main.async {
+          guard let self else { return }
+          if let decoded { self.show(decoded) } else { fallback() }
+        }
+      }
+      return
+    }
+    guard let url = URL(string: raw),
+      ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { fallback(); return }
     var request = URLRequest(url: url)
     request.allHTTPHeaderFields = data["headers"] as? [String: String]
     request.timeoutInterval = 10
     cancelLoad = NativeMessageImageLoader.shared.load(request) { [weak self] loaded in
-      guard let self, let loaded else { return }
-      image.image = UIAccessibility.isReduceMotionEnabled ? loaded.images?.first ?? loaded : loaded
-      label.isHidden = true
+      guard let self else { return }
+      if let loaded { show(loaded) } else { fallback() }
     }
+  }
+
+  private func show(_ loaded: UIImage) {
+    image.image = UIAccessibility.isReduceMotionEnabled ? loaded.images?.first ?? loaded : loaded
+    label.isHidden = true
   }
 
   @available(*, unavailable)
@@ -527,7 +556,7 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     completionHandler(nil) // Never forward supplied auth to another URL.
   }
 
-  private static func decode(_ bytes: Data) -> UIImage? {
+  static func decode(_ bytes: Data) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { return nil }
     let count = CGImageSourceGetCount(source)
     let step = max(1, Int(ceil(Double(count) / 60)))
