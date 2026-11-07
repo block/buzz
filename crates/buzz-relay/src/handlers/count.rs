@@ -252,14 +252,7 @@ pub async fn handle_count(
             {
                 match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
-                    Err(e) => {
-                        conn.send(RelayMessage::closed(
-                            &sub_id,
-                            &super::req::db_read_closed_reason(&e),
-                        ));
-                        access.db_failed(&e);
-                        return;
-                    }
+                    Err(e) => return close_failed_count(&conn, &sub_id, &mut access, &e),
                 }
             } else {
                 // Fallback: query + post-filter for non-pushable constraints.
@@ -291,14 +284,7 @@ pub async fn handle_count(
                             total += 1;
                         }
                     }
-                    Err(e) => {
-                        conn.send(RelayMessage::closed(
-                            &sub_id,
-                            &super::req::db_read_closed_reason(&e),
-                        ));
-                        access.db_failed(&e);
-                        return;
-                    }
+                    Err(e) => return close_failed_count(&conn, &sub_id, &mut access, &e),
                 }
             }
         } else {
@@ -342,14 +328,7 @@ pub async fn handle_count(
                 query.limit = None; // COUNT doesn't need a row limit
                 match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
-                    Err(e) => {
-                        conn.send(RelayMessage::closed(
-                            &sub_id,
-                            &super::req::db_read_closed_reason(&e),
-                        ));
-                        access.db_failed(&e);
-                        return;
-                    }
+                    Err(e) => return close_failed_count(&conn, &sub_id, &mut access, &e),
                 }
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
@@ -380,20 +359,30 @@ pub async fn handle_count(
                             total += 1;
                         }
                     }
-                    Err(e) => {
-                        conn.send(RelayMessage::closed(
-                            &sub_id,
-                            &super::req::db_read_closed_reason(&e),
-                        ));
-                        access.db_failed(&e);
-                        return;
-                    }
+                    Err(e) => return close_failed_count(&conn, &sub_id, &mut access, &e),
                 }
             }
         }
     }
     conn.send(RelayMessage::count(&sub_id, total));
     access.counted(total);
+}
+
+/// Close a COUNT whose DB read failed. The client gets the fixed
+/// [`super::req::db_read_closed_reason`]; the log gets only the error kind,
+/// since DB error text can repeat a bound value.
+fn close_failed_count(
+    conn: &ConnectionState,
+    sub_id: &str,
+    access: &mut crate::access::ReadLog,
+    e: &buzz_db::DbError,
+) {
+    warn!(sub_id = %sub_id, error_kind = %e.kind(), "COUNT read failed");
+    conn.send(RelayMessage::closed(
+        sub_id,
+        super::req::db_read_closed_reason(e),
+    ));
+    access.db_failed(e);
 }
 
 #[cfg(test)]

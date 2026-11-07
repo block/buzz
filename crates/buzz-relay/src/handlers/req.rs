@@ -558,7 +558,7 @@ pub async fn handle_req(
                     });
                     // CLOSED, never EOSE: EOSE tells the client it has every
                     // stored event, so a resuming client would skip this history.
-                    return Some(history_read_closed_reason(&e));
+                    return Some(db_read_closed_reason(&e));
                 }
             };
 
@@ -1752,8 +1752,10 @@ pub(crate) const QUERY_TIMED_OUT_CLOSED: &str = "error: query timed out";
 /// error stays in the relay log, and clients treat it as retryable.
 pub(crate) const DATABASE_ERROR_CLOSED: &str = "error: database error";
 
-/// CLOSED reason for a failed REQ history read.
-fn history_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
+/// CLOSED reason for a failed DB read (REQ history, COUNT): a statement
+/// cancel gets the stable timeout reason; anything else the fixed
+/// [`DATABASE_ERROR_CLOSED`], never the error text.
+pub(crate) fn db_read_closed_reason(e: &buzz_db::DbError) -> &'static str {
     if e.is_statement_cancelled() {
         QUERY_TIMED_OUT_CLOSED
     } else {
@@ -1773,16 +1775,6 @@ fn search_closed_reason(e: &buzz_search::SearchError) -> &'static str {
         QUERY_TIMED_OUT_CLOSED
     } else {
         SEARCH_FAILED_CLOSED
-    }
-}
-
-/// CLOSED reason for a failed one-shot DB read (COUNT): a statement cancel gets
-/// the stable timeout reason; anything else keeps the raw error.
-pub(crate) fn db_read_closed_reason(e: &buzz_db::DbError) -> String {
-    if e.is_statement_cancelled() {
-        QUERY_TIMED_OUT_CLOSED.to_string()
-    } else {
-        format!("error: {e}")
     }
 }
 
@@ -2057,6 +2049,20 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    /// A failed COUNT read closes with the same fixed reason as a failed
+    /// history read: the driver message, which can quote a bound value,
+    /// stays in the relay log. Mutation: return the error text → RED.
+    #[test]
+    fn db_read_closed_reason_never_carries_driver_text() {
+        for e in [
+            buzz_db::DbError::Sqlx(sqlx::Error::Protocol("bound value 'secret'".into())),
+            buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut),
+            buzz_db::DbError::InvalidData("bound value 'secret'".into()),
+        ] {
+            assert_eq!(db_read_closed_reason(&e), DATABASE_ERROR_CLOSED, "{e:?}");
+        }
+    }
 
     fn lifecycle_conn() -> (
         ConnectionState,

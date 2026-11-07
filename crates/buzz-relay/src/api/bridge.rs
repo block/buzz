@@ -10561,10 +10561,13 @@ pub(crate) mod postgres_tests {
             ),
             "HTTP COUNT {arm} ordinary error"
         );
-        let frame = fx.ws_count(&filter).await;
-        assert!(
-            frame.starts_with(r#"["CLOSED","c","error: "#) && !frame.contains("query timed out"),
-            "WS COUNT {arm} ordinary error: {frame}"
+        assert_eq!(
+            fx.ws_count(&filter).await,
+            format!(
+                r#"["CLOSED","c","{}"]"#,
+                crate::handlers::req::DATABASE_ERROR_CLOSED
+            ),
+            "WS COUNT {arm} ordinary error"
         );
 
         fx.drop().await;
