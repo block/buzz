@@ -1279,14 +1279,16 @@ pub async fn get_active_membership_ids_bulk_read_at(
     )
     .await?;
     let read_at = std::time::Instant::now();
+    // One bounded read per pubkey, as in the single-user query: each user's
+    // scan stops at `limit` rows.
     let rows = sqlx::query(
-        "SELECT pubkey, channel_id FROM ( \
-           SELECT cm.pubkey, cm.channel_id, \
-                  ROW_NUMBER() OVER (PARTITION BY cm.pubkey) AS n \
-           FROM channel_members cm \
+        "SELECT u.pubkey, m.channel_id FROM unnest($2::bytea[]) AS u(pubkey) \
+         CROSS JOIN LATERAL ( \
+           SELECT cm.channel_id FROM channel_members cm \
            JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
-           WHERE cm.community_id = $1 AND cm.pubkey = ANY($2) AND cm.removed_at IS NULL \
-         ) m WHERE n <= $3",
+           WHERE cm.community_id = $1 AND cm.pubkey = u.pubkey AND cm.removed_at IS NULL \
+           LIMIT $3 \
+         ) m",
     )
     .bind(community_id.as_uuid())
     .bind(pubkeys)

@@ -354,12 +354,25 @@ async fn fan_out_bulk_read_matches_single_user_membership() {
         );
     }
 
+    // Two users above a positive cap each get exactly the cap: a cap on the
+    // whole batch would truncate one of them into false denials.
+    let heavy = [vec![5u8; 32], vec![6u8; 32]];
+    let three = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    sqlx::query("INSERT INTO channels (community_id, id, name, visibility, created_by) SELECT $1, id, id::text, 'private', $3 FROM unnest($2::uuid[]) AS id")
+        .bind(community.as_uuid()).bind(three).bind(&member).execute(&pool).await.unwrap();
+    for pubkey in &heavy {
+        sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey) SELECT $1, id, $3 FROM unnest($2::uuid[]) AS id")
+            .bind(community.as_uuid()).bind(three).bind(pubkey).execute(&pool).await.unwrap();
+    }
     let capped = state
         .db
-        .get_active_membership_ids_bulk_read_at(community, &[member.clone(), removed.clone()], 0)
+        .get_active_membership_ids_bulk_read_at(community, &heavy, 2)
         .await
         .unwrap();
-    assert!(capped.value.is_empty(), "the cap applies per user");
+    for pubkey in &heavy {
+        let rows = capped.value.iter().filter(|(pk, _)| pk == pubkey).count();
+        assert_eq!(rows, 2, "the cap applies per user");
+    }
 
     pool.close().await;
     let uncached = vec![9u8; 32];

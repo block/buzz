@@ -75,8 +75,11 @@ pub const WORKER_QUEUE: usize = 1024;
 /// of a few seconds, so such a stall delays deliveries instead of closing
 /// their recipients.
 pub const MAX_DELIVERY_DELAY: Duration = Duration::from_secs(30);
-/// The share of this node's connections the closer may close per second:
-/// 1%, so closing every connection takes at least 100 s.
+/// The share of this node's subscribed connections the closer may close per
+/// second, 1%, above a floor of one per [`CLOSE_TICK`]: `max(1% of
+/// connections, 10)` closes per second. From 1,000 connections up, closing
+/// every connection takes at least 100 s; a smaller node is bounded by the
+/// floor (150 connections close in about 15 s).
 const CLOSE_SHARE_PER_SECOND: f64 = 0.01;
 /// The closer's mean tick. Each tick is jittered by ±50%.
 const CLOSE_TICK: Duration = Duration::from_millis(100);
@@ -259,9 +262,10 @@ fn close_rate(connections: usize) -> f64 {
 }
 
 /// Fences connections that lost a live event at once, then closes them at
-/// [`CLOSE_SHARE_PER_SECOND`] of this node's connections, at least one per
-/// tick. Every node paces its own closes, so a loss that reaches every node
-/// still sends at most that share of the fleet to reconnect each second. The
+/// [`close_rate`]: [`CLOSE_SHARE_PER_SECOND`] of this node's connections, at
+/// least one per tick. Every node paces its own closes, so a loss that reaches
+/// every node sends at most that share of the fleet (or the floor, on nodes
+/// under 1,000 connections) to reconnect each second. The
 /// pending set holds each connection once and never more than this node's
 /// connections.
 #[derive(Default)]
@@ -497,6 +501,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn closer_closes_a_share_of_the_nodes_connections_per_second() {
         assert_eq!(close_rate(100), 10.0, "the floor: one per mean tick");
+        assert_eq!(
+            close_rate(150),
+            10.0,
+            "a small node is bounded by the floor"
+        );
         assert_eq!(close_rate(10_000), 100.0, "1% of the node per second");
 
         let state = crate::state::tests::test_state().await;
