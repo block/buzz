@@ -72,8 +72,8 @@ use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::api::git::manifest::{
-    pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS, MAX_MANIFEST_REFS,
-    PACK_COMPACTION_THRESHOLD,
+    next_published_at, pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS,
+    MAX_MANIFEST_REFS, PACK_COMPACTION_THRESHOLD,
 };
 use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
 use buzz_core::TenantContext;
@@ -239,6 +239,7 @@ impl ParentState {
                 refs: BTreeMap::new(),
                 packs: Vec::new(),
                 parent: None,
+                published_at: None,
             },
         }
     }
@@ -925,6 +926,7 @@ fn compose_after(
         refs,
         packs,
         parent: parent_digest,
+        published_at: None,
     }
 }
 
@@ -942,6 +944,7 @@ fn compose_compacted_after(
         refs,
         packs: compacted_pack_keys,
         parent: parent_digest,
+        published_at: None,
     }
 }
 
@@ -1167,6 +1170,16 @@ async fn cas_publish_inner(
             refs_after,
             new_pack_key,
         )
+    };
+    // Stamp the publication time on both the compacted and delta-pack paths.
+    // Strictly after the parent's stamp, so the derived kind:30618 events sort
+    // in manifest-chain order whichever instance and clock emit them.
+    let m_after = Manifest {
+        published_at: Some(next_published_at(
+            &parent_state.parent,
+            nostr::Timestamp::now().as_secs(),
+        )),
+        ..m_after
     };
 
     // **Pre-CAS validation** (Sami #2 / Max / Dawn): refuse to commit an
@@ -1700,6 +1713,8 @@ mod tests {
             refs: parent_refs,
             packs: vec![first_pack_key, second_pack_key],
             parent: None,
+            // Stamped by an instance whose clock runs far ahead of this one.
+            published_at: Some(4_000_000_000),
         };
         parent.validate().expect("parent manifest");
         let parent_key = store
@@ -1782,6 +1797,11 @@ mod tests {
         );
         assert!(success.manifest.refs.contains_key("refs/tags/v1"));
         assert_eq!(success.manifest.parent, Some(parent_digest));
+        assert_eq!(
+            success.manifest.published_at,
+            Some(4_000_000_001),
+            "the child's kind:30618 must sort after its parent's"
+        );
 
         let conflict = cas_publish_inner(
             &store,

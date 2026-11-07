@@ -531,6 +531,99 @@ async fn git_concurrent_push_one_wins_and_repo_recovers() {
     );
 }
 
+/// A non-atomic multi-ref push can be partially accepted: git applies each ref
+/// update independently and reports `ok` for the refs it applied. The relay
+/// must publish those refs, or the client records an update that never landed.
+#[tokio::test]
+#[ignore = "requires live relay + MinIO + git"]
+async fn git_partial_push_publishes_accepted_refs() {
+    use nostr::ToBech32;
+
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let owner_nsec = owner.secret_key().to_bech32().unwrap();
+    let repo = format!("e2e-git-partial-{}", std::process::id());
+    let s3 = GitS3Probe::from_env();
+
+    let channel = create_test_channel(&owner).await;
+    let announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &repo]).unwrap(),
+            Tag::parse(["name", "e2e partial push repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    post_event(&announce).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let tmp = tempdir_named("buzz-e2e-git-partial");
+    let url = format!("{}/git/{}/{}", relay_http_url(), owner_hex, repo);
+
+    git(&["clone", "--quiet", &url, "work"], tmp.path(), &owner_nsec);
+    let work = tmp.path().join("work");
+    std::fs::write(work.join("README.md"), "base\n").unwrap();
+    git(&["add", "."], &work, &owner_nsec);
+    git(&["commit", "--quiet", "-m", "base"], &work, &owner_nsec);
+    git(&["branch", "-M", "main"], &work, &owner_nsec);
+    git(
+        &["push", "--quiet", "origin", "main", "main:feature"],
+        &work,
+        &owner_nsec,
+    );
+    let base_pointer = s3.require_pointer(&owner_hex, &repo).await;
+
+    // `feature/x` conflicts with the existing `feature` branch, so git rejects
+    // it while applying the fast-forward of `main`.
+    std::fs::write(work.join("README.md"), "base\nnext\n").unwrap();
+    git(&["commit", "--quiet", "-am", "next"], &work, &owner_nsec);
+    let next_sha = git(&["rev-parse", "main"], &work, &owner_nsec)
+        .trim()
+        .to_string();
+    let out = git_status(
+        &["push", "origin", "main", "main:refs/heads/feature/x"],
+        &work,
+        &owner_nsec,
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "feature/x must be rejected: {stderr}"
+    );
+    assert!(
+        stderr.contains("main -> main"),
+        "client reports main as pushed: {stderr}"
+    );
+
+    let after_pointer = s3.require_pointer(&owner_hex, &repo).await;
+    assert_ne!(
+        after_pointer, base_pointer,
+        "the accepted main update must advance the S3 manifest pointer"
+    );
+    git(
+        &["clone", "--quiet", &url, "after"],
+        tmp.path(),
+        &owner_nsec,
+    );
+    let after = tmp.path().join("after");
+    assert_eq!(
+        git(&["rev-parse", "main"], &after, &owner_nsec).trim(),
+        next_sha,
+        "a fresh clone sees the main update the client was told landed"
+    );
+    let feature_x = git_status(
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/feature/x",
+        ],
+        &after,
+        &owner_nsec,
+    );
+    assert!(!feature_x.status.success(), "rejected feature/x is absent");
+}
+
 struct TempDir(PathBuf);
 impl TempDir {
     fn path(&self) -> &Path {
