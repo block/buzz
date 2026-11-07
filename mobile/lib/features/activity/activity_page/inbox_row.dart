@@ -1,6 +1,7 @@
 part of '../activity_page.dart';
 
 const _inboxSwipeActionInset = Grid.half;
+const _inboxReminderPreviewLength = 100;
 const _inboxSwipeActionLabelMinWidth = Grid.xxl;
 const _inboxSwipeLabelRevealWidth =
     _inboxSwipeActionLabelMinWidth + (_inboxSwipeActionInset * 2);
@@ -200,7 +201,7 @@ class _InboxRow extends HookConsumerWidget {
                     child: InkWell(
                       key: ValueKey('inbox-row-${item.id}'),
                       onTap: onTap,
-                      onLongPress: () => _showRowActions(context),
+                      onLongPress: () => _showRowActions(context, ref),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
                           horizontal: Grid.gutter,
@@ -335,42 +336,138 @@ class _InboxRow extends HookConsumerWidget {
     );
   }
 
-  void _showRowActions(BuildContext context) {
+  /// Thread root that Follow acts on: the conversation's root for thread
+  /// rows, the message itself for top-level rows (matching the message
+  /// actions sheet). Solo chats have no threads, and grouped DM conversations
+  /// have no single thread, so neither offers Follow.
+  String? get _followRootId {
+    if (channel?.isSolo ?? false) return null;
+    if (item.conversationId.startsWith('dm:')) return null;
+    return item.conversationId;
+  }
+
+  void _showRowActions(BuildContext context, WidgetRef ref) {
+    final followRootId = _followRootId;
+    final following =
+        followRootId != null &&
+        ref.read(threadFollowsProvider).isFollowing(followRootId);
+    final reminderChannelId = item.item.channelId;
+    final canRemind =
+        reminderChannelId != null && ref.read(reminderServiceProvider) != null;
+
     showBuzzModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: IconTheme.merge(
-            data: const IconThemeData(size: 18),
-            child: SheetActionSection(
-              children: [
-                ListTile(
-                  leading: Icon(isDone ? BuzzIcons.mail : BuzzIcons.mailOpen),
-                  title: Text(isDone ? 'Mark unread' : 'Mark as read'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    isDone ? onMarkUnread() : onMarkRead();
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(BuzzIcons.externalLink),
-                  title: const Text('Open conversation'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    onTap();
-                  },
-                ),
-              ],
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: IconTheme.merge(
+              data: const IconThemeData(size: 18),
+              child: SheetActionSection(
+                children: [
+                  ListTile(
+                    leading: Icon(isDone ? BuzzIcons.mail : BuzzIcons.mailOpen),
+                    title: Text(isDone ? 'Mark unread' : 'Mark as read'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      isDone ? onMarkUnread() : onMarkRead();
+                    },
+                  ),
+                  if (followRootId != null)
+                    ListTile(
+                      leading: Icon(
+                        following ? BuzzIcons.bellOff : BuzzIcons.bellRing,
+                      ),
+                      title: Text(
+                        following ? 'Unfollow thread' : 'Follow thread',
+                      ),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        final notifier = ref.read(
+                          threadFollowsProvider.notifier,
+                        );
+                        following
+                            ? notifier.unfollowThread(followRootId)
+                            : notifier.followThread(followRootId);
+                      },
+                    ),
+                  if (canRemind)
+                    ListTile(
+                      leading: const Icon(BuzzIcons.clock),
+                      title: const Text('Remind me'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        unawaited(
+                          _remindMe(context, ref, channelId: reminderChannelId),
+                        );
+                      },
+                    ),
+                  ListTile(
+                    leading: const Icon(BuzzIcons.externalLink),
+                    title: const Text('Open conversation'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      onTap();
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  /// Opens the reminder sheet for the row's message. An existing pending
+  /// reminder for that message is rescheduled rather than duplicated, so the
+  /// reminder list must be loaded first (it otherwise loads only with the
+  /// Reminders filter).
+  Future<void> _remindMe(
+    BuildContext context,
+    WidgetRef ref, {
+    required String channelId,
+  }) async {
+    final List<Reminder> reminders;
+    try {
+      reminders = await ref.read(remindersProvider.future);
+    } catch (error) {
+      debugPrint('[Inbox] loading reminders failed: $error');
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showFeedbackSnackBar(
+        const SnackBar(content: Text('Couldn’t load reminders. Try again.')),
+        kind: ToastKind.error,
+      );
+      return;
+    }
+    if (!context.mounted) return;
+    final existing = reminders
+        .where(
+          (reminder) =>
+              reminder.status == 'pending' &&
+              reminder.target?.eventId == item.item.id,
+        )
+        .firstOrNull;
+    showRemindMeLaterSheet(
+      context: context,
+      ref: ref,
+      target: ReminderTarget(
+        eventId: item.item.id,
+        channelId: channelId,
+        preview: item.item.displayContent.characters
+            .take(_inboxReminderPreviewLength)
+            .toString(),
+        authorPubkey: item.item.pubkey,
+      ),
+      existing: existing == null
+          ? null
+          : (dTag: existing.id, note: existing.note),
+      onSaved: () => unawaited(ref.read(remindersProvider.notifier).refresh()),
     );
   }
 }
