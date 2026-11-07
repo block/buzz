@@ -97,39 +97,44 @@ pub async fn handle_identity_archive_event(
         "identity archive request processed"
     );
 
-    if !changed {
-        return Ok(());
-    }
+    // Only emit a delta when the DB state actually transitioned — an idempotent
+    // retry (changed == false) has no state change to describe. The snapshot,
+    // however, is a pure function of the archived_identities table, so
+    // republish it on every request — including idempotent retries — so a
+    // snapshot publish that failed transiently self-heals without a destructive
+    // unarchive/archive cycle. Previously the early return gated both behind
+    // `changed`, making a lost snapshot permanently unrepairable.
+    if changed {
+        let publish_delta = if kind == KIND_IA_ARCHIVE_REQUEST {
+            publish_nipia_archived(
+                tenant,
+                state,
+                &target_hex,
+                consent_path.as_str(),
+                &actor_hex,
+                &request_event_id,
+                &event.content,
+                reason.as_deref(),
+                replaced_by.as_deref(),
+            )
+            .await
+        } else {
+            publish_nipia_unarchived(
+                tenant,
+                state,
+                &target_hex,
+                consent_path.as_str(),
+                &actor_hex,
+                &request_event_id,
+                &event.content,
+                reason.as_deref(),
+            )
+            .await
+        };
 
-    let publish_delta = if kind == KIND_IA_ARCHIVE_REQUEST {
-        publish_nipia_archived(
-            tenant,
-            state,
-            &target_hex,
-            consent_path.as_str(),
-            &actor_hex,
-            &request_event_id,
-            &event.content,
-            reason.as_deref(),
-            replaced_by.as_deref(),
-        )
-        .await
-    } else {
-        publish_nipia_unarchived(
-            tenant,
-            state,
-            &target_hex,
-            consent_path.as_str(),
-            &actor_hex,
-            &request_event_id,
-            &event.content,
-            reason.as_deref(),
-        )
-        .await
-    };
-
-    if let Err(e) = publish_delta {
-        warn!(error = %e, "failed to publish NIP-IA delta");
+        if let Err(e) = publish_delta {
+            warn!(error = %e, "failed to publish NIP-IA delta");
+        }
     }
     if let Err(e) = publish_nipia_archival_list(tenant, state).await {
         warn!(error = %e, "failed to publish NIP-IA archival list");
