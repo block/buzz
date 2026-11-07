@@ -423,8 +423,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         archived_identity_production
             .matches("WriterOperation::EventWrite")
             .count(),
-        4,
-        "all four archived identity operations must be attributed to event writes"
+        5,
+        "all five archived identity operations must be attributed to event writes"
     );
     assert!(!archived_identity_production.contains("fetch_optional(pool)"));
     assert!(!archived_identity_production.contains("fetch_all(pool)"));
