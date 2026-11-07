@@ -113,6 +113,7 @@ export function markdownPropsAreEqual(
     prev.interactive === next.interactive &&
     prev.blockCode === next.blockCode &&
     prev.mediaInset === next.mediaInset &&
+    prev.messageId === next.messageId &&
     shallowRecordEqual(
       prev.agentMentionPubkeysByName,
       next.agentMentionPubkeysByName,

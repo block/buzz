@@ -361,6 +361,7 @@ class _MessageBubble extends HookConsumerWidget {
                                     child: MessageContent(
                                       key: swipeContentKey,
                                       content: message.content,
+                                      messageId: message.id,
                                       bubble: true,
                                       hasReactions:
                                           message.reactions.isNotEmpty,

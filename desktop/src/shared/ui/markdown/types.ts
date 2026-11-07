@@ -42,6 +42,8 @@ export type MarkdownRuntime = {
   /** Inline content supplied to the first prose-capable Markdown block. */
   leadingInlineContent?: React.ReactNode;
   mentionPubkeysByName?: Record<string, string>;
+  /** Message identity; keys reader-local UI state such as open sections. */
+  messageId?: string;
   onOpenChannel: (channelId: string) => void;
   /** Navigate to a Buzz git entity (`buzz://pr|issue|repo` deep link). */
   onOpenEntityLink: (link: ParsedEntityLink) => void;
