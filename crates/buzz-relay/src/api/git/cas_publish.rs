@@ -983,7 +983,7 @@ fn record_compaction(
 /// `parent_state` you pass in must be the same one the workspace was
 /// hydrated from. Concretely: `hydrate::hydrate_for_write(store, ctx, owner,
 /// repo)` returns `(HydratedRepo, ParentState)` from a single pointer
-/// observation → `install_hook(repo.path())` → run `receive-pack`
+/// observation → `install_hook(repo.path(), ..)` → run `receive-pack`
 /// against the workspace → call this with the **same `parent_state`**.
 /// The CAS predicate is `parent_state.if_match`, so a concurrent writer
 /// that advanced the pointer between hydrate and CAS reliably surfaces
