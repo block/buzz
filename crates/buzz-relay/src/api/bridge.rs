@@ -711,7 +711,7 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 // Nostr filter JSON. nostr::Filter silently drops unknown fields during
 // deserialization, so we extract them from the raw JSON Value first.
 
-const BRIDGE_FEED_MAX_LIMIT: i64 = 100;
+const BRIDGE_FEED_MAX_LIMIT: u32 = 100;
 const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
 
 /// The `before_id` extension field, with "present but malformed" kept distinct
@@ -1064,11 +1064,12 @@ async fn handle_channel_window_filter(
         }
     };
 
-    let limit = filter
-        .limit
-        .map(|l| (l as u32).min(BRIDGE_WINDOW_MAX_LIMIT))
-        .unwrap_or(BRIDGE_WINDOW_DEFAULT_LIMIT)
-        .max(1);
+    let limit = buzz_core::filter::clamp_limit(
+        filter.limit,
+        BRIDGE_WINDOW_DEFAULT_LIMIT,
+        BRIDGE_WINDOW_MAX_LIMIT,
+    )
+    .max(1);
     let kind_filter: Option<Vec<u32>> = filter
         .kinds
         .as_ref()
@@ -1911,10 +1912,11 @@ async fn query_member_events(
             None => continue,
         };
 
-        let limit = filter
-            .limit
-            .map(|l| (l as i64).min(BRIDGE_FEED_MAX_LIMIT))
-            .unwrap_or(20);
+        let limit = i64::from(buzz_core::filter::clamp_limit(
+            filter.limit,
+            20,
+            BRIDGE_FEED_MAX_LIMIT,
+        ));
         let since = filter
             .since
             .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
@@ -2029,10 +2031,7 @@ async fn query_member_events(
             }
         }
 
-        let limit = filter
-            .limit
-            .unwrap_or(100)
-            .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
+        let limit = buzz_core::filter::clamp_limit(filter.limit, 100, BRIDGE_THREAD_MAX_LIMIT);
         let thread_cursor = extract_thread_cursor(raw);
         let thread_replies = state
             .db
@@ -2728,7 +2727,7 @@ async fn handle_bridge_search(
             _ => continue,
         };
 
-        let limit = filter.limit.unwrap_or(100).min(500) as u32;
+        let limit = buzz_core::filter::clamp_limit(filter.limit, 100, 500);
         if limit == 0 {
             continue;
         }
