@@ -405,12 +405,12 @@ impl ChannelType {
     }
 
     /// Visibility of a new channel of this type when its create event has no
-    /// `visibility` tag. A system channel holds access-control data, so it is
-    /// private unless its creator asks for open.
+    /// `visibility` tag. DMs are private. A system channel holds access-control
+    /// data, so it is private unless its creator asks for open.
     pub fn default_visibility(&self) -> ChannelVisibility {
         match self {
-            Self::System => ChannelVisibility::Private,
-            Self::Stream | Self::Forum | Self::Dm | Self::Workflow => ChannelVisibility::Open,
+            Self::Dm | Self::System => ChannelVisibility::Private,
+            Self::Stream | Self::Forum | Self::Workflow => ChannelVisibility::Open,
         }
     }
 }
@@ -550,8 +550,26 @@ mod tests {
     use super::{
         canonical_channel_name, channel_name_error, channel_type_from_group_state_tags,
         group_state_identity_tags, parse_channel_labels, ChannelJoinRole, ChannelLabelError,
-        ChannelType, MemberRole, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
+        ChannelType, ChannelVisibility, MemberRole, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS,
+        RESERVED_CHANNEL_LABELS,
     };
+
+    #[test]
+    fn dm_visibility_defaults_private_without_changing_other_channel_types() {
+        for (channel_type, visibility) in [
+            (ChannelType::Dm, ChannelVisibility::Private),
+            (ChannelType::System, ChannelVisibility::Private),
+            (ChannelType::Stream, ChannelVisibility::Open),
+            (ChannelType::Forum, ChannelVisibility::Open),
+            (ChannelType::Workflow, ChannelVisibility::Open),
+        ] {
+            assert_eq!(
+                channel_type.default_visibility(),
+                visibility,
+                "{channel_type}"
+            );
+        }
+    }
 
     #[test]
     fn channel_name_error_matches_the_column_limit() {
