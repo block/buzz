@@ -26,6 +26,8 @@ mod deletion_postgres_tests;
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
+/// Shared `created_at` freshness (clock-skew) checks.
+pub(crate) mod freshness;
 #[cfg(test)]
 pub(crate) mod group_state_postgres_tests;
 /// NIP-IA identity archive request handler (kinds 9035–9036).
