@@ -1094,3 +1094,52 @@ test("implicit prefix removal uses the present exact label rather than a stale a
   act(() => result.current.removeAddressedAgent(key));
   assert.equal(text, "hello");
 });
+
+test("always-address path passes persist:true into onAddressAgentMention", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const addressed = [];
+  const text = "@";
+  const mentions = {
+    cancelMentionAutocomplete: () => {},
+    getDraftMentionRefs: () => [],
+    getMentionDisplayName: () => "Agent Ada",
+    isInlineMentionSelection: () => false,
+    isMentionOpen: true,
+    openMentionPicker: () => {},
+    registerMentionPubkey: () => {},
+    mentionStartIndex: text.lastIndexOf("@"),
+  };
+  const audience = {
+    pubkeys: [],
+    addPubkey: () => {},
+  };
+  const richText = {
+    getPlainTextAndCursor: () => ({ text, cursor: text.length }),
+  };
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: () => {},
+      audience,
+      audienceScope: "channel-scope",
+      mentions,
+      onAddressAgentMention: (suggestion, options) =>
+        addressed.push({ suggestion, options }),
+      onPulseAddressLock: () => {},
+      richText,
+    }),
+  );
+
+  act(() => {
+    result.current.toggleAlwaysAddressAgent({
+      pubkey: "agent-pubkey",
+      displayName: "Agent Ada",
+      isAgent: true,
+    });
+  });
+
+  assert.equal(addressed.length, 1);
+  assert.deepEqual(addressed[0].options, { persist: true });
+});
