@@ -1,0 +1,77 @@
+import 'package:buzz/shared/http/app_http_client.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+void main() {
+  test('off iOS, clients come from http.Client()', () {
+    final mock = MockClient((_) async => http.Response('', 200));
+    for (final traffic in HttpTraffic.values) {
+      expect(
+        http.runWithClient(() => newAppHttpClient(traffic), () => mock),
+        same(mock),
+      );
+    }
+  });
+
+  test('closing a shared-session handle leaves the session usable', () async {
+    var sessionClosed = false;
+    final session = _ClosingMock(
+      (_) async => http.Response('ok', 200),
+      onClose: () => sessionClosed = true,
+    );
+    final first = SharedSessionClient(session);
+    final second = SharedSessionClient(session);
+
+    first.close();
+
+    expect(sessionClosed, isFalse);
+    expect((await second.get(Uri.parse('https://relay.example/'))).body, 'ok');
+  });
+
+  test('cleartext requests use the handle\'s own client', () async {
+    final sessionUrls = <Uri>[];
+    final cleartextUrls = <Uri>[];
+    var cleartextClosed = false;
+    final client = SharedSessionClient(
+      MockClient((request) async {
+        sessionUrls.add(request.url);
+        return http.Response('', 200);
+      }),
+      cleartext: () => _ClosingMock((request) async {
+        cleartextUrls.add(request.url);
+        return http.Response('', 200);
+      }, onClose: () => cleartextClosed = true),
+    );
+
+    await client.get(Uri.parse('https://relay.example/a'));
+    await client.get(Uri.parse('http://icons.example/b'));
+    client.close();
+
+    expect(sessionUrls, [Uri.parse('https://relay.example/a')]);
+    expect(cleartextUrls, [Uri.parse('http://icons.example/b')]);
+    expect(cleartextClosed, isTrue);
+  });
+
+  test('URLSession error codes map to user-facing failure kinds', () {
+    expect(urlErrorFailure(-1009), TransportFailure.unreachable);
+    expect(urlErrorFailure(-1004), TransportFailure.unreachable);
+    expect(urlErrorFailure(-1001), TransportFailure.timedOut);
+    expect(urlErrorFailure(-1200), TransportFailure.insecure);
+    expect(urlErrorFailure(-1202), TransportFailure.insecure);
+    expect(urlErrorFailure(-999), isNull);
+    expect(urlSessionFailure(http.ClientException('offline')), isNull);
+  });
+}
+
+class _ClosingMock extends MockClient {
+  _ClosingMock(super.fn, {required this.onClose});
+
+  final void Function() onClose;
+
+  @override
+  void close() {
+    onClose();
+    super.close();
+  }
+}

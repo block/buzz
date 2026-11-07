@@ -9,10 +9,10 @@ environment:
   sdk: ^3.11.4
 
 dependencies:
-  code_assets: ^1.0.0
+  code_assets: ^1.2.0
   ffi: ^2.2.0
-  hooks: ^1.0.2
-  native_toolchain_c: ^0.17.6
+  hooks: ^2.0.0
+  native_toolchain_c: ^0.19.1
 
 dev_dependencies:
   test: ^1.26.0
