@@ -99,6 +99,8 @@ class HomePage extends HookConsumerWidget {
     );
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
+      messagesActionsWidth:
+          2 * (defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48) + Grid.xs,
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           // An internal build reaches only its organization's community.
