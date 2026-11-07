@@ -1,8 +1,11 @@
 import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
+
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
+
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -36,6 +39,7 @@ import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
+import 'message_content/markdown_tables.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -298,10 +302,8 @@ class MessageContent extends HookConsumerWidget {
         ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
-    // gpt_markdown has no backslash escapes, so hold escaped characters as
-    // stand-ins that _MarkdownEscapeMd and the link builders restore.
     final markdownContent = useMemoized(
-      () => shieldMarkdownProseEscapes(galleryText),
+      () => separateMarkdownTables(escapeMarkdownMathDelimiters(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -339,8 +341,8 @@ class MessageContent extends HookConsumerWidget {
 
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
-      // so the gpt_markdown combined regex can match multi-word names
-      // even when caseSensitive is not preserved.
+      // so _MentionMd's pattern matches multi-word names as one token, in
+      // the bound name's case.
       // Skip content inside backticks to avoid altering inline code.
       final mentionParts = markdownContent.split('`');
       final mentionBuf = StringBuffer();
@@ -362,17 +364,10 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write(segment);
         }
       }
-      var result = mentionBuf.toString();
-
-      // Ensure channel links at the very start of content don't get
-      // swallowed by markdown processing.
-      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
-        result = '\u200B$result';
-      }
-      return result;
+      return mentionBuf.toString();
     }, [markdownContent, mentionPresentationKey]);
 
-    final inlineComponents = _useMessageInlineComponents(
+    final inlinePatterns = _useMessageInlinePatterns(
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -409,41 +404,41 @@ class MessageContent extends HookConsumerWidget {
             : null,
         followLinkColor: false,
         // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
+        // gpt_markdown autolinks by default, so both would run.
         autolink: false,
+        // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+        alertBuilder: (_, alert) => alert.asBlockQuote(),
         codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
           name: name,
           code: code,
           bubble: bubble,
           ink: bubble && ownMessage ? ownTextColor : null,
         ),
-        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
-          final url = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildLink(
-            context,
+        // Same widget-shaped link as before: chips, media links and taps
+        // are handled in _buildLink, so the package's own tap is not used.
+        inlineLinkBuilder: (link) => link.asWidgetSpan(
+          _buildLink(
+            link.context,
             ref,
-            linkText,
-            url,
-            imetaByUrl[url],
-            linkStyle,
+            TextSpan(children: link.labelSpans),
+            link.url,
+            imetaByUrl[link.url],
+            link.style,
             style,
             resolvedChannelTap,
             resolvedChannelNames,
-          );
-        },
-        imageBuilder: (context, shieldedUrl, _, _) {
-          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildMedia(
-            context,
-            imageUrl,
-            imetaByUrl[imageUrl],
-            onReply: onMediaReply == null ? null : mediaReply,
-            onMore: onMediaMore == null ? null : mediaMore,
-          );
-        },
+          ),
+        ),
+        imageBuilder: (context, imageUrl, _, _) => _buildMedia(
+          context,
+          imageUrl,
+          imetaByUrl[imageUrl],
+          onReply: onMediaReply == null ? null : mediaReply,
+          onMore: onMediaMore == null ? null : mediaMore,
+        ),
         textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
-        inlineComponents: inlineComponents,
+        inlinePatterns: inlinePatterns,
       ),
     );
     final segments = bubble
@@ -686,8 +681,13 @@ class MessageContent extends HookConsumerWidget {
 
     // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
     // instead of exposing a control whose tap cannot do anything.
+    // The container keeps the chip's label its own node; without it, the
+    // non-interactive chip merges into the surrounding paragraph's label.
     if (buzzLink is EntityDeepLink) {
-      return IgnorePointer(child: renderedLink);
+      return Semantics(
+        container: true,
+        child: IgnorePointer(child: renderedLink),
+      );
     }
 
     return GestureDetector(
@@ -1035,7 +1035,7 @@ class _MessageCodeBlock extends HookWidget {
   }
 }
 
-class _MentionMd extends InlineMd {
+class _MentionMd {
   final Map<String, Set<String>> bindings;
   final Map<String, String> displayLabels;
   final Map<String, String> mentionNames;
@@ -1061,28 +1061,24 @@ class _MentionMd extends InlineMd {
   /// placeholder nested inside the link's own placeholder does not paint on
   /// iOS — an authored `[@mention](url)` renders as nothing. Link resolution
   /// wins over token detection inside a label.
-  @override
-  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
+  late final InlinePattern pattern = InlinePattern(
+    pattern: _exp,
+    builder: (context, match, style) => span(context, match[0]!, style),
+  );
 
-  @override
   RegExp get exp => _exp;
 
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
+  InlineSpan span(BuildContext context, String text, TextStyle style) {
     final raw = exp.firstMatch(text.trim())?.group(0);
     if (raw == null) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
 
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
     final matches = bindings[name] ?? const <String>{};
     final pubkey = matches.length == 1 ? matches.single : null;
     if (bindings.containsKey(name) && matches.length != 1) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
     final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
         ? displayLabels[name]
@@ -1099,7 +1095,7 @@ class _MentionMd extends InlineMd {
       label: visibleLabel,
       semanticsLabel: fullLabel,
       isAgent: isAgent,
-      textStyle: config.style,
+      textStyle: style,
     );
 
     return WidgetSpan(

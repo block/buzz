@@ -52,3 +52,30 @@ const _marker = '\u2060';
 const _fullwidthOffset = 0xFEE0;
 // CommonMark: a backslash escapes any ASCII punctuation character.
 final _escape = RegExp(r'\\([!-/:-@\[-`{-~])|\u2060');
+
+/// [content] with `\[`, `\]`, `\(` and `\)` outside code written as numeric
+/// entities.
+///
+/// gpt_markdown reads those pairs as LaTeX delimiters, but in CommonMark, and
+/// on desktop, they are escapes for literal brackets and parentheses. The
+/// renderer decodes the entities as text, so `\[not a link\](x)` shows
+/// `[not a link](x)` instead of a formula. `\\` stays an escaped backslash.
+String escapeMarkdownMathDelimiters(String content) =>
+    _mathDelimiter.hasMatch(content)
+    ? mapMarkdownProse(
+        content,
+        (prose) => prose.replaceAllMapped(
+          _backslashPair,
+          (m) => switch (m[1]) {
+            '[' => '&#91;',
+            ']' => '&#93;',
+            '(' => '&#40;',
+            ')' => '&#41;',
+            _ => m[0]!,
+          },
+        ),
+      )
+    : content;
+
+final _mathDelimiter = RegExp(r'\\[\[\]()]');
+final _backslashPair = RegExp(r'\\(.)', dotAll: true);

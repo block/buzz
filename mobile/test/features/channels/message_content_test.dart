@@ -561,10 +561,10 @@ void main() {
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // A quoted fence ends with its quote, so later prose is parsed.
         ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
-        // Known limitation: gpt_markdown's raw-text fallback for this
-        // unclaimed strike skips inline components, so the stand-in shows.
-        // Its fullwidth form still reads as #.
-        ('~~a\nb \\#c~~', '\uFF03c'),
+        // An unclosed run ends with its paragraph, so later code stays code.
+        ('x ``` y\n- ``` p ```\n- q ``` \\[r\\] ``` s', r'\[r\]'),
+        // A strike that spans a line break still decodes its escapes.
+        ('~~a\nb \\#c~~', 'b #c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
@@ -591,7 +591,7 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
-          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          if (content.contains('\u2060')) continue;
           expect(
             find.textContaining(
               RegExp('\u2060|\\]\\(http'),
@@ -610,6 +610,37 @@ void main() {
       // Gallery labels drop their escapes too.
       expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
       semantics.dispose();
+    });
+
+    testWidgets('a quote opening with an alert marker stays a quote', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(const MessageContent(content: '> [!NOTE]\n> Builds run.')),
+      );
+      expect(find.textContaining('[!NOTE]', findRichText: true), findsWidgets);
+    });
+
+    testWidgets('a table typed under its caption renders as a table', (
+      tester,
+    ) async {
+      Finder pipes() => find.textContaining('|', findRichText: true);
+      for (final (content, table) in [
+        ('**Sizes:**\n| Folder | Size |\n|---|---|\n| `~/a` | 9 GB |', true),
+        ('Sizes:\n\n| Folder | Size |\n|---|---|\n| a | 9 GB |', true),
+        // As in GFM, a delimiter row with a different cell count does not
+        // open a table.
+        ('Sizes:\n| Folder | Size | Note |\n|---|---|\n| a | 9 GB |', false),
+        ('```\nSizes:\n| Folder | Size |\n|---|---|\n```', false),
+      ]) {
+        await tester.pumpWidget(_testable(MessageContent(content: content)));
+        expect(pipes(), table ? findsNothing : findsWidgets, reason: content);
+        expect(
+          find.textContaining('Folder', findRichText: true),
+          findsWidgets,
+          reason: content,
+        );
+      }
     });
 
     testWidgets('forwards text alignment to markdown rendering', (
@@ -3074,6 +3105,29 @@ Photos
         expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('general'), findsOneWidget);
         expect(find.text('#general'), findsNothing);
+      });
+
+      testWidgets('a channel that opens the message is a link, not a heading', (
+        tester,
+      ) async {
+        String? tappedId;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '#general is busy',
+              channelNames: const {'general': 'ch-id-1'},
+              onChannelTap: (id) => tappedId = id,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(
+          find.textContaining('is busy', findRichText: true),
+          findsWidgets,
+        );
+        await tester.tap(find.text('general'));
+        expect(tappedId, 'ch-id-1');
       });
 
       testWidgets('channel tap callback fires', (tester) async {

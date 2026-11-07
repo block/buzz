@@ -222,6 +222,21 @@ void main() {
         expected: '~~~\n$url\n~~~ x\n~~~\n[$url]($url)',
       ),
       (
+        name: 'unmatched backtick does not pair across a block quote',
+        input: 'plain `\n> $url `code`',
+        expected: 'plain `\n> [$url]($url) `code`',
+      ),
+      (
+        name: 'unmatched backtick does not pair into a nested quote',
+        input: '> plain `\n> > $url `code`',
+        expected: '> plain `\n> > [$url]($url) `code`',
+      ),
+      (
+        name: 'quoted code span continues on the next quoted line',
+        input: '> `$url\n> more` $url',
+        expected: '> `$url\n> more` [$url]($url)',
+      ),
+      (
         name: 'unclosed backticks remain prose',
         input: '$url then `$url',
         expected: '[$url]($url) then `[$url]($url)',
