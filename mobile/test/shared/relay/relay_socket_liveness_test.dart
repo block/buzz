@@ -305,4 +305,28 @@ void main() {
       await sink.close(force: true);
     },
   );
+
+  test('upgrades name the app and its version', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final agents = <String?>[];
+    server.listen((request) async {
+      agents.add(request.headers.value(HttpHeaders.userAgentHeader));
+      final ws = await WebSocketTransformer.upgrade(request);
+      ws.listen((_) {}, onError: (_) {}, onDone: () {});
+    });
+    setRelayUserAgent('1.2.3');
+    for (final headers in [
+      <String, String>{},
+      {'Nostr-Federated-Identity': 'Bearer synthetic'},
+    ]) {
+      final socket = await openRelayWebSocket(
+        Uri.parse('ws://127.0.0.1:${server.port}'),
+        headers: headers,
+        pingInterval: const Duration(seconds: 30),
+      );
+      await socket.close();
+    }
+    expect(agents, ['Buzz-Mobile/1.2.3', 'Buzz-Mobile/1.2.3']);
+    await server.close(force: true);
+  });
 }
