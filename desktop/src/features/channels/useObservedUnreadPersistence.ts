@@ -34,7 +34,7 @@ export type ObservedUnreadPersistence = {
     scope: string,
     channelId?: string,
     event?: ObservedUnreadEvent,
-  ) => void;
+  ) => boolean;
   removeChannel: (channelId: string) => void;
   updateMembership: (kind: string, value: string, present: boolean) => void;
   syncMarkers: (
@@ -99,6 +99,9 @@ export function useObservedUnreadPersistence(
   const nativeFailedRef = React.useRef(false);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueRef = React.useRef<QueuedObservedUnreadEvent[]>([]);
+  // Relay replay and catch-up can deliver the same event repeatedly. Keep only
+  // IDs here; the native store remains the authoritative unread read model.
+  const seenNativeEventIdsRef = React.useRef(new Set<string>());
   const pendingMarkersRef = React.useRef(
     new Map<
       string,
@@ -435,6 +438,7 @@ export function useObservedUnreadPersistence(
     flushObservedUnreadWrite(persistRefs.current);
     nativeRef.current = null;
     nativeFailedRef.current = false;
+    seenNativeEventIdsRef.current.clear();
     projectionsRef.current = new Map();
     observedUnreadEventsByChannelRef.current = new Map();
     latestByChannelRef.current = new Map();
@@ -545,8 +549,15 @@ export function useObservedUnreadPersistence(
 
   const schedule = React.useCallback(
     (scope: string, channelId?: string, event?: ObservedUnreadEvent) => {
-      if (scopeLoadedRef.current !== scope) return;
+      if (scopeLoadedRef.current !== scope) return false;
       if (nativeRef.current && channelId && event) {
+        const seen = seenNativeEventIdsRef.current;
+        if (seen.has(event.id)) return false;
+        seen.add(event.id);
+        if (seen.size > 5_000) {
+          const oldest = seen.values().next().value;
+          if (oldest !== undefined) seen.delete(oldest);
+        }
         queueRef.current.push({ scope, event: { channelId, ...event } });
         if (timerRef.current !== null) clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => {
@@ -554,6 +565,7 @@ export function useObservedUnreadPersistence(
           flushNative();
         }, 1_000);
       } else scheduleObservedUnreadWrite(scope, persistRefs.current);
+      return true;
     },
     [flushNative],
   );

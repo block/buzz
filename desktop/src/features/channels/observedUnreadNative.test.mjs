@@ -799,6 +799,49 @@ test("matrix: an ingested event reaches the projection the badge reads", async (
   }
 });
 
+test("native relay replay does not write or notify twice for one event", async () => {
+  installFreshStorage();
+  let harness;
+  const rig = installNativeRig();
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: "pk-replay-dedup" },
+      makeRefs(),
+    );
+    await settle();
+    const event = makeObservedEvent({ id: "replayed-event", createdAt: NOW_S });
+    assert.equal(
+      harness.api.schedule(harness.api.currentScope, "ch", event),
+      true,
+    );
+    assert.equal(
+      harness.api.schedule(harness.api.currentScope, "ch", event),
+      false,
+    );
+    await act(async () => {
+      globalThis.dispatchEvent({ type: "pagehide" });
+    });
+    await settle();
+    assert.equal(rig.requests("observed_unread_ingest").length, 1);
+    assert.equal(
+      harness.api.schedule(harness.api.currentScope, "ch", event),
+      false,
+      "a replay after the first native ack must also be ignored",
+    );
+    assert.equal(rig.requests("observed_unread_ingest").length, 1);
+    await harness.render({ ...DEFAULT_PROPS, pubkey: "pk-replay-dedup-b" });
+    await settle();
+    assert.equal(
+      harness.api.schedule(harness.api.currentScope, "ch", event),
+      true,
+      "the same event ID may be ingested in a different scope",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
 test("matrix: a rebuilt store generation is reopened instead of wedging on the old revision", async () => {
   installFreshStorage();
   let harness;
