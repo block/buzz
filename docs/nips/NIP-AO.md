@@ -297,4 +297,4 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
 
 ## Reference Implementation
 
-[block/sprout PR #421](https://github.com/block/sprout/pull/421)
+[block/buzz PR #421](https://github.com/block/buzz/pull/421)
