@@ -42,8 +42,6 @@ Future<void> confirmOrganizationSignOut(
     // End the session first: a session that could not be cleared would be
     // restored at the next launch, so the community stays until it is.
     await signIn.signOut();
-    final failure = signIn.failure;
-    if (failure != null) throw failure;
     await ref
         .read(communityListProvider.notifier)
         .removeCommunity(community.id);

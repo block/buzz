@@ -271,9 +271,14 @@ void main() {
         ),
         reconnect: () async {},
       );
-      // The landing signs out while browser setup still delays the restore.
+      // Sign out twice while browser setup still delays the restore. Each
+      // failed clear is reported to its own caller, including the attempt
+      // the second one superseded.
       final initialized = signIn.initialize();
-      await signIn.signOut();
+      final first = signIn.signOut();
+      final second = signIn.signOut();
+      await expectLater(first, throwsA(AccountFailure.storage));
+      await expectLater(second, throwsA(AccountFailure.storage));
       browserReady.complete();
       await initialized;
       expect(signIn.account.account, isNotNull);
