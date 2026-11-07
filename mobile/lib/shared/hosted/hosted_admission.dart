@@ -162,6 +162,7 @@ class HostedAdmission {
     try {
       socket.headers = await relayAuth.headers(
         RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
+        fresh: true,
       );
       await socket.connect().timeout(const Duration(seconds: 30));
       if (socket.state != SocketState.connected) throw AccountFailure.denied;
