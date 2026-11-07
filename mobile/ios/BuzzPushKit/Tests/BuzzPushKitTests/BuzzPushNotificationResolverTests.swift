@@ -1206,27 +1206,24 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       session: URLSession(configuration: configuration), loadSession: { organization },
       loadHostedSession: { sharedHosted }, now: { clock })
     let issued = "hosted.payload.signature"
+    let enforcing: Set<String> = ["team.communities.example", "pending.communities.example"]
     var issuedRelays: [String] = []
-    var identityChecks = 0
+    var builderlabCalls = 0
     var boundPubkey: String?
     var relayAssertions: [String: [String?]] = [:]
     URLProtocolStub.handler = { request in
       let body = Self.body(of: request)
       if request.url?.host == "app.example" {
+        builderlabCalls += 1
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-BB-Session-Credential"), "hosted-credential")
         if request.url?.path == "/api/goose/v1/buzz/nostr-identities/current" {
-          identityChecks += 1
           let identity: Any = boundPubkey.map { ["pubkey_hex": $0] } ?? NSNull()
           return Self.response(request, status: 200,
             data: try JSONSerialization.data(withJSONObject: ["identity": identity]))
         }
         XCTAssertEqual(request.url?.path, "/api/goose/v1/buzz/identity/assertions")
         let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let relay = try XCTUnwrap(fields["relay_url"] as? String)
-        issuedRelays.append(relay)
-        guard relay == "wss://team.communities.example" else {
-          return Self.response(request, status: 403, data: Data())
-        }
+        issuedRelays.append(try XCTUnwrap(fields["relay_url"] as? String))
         return Self.response(request, status: 200, data: try JSONSerialization.data(withJSONObject: [
           "assertion": issued, "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now + 300,
         ]))
@@ -1236,60 +1233,69 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       let host = try XCTUnwrap(request.url?.host)
       let assertion = request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
       relayAssertions[host, default: []].append(assertion)
-      if host == "team.communities.example", assertion != "Bearer \(issued)" {
-        return Self.response(request, status: 401, data: Data())
+      if enforcing.contains(host), assertion != "Bearer \(issued)" {
+        // The relay's NIP-FI challenge for missing evidence.
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 401, httpVersion: "HTTP/1.1",
+          headerFields: ["WWW-Authenticate": "Nostr"])!
+        return (response, Data())
       }
       let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
       let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
       return Self.response(request, status: 200,
         data: try JSONEncoder().encode(kinds.contains(9) ? [message] : []))
     }
-    func notify(_ relayUrl: String) throws -> BuzzPushNotificationResolver {
+    func notify(_ relayUrl: String, delivers: Bool = true) throws -> BuzzPushNotificationResolver {
       let resolver = makeResolver(
         communitiesData: try snapshotData([community(relayUrl: relayUrl)]),
         now: clock, assertionIssuer: issuer)
-      XCTAssertEqual(resolve(resolver)?.body, "Hosted hello", relayUrl)
+      let body = resolve(resolver)?.body
+      if delivers { XCTAssertEqual(body, "Hosted hello", relayUrl) } else { XCTAssertNotEqual(body, "Hosted hello", relayUrl) }
       return resolver
     }
 
+    // A community that doesn't enforce NIP-FI never costs a Builderlab call.
+    _ = try notify("wss://open.communities.example")
+    _ = try notify("wss://open.communities.example")
+    XCTAssertEqual(builderlabCalls, 0)
+    XCTAssertTrue(relayAssertions["open.communities.example"]?.allSatisfy { $0 == nil } == true)
+
     // Issuance can bind the account's first identity, which only the app chooses: while the
-    // account is unbound, or bound to another key, the extension never asks the issuer.
-    _ = try notify("wss://pending.communities.example")
+    // account is unbound, or bound to another key, the extension never asks the issuer, and
+    // its refusal stands until it lapses.
+    _ = try notify("wss://pending.communities.example", delivers: false)
+    _ = try notify("wss://pending.communities.example", delivers: false)
+    XCTAssertEqual(builderlabCalls, 1)
     boundPubkey = String(repeating: "f", count: 64)
     clock += BuzzRelayAssertionIssuer.refusalLifetime + 1
-    _ = try notify("wss://pending.communities.example")
-    XCTAssertEqual(identityChecks, 2)
+    _ = try notify("wss://pending.communities.example", delivers: false)
+    XCTAssertEqual(builderlabCalls, 2)
     XCTAssertTrue(issuedRelays.isEmpty)
-    XCTAssertTrue(relayAssertions["pending.communities.example"]?.allSatisfy { $0 == nil } == true)
     boundPubkey = Self.ownPubkey
     clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
 
-    // An enforcing hosted community gets the hosted assertion.
+    // An enforcing community challenges, then gets the hosted assertion on the retry.
     let enforced = try notify("wss://team.communities.example")
     XCTAssertTrue(enforced.isStillAuthorized())
     XCTAssertEqual(issuedRelays, ["wss://team.communities.example"])
-    XCTAssertTrue(relayAssertions["team.communities.example"]?.allSatisfy { $0 == "Bearer \(issued)" } == true)
-
-    // A refused community is queried without one, and its refusal stands until it lapses.
-    _ = try notify("wss://open.communities.example")
-    _ = try notify("wss://open.communities.example")
-    XCTAssertEqual(issuedRelays.filter { $0 == "wss://open.communities.example" }.count, 1)
-    clock += BuzzRelayAssertionIssuer.refusalLifetime + 1
-    _ = try notify("wss://open.communities.example")
-    XCTAssertEqual(issuedRelays.filter { $0 == "wss://open.communities.example" }.count, 2)
-    XCTAssertTrue(relayAssertions["open.communities.example"]?.allSatisfy { $0 == nil } == true)
-    // A confirmed binding is checked once per session and key.
-    XCTAssertEqual(identityChecks, 3)
+    XCTAssertEqual(relayAssertions["team.communities.example"]?.first, .some(nil))
+    // Once challenged, the relay gets the reused assertion up front.
+    let before = relayAssertions["team.communities.example"]?.count ?? 0
+    _ = try notify("wss://team.communities.example")
+    XCTAssertEqual(issuedRelays.count, 1)
+    XCTAssertTrue(
+      relayAssertions["team.communities.example"]?.dropFirst(before).allSatisfy {
+        $0 == "Bearer \(issued)"
+      } == true)
 
     // Hosts outside the hosted community domain never reach the hosted issuer.
-    let before = issuedRelays.count
+    let calls = builderlabCalls
     for relayUrl in ["wss://communities.example", "wss://team.other.example", "wss://communities.example.evil"] {
       _ = try notify(relayUrl)
     }
-    XCTAssertEqual(issuedRelays.count, before)
+    XCTAssertEqual(builderlabCalls, calls)
 
     // Signing out of the hosted account revokes delivery of what its assertion fetched.
-    clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
     sharedHosted = nil
     XCTAssertFalse(enforced.isStillAuthorized())
   }

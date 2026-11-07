@@ -106,6 +106,8 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   private var refused: [String: Date] = [:]
   /// Hosted credential and key pairs the account is already bound to.
   private var bound: Set<String> = []
+  /// Hosted relays that have challenged for NIP-FI evidence in this process.
+  private var challengedRelays: Set<String> = []
 
   public init(
     session: URLSession,
@@ -138,11 +140,25 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     return nil
   }
 
+  /// Whether `response` is a relay's NIP-FI challenge: 401 with `WWW-Authenticate: Nostr`. A
+  /// rejected assertion is a 403 and never carries the challenge.
+  public static func isChallenge(_ response: URLResponse?) -> Bool {
+    guard let response = response as? HTTPURLResponse, response.statusCode == 401,
+      let challenge = response.value(forHTTPHeaderField: "WWW-Authenticate")
+    else { return false }
+    return challenge.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("nostr")
+  }
+
   /// Completes with the `Nostr-Federated-Identity` value for an organization or hosted relay, or
   /// nil when no shared session covers the relay or no assertion could be issued. A nil value for
   /// an enforcing relay leaves the relay to refuse the request.
+  ///
+  /// Hosted communities enforce NIP-FI one at a time and none need Builderlab until they do, so
+  /// a hosted relay gets an assertion only once it has `challenged` (answered a request with
+  /// [isChallenge]) in this process. Organization relays always get one.
   public func header(
-    relayURL: URL, privateKeyHex: String, completion: @escaping (BuzzRelayAssertion?) -> Void
+    relayURL: URL, privateKeyHex: String, challenged: Bool = false,
+    completion: @escaping (BuzzRelayAssertion?) -> Void
   ) {
     guard let organization = sessionProtecting(relayURL),
       let issuerURL = organization.assertionURL,
@@ -155,6 +171,16 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     }
     let pubkey = VerifiedNostrEvent.hex(pubkeyBytes)
     let relay = "wss://\(host)"
+    if organization.isHosted {
+      lock.lock()
+      if challenged { challengedRelays.insert(relay) }
+      let required = challengedRelays.contains(relay)
+      lock.unlock()
+      guard required else {
+        completion(nil)
+        return
+      }
+    }
     let cacheKey = "\(organization.origin)|\(relay)|\(pubkey)|\(organization.credential)"
     lock.lock()
     if let entry = cached[cacheKey], entry.expiry.timeIntervalSince(now()) > Self.reuseMargin {

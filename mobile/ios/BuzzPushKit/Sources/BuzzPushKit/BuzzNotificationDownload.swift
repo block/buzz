@@ -5,6 +5,8 @@ final class BuzzNotificationDownload: NSObject, URLSessionDataDelegate, @uncheck
   enum Failure: Error {
     case tooLarge
     case status(Int)
+    /// A 401 carrying `WWW-Authenticate: Nostr`: the relay requires NIP-FI evidence.
+    case challenged
     case empty, invalidResponse
   }
   private let maximumBytes: Int
@@ -38,7 +40,9 @@ final class BuzzNotificationDownload: NSObject, URLSessionDataDelegate, @uncheck
       return
     }
     guard (200..<300).contains(response.statusCode) else {
-      failure = Failure.status(response.statusCode)
+      failure =
+        BuzzRelayAssertionIssuer.isChallenge(response)
+        ? Failure.challenged : Failure.status(response.statusCode)
       completionHandler(.cancel)
       return
     }
