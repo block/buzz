@@ -433,12 +433,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     step.finish();
 
     // NIP-43: if membership enforcement is on, a valid owner pubkey is required.
-    // config.rs already strips invalid values with a warning; catch the resulting
-    // None here so we fail fast with a clear message rather than starting a relay
-    // that no one can administer.
+    // A malformed RELAY_OWNER_PUBKEY already fails in config.rs, so None here
+    // means unset: fail fast rather than start a relay no one can administer.
     if config.require_relay_membership && config.relay_owner_pubkey.is_none() {
         error!(
-            "BUZZ_REQUIRE_RELAY_MEMBERSHIP=true but RELAY_OWNER_PUBKEY is not set or invalid. \
+            "BUZZ_REQUIRE_RELAY_MEMBERSHIP=true but RELAY_OWNER_PUBKEY is not set. \
              Set RELAY_OWNER_PUBKEY to a valid 64-char hex pubkey."
         );
         return Err(anyhow::anyhow!(
