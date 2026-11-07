@@ -72,13 +72,14 @@ export function SoundPicker({
       setIsPlaying(false);
       return;
     }
-    const audio = playNotificationSound(value);
-    if (!audio) return;
-    audioRef.current = audio;
-    setIsPlaying(true);
-    const stop = () => setIsPlaying(false);
-    audio.addEventListener("ended", stop, { once: true });
-    audio.addEventListener("pause", stop, { once: true });
+    void playNotificationSound(value).then((audio) => {
+      if (!audio) return;
+      audioRef.current = audio;
+      setIsPlaying(true);
+      const stop = () => setIsPlaying(false);
+      audio.addEventListener("ended", stop, { once: true });
+      audio.addEventListener("pause", stop, { once: true });
+    });
   }
 
   return (
