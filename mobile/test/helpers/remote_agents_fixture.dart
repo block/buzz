@@ -42,6 +42,7 @@ class FakeRegistry extends BuilderlabAccountClient {
   ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
   bool ignoreModelUpdate = false;
+  bool ignoreInstructionsUpdate = false;
   List<Map<String, dynamic>> models = [
     {
       'id': 'test-model',
@@ -133,6 +134,18 @@ class FakeRegistry extends BuilderlabAccountClient {
                   'model_id': body['model_id'],
                   'reasoning_effort': body['reasoning_effort'],
                   'model_selection_status': 1,
+                }
+              else
+                row,
+          ];
+        }
+        if (body.containsKey('agent_instructions') && !ignoreInstructionsUpdate) {
+          listed = [
+            for (final row in listed)
+              if (row['agent_pubkey'] == body['agent_pubkey'])
+                {
+                  ...row,
+                  'agent_instructions': body['agent_instructions'],
                 }
               else
                 row,

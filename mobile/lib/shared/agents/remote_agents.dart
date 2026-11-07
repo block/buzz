@@ -565,6 +565,62 @@ class RemoteAgentController extends ChangeNotifier {
     }
   });
 
+  /// Saves instructions for an active agent owned by this account, then verifies readback.
+  Future<bool> updateInstructions({
+    required Community community,
+    required String pubkey,
+    required String instructions,
+    required bool Function() isCurrent,
+  }) => run(() async {
+    final subject = account.account?.subject;
+    void check() {
+      if (subject == null ||
+          account.account?.subject != subject ||
+          !isCurrent()) {
+        throw StateError('Community or account changed. Reopen Agents.');
+      }
+    }
+
+    check();
+    if (!HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl))) {
+      throw StateError('This community does not support remote agents.');
+    }
+    await ensureBinding();
+    check();
+    if (owner != community.pubkey) throw AccountIdentityFailure.mismatch;
+    if (!activeAgents.contains(pubkey)) {
+      throw StateError('Refresh Agents before updating instructions.');
+    }
+    final trimmed = instructions.trim();
+    if (trimmed.length > 20000) {
+      throw StateError('Use at most 20,000 characters for instructions.');
+    }
+    final result = await account.post('/v3/beekeeper/update-agent', {
+      'agent_pubkey': pubkey,
+      'agent_instructions': trimmed,
+    }, expectedSubject: subject);
+    check();
+    if (result['error'] != null) throw AccountFailure.rejected;
+    final readback = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    }, expectedSubject: subject);
+    check();
+    requireStatus(readback, 'SUCCESS', 1);
+    final rows = readback['agents'];
+    if (rows is! List) throw StateError('Invalid agent listing.');
+    agents = [
+      for (final row in rows) Map<String, dynamic>.from(row as Map),
+    ].where((row) => !deletedAgents.contains(row['agent_pubkey'])).toList();
+    final saved = agents
+        .where((row) => row['agent_pubkey'] == pubkey)
+        .firstOrNull;
+    if (saved?['agent_instructions'] != trimmed) {
+      throw StateError(
+        'The server has not confirmed updated instructions. Refresh and try again.',
+      );
+    }
+  });
+
   Future<void> _savePending(Map<String, dynamic> value) async {
     final scope = _storageScope;
     final prefs = await SharedPreferences.getInstance();
