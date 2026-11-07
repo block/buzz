@@ -133,12 +133,12 @@ pub async fn filter_fanout_by_access(
 }
 
 /// The result of the fan-out access gate.
-struct FanoutAccess {
+pub(crate) struct FanoutAccess {
     /// Recipients that may receive the event.
-    allowed: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    pub(crate) allowed: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     /// Recipients dropped because a visibility or membership lookup failed,
     /// not because they lack access.
-    unverified: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    pub(crate) unverified: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 }
 
 /// `filter_fanout_by_access`, also reporting the recipients it dropped
@@ -265,22 +265,32 @@ async fn check_fanout_access(
         }
     }
 
-    let mut allowed = Vec::with_capacity(matches.len());
+    // One membership read for every recipient the cache lacks, not one per
+    // recipient: each read would wait on the pool in turn.
+    let recipients: Vec<_> = matches
+        .into_iter()
+        .filter_map(|(conn_id, sub_id)| {
+            Some((
+                conn_id,
+                sub_id,
+                state.conn_manager.pubkey_for_conn(conn_id)?,
+            ))
+        })
+        .collect();
+    let members = state
+        .members_cached(
+            community_id,
+            channel_id,
+            recipients.iter().map(|(.., pubkey)| pubkey.clone()),
+        )
+        .await;
+    let mut allowed = Vec::with_capacity(recipients.len());
     let mut unverified = Vec::new();
-    for (conn_id, sub_id) in matches {
-        let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
-            continue;
-        };
-        match state
-            .is_member_cached(community_id, channel_id, &pubkey)
-            .await
-        {
-            Ok(true) => allowed.push((conn_id, sub_id)),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
-                unverified.push((conn_id, sub_id));
-            }
+    for (conn_id, sub_id, pubkey) in recipients {
+        if members.members.contains(&pubkey) {
+            allowed.push((conn_id, sub_id));
+        } else if members.unverified.contains(&pubkey) {
+            unverified.push((conn_id, sub_id));
         }
     }
     FanoutAccess {
@@ -289,17 +299,17 @@ async fn check_fanout_access(
     }
 }
 
-/// Pass fan-out matches through the access gate, and return the ones that
-/// receive the event itself. Syncs among the matches get its change signal
+/// Pass fan-out matches through the access gate. `allowed` is the matches
+/// that receive the event itself: syncs among them get its change signal
 /// instead (NIP-AR rule 5), and each fan-out path calls this, so none of them
-/// can skip a sync.
+/// can skip a sync. `unverified` is the matches the gate could not check.
 pub(crate) async fn route_fanout_matches(
     state: &AppState,
     community_id: CommunityId,
     stored: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     threaded: Option<&crate::state::ThreadedChannelVisibility>,
-) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+) -> FanoutAccess {
     state.artifact_syncs.signal_access_change(stored, &matches);
     let access = check_fanout_access(state, community_id, stored, matches, threaded).await;
     // A sync that the gate could not check loses this change, so its copy is
@@ -307,7 +317,10 @@ pub(crate) async fn route_fanout_matches(
     state
         .artifact_syncs
         .resync_matches(&access.unverified, "resync: access check failed");
-    state.artifact_syncs.divert(stored, access.allowed)
+    FanoutAccess {
+        allowed: state.artifact_syncs.divert(stored, access.allowed),
+        unverified: access.unverified,
+    }
 }
 
 /// Deliver one event to this relay's local subscribers through the access gate.
@@ -331,7 +344,9 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     stored: &StoredEvent,
 ) {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
-    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
+    let matches = route_fanout_matches(state, community_id, stored, matches, None)
+        .await
+        .allowed;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
         return;
@@ -408,24 +423,29 @@ pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> S
 }
 
 /// Deliver one Redis event that is not a local echo to this relay's local
-/// subscribers, through the access gate.
+/// subscribers, through the access gate. Returns the connections the gate
+/// could not check, which did not get the event.
 pub(crate) async fn deliver_pubsub_event(
     state: &Arc<AppState>,
     community_id: CommunityId,
     stored: &StoredEvent,
-) {
+) -> Vec<crate::subscription::ConnId> {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
-    let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
+    let FanoutAccess {
+        allowed: matches,
+        unverified,
+    } = route_fanout_matches(state, community_id, stored, matches, None).await;
+    let unverified = unverified.into_iter().map(|(conn_id, _)| conn_id).collect();
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
-        return;
+        return unverified;
     }
 
     let event_json = match serde_json::to_string(&stored.event) {
         Ok(json) => json,
         Err(e) => {
             tracing::error!("Failed to serialize event for multi-node fan-out: {e}");
-            return;
+            return unverified;
         }
     };
     let frames = fanout_frame_cache(
@@ -446,6 +466,7 @@ pub(crate) async fn deliver_pubsub_event(
             "multi-node fan-out: {drop_count} connection(s) dropped"
         );
     }
+    unverified
 }
 
 /// Schedule post-commit delivery/side effects for a stored event.
@@ -537,7 +558,8 @@ async fn dispatch_persistent_event_inner(
         matches,
         threaded_visibility.as_ref(),
     )
-    .await;
+    .await
+    .allowed;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,
