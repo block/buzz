@@ -2949,14 +2949,8 @@ pub async fn workflow_webhook(
             .unwrap_or_default(),
         ..Default::default()
     };
-    if let Some(Value::Object(ref map)) = body_json {
-        for (k, v) in map {
-            let val_str = match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            trigger_ctx.webhook_fields.insert(k.clone(), val_str);
-        }
+    if let Some(Value::Object(map)) = body_json {
+        trigger_ctx.extend_webhook_fields(map);
     }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 

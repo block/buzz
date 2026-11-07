@@ -134,6 +134,16 @@ async fn post_webhook(
     host: &str,
     secret: &str,
 ) -> (StatusCode, Value) {
+    post_webhook_with_body(state, workflow_id, host, secret, Bytes::new()).await
+}
+
+async fn post_webhook_with_body(
+    state: &Arc<AppState>,
+    workflow_id: Uuid,
+    host: &str,
+    secret: &str,
+    body: Bytes,
+) -> (StatusCode, Value) {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::HOST,
@@ -149,7 +159,7 @@ async fn post_webhook(
         Path(workflow_id.to_string()),
         Query(WebhookQuery { secret: None }),
         headers,
-        Bytes::new(),
+        body,
     )
     .await
     {
@@ -354,4 +364,61 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
         .execute(&admin_pool)
         .await
         .expect("drop restriction lookup failure schema");
+}
+
+/// PostgreSQL `jsonb` rejects `\u0000`; a webhook body field holding an
+/// escaped NUL must still create the run instead of failing the insert.
+#[tokio::test]
+#[ignore = "requires PostgreSQL and Redis"]
+async fn webhook_body_field_with_nul_creates_run() {
+    let pool = PgPool::connect(&database_url())
+        .await
+        .expect("connect to isolated PostgreSQL test database");
+    let db = buzz_db::Db::from_pool(pool.clone());
+
+    let community_id = Uuid::new_v4();
+    let host = format!("webhook-nul-{}.test", Uuid::new_v4().simple());
+    let owner_pubkey = [0x44; 32];
+    let workflow_id = Uuid::new_v4();
+    let secret = format!("webhook-secret-{}", Uuid::new_v4().simple());
+    seed_community(&pool, community_id, &host).await;
+    seed_webhook_workflow(
+        &pool,
+        WebhookWorkflowSeed {
+            community_id,
+            workflow_id,
+            channel_id: Uuid::new_v4(),
+            owner_pubkey: &owner_pubkey,
+            owner_role: "owner",
+            name: "nul-field-workflow",
+            secret: &secret,
+            steps: json!([{"id": "hold", "action": "delay", "duration": "1s"}]),
+        },
+    )
+    .await;
+
+    let (state, audit_shutdown) = app_state(db, &pool).await;
+    let (status, body) = post_webhook_with_body(
+        &state,
+        workflow_id,
+        &host,
+        &secret,
+        Bytes::from_static(br#"{"note": "a\u0000b"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "response: {body}");
+
+    let trigger_context: Value = sqlx::query_scalar(
+        "SELECT trigger_context FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2",
+    )
+    .bind(community_id)
+    .bind(workflow_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load run trigger context");
+    assert_eq!(trigger_context["webhook_fields"]["note"], "a\u{FFFD}b");
+
+    audit_shutdown
+        .drain(std::time::Duration::from_secs(1))
+        .await;
 }

@@ -61,6 +61,44 @@ impl TriggerContext {
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
         }
     }
+
+    /// Flatten a JSON object (webhook body, command payload) into
+    /// `webhook_fields`: strings verbatim, other values as compact JSON.
+    ///
+    /// U+0000 in keys and values becomes U+FFFD: the context is persisted as
+    /// `workflow_runs.trigger_context`, and PostgreSQL `jsonb` rejects `\u0000`.
+    pub fn extend_webhook_fields(&mut self, map: serde_json::Map<String, JsonValue>) {
+        for (key, value) in map {
+            let value = match value {
+                JsonValue::String(s) => s,
+                other => other.to_string(),
+            };
+            self.webhook_fields.insert(storable(key), storable(value));
+        }
+    }
+}
+
+/// Replace U+0000 with U+FFFD so an untrusted string can be persisted in run
+/// state: PostgreSQL `jsonb` rejects `\u0000` ("unsupported Unicode escape
+/// sequence"), which would fail the run's status update and strand it.
+/// U+FFFD matches how `String::from_utf8_lossy` already treats invalid UTF-8.
+fn storable(s: String) -> String {
+    if s.contains('\0') {
+        s.replace('\0', "\u{FFFD}")
+    } else {
+        s
+    }
+}
+
+/// Step output of `call_webhook`: the status and the body decoded lossily
+/// into a [`storable`] string, because the output lands in the run's
+/// `execution_trace`.
+#[cfg(any(feature = "reqwest", test))]
+pub(crate) fn webhook_output(status: u16, body: &[u8]) -> JsonValue {
+    serde_json::json!({
+        "status": status,
+        "body": storable(String::from_utf8_lossy(body).into_owned()),
+    })
 }
 
 /// Resolve `{{trigger.X}}` and `{{steps.ID.output.X}}` placeholders in a string.
@@ -953,12 +991,7 @@ async fn call_webhook_impl(
         }
     }
 
-    let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
-
-    Ok(serde_json::json!({
-        "status": status,
-        "body": body_text,
-    }))
+    Ok(webhook_output(status, &body_bytes))
 }
 
 /// Returns a shared `reqwest::Client` reused across all workflow HTTP calls.
@@ -1982,5 +2015,50 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    /// True if any string in `value` holds U+0000, which PostgreSQL `jsonb`
+    /// rejects as `\u0000`.
+    fn contains_nul(value: &JsonValue) -> bool {
+        match value {
+            JsonValue::String(s) => s.contains('\0'),
+            JsonValue::Array(items) => items.iter().any(contains_nul),
+            JsonValue::Object(map) => map.iter().any(|(k, v)| k.contains('\0') || contains_nul(v)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn webhook_output_replaces_nul_like_invalid_utf8() {
+        let trace = json!([{
+            "step_id": "hook",
+            "status": "completed",
+            "output": webhook_output(200, b"ok\0tail\xff"),
+        }]);
+        assert!(
+            !contains_nul(&trace),
+            "trace is not jsonb-storable: {trace}"
+        );
+        assert_eq!(trace[0]["output"]["body"], "ok\u{FFFD}tail\u{FFFD}");
+        assert_eq!(trace[0]["output"]["status"], 200);
+    }
+
+    #[test]
+    fn extend_webhook_fields_replaces_nul_in_keys_and_values() {
+        let body: JsonValue = serde_json::from_str(
+            r#"{"note": "a\u0000b", "k\u0000": 1, "nested": {"x": "\u0000"}}"#,
+        )
+        .unwrap();
+        let mut ctx = TriggerContext::default();
+        ctx.extend_webhook_fields(body.as_object().cloned().unwrap());
+        let stored = serde_json::to_value(&ctx).unwrap();
+        assert!(
+            !contains_nul(&stored),
+            "context is not jsonb-storable: {stored}"
+        );
+        assert_eq!(ctx.get_field("note"), Some("a\u{FFFD}b"));
+        assert_eq!(ctx.get_field("k\u{FFFD}"), Some("1"));
+        // Non-string values are stored as JSON text, where NUL is escaped.
+        assert_eq!(ctx.get_field("nested"), Some(r#"{"x":"\u0000"}"#));
     }
 }
