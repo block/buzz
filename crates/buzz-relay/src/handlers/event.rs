@@ -254,6 +254,9 @@ async fn check_fanout_access(
     match visibility {
         Ok(v) if v != "private" => return verified(matches),
         Ok(_) => {}
+        // A deleted channel grants no one access. That is an answer, not a
+        // failed check, so its recipients are not unverified.
+        Err(buzz_db::DbError::ChannelNotFound(_)) => return verified(Vec::new()),
         Err(e) => {
             // Fail closed: if we cannot determine visibility, do not leak a
             // possibly-private channel's events.

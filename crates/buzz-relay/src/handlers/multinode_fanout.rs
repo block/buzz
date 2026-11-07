@@ -731,6 +731,50 @@ mod tests {
         assert!(!cancel.is_cancelled());
     }
 
+    mod postgres_tests {
+        use super::*;
+
+        /// An event for a channel the database does not have (deleted, or
+        /// never created here) reaches no one, and is not retried: a missing
+        /// channel is an answer, not a failed check. Retrying it would hold
+        /// its worker until the deadline and then close its recipients.
+        /// Mutation: drop the `ChannelNotFound` arm in `check_fanout_access`
+        /// -> retried for 30 s and queued to close -> RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn event_for_a_missing_channel_is_denied_not_retried() {
+            let state = crate::state::tests::test_state().await;
+            let channel_id = Uuid::new_v4();
+            let (conn, mut frames, cancel) = subscriber(&state, STORED);
+            state.sub_registry.register(
+                conn,
+                "channel".to_string(),
+                vec![Filter::new().kind(Kind::Custom(STORED))],
+                Some(channel_id),
+            );
+            let closer = LagCloser::default();
+
+            let started = std::time::Instant::now();
+            deliver_or_lose(
+                &state,
+                &closer,
+                Queued::new(ChannelEvent {
+                    topic: EventTopic::Channel(channel_id),
+                    ..event(STORED, 0)
+                }),
+            )
+            .await;
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "not retried: {:?}",
+                started.elapsed()
+            );
+            assert!(frames.try_recv().is_err(), "no one has access");
+            assert!(closer.pending.lock().expect("pending").is_empty());
+            assert!(!cancel.is_cancelled());
+        }
+    }
+
     /// The deadline runs from Redis receipt: an event that already waited out
     /// its deadline in the broadcast before dispatch is lost, not delivered.
     #[tokio::test(start_paused = true)]
