@@ -35,7 +35,7 @@ use super::{
     known_acp_runtime, normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
     readiness::EffectiveHarnessDescriptor,
-    runtime::{resolve_session_title, SESSION_TITLE_ENV_VAR},
+    runtime::{mcp_command_for_agent, resolve_session_title, SESSION_TITLE_ENV_VAR},
     types::{AgentDefinition, ManagedAgentRecord, TeamRecord},
     AcpSessionPolicy, GlobalAgentConfig,
 };
@@ -197,10 +197,7 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
-            mcp_command: known_acp_runtime(&descriptor.command)
-                .and_then(|runtime| runtime.mcp_command)
-                .unwrap_or("")
-                .to_string(),
+            mcp_command: mcp_command_for_agent(&descriptor.command).to_string(),
             // Effort has ONE representation in the snapshot: `effort_level`
             // below, always holding the projected effective value. The keys
             // stripped here mirror EXACTLY what the launch projection suppressed
