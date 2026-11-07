@@ -90,32 +90,59 @@ public final class BuzzNotificationAvatarLoader {
       completion(.failure(BuzzNotificationCacheError.revoked))
       return
     }
-    do {
-      request.setValue(
-        try Self.authorization(url: url, key: key, account: scope.account),
-        forHTTPHeaderField: "Authorization")
-    } catch {
-      completion(.failure(error))
-      return
-    }
     guard let assertionIssuer, let relayURL = URL(string: scope.relayOrigin) else {
+      do {
+        request.setValue(
+          try Self.authorization(url: url, key: key, account: scope.account),
+          forHTTPHeaderField: "Authorization")
+      } catch {
+        completion(.failure(error))
+        return
+      }
       download(request, scope: scope, completion: completion)
       return
     }
-    // The signed request never follows a redirect, so the assertion stays on the relay.
-    let signed = request
-    assertionIssuer.header(relayURL: relayURL, privateKeyHex: key) { assertion in
+    // Each attempt is signed afresh. The signed request never follows a redirect, so the
+    // assertion stays on the relay.
+    func fetch(
+      _ assertion: BuzzRelayAssertion?, _ completion: @escaping (Result<Data, Error>) -> Void
+    ) {
       // The community may have been removed or its key changed while the assertion was issued.
       // Sending the signed request now would present revoked proofs to the relay.
       guard self.isCurrent(scope) else {
         completion(.failure(BuzzNotificationCacheError.revoked))
         return
       }
-      var request = signed
-      if let assertion {
-        request.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
+      var signed = request
+      do {
+        signed.setValue(
+          try Self.authorization(url: url, key: key, account: scope.account),
+          forHTTPHeaderField: "Authorization")
+      } catch {
+        completion(.failure(error))
+        return
       }
-      self.download(request, scope: scope, assertion: assertion, completion: completion)
+      if let assertion {
+        signed.setValue(assertion.header, forHTTPHeaderField: "Nostr-Federated-Identity")
+      }
+      self.download(signed, scope: scope, assertion: assertion, completion: completion)
+    }
+    assertionIssuer.header(relayURL: relayURL, privateKeyHex: key) { assertion in
+      fetch(assertion) { result in
+        // A hosted relay is tried without an assertion first, and asks for one by challenging.
+        guard assertion == nil, case .failure(BuzzNotificationDownload.Failure.challenged) = result
+        else {
+          completion(result)
+          return
+        }
+        assertionIssuer.header(relayURL: relayURL, privateKeyHex: key, challenged: true) { answer in
+          guard let answer else {
+            completion(result)
+            return
+          }
+          fetch(answer, completion)
+        }
+      }
     }
   }
 

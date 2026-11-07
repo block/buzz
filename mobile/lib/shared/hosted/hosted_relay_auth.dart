@@ -8,12 +8,25 @@ import '../relay/relay_provider.dart';
 import 'builderlab_account.dart';
 import 'account_identity_store.dart';
 import 'hosted_environment.dart';
+import 'nip_fi_discovery.dart';
 import 'organization_environment.dart';
 import 'organization_key_backup.dart';
 import '../push/push_bridge.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
-  final account = BuilderlabAccountClient();
+  final account = BuilderlabAccountClient(
+    // Hosted communities that enforce NIP-FI need the extension to mint too.
+    // A build without hosted relay auth still clears a copy an earlier build
+    // shared, so the extension cannot keep minting after sign-out.
+    onSessionChanged: (credential) => shareHostedSessionWithNotifications(
+      origin: HostedEnvironment.origin,
+      credential: HostedRelayAuth.configured && HostedEnvironment.enabled
+          ? credential
+          : null,
+      relayDomains: HostedEnvironment.authDomains,
+      communityDomain: HostedEnvironment.communitySuffix,
+    ),
+  );
   ref.onDispose(account.dispose);
   return account;
 });
@@ -62,17 +75,32 @@ final hostedHttpClientFactoryProvider = Provider<http.Client Function()>((ref) {
 
 /// The build's one Builderlab session, with a short-lived assertion for the
 /// current relay/key. A public build's hosted communities use [account] when
-/// [enabled]; an internal build's organization relays use [organization].
-/// Enable alongside backend issuance; self-hosted communities stay usable.
+/// [enabled] and their relay's NIP-FI discovery requires evidence; an internal
+/// build's organization relays always use [organization]. Enable alongside
+/// backend issuance; self-hosted communities stay usable.
 class HostedRelayAuth extends ChangeNotifier {
   HostedRelayAuth(
     this.account, {
     this.organization,
     this.organizationBackup,
     this.organizationRelay = OrganizationEnvironment.protects,
-    this.enabled = const bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH'),
+    this.enabled = configured,
     DateTime Function()? now,
-  }) : _now = now ?? DateTime.now;
+    NipFiRequirementFetch? discover,
+  }) : _now = now ?? DateTime.now,
+       _discover = discover ?? _fetchRequirement;
+
+  static Future<bool> _fetchRequirement(Uri origin) async {
+    final client = http.Client();
+    try {
+      return await fetchNipFiRequirement(client, origin);
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Whether this build turns hosted relay auth on.
+  static const configured = bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH');
 
   final BuilderlabAccountClient account;
   final BuilderlabAccountClient? organization;
@@ -82,6 +110,12 @@ class HostedRelayAuth extends ChangeNotifier {
   final bool Function(Uri relay) organizationRelay;
   final bool enabled;
   final DateTime Function() _now;
+  final NipFiRequirementFetch _discover;
+  // NIP-FI discovery per hosted relay origin: the read in flight, shared by
+  // concurrent callers, and the last result. The issuer refuses hosts that have
+  // not enabled NIP-FI, so those connect without evidence.
+  final _discovering = <String, Future<bool>>{};
+  final _required = <String, bool>{};
   // One assertion per relay and key, so issuing for an inactive community (for
   // example a background revocation) never evicts the active session's
   // credentials that native media paths read synchronously.
@@ -130,7 +164,12 @@ class HostedRelayAuth extends ChangeNotifier {
   /// recovery state. Null means protected metadata must wait for active auth.
   Map<String, String>? cachedHeaders(RelayConfig config) {
     if (_disposed) return null;
-    if (!protects(config)) return const {};
+    final client = _accountFor(config);
+    if (client == null) return const {};
+    if (_hostedOrigin(config, client) case final origin?
+        when _required[origin] == false) {
+      return const {};
+    }
     final pubkey = pubkeyFromNsec(config.nsec);
     if (pubkey == null) return null;
     final cached =
@@ -139,7 +178,7 @@ class HostedRelayAuth extends ChangeNotifier {
           pubkey: pubkey,
         )];
     if (cached == null ||
-        !identical(cached.account, _accountFor(config)?.account) ||
+        !identical(cached.account, client.account) ||
         !cached.expiry.isAfter(_now())) {
       return null;
     }
@@ -176,13 +215,23 @@ class HostedRelayAuth extends ChangeNotifier {
   /// foreground use never inherits an assertion whose key was not backed up.
   /// Without an assertion it gets no headers rather than a failure, so the
   /// relay decides.
+  ///
+  /// A hosted relay gets an assertion only when its NIP-FI discovery requires
+  /// one. Every caller opening a new socket passes [fresh] to reread
+  /// discovery, so a community that changes enforcement is picked up on its
+  /// next connect; HTTP requests reuse the latest discovery.
   Future<Map<String, String>> headers(
     RelayConfig config, {
     bool background = false,
+    bool fresh = false,
   }) async {
     final client = _accountFor(config);
     if (client == null) return const {};
     try {
+      if (_hostedOrigin(config, client) case final origin?
+          when !await _requires(origin, fresh)) {
+        return const {};
+      }
       return await _headers(config, client, background);
     } on AccountFailure catch (failure) {
       // Cleanup still reaches a relay that does not enforce assertions; an
@@ -195,6 +244,29 @@ class HostedRelayAuth extends ChangeNotifier {
         return const {};
       }
       rethrow;
+    }
+  }
+
+  /// The relay origin whose discovery decides, or null for organization relays,
+  /// which always use their own issuer.
+  String? _hostedOrigin(RelayConfig config, BuilderlabAccountClient client) =>
+      identical(client, organization) ? null : Uri.parse(config.baseUrl).origin;
+
+  Future<bool> _requires(String origin, bool fresh) async {
+    final known = _required[origin];
+    if (!fresh && known != null) return known;
+    final pending = _discovering[origin] ??= _discover(Uri.parse(origin));
+    try {
+      return _required[origin] = await pending;
+    } on Exception catch (error) {
+      // The last answer stays for requests. Without one, or for a new
+      // connection, retry with backoff rather than guessing.
+      debugPrint('NIP-FI discovery failed for $origin: $error');
+      throw AccountFailure.unavailable;
+    } finally {
+      if (identical(_discovering[origin], pending)) {
+        _discovering.remove(origin);
+      }
     }
   }
 
@@ -414,6 +486,8 @@ class HostedRelayAuth extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _cached.clear();
+    _discovering.clear();
+    _required.clear();
     super.dispose();
   }
 }

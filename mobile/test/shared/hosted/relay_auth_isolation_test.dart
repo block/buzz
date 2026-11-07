@@ -93,6 +93,7 @@ void main() {
         organizationRelay: (relay) =>
             BuilderlabBuild.matchesRelay(relay, [relayHost]),
         enabled: true,
+        discover: (_) async => true,
       );
       final orgHeaders = auth.headers(orgRelay);
       await pumpEventQueue();

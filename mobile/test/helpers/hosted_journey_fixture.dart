@@ -75,6 +75,10 @@ class HostedJourneyFixture {
   int secondRelayFailures = 0;
   DateTime assertionNow = DateTime.now();
   bool relayAuthEnabled = false;
+
+  /// What hosted relays' NIP-FI discovery answers; null fails discovery.
+  bool? nipFiRequired = true;
+  int discoveries = 0;
   bool expiredSession = false;
   bool denyAssertion = false;
   bool refuseUpgrade = false;
@@ -195,7 +199,7 @@ class HostedJourneyFixture {
           HostedEnvironment.requiresAuth(request.url.host)) {
         expect(
           request.headers['Nostr-Federated-Identity'],
-          'Bearer synthetic-assertion',
+          nipFiRequired == true ? 'Bearer synthetic-assertion' : isNull,
         );
         expect(request.headers.containsKey('X-BB-Session-Credential'), isFalse);
       }
@@ -482,6 +486,11 @@ class HostedJourneyFixture {
                     organizationEnabled && relay.host == organizationRelayHost,
                 enabled: true,
                 now: () => assertionNow,
+                discover: (_) async {
+                  discoveries++;
+                  return nipFiRequired ??
+                      (throw http.ClientException('NIP-11 unreachable'));
+                },
               );
               ref.onDispose(auth.dispose);
               return auth;
@@ -734,7 +743,8 @@ class _RelaySocket extends RelaySocket {
               host == HostedJourneyFixture.organizationRelayHost
           // Signed out connects without one and lets the relay decide.
           ? anyOf(isNull, 'Bearer organization-assertion')
-          : HostedEnvironment.requiresAuth(host)
+          : HostedEnvironment.requiresAuth(host) &&
+                fixture.nipFiRequired != false
           ? 'Bearer synthetic-assertion'
           : isNull,
     );
