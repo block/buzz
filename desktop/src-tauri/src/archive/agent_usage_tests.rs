@@ -835,3 +835,29 @@ fn reported_usage_serializes_with_all_seven_camel_case_keys() {
         "ReportedUsage camelCase key contract changed — update tauriArchive.ts to match"
     );
 }
+
+#[test]
+fn usage_null_row_is_valid_and_stays_out_of_token_accounting() {
+    let json = r#"{"harness":"goose","timestamp":"1970-01-01T00:00:10Z","sessionId":"s1","tools":{"Read":1}}"#;
+    let null_row = AgentMetricIndexRow::from_payload(json, "n1", "agent1", 10, 10);
+    assert_eq!(null_row.parse_status, ParseStatus::Valid);
+    assert!(null_row.is_usage_null());
+
+    let prev = AgentMetricIndexRow {
+        turn_input_tokens: Some(100),
+        cumulative_input_tokens: Some(100),
+        ..row("e1", "agent1", "s1", 1, 0)
+    };
+    let cur = AgentMetricIndexRow {
+        cumulative_input_tokens: Some(130),
+        ..row("e2", "agent1", "s1", 2, 20)
+    };
+    let rows = vec![prev, null_row, cur];
+    let boundaries = boundaries_7();
+    let series = compute_series(&rows, &rows, 0, &boundaries, None, true);
+    let bucket = &series.buckets[0];
+    assert!(!bucket.usage.input_tokens.incomplete);
+    // 100 (direct, no baseline) + 30 (cumulative delta against seq 1).
+    assert_eq!(bucket.usage.input_tokens.value, Some("130".to_string()));
+    assert_eq!(bucket.report_count, 2);
+}
