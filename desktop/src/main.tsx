@@ -21,6 +21,7 @@ import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
+import { startUserTimingSweep } from "@/shared/lib/userTimingSweep";
 import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
 import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
 
@@ -131,6 +132,7 @@ async function bootstrap() {
   initializeConversationDensityPreference();
   initializeFontSizePreference();
   startLocalStorageSweep();
+  startUserTimingSweep({ enabled: import.meta.env.DEV });
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
