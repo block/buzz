@@ -247,6 +247,11 @@ void main() {
       return null;
     });
     expect(queried, isEmpty);
+
+    // Removing the organization's community keeps the hidden one stored.
+    await storage.remove(organization.id);
+    expect(await storage.loadAll(), isEmpty);
+    expect((await everything.loadAll()).map((item) => item.id), [other.id]);
   }, skip: skip);
 }
 
