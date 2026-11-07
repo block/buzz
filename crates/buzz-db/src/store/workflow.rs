@@ -1810,6 +1810,30 @@ impl Db {
 
 #[cfg(test)]
 mod postgres_tests {
+    #[test]
+    fn stored_cause_requires_a_consistent_source_and_pubkey() {
+        let pubkey = vec![1u8; 32];
+        assert_eq!(
+            RunCause::from_columns(Some("event"), Some(pubkey.clone())),
+            Some(RunCause::Event(pubkey.clone()))
+        );
+        assert_eq!(
+            RunCause::from_columns(Some("schedule"), None),
+            Some(RunCause::Schedule)
+        );
+        for (source, key) in [
+            (Some("event"), None),
+            (Some("manual"), None),
+            (Some("schedule"), Some(pubkey.clone())),
+            (Some("webhook"), Some(pubkey.clone())),
+            (Some("unknown"), None),
+            (None, Some(pubkey.clone())),
+            (None, None),
+        ] {
+            assert_eq!(RunCause::from_columns(source, key), None, "{source:?}");
+        }
+    }
+
     use super::*;
     use chrono::TimeZone;
 

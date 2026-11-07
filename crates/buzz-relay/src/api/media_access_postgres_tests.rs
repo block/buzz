@@ -709,10 +709,9 @@ async fn private_media_revocation_http_journey() {
             tenant.community(),
             &open.to_string(),
             &text,
-            &text,
+            Some(&text),
             &member.public_key().to_hex(),
             None,
-            true,
         )
         .await;
     assert!(

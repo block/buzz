@@ -60,6 +60,9 @@ pub struct WorkflowConfig {
     pub max_concurrent: usize,
     /// Default per-step timeout in seconds. Default: 300 (5 minutes).
     pub default_timeout_secs: u64,
+    /// Secure workflows mode: messages carry agent-directing mentions only
+    /// for runs whose cause and definition may direct agents. Default: off.
+    pub secure_workflows: bool,
 }
 
 impl Default for WorkflowConfig {
@@ -67,6 +70,7 @@ impl Default for WorkflowConfig {
         Self {
             max_concurrent: 100,
             default_timeout_secs: 300,
+            secure_workflows: false,
         }
     }
 }
@@ -1409,6 +1413,7 @@ mod postgres_tests {
         let cfg = WorkflowConfig::default();
         assert_eq!(cfg.max_concurrent, 100);
         assert_eq!(cfg.default_timeout_secs, 300);
+        assert!(!cfg.secure_workflows);
     }
 
     #[test]
@@ -1635,9 +1640,11 @@ steps:
         let cfg = WorkflowConfig {
             max_concurrent: 50,
             default_timeout_secs: 600,
+            secure_workflows: true,
         };
         assert_eq!(cfg.max_concurrent, 50);
         assert_eq!(cfg.default_timeout_secs, 600);
+        assert!(cfg.secure_workflows);
     }
 
     fn make_message_event() -> buzz_core::StoredEvent {

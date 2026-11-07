@@ -1221,10 +1221,9 @@ mod postgres_tests {
                     community,
                     &channel.to_string(),
                     text,
-                    text,
+                    Some(text),
                     &owner.public_key().to_hex(),
                     None,
-                    true,
                 )
                 .await
                 .expect("send workflow message");

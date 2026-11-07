@@ -385,9 +385,17 @@ a plain `["p", <pubkey>]` for every member that the rendered text mentions, and 
 
 A `buzz:workflow-mention` tag is the relay's statement that the message may
 direct the named agent on the owner's behalf. An agent acts on a workflow
-message only if the relay signed it, `buzz:workflow-owner` names the agent's
-owner, and a `buzz:workflow-mention` tag names the agent. A plain `p` tag on a
-workflow message notifies the member but does not direct an agent.
+message only if all of these hold:
+
+- the message is signed by the relay key that the active community advertises;
+- a `buzz:workflow-mention` tag names the agent;
+- the workflow principal that `buzz:workflow-owner` names passes the receiving
+  client's rule for whom the agent accepts work from: its owner, or an agent
+  that its owner has attested.
+
+`buzz:workflow-owner` is attribution. It does not by itself authorize anything.
+A plain `p` tag on a workflow message notifies the member but does not direct
+an agent.
 
 A relay may withhold `buzz:workflow-mention` tags under a policy. The message
 still posts with its `p` tags. In secure workflows mode, the relay adds the tags

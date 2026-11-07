@@ -625,8 +625,12 @@ pub async fn dispatch_action(
                         workflow.channel_id,
                     )?;
                     let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
-                    let may_direct_agents = definition_may_direct_agents
-                        && cause_may_direct_agents(wf_run.cause.as_ref(), &workflow.owner_pubkey);
+                    let may_direct_agents = !engine.config.secure_workflows
+                        || (definition_may_direct_agents
+                            && cause_may_direct_agents(
+                                wf_run.cause.as_ref(),
+                                &workflow.owner_pubkey,
+                            ));
 
                     // Thread the reply onto the triggering message when requested.
                     // The trigger must carry the event to reply to; schema
@@ -660,16 +664,16 @@ pub async fn dispatch_action(
                             ));
                         }
                     };
+                    let authorized_text = may_direct_agents.then_some(authored_text);
                     let event_id = engine
                         .action_sink()?
                         .send_message(
                             community_id,
                             &channel_id,
                             text,
-                            authored_text,
+                            authorized_text,
                             &owner_pubkey_hex,
                             reply_to,
-                            may_direct_agents,
                         )
                         .await
                         .map_err(WorkflowError::from)?;
@@ -1121,20 +1125,11 @@ pub async fn execute_run(
             )
         })?;
 
-    execute_steps(
-        engine,
-        community_id,
-        run_id,
-        def,
-        trigger_ctx,
-        0,
-        None,
-        false,
-    )
-    .await
+    execute_steps(engine, community_id, run_id, def, trigger_ctx, None).await
 }
 
-/// Resume execution from a specific step index (used for approval resume).
+/// Resume a run after its approval was granted, from a specific step index.
+/// Messages from a resumed run never direct agents in secure workflows mode.
 ///
 /// Acquires a concurrency permit from `engine.run_semaphore` before executing —
 /// returns [`WorkflowError::CapacityExceeded`] immediately if all permits are
@@ -1154,7 +1149,6 @@ pub async fn execute_from_step(
     trigger_ctx: &TriggerContext,
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
-    resumed_after_approval: bool,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
@@ -1200,14 +1194,13 @@ pub async fn execute_from_step(
         run_id,
         def,
         trigger_ctx,
-        start_index,
-        initial_outputs,
-        resumed_after_approval,
+        Some((start_index, initial_outputs.unwrap_or_default())),
     )
     .await
 }
 
-/// Internal: execute workflow steps starting from `start_index`, without
+/// Internal: execute workflow steps from the start, or from `resume`'s step
+/// index with its restored outputs, without
 /// acquiring the semaphore. Called by both [`execute_run`] and
 /// [`execute_from_step`] after they have already acquired a permit.
 ///
@@ -1219,12 +1212,12 @@ async fn execute_steps(
     run_id: Uuid,
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
-    start_index: usize,
-    initial_outputs: Option<HashMap<String, JsonValue>>,
-    resumed_after_approval: bool,
+    resume: Option<(usize, HashMap<String, JsonValue>)>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
-    let definition_may_direct_agents = !resumed_after_approval && definition_may_direct_agents(def);
-    let mut step_outputs: HashMap<String, JsonValue> = initial_outputs.unwrap_or_default();
+    // A resumed run continues on restored outputs and on a definition that
+    // may have changed since the approval, so it never directs agents.
+    let definition_may_direct_agents = resume.is_none() && definition_may_direct_agents(def);
+    let (start_index, mut step_outputs) = resume.unwrap_or_default();
     let mut trace: Vec<JsonValue> = Vec::new();
 
     for (i, step) in def.steps.iter().enumerate() {
