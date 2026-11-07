@@ -30,6 +30,7 @@ import { useHuddlePresentation } from "@/app/useHuddlePresentation";
 import { shouldShowSidebarChannel } from "@/app/huddleChannelVisibility";
 import {
   channelsQueryKey,
+  useChannelsFetched,
   useChannelsQuery,
   useCreateChannelMutation,
   useHideDmMutation,
@@ -107,6 +108,13 @@ import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
 import { AppWorkflowEditorOverlayProvider } from "@/app/AppWorkflowEditorOverlayProvider";
 import { LazySettingsScreen } from "@/app/LazySettingsScreen";
 const EMPTY_CHANNELS: Channel[] = [];
+// Auto-restarts drifted idle agents (per-agent opt-out, default ON). Its 15 s
+// re-evaluation tick lives in this leaf so it does not re-render the shell.
+function AutoRestartPolicy({ relayUrl }: { relayUrl: string | undefined }) {
+  useAutoRestartPolicy(relayUrl);
+  return null;
+}
+
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
@@ -205,8 +213,6 @@ export function AppShell() {
     communitiesHook.activeCommunity?.relayUrl,
   );
   useAgentsDataRefresh();
-  // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
-  useAutoRestartPolicy(communitiesHook.activeCommunity?.relayUrl);
   // Owner-global observer ingestion: receives + decrypts agent observer
   // frames and keeps derived active-turn liveness in sync app-wide, so no
   // individual screen/panel has to mount its own bridge for ingestion.
@@ -246,6 +252,7 @@ export function AppShell() {
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   const channelsQuery = useChannelsQuery();
+  const channelsFetched = useChannelsFetched();
   const channels = channelsQuery.data ?? [];
   useReminderNotifications(
     identityQuery.data?.pubkey,
@@ -291,8 +298,7 @@ export function AppShell() {
     const activeCommunityId = communitiesHook.activeCommunity?.id;
     if (
       hasRestoredCommunityDestinationRef.current ||
-      !channelsQuery.isSuccess ||
-      channelsQuery.dataUpdatedAt === 0 ||
+      !channelsFetched ||
       !activeCommunityId
     ) {
       return;
@@ -326,8 +332,7 @@ export function AppShell() {
       void goChannel(destination.channelId, { replace: true });
     }
   }, [
-    channelsQuery.dataUpdatedAt,
-    channelsQuery.isSuccess,
+    channelsFetched,
     communitiesHook.activeCommunity?.id,
     goChannel,
     goHome,
@@ -701,6 +706,7 @@ export function AppShell() {
   });
   return (
     <PreventSleepProvider>
+      <AutoRestartPolicy relayUrl={communitiesHook.activeCommunity?.relayUrl} />
       {!isHuddleRoom ? (
         <AppShellTrayMenu
           channels={channels}
