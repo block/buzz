@@ -1,11 +1,12 @@
-# Preset harness logos — provenance
+# Harness logos — provenance
 
-Third-party marks bundled to identify tier-2 preset harnesses in the runtime
-gallery (`PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`).
-Nominative use only — each mark identifies its own vendor's harness.
+Third-party marks bundled to identify preset and compiled-in (builtin)
+harnesses in the runtime gallery (`PRESET_LOGOS` / `RUNTIME_LOGOS` in
+`desktop/src/features/onboarding/ui/RuntimeIcon.tsx`). Nominative use only —
+each mark identifies its own vendor's harness.
 
-Add a row here when adding a preset logo; only bundle marks whose upstream
-license permits redistribution.
+Add a row here when adding a logo; only bundle marks whose upstream license
+permits redistribution.
 
 | File | Upstream | Commit | License | Source path | Modifications |
 |---|---|---|---|---|---|
@@ -16,6 +17,16 @@ license permits redistribution.
 | `pi.svg` | [earendil-works/pi-website](https://github.com/earendil-works/pi-website) | `2f5e410b97474d0a34ec2500aa1aa58d6c3f992c` | MIT © 2026 Earendil Inc. and contributors | `src/favicon.svg` | None |
 | `kimi.png` | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) | `4a550effdfcb29a25a5d325bf935296cc50cd417` | Apache-2.0; NOTICE: Kimi Code CLI © 2025 Moonshot AI | `web/public/logo.png` | None |
 | `grok.svg` | [SpaceXAI brand guidelines](https://x.ai/legal/brand-guidelines) | Retrieved 2026-07-25 | xAI Brand Guidelines: marks may be used to accurately refer to xAI or its services; logos must be used exactly as provided | `SpaceXAI_Grok_Assets.zip` → `Grok_Logomark_Dark.svg` | None |
+
+## Builtin logos (`RUNTIME_LOGOS`)
+
+Compiled-in (tier-1) runtimes ship their logos inlined into the bundle from
+`src/features/onboarding/assets/harness-logos/` (no `public/` files, no
+runtime fetch).
+
+| File | Upstream | Commit | License | Source path | Modifications |
+|---|---|---|---|---|---|
+| `dsh.svg` | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | `0010283` | MIT © 2026 DeepSeek | `website/public/favicon.svg` | Added the mark to a white square canvas so it remains legible in both app themes |
 
 ## Inline SVG marks (`RUNTIME_MARKS`)
 
