@@ -54,5 +54,6 @@ uuid = { workspace = true }
 [dev-dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
 ciborium = "0.2"
+percent-encoding = "2.3"
 proptest = { workspace = true }
 reqwest = { workspace = true }
