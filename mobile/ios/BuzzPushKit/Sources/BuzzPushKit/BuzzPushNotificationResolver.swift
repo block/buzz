@@ -533,7 +533,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     return BuzzPushResolution(
       title: profile?.displayName ?? "",
       body: body,
-      subtitle: community.name,
+      subtitle: channel.flatMap {
+        channelDisplayName(channel: $0, currentUser: community.pubkey?.lowercased())
+      },
       threadIdentifier: conversationIdentifier ?? community.id,
       navigationTarget: channelID.map {
         BuzzPushNavigationTarget(
@@ -635,6 +637,18 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       guard memberCount == 2, senderIsMember else { return nil }
       return (nil, recipientCount)
     }
+    guard let displayName = channelDisplayName(channel: channel, currentUser: currentUser)
+    else { return nil }
+    return (displayName, recipientCount)
+  }
+
+  /// The conversation name shown with a channel message: `#name` for team
+  /// channels and forums, the bare name for your own Solo chats, and `nil`
+  /// for DMs and unrecognized channel types.
+  private static func channelDisplayName(
+    channel: BuzzPushCachedChannel,
+    currentUser: String?
+  ) -> String? {
     guard let channelType = channel.channelType,
       ["stream", "forum"].contains(channelType),
       let displayName = channel.displayName
@@ -643,9 +657,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     // get no `#`. Like the app (`Channel.isPersonalChat`), someone else's
     // Solo chat you belong to stays an ordinary channel.
     if channel.isSolo == true, channel.creatorPubkey == currentUser {
-      return (displayName, recipientCount)
+      return displayName
     }
-    return (displayName.hasPrefix("#") ? displayName : "#\(displayName)", recipientCount)
+    return displayName.hasPrefix("#") ? displayName : "#\(displayName)"
   }
 
   private static func newest(_ events: [VerifiedNostrEvent]) -> VerifiedNostrEvent? {

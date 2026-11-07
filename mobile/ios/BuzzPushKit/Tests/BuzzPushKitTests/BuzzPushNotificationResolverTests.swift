@@ -311,7 +311,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
       XCTAssertEqual(result?.0.title, sender.title, "pubkey: \(sender.pubkey)")
       XCTAssertEqual(result?.0.body, "Preview", "pubkey: \(sender.pubkey)")
-      XCTAssertEqual(result?.0.subtitle, "Community", "pubkey: \(sender.pubkey)")
+      XCTAssertNil(result?.0.subtitle, "pubkey: \(sender.pubkey)")
       XCTAssertEqual(result?.0.senderPubkey, sender.pubkey, "pubkey: \(sender.pubkey)")
       XCTAssertEqual(result?.0.threadIdentifier, "community-id", "pubkey: \(sender.pubkey)")
     }
@@ -367,7 +367,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertNotEqual(result.body, Self.gatewayBody)
     XCTAssertEqual(result.title, "")
     XCTAssertEqual(result.body, "Hello Buzz")
-    XCTAssertEqual(result.subtitle, "Community")
+    XCTAssertNil(result.subtitle)
     XCTAssertEqual(
       result.threadIdentifier,
       BuzzPushPresentationIdentity.conversation(
@@ -1024,7 +1024,7 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
 
     XCTAssertEqual(result.title, "")
     XCTAssertNil(result.conversationDisplayName)
-    XCTAssertEqual(result.subtitle, "Community")
+    XCTAssertNil(result.subtitle)
     XCTAssertEqual(result.body, "Fallback content")
   }
 
