@@ -1,6 +1,7 @@
-import { MessageSquareText } from "lucide-react";
+import { AlertCircle, MessageSquareText } from "lucide-react";
 import * as React from "react";
 
+import { useAppShell } from "@/app/AppShellContext";
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
@@ -8,6 +9,7 @@ import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 import type { Channel } from "@/shared/api/types";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
@@ -56,6 +58,7 @@ export function ForumView({
   const [isComposerOpen, setIsComposerOpen] = React.useState(false);
   const postsScrollRef = React.useRef<HTMLDivElement>(null);
 
+  const { markThreadRead } = useAppShell();
   const profileQuery = useProfileQuery();
   const postsQuery = useForumPostsQuery(channel);
   const threadQuery = useForumThreadQuery(
@@ -70,7 +73,10 @@ export function ForumView({
     selectedPostId,
   );
 
-  const posts = postsQuery.data?.posts ?? [];
+  const posts = React.useMemo(
+    () => (postsQuery.data ?? []).flatMap((page) => page.posts),
+    [postsQuery.data],
+  );
 
   // Collect all pubkeys from posts and thread for profile resolution.
   // Mentioned pubkeys (`p`/`mention` tags) must be included too: mention
@@ -119,6 +125,19 @@ export function ForumView({
     [profileQuery.data, profilesQuery.data?.profiles],
   );
 
+  // Reading a thread is the only thing that clears its replies. The channel
+  // marker covers posts, not replies, so without this a thread that has been
+  // replied to keeps its unread dot for good.
+  const openThread = selectedPostId ? threadQuery.data : undefined;
+  React.useEffect(() => {
+    if (!selectedPostId || !openThread) return;
+    const newestSeen = openThread.replies.reduce(
+      (latest, reply) => Math.max(latest, reply.createdAt),
+      openThread.post.createdAt,
+    );
+    markThreadRead(selectedPostId, newestSeen);
+  }, [markThreadRead, openThread, selectedPostId]);
+
   const previousChannelIdRef = React.useRef(channel.id);
   React.useEffect(() => {
     if (previousChannelIdRef.current === channel.id) {
@@ -143,6 +162,8 @@ export function ForumView({
         currentPubkey={effectiveCurrentPubkey}
         isDeletingPost={deletePostMutation.isPending}
         isLoading={threadQuery.isLoading}
+        loadError={threadQuery.isError ? threadQuery.error : null}
+        onRetry={() => void threadQuery.refetch()}
         isSendingReply={createReplyMutation.isPending}
         onBack={onClosePost}
         onDeletePost={(eventId) => {
@@ -220,6 +241,28 @@ export function ForumView({
             <Skeleton className="h-24 w-full rounded-xl" />
             <Skeleton className="h-24 w-full rounded-xl" />
           </div>
+        ) : postsQuery.isError ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-4 py-16 text-center">
+            <AlertCircle className="h-10 w-10 text-muted-foreground/40" />
+            <div>
+              <p className="text-sm font-medium text-foreground/70">
+                Could not load posts
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {postsQuery.error instanceof Error
+                  ? postsQuery.error.message
+                  : "The forum did not respond."}
+              </p>
+            </div>
+            <Button
+              disabled={postsQuery.isFetching}
+              onClick={() => void postsQuery.refetch()}
+              size="sm"
+              variant="outline"
+            >
+              {postsQuery.isFetching ? "Retrying..." : "Try again"}
+            </Button>
+          </div>
         ) : posts.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 px-4 py-16 text-center">
             <MessageSquareText className="h-10 w-10 text-muted-foreground/40" />
@@ -260,6 +303,21 @@ export function ForumView({
             scrollRef={postsScrollRef}
           />
         )}
+
+        {posts.length > 0 && postsQuery.hasNextPage ? (
+          <div className="flex justify-center px-4 pb-6">
+            <Button
+              disabled={postsQuery.isFetchingNextPage}
+              onClick={() => void postsQuery.fetchNextPage()}
+              size="sm"
+              variant="outline"
+            >
+              {postsQuery.isFetchingNextPage
+                ? "Loading older posts..."
+                : "Load older posts"}
+            </Button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
