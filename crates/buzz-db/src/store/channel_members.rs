@@ -894,7 +894,10 @@ pub(crate) async fn put_members_with_event(
 /// tag, the TTL reaper's single UPDATE), and none of them takes the
 /// membership lock. So an archive either commits before [`put_members_on`]
 /// reads `archived_at`, or waits until this write commits.
-async fn lock_channel_for_member_put(tx: &mut AdmittedTx, channel_id: Uuid) -> Result<()> {
+pub(crate) async fn lock_channel_for_member_put(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<()> {
     let community_id = tx.community();
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
     lock_channel_ttl_shared_in_transaction(tx, channel_id).await?;
@@ -1195,6 +1198,7 @@ pub async fn remove_member(
     if result.rows_affected() == 0 {
         return Err(DbError::MemberNotFound(channel_id));
     }
+    crate::dm::release_dm_identity(tx.conn(), community_id, channel_id).await?;
 
     tx.commit().await?;
     Ok(())

@@ -9,6 +9,7 @@
 //! 3. Pubkey/auth identity match
 //! 4. Per-kind scope authorization
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
+use buzz_db::dm::{DmGrowth, MAX_DM_PEOPLE};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
@@ -291,6 +293,174 @@ fn compute_definition_hash(json_str: &str) -> Vec<u8> {
     Sha256::digest(json_str.as_bytes()).to_vec()
 }
 
+/// Map a DM write's refusal to the client's error.
+fn dm_write_error(e: DbError) -> IngestError {
+    match e {
+        DbError::AccessDenied(m) => IngestError::Rejected(format!("forbidden: {m}")),
+        DbError::InvalidData(m) => IngestError::Rejected(format!("invalid: {m}")),
+        DbError::ChannelNotFound(_) => IngestError::Rejected("invalid: DM not found".into()),
+        e => IngestError::Internal(format!("error: db: {e}")),
+    }
+}
+
+/// The side effects of members joining an existing DM (post-commit,
+/// best-effort): membership caches, a `member_joined` system message each,
+/// kind:39000/39002 and kind:44100.
+async fn announce_dm_additions(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    actor: &[u8],
+    added: &[Vec<u8>],
+) {
+    if added.is_empty() {
+        return;
+    }
+    for pk in added {
+        state.invalidate_membership(tenant, channel_id, pk);
+    }
+    let actor_hex = hex::encode(actor);
+    for pk in added {
+        if let Err(e) = emit_system_message(
+            tenant,
+            state,
+            channel_id,
+            serde_json::json!({
+                "type": "member_joined",
+                "actor": actor_hex,
+                "target": hex::encode(pk),
+            }),
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            warn!("DM add: system message failed: {e}");
+        }
+    }
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, "DM add: discovery emission failed: {e}");
+    }
+    for pk in added {
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel_id,
+            pk,
+            actor,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!("DM add: membership notification failed: {e}");
+        }
+    }
+}
+
+/// The side effects of a newly created DM (post-commit, best-effort).
+async fn announce_dm_created(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    actor: &[u8],
+    participants: &[Vec<u8>],
+) {
+    metrics::counter!(
+        "buzz_channels_created_total",
+        "community" => tenant.host().to_owned(),
+        "type" => "dm"
+    )
+    .increment(1);
+
+    for pk in participants {
+        state.invalidate_membership(tenant, channel_id, pk);
+    }
+
+    let participant_hexes: Vec<String> = participants.iter().map(hex::encode).collect();
+    if let Err(e) = emit_system_message(
+        tenant,
+        state,
+        channel_id,
+        serde_json::json!({
+            "type": "dm_created",
+            "actor": hex::encode(actor),
+            "participants": participant_hexes,
+        }),
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        warn!("DM open: system message failed: {e}");
+    }
+
+    if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(channel = %channel_id, "DM open: discovery emission failed: {e}");
+    }
+
+    for participant in participants {
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel_id,
+            participant,
+            actor,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!("DM open: membership notification failed: {e}");
+        }
+    }
+}
+
+/// Whether `event` carries `["history", "include"]`: the caller has agreed to
+/// share an existing DM's history with whoever joins it. Without it, DM
+/// commands behave as before members could join in place.
+fn history_opt_in(event: &Event) -> Result<bool, IngestError> {
+    match extract_tag(event, "history").as_deref() {
+        None => Ok(false),
+        Some("include") => Ok(true),
+        Some(other) => Err(IngestError::Rejected(format!(
+            "invalid: history must be \"include\", got \"{other}\""
+        ))),
+    }
+}
+
+/// Why the relay's moderation DM cannot take anyone else.
+const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
+
+/// The agents among `pubkeys` (users with an owner): each one's
+/// `channel_add_policy` and owner.
+async fn dm_agents(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkeys: &[Vec<u8>],
+) -> Result<HashMap<Vec<u8>, (String, Vec<u8>)>, IngestError> {
+    let policies = state
+        .db
+        .get_agent_channel_policies(tenant.community(), pubkeys)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: agent lookup: {e}")))?;
+    Ok(policies
+        .into_iter()
+        .filter_map(|(pubkey, (policy, owner))| owner.map(|owner| (pubkey, (policy, owner))))
+        .collect())
+}
+
+/// Refuse unless `actor` may put each of `agents` in a DM with other people,
+/// by its `channel_add_policy`, as a kind:9000 add would decide.
+fn check_dm_agent_policies(
+    agents: &HashMap<Vec<u8>, (String, Vec<u8>)>,
+    actor: &[u8],
+) -> Result<(), IngestError> {
+    for (agent, (policy, owner)) in agents {
+        if agent.as_slice() != actor {
+            super::channel_authz::decide_channel_add_policy(policy, Some(owner), actor)
+                .map_err(|e| IngestError::Rejected(format!("forbidden: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_dm_open(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -298,36 +468,48 @@ async fn handle_dm_open(
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let self_hex = hex::encode(&self_bytes);
+    let include_history = history_opt_in(event)?;
 
-    // 1. Extract participant pubkeys from `p` tags
-    let p_tags = extract_p_tags(event);
-
-    // 2. Validate: at least 1 other participant, max 8 others (9 total)
-    if p_tags.is_empty() {
+    // 1. Decode the other participants from `p` tags (deduplicated).
+    let mut others: Vec<Vec<u8>> = Vec::new();
+    for hex_str in &extract_p_tags(event) {
+        let pk = decode_pubkey(hex_str)?;
+        if pk != self_bytes && !others.contains(&pk) {
+            others.push(pk);
+        }
+    }
+    if others.is_empty() {
         return Err(IngestError::Rejected(
             "invalid: pubkeys must contain at least 1 other participant".into(),
         ));
     }
-    if p_tags.len() > 8 {
-        return Err(IngestError::Rejected(
-            "invalid: pubkeys may contain at most 8 other participants (9 total)".into(),
-        ));
+
+    // 2. The relay's moderation DM stays two-party. At most 8 other people
+    //    (9 total); agents do not count. Putting an agent in a DM with anyone
+    //    besides the caller needs its channel_add_policy; messaging one alone
+    //    does not.
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    if others.len() > 1
+        && others
+            .iter()
+            .any(|pk| pk.as_slice() == relay_pubkey.as_slice())
+    {
+        return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
+    }
+    let agents = dm_agents(tenant, state, &others).await?;
+    let other_people = others.iter().filter(|pk| !agents.contains_key(*pk)).count();
+    if others.len() > 1 {
+        check_dm_agent_policies(&agents, &self_bytes)?;
+    }
+    if other_people > MAX_DM_PEOPLE - 1 {
+        return Err(IngestError::Rejected(format!(
+            "invalid: pubkeys may contain at most {} other people ({MAX_DM_PEOPLE} total); agents do not count",
+            MAX_DM_PEOPLE - 1
+        )));
     }
 
-    // Decode all provided pubkeys
-    let mut other_bytes: Vec<Vec<u8>> = Vec::with_capacity(p_tags.len());
-    for hex_str in &p_tags {
-        other_bytes.push(decode_pubkey(hex_str)?);
-    }
-
-    // 3. Build full participant set (self + others, deduplicated)
     let mut all_bytes: Vec<Vec<u8>> = vec![self_bytes.clone()];
-    for ob in &other_bytes {
-        if !all_bytes.iter().any(|b| b == ob) {
-            all_bytes.push(ob.clone());
-        }
-    }
+    all_bytes.extend(others);
 
     // Persist the command event (idempotency) — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {
@@ -341,77 +523,38 @@ async fn handle_dm_open(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 4. Execute: open_dm
+    // 3. Execute. With history, open the DM of these people and add any named
+    //    agents it does not hold yet; without, the DM of exactly these members.
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
     let (channel, was_created) = state
         .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
+        .open_dm(tenant.community(), &all_refs, &self_bytes, include_history)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
+        .map_err(dm_write_error)?;
+    let added = if was_created || !include_history {
+        Vec::new()
+    } else {
+        grow_with_agents(tenant, state, channel.id, &self_bytes, &agents).await?
+    };
 
     // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
-    // 5. Side effects if newly created (post-commit, best-effort)
+    // 4. Side effects (post-commit, best-effort)
     if was_created {
-        metrics::counter!(
-            "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
-            "type" => "dm"
-        )
-        .increment(1);
-
-        // Invalidate caches for all participants
-        for pk in &all_bytes {
-            state.invalidate_membership(tenant, channel.id, pk);
-        }
-
-        let participant_hexes: Vec<String> = all_bytes.iter().map(hex::encode).collect();
-        if let Err(e) = emit_system_message(
-            tenant,
-            state,
-            channel.id,
-            serde_json::json!({
-                "type": "dm_created",
-                "actor": self_hex,
-                "participants": participant_hexes,
-            }),
-            chrono::Utc::now(),
-        )
-        .await
-        {
-            warn!("DM open: system message failed: {e}");
-        }
-
-        if let Err(e) = emit_group_discovery_events(tenant, state, channel.id).await {
-            warn!(channel = %channel.id, "DM open: discovery emission failed: {e}");
-        }
-
-        for participant in &all_bytes {
-            if let Err(e) = emit_membership_notification(
-                tenant,
-                state,
-                channel.id,
-                participant,
-                &self_bytes,
-                KIND_MEMBER_ADDED_NOTIFICATION,
-            )
-            .await
-            {
-                warn!("DM open: membership notification failed: {e}");
-            }
-        }
+        announce_dm_created(tenant, state, channel.id, &self_bytes, &all_bytes).await;
     } else {
         // Re-open of an existing DM cleared the caller's hidden_at; refresh
         // their NIP-DV snapshot so the DM reappears in the sidebar.
         if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
             warn!("DM re-open: visibility snapshot failed: {e}");
         }
+        announce_dm_additions(tenant, state, channel.id, &self_bytes, &added).await;
     }
 
-    // 6. Return response
+    // 5. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
@@ -425,6 +568,40 @@ async fn handle_dm_open(
     })
 }
 
+/// Add `agents` to the existing DM `channel_id` in place. Agents never change
+/// which DM it is, so the DM cannot turn out to be another one.
+async fn grow_with_agents(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    actor: &[u8],
+    agents: &HashMap<Vec<u8>, (String, Vec<u8>)>,
+) -> Result<Vec<Vec<u8>>, IngestError> {
+    if agents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let refs: Vec<&[u8]> = agents.keys().map(Vec::as_slice).collect();
+    match state
+        .db
+        .grow_dm(tenant.community(), channel_id, actor, &refs)
+        .await
+        .map_err(dm_write_error)?
+    {
+        DmGrowth::Grown { added } => Ok(added),
+        DmGrowth::Existing(_) | DmGrowth::PeopleStartNewDm => Err(IngestError::Internal(
+            "error: adding agents changed the DM's people".into(),
+        )),
+    }
+}
+
+/// kind:41011: add people and agents to a DM.
+///
+/// With `["history", "include"]`, people and agents join in place, with the
+/// DM's history. People move the DM's identity to the grown set of people, or,
+/// if a DM of those people already exists, that DM is returned instead and
+/// nothing changes here. Without the tag, everyone starts a new DM of exactly
+/// its members (no history), as before. So do people added to a DM of at most
+/// one person, even with the tag. An agent cannot send the tag.
 async fn handle_dm_add_member(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -445,6 +622,7 @@ async fn handle_dm_add_member(
             "invalid: must specify at least 1 new participant in p tags".into(),
         ));
     }
+    let include_history = history_opt_in(event)?;
 
     // 2. Validate caller is member of existing DM
     let is_member = state
@@ -467,27 +645,40 @@ async fn handle_dm_add_member(
         return Err(IngestError::Rejected("invalid: channel is not a DM".into()));
     }
 
-    // 4. Get existing members, merge with new
-    let existing_members = state
+    // 4. Read the current members. The relay's moderation DM stays two-party.
+    let members: Vec<Vec<u8>> = state
         .db
         .get_members_for_event_write(tenant.community(), channel_id)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: get members: {e}")))?;
-
-    let mut all_bytes: Vec<Vec<u8>> = existing_members.into_iter().map(|m| m.pubkey).collect();
-
-    // Decode and merge new pubkeys
-    for hex_str in &p_tags {
-        let bytes = decode_pubkey(hex_str)?;
-        if !all_bytes.iter().any(|b| b == &bytes) {
-            all_bytes.push(bytes);
-        }
+        .map_err(|e| IngestError::Internal(format!("error: get members: {e}")))?
+        .into_iter()
+        .map(|m| m.pubkey)
+        .collect();
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    if members
+        .iter()
+        .any(|m| m.as_slice() == relay_pubkey.as_slice())
+    {
+        return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
     }
 
-    // 5. Enforce max 9 participants
-    if all_bytes.len() > 9 {
+    let mut additions: Vec<Vec<u8>> = Vec::new();
+    for hex_str in &p_tags {
+        let pk = decode_pubkey(hex_str)?;
+        if !members.contains(&pk) && !additions.contains(&pk) {
+            additions.push(pk);
+        }
+    }
+    let agents = dm_agents(tenant, state, &additions).await?;
+    check_dm_agent_policies(&agents, &self_bytes)?;
+    // Only people grow a DM or share its history. Any other add starts a new
+    // DM of everyone, as every add did before.
+    let actor_is_agent = !dm_agents(tenant, state, std::slice::from_ref(&self_bytes))
+        .await?
+        .is_empty();
+    if actor_is_agent && include_history {
         return Err(IngestError::Rejected(
-            "invalid: DM supports at most 9 participants".into(),
+            "forbidden: only people can share a DM's history".into(),
         ));
     }
 
@@ -503,60 +694,78 @@ async fn handle_dm_add_member(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 6. Execute: open_dm with expanded set (creates NEW DM — DM sets are immutable)
-    let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (new_channel, was_created) = state
-        .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
+    // 5. Execute.
+    let addition_refs: Vec<&[u8]> = additions.iter().map(Vec::as_slice).collect();
+    let growth = if include_history {
+        // Grow this DM in place.
+        Some(
+            state
+                .db
+                .grow_dm(tenant.community(), channel_id, &self_bytes, &addition_refs)
+                .await
+                .map_err(dm_write_error)?,
+        )
+    } else {
+        None
+    };
+    let (target, was_created, added, moved_elsewhere) = match growth {
+        Some(DmGrowth::Grown { added }) => (channel_id, false, added, false),
+        // These people already have a DM: the agents join them there.
+        Some(DmGrowth::Existing(other)) => {
+            let added = grow_with_agents(tenant, state, other, &self_bytes, &agents).await?;
+            (other, false, added, true)
+        }
+        // Start a new DM of everyone (no history); this DM is untouched. A DM
+        // of at most one person never gains people, even with the tag.
+        Some(DmGrowth::PeopleStartNewDm) | None => {
+            let mut all_bytes = members.clone();
+            all_bytes.extend(additions.iter().cloned());
+            let all_refs: Vec<&[u8]> = all_bytes.iter().map(Vec::as_slice).collect();
+            let (channel, created) = state
+                .db
+                .open_dm(tenant.community(), &all_refs, &self_bytes, false)
+                .await
+                .map_err(dm_write_error)?;
+            (channel.id, created, Vec::new(), !created)
+        }
+    };
 
     // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
-    // 7. Cache invalidation + notifications for new DM (post-commit, best-effort)
+    // 6. Side effects (post-commit, best-effort)
     if was_created {
-        metrics::counter!(
-            "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
-            "type" => "dm"
-        )
-        .increment(1);
-
-        for pk in &all_bytes {
-            state.invalidate_membership(tenant, new_channel.id, pk);
-        }
-
-        if let Err(e) = emit_group_discovery_events(tenant, state, new_channel.id).await {
-            warn!(channel = %new_channel.id, "DM add_member: discovery emission failed: {e}");
-        }
-
-        for participant_bytes in &all_bytes {
-            if let Err(e) = emit_membership_notification(
-                tenant,
-                state,
-                new_channel.id,
-                participant_bytes,
-                &self_bytes,
-                KIND_MEMBER_ADDED_NOTIFICATION,
-            )
-            .await
+        let mut participants = members;
+        participants.extend(additions);
+        announce_dm_created(tenant, state, target, &self_bytes, &participants).await;
+    } else {
+        if moved_elsewhere {
+            // The caller lands in an existing DM; make sure they can see it.
+            if let Err(e) = state
+                .db
+                .unhide_dm(tenant.community(), target, &self_bytes)
+                .await
             {
-                warn!("DM add_member: membership notification failed: {e}");
+                warn!("DM add: unhide failed: {e}");
+            } else if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await
+            {
+                warn!("DM add: visibility snapshot failed: {e}");
             }
         }
+        announce_dm_additions(tenant, state, target, &self_bytes, &added).await;
     }
 
-    // 8. Return response
+    // 7. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
         message: format!(
             "response:{}",
             serde_json::json!({
-                "channel_id": new_channel.id.to_string(),
+                "channel_id": target.to_string(),
+                "created": was_created,
             })
         ),
     })

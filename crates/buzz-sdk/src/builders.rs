@@ -1955,6 +1955,13 @@ pub fn build_workflow_approval(
 /// Build a DM open event (kind 41010).
 ///
 /// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
+/// The relay finds or makes the DM of exactly these members. With a
+/// `["history", "include"]` tag, it instead finds the DM of the named people
+/// and adds any named agents it lacks.
+///
+/// The relay answers kind 41010 and kind 41011 with
+/// `response:{"channel_id":"<uuid>","created":<bool>}`, where `created` is
+/// true only when a new DM was made.
 pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(SdkError::InvalidInput(
@@ -1970,9 +1977,20 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
 }
 
 /// Build a DM add-member event (kind 41011).
-pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilder, SdkError> {
+///
+/// With `include_history`, the member joins this DM and sees its history,
+/// unless a person is joining a DM of at most one person and their agents.
+/// Otherwise adding anyone starts a new DM of everyone.
+pub fn build_dm_add_member(
+    channel_id: Uuid,
+    pubkey: &str,
+    include_history: bool,
+) -> Result<EventBuilder, SdkError> {
     let pk = check_pubkey_hex(pubkey, "pubkey")?;
-    let tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
+    if include_history {
+        tags.push(tag(&["history", "include"])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags))
 }
 
@@ -5073,15 +5091,22 @@ mod tests {
     fn dm_add_member_happy_path() {
         let cid = uuid();
         let pk = "b".repeat(64);
-        let ev = sign(build_dm_add_member(cid, &pk).unwrap());
+        let ev = sign(build_dm_add_member(cid, &pk, false).unwrap());
         assert_eq!(ev.kind.as_u16(), 41011);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert!(has_tag(&ev, "p", &pk));
+        assert!(!ev.tags.iter().any(|t| t.as_slice()[0] == "history"));
+    }
+
+    #[test]
+    fn dm_add_member_with_history() {
+        let ev = sign(build_dm_add_member(uuid(), &"b".repeat(64), true).unwrap());
+        assert!(has_tag(&ev, "history", "include"));
     }
 
     #[test]
     fn dm_add_member_rejects_bad_pubkey() {
-        let err = build_dm_add_member(uuid(), "short").unwrap_err();
+        let err = build_dm_add_member(uuid(), "short", false).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
