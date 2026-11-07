@@ -22,6 +22,7 @@ use super::{
 struct FakeKeyStore {
     reachable: bool,
     fail_verify: bool,
+    fail_write: bool,
     stored: RefCell<HashMap<String, String>>,
     write_count: RefCell<usize>,
     read_count: RefCell<usize>,
@@ -32,6 +33,7 @@ impl FakeKeyStore {
         Self {
             reachable: true,
             fail_verify: false,
+            fail_write: false,
             stored: RefCell::new(HashMap::new()),
             write_count: RefCell::new(0),
             read_count: RefCell::new(0),
@@ -41,6 +43,7 @@ impl FakeKeyStore {
         Self {
             reachable: false,
             fail_verify: false,
+            fail_write: false,
             stored: RefCell::new(HashMap::new()),
             write_count: RefCell::new(0),
             read_count: RefCell::new(0),
@@ -50,6 +53,17 @@ impl FakeKeyStore {
         Self {
             reachable: true,
             fail_verify: true,
+            fail_write: false,
+            stored: RefCell::new(HashMap::new()),
+            write_count: RefCell::new(0),
+            read_count: RefCell::new(0),
+        }
+    }
+    fn write_fails() -> Self {
+        Self {
+            reachable: true,
+            fail_verify: false,
+            fail_write: true,
             stored: RefCell::new(HashMap::new()),
             write_count: RefCell::new(0),
             read_count: RefCell::new(0),
@@ -95,6 +109,9 @@ impl KeyStore for FakeKeyStore {
         }
     }
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
+        if self.fail_write {
+            return Err("keyring write failed".to_string());
+        }
         if self.fail_verify {
             return Err("read-back verify failed".to_string());
         }
@@ -188,6 +205,17 @@ fn migrate_keeps_inline_when_verify_fails() {
         migrate_inline_key(&store, &record),
         KeyMigration::KeptInline
     );
+}
+
+#[test]
+fn persist_keeps_inline_on_write_and_readback_failures() {
+    for store in [FakeKeyStore::write_fails(), FakeKeyStore::verify_fails()] {
+        let mut records = vec![record_with_key("nsec1syntheticfallback")];
+
+        persist_agent_keys_with(&store, &mut records);
+
+        assert_eq!(records[0].private_key_nsec, "nsec1syntheticfallback");
+    }
 }
 
 #[test]
