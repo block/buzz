@@ -1,7 +1,10 @@
 part of 'pairing_provider.dart';
 
-String _friendlyErrorMessage(Object error) {
+String _friendlyErrorMessage(Object error, {String? relayUrl}) {
   final message = error.toString();
+  if (pairingLooksLikeMissingLegacyEndpoint(error, relayUrl: relayUrl)) {
+    return pairingEndpointNotFoundMessage(relayUrl ?? '');
+  }
   if (message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||
