@@ -342,6 +342,49 @@ void main() {
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('$platform scrolled bell opens Activity', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(await buildHome(longSolo: true));
+      await tester.pumpAndSettle();
+      final scroll = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!;
+      final collapseHeight = tester
+          .widget<FrostedAppBar>(find.byType(FrostedAppBar))
+          .bottomHeight;
+      for (final fraction in [0.01, 0.25, 0.5, 0.75, 1.0]) {
+        scroll.jumpTo(collapseHeight * fraction);
+        await tester.pumpAndSettle();
+        expect(
+          find.byTooltip('Activity').hitTestable(),
+          findsOneWidget,
+          reason: 'Bell must remain tappable at collapse fraction $fraction',
+        );
+      }
+      if (platform == TargetPlatform.iOS) {
+        // Widget tests hit-test the platform view but cannot run UIKit's
+        // button action. Exercise the callback that native taps dispatch.
+        tester
+            .widget<IosGlassNavigationButton>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is IosGlassNavigationButton &&
+                    widget.icon == IosGlassNavigationIcon.bell,
+              ),
+            )
+            .onPressed!();
+      } else {
+        await tester.tap(find.byTooltip('Activity'));
+      }
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityPage), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('$platform bell follows unread inbox state', (tester) async {
       debugDefaultTargetPlatformOverride = platform;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
