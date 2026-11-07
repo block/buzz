@@ -87,3 +87,17 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "S3/object-storage source missing"
+
+  - it: fails when s3.credentialSource chain is combined with static S3 keys
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: https://s3.example.com
+      s3.bucket: buzz-media
+      s3.credentialSource: chain
+      s3.accessKey: AKIAEXAMPLE
+    asserts:
+      - failedTemplate:
+          errorPattern: "s3.credentialSource: chain cannot be combined with s3.accessKey / s3.secretKey"
