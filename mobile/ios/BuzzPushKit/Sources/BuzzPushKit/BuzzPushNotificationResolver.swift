@@ -201,7 +201,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion([], nil)
       return
     }
-    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
+    withFederatedIdentity(relayURL: relayURL, privateKey: privateKey) {
+      (assertion, finish: @escaping ((Data?, URLResponse?), Bool) -> Void) in
       self.send(
         url: url, body: body, privateKey: privateKey, federatedIdentity: assertion?.header,
         session: self.session,
@@ -209,23 +210,51 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
           self.matchingPrivateKey(for: community) == privateKey && self.isCurrent(assertion)
         }
       ) { data, response in
-        guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
-          let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
-          let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
-        else {
-          completion([], assertion)
+        finish((data, response), BuzzRelayAssertionIssuer.isChallenge(response))
+      }
+    } completion: { result, assertion in
+      let (data, response) = result
+      guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
+        let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+        let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+      else {
+        completion([], assertion)
+        return
+      }
+      completion(
+        Self.messages(
+          events: events.filter { event in
+            event.hasValidIDAndSignature()
+              && community.policies.contains { policy in
+                PushLeaseMatcher.matches(event: event, policy: policy)
+              }
+          },
+          community: community
+        ), assertion)
+    }
+  }
+
+  /// Runs `attempt` with the relay's NIP-FI assertion, if any. A hosted relay is tried without
+  /// one first; only if it challenges does the extension ask Builderlab, then retry once.
+  private func withFederatedIdentity<Output>(
+    relayURL: URL, privateKey: String,
+    attempt: @escaping (BuzzRelayAssertion?, @escaping (Output, Bool) -> Void) -> Void,
+    completion: @escaping (Output, BuzzRelayAssertion?) -> Void
+  ) {
+    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
+      attempt(assertion) { output, challenged in
+        guard challenged, assertion == nil, let assertionIssuer = self.assertionIssuer else {
+          completion(output, assertion)
           return
         }
-        completion(
-          Self.messages(
-            events: events.filter { event in
-              event.hasValidIDAndSignature()
-                && community.policies.contains { policy in
-                  PushLeaseMatcher.matches(event: event, policy: policy)
-                }
-            },
-            community: community
-          ), assertion)
+        assertionIssuer.header(relayURL: relayURL, privateKeyHex: privateKey, challenged: true) {
+          answer in
+          guard let answer else {
+            completion(output, nil)
+            return
+          }
+          attempt(answer) { output, _ in completion(output, answer) }
+        }
       }
     }
   }
@@ -412,7 +441,8 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion([])
       return
     }
-    federatedIdentity(relayURL: relayURL, privateKey: privateKey) { assertion in
+    withFederatedIdentity(relayURL: relayURL, privateKey: privateKey) {
+      (assertion, finish: @escaping (Result<Data, Error>?, Bool) -> Void) in
       var request = URLRequest(url: url)
       request.httpMethod = "POST"
       request.httpBody = body
@@ -420,7 +450,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       guard let auth = try? NostrHTTPAuth.authorizationHeader(
         url: url, method: "POST", body: body, privateKeyHex: privateKey)
       else {
-        completion([])
+        finish(nil, false)
         return
       }
       request.setValue(auth, forHTTPHeaderField: "Authorization")
@@ -431,15 +461,21 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
         request: request, configuration: self.session.configuration,
         maximumBytes: Self.maximumPresentationResponseBytes
       ) { result in
-        guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
-          case .success(let data) = result,
-          let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
-        else {
-          completion([])
+        guard case .failure(BuzzNotificationDownload.Failure.challenged) = result else {
+          finish(result, false)
           return
         }
-        completion(events.filter { $0.hasValidIDAndSignature() })
+        finish(result, true)
       }
+    } completion: { result, assertion in
+      guard self.matchingPrivateKey(for: community) != nil, self.isCurrent(assertion),
+        case .success(let data)? = result,
+        let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
+      else {
+        completion([])
+        return
+      }
+      completion(events.filter { $0.hasValidIDAndSignature() })
     }
   }
 
