@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nostr::EventId;
+use nostr::{EventId, PublicKey, Tag};
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
@@ -23,12 +23,30 @@ pub async fn cmd_add_reaction(
         buzz_sdk::build_reaction(target_eid, emoji)
             .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
     };
+    // NIP-25: lets the target's author find reactions with a `#p` filter.
+    let target_author = fetch_target_author(client, event_id).await?;
+    let builder = builder.tag(Tag::public_key(target_author));
 
     let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
+}
+
+async fn fetch_target_author(client: &BuzzClient, event_id: &str) -> Result<PublicKey, CliError> {
+    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let author = events
+        .as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event.get("pubkey"))
+        .and_then(|pubkey| pubkey.as_str())
+        .ok_or_else(|| CliError::NotFound(format!("event {event_id} not found")))?;
+    PublicKey::from_hex(author)
+        .map_err(|e| CliError::Other(format!("event {event_id} has an invalid pubkey: {e}")))
 }
 
 pub async fn cmd_remove_reaction(
@@ -132,5 +150,112 @@ pub async fn dispatch(cmd: crate::ReactionsCmd, client: &BuzzClient) -> Result<(
         } => cmd_add_reaction(client, &event, &emoji, emoji_url.as_deref()).await,
         ReactionsCmd::Remove { event, emoji } => cmd_remove_reaction(client, &event, &emoji).await,
         ReactionsCmd::Get { event } => cmd_get_reactions(client, &event).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cmd_add_reaction, BuzzClient, CliError};
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::Router;
+    use nostr::Keys;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    const TARGET_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TARGET_AUTHOR: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
+
+    type Submitted = Arc<Mutex<Option<serde_json::Value>>>;
+
+    async fn fake_relay(query_body: String) -> (String, Submitted) {
+        let submitted: Submitted = Arc::new(Mutex::new(None));
+        let state = (query_body, submitted.clone());
+        let app = Router::new()
+            .route(
+                "/query",
+                post(|State((body, _)): State<(String, Submitted)>| async move {
+                    (StatusCode::OK, [("content-type", "application/json")], body)
+                }),
+            )
+            .route(
+                "/events",
+                post(
+                    |State((_, submitted)): State<(String, Submitted)>, body: Bytes| async move {
+                        *submitted.lock().unwrap() = serde_json::from_slice(&body).ok();
+                        (
+                            StatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"event_id":"fake","accepted":true}"#,
+                        )
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}"), submitted)
+    }
+
+    fn target_response() -> String {
+        serde_json::json!([{ "id": TARGET_ID, "pubkey": TARGET_AUTHOR, "kind": 9, "tags": [] }])
+            .to_string()
+    }
+
+    fn submitted_tags(submitted: &Submitted) -> Vec<Vec<String>> {
+        let event = submitted.lock().unwrap().clone().expect("event submitted");
+        serde_json::from_value(event["tags"].clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn add_reaction_tags_target_author() {
+        let (url, submitted) = fake_relay(target_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_add_reaction(&client, TARGET_ID, "👍", None)
+            .await
+            .unwrap();
+
+        let tags = submitted_tags(&submitted);
+        assert!(tags.contains(&vec!["e".to_string(), TARGET_ID.to_string()]));
+        assert!(
+            tags.contains(&vec!["p".to_string(), TARGET_AUTHOR.to_string()]),
+            "reaction must carry a p tag naming the target author, got {tags:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_custom_emoji_reaction_tags_target_author() {
+        let (url, submitted) = fake_relay(target_response()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        cmd_add_reaction(
+            &client,
+            TARGET_ID,
+            "wave",
+            Some("https://cdn.example.com/wave.png"),
+        )
+        .await
+        .unwrap();
+
+        let tags = submitted_tags(&submitted);
+        assert!(tags.contains(&vec!["p".to_string(), TARGET_AUTHOR.to_string()]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.first().map(String::as_str) == Some("emoji")));
+    }
+
+    #[tokio::test]
+    async fn add_reaction_to_unknown_event_fails_without_submitting() {
+        let (url, submitted) = fake_relay("[]".to_string()).await;
+        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+
+        let result = cmd_add_reaction(&client, TARGET_ID, "👍", None).await;
+
+        assert!(matches!(result, Err(CliError::NotFound(_))));
+        assert!(submitted.lock().unwrap().is_none());
     }
 }
