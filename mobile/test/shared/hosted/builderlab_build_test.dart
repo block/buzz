@@ -10,14 +10,22 @@ void main() {
     expect(none.origin, isNull);
     expect(none.relayDomains, isEmpty);
 
-    final internal = BuilderlabBuild.parse(
-      distribution: 'internal',
+    final public = BuilderlabBuild.parse(
+      distribution: 'public',
       url: 'https://id.example.org/',
       relays: ' Buzz.Example.org ,other.example.org.',
     );
+    expect(public.distribution, BuilderlabDistribution.public);
+    expect(public.origin, Uri.parse('https://id.example.org'));
+    expect(public.relayDomains, ['buzz.example.org', 'other.example.org']);
+
+    final internal = BuilderlabBuild.parse(
+      distribution: 'internal',
+      url: 'https://id.example.org',
+      relays: 'Buzz.Example.org.',
+    );
     expect(internal.distribution, BuilderlabDistribution.internal);
-    expect(internal.origin, Uri.parse('https://id.example.org'));
-    expect(internal.relayDomains, ['buzz.example.org', 'other.example.org']);
+    expect(internal.relayDomains, ['buzz.example.org']);
 
     for (final (distribution, url, relays) in [
       ('public', 'https://id.example.org', ''),
@@ -31,6 +39,7 @@ void main() {
       ('public', 'https://id.example.org', 'wss://$relays'),
       ('public', 'https://id.example.org', '*.example.org'),
       ('public', 'https://id.example.org', 'localhost'),
+      ('internal', 'https://id.example.org', 'buzz.example.org,b.example.org'),
     ]) {
       expect(
         () => BuilderlabBuild.parse(

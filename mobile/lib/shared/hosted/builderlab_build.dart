@@ -82,6 +82,11 @@ abstract final class BuilderlabBuild {
     if (kind == null) {
       throw StateError('BUZZ_DISTRIBUTION must be internal or public');
     }
+    // An internal build reaches one organization community and has no
+    // switcher, so a second relay could strand its members there.
+    if (kind == BuilderlabDistribution.internal && domains.length != 1) {
+      throw StateError('An internal build takes exactly one relay host');
+    }
     final uri = Uri.parse(url);
     if (uri.scheme != 'https' ||
         uri.host.isEmpty ||

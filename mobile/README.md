@@ -40,14 +40,14 @@ communities under `BUZZ_BUILDERLAB_RELAYS`, which also places new communities
 under the first domain. QR pairing and other communities stay available.
 
 An internal build offers one **Sign in** action that goes to the organization's
-single sign-on and then joins the community at the first
-`BUZZ_BUILDERLAB_RELAYS` entry. It has no QR pairing, community switching or
+single sign-on and then joins the community at its
+`BUZZ_BUILDERLAB_RELAYS` host. It has no QR pairing, community switching or
 community creation, refuses links to other relays, and hides communities on
 other relays that an earlier build saved, keeping their keys.
 
-An internal build treats `BUZZ_BUILDERLAB_RELAYS` entries as exact relay hosts,
-not domains, and those relays always receive its Builderlab session's relay
-assertions.
+An internal build takes exactly one `BUZZ_BUILDERLAB_RELAYS` entry, its
+organization's relay host. It matches that exact host, not a domain, and the
+relay always receives its Builderlab session's relay assertions.
 
 ## Agent creation links
 
