@@ -1298,6 +1298,20 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     // Signing out of the hosted account revokes delivery of what its assertion fetched.
     sharedHosted = nil
     XCTAssertFalse(enforced.isStillAuthorized())
+
+    // An account origin that redirects never gets the session forwarded: the redirect is
+    // refused, so the relay stub above never sees the credential.
+    let redirecting = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { nil },
+      loadHostedSession: { hosted }, now: { clock })
+    URLProtocolStub.redirect = { request in
+      request.url?.host == "app.example" ? URL(string: "https://elsewhere.example/steal") : nil
+    }
+    defer { URLProtocolStub.redirect = nil }
+    XCTAssertNotEqual(resolve(makeResolver(
+      communitiesData: try snapshotData([community(relayUrl: "wss://team.communities.example")]),
+      now: clock, assertionIssuer: redirecting))?.body, "Hosted hello")
+    XCTAssertNil(relayAssertions["elsewhere.example"])
   }
 
   /// A refused or malformed issuance never produces a header.

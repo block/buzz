@@ -15,14 +15,16 @@ import '../push/push_bridge.dart';
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
   final account = BuilderlabAccountClient(
     // Hosted communities that enforce NIP-FI need the extension to mint too.
-    onSessionChanged: HostedRelayAuth.configured && HostedEnvironment.enabled
-        ? (credential) => shareHostedSessionWithNotifications(
-            origin: HostedEnvironment.origin,
-            credential: credential,
-            relayDomains: HostedEnvironment.authDomains,
-            communityDomain: HostedEnvironment.communitySuffix,
-          )
-        : null,
+    // A build without hosted relay auth still clears a copy an earlier build
+    // shared, so the extension cannot keep minting after sign-out.
+    onSessionChanged: (credential) => shareHostedSessionWithNotifications(
+      origin: HostedEnvironment.origin,
+      credential: HostedRelayAuth.configured && HostedEnvironment.enabled
+          ? credential
+          : null,
+      relayDomains: HostedEnvironment.authDomains,
+      communityDomain: HostedEnvironment.communitySuffix,
+    ),
   );
   ref.onDispose(account.dispose);
   return account;
