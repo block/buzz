@@ -84,6 +84,13 @@ function parseMembershipChangePayload(
       return target ? { mode: "departure", target } : null;
     }
     if (
+      payload.type === "member_removed" &&
+      typeof payload.target === "string"
+    ) {
+      const target = payload.target.trim().toLowerCase();
+      return target ? { mode: "departure", target } : null;
+    }
+    if (
       payload.type !== "member_joined" ||
       typeof payload.actor !== "string" ||
       typeof payload.target !== "string"
@@ -102,31 +109,22 @@ function parseMembershipChangePayload(
   }
 }
 
-function membershipChangesCanGroup(
-  first: MembershipChangePayload,
-  second: MembershipChangePayload,
-): boolean {
-  if (second.mode === "departure") {
-    return first.mode === "self-arrival" && first.target === second.target;
-  }
-  return first.mode !== "departure";
-}
-
 /**
  * Membership groups are anchored from their newest entry so prepending older
  * history cannot repartition the rows that are already loaded. Their key is
  * likewise the newest entry's key: extending the oldest visible group changes
  * its contents, but not its identity or the virtual list's existing key suffix.
  *
- * Compatible membership activities stay together while they are contiguous.
- * Arrival cohorts are actor-neutral even when self-joins and additions mix, but
- * one or more equivalent self-joins followed by that member leaving remain a
- * single lifecycle summary — every contiguous self-arrival of the departing
- * member is absorbed, since the relay re-emits `member_joined` on each
- * PUT_USER. `buildGroupedMembershipPayload` must describe every group this
- * emits; `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
- * Each adjacent event must fall within the one-hour activity window, so
- * uninterrupted activity can extend beyond an hour overall.
+ * Membership activities stay together while they are contiguous, regardless of
+ * whether they are arrivals, removals, or self-departures. Arrival cohorts are
+ * actor-neutral even when self-joins and additions mix, but one or more
+ * equivalent self-joins followed by that member leaving remain a single
+ * lifecycle summary — every contiguous self-arrival of the departing member is
+ * absorbed, since the relay re-emits `member_joined` on each PUT_USER.
+ * `buildGroupedMembershipPayload` must describe every group this emits;
+ * `membershipGroupPayload.test.mjs` pins that with a matrix invariant.
+ * Time between adjacent events does not split a group; only a message, a day
+ * boundary, or the unread divider does.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -136,8 +134,7 @@ function buildMembershipGroups(
 
   for (let end = entries.length - 1; end >= 0; ) {
     const newestEntry = entries[end];
-    const newestPayload = parseMembershipChangePayload(newestEntry);
-    if (!newestPayload) {
+    if (!parseMembershipChangePayload(newestEntry)) {
       end -= 1;
       continue;
     }
@@ -145,14 +142,10 @@ function buildMembershipGroups(
     let start = end;
     while (start > 0) {
       const candidate = entries[start - 1];
-      const nextEntry = entries[start];
-      const candidatePayload = parseMembershipChangePayload(candidate);
       if (
         barrierIndexes.has(start) ||
-        !candidatePayload ||
-        !membershipChangesCanGroup(candidatePayload, newestPayload) ||
-        newestEntry.message.createdAt < candidate.message.createdAt ||
-        nextEntry.message.createdAt - candidate.message.createdAt > 60 * 60
+        !parseMembershipChangePayload(candidate) ||
+        newestEntry.message.createdAt < candidate.message.createdAt
       ) {
         break;
       }

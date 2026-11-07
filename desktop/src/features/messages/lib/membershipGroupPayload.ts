@@ -20,6 +20,8 @@ export type SystemMessagePayload = {
   type: string;
   actor?: string;
   arrivals?: Array<{ actor: string; target: string }>;
+  addedTargets?: string[];
+  removedTargets?: string[];
   target?: string;
   targets?: string[];
   topic?: string;
@@ -59,6 +61,30 @@ export function buildGroupedMembershipPayload(
   const joinedThenLeft = buildJoinedThenLeftPayload(payloads);
   if (joinedThenLeft) return joinedThenLeft;
 
+  const membershipChanges = payloads.map(parseMembershipChange);
+  if (membershipChanges.some((change) => !change)) return null;
+
+  const changes = membershipChanges as Array<MembershipChange>;
+  if (changes.some((change) => change.mode === "departure")) {
+    return {
+      addedTargets: [
+        ...new Set(
+          changes
+            .filter((change) => change.mode === "arrival")
+            .map((change) => change.target),
+        ),
+      ],
+      removedTargets: [
+        ...new Set(
+          changes
+            .filter((change) => change.mode === "departure")
+            .map((change) => change.target),
+        ),
+      ],
+      type: "members_changed",
+    };
+  }
+
   const arrivals = payloads.map((payload) => {
     const payloadActor = payload?.actor ? normalizePubkey(payload.actor) : null;
     const payloadTarget = payload?.target
@@ -82,6 +108,31 @@ export function buildGroupedMembershipPayload(
     target: targets[0],
     targets,
   };
+}
+
+type MembershipChange =
+  | { mode: "arrival"; target: string }
+  | { mode: "departure"; target: string };
+
+function parseMembershipChange(
+  payload: SystemMessagePayload | null,
+): MembershipChange | null {
+  if (payload?.type === "member_joined" && payload.target) {
+    const target = normalizePubkey(payload.target);
+    return target ? { mode: "arrival", target } : null;
+  }
+
+  if (payload?.type === "member_left" && payload.actor) {
+    const target = normalizePubkey(payload.actor);
+    return target ? { mode: "departure", target } : null;
+  }
+
+  if (payload?.type === "member_removed" && payload.target) {
+    const target = normalizePubkey(payload.target);
+    return target ? { mode: "departure", target } : null;
+  }
+
+  return null;
 }
 
 /**
