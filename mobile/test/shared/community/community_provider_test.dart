@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -8,6 +9,7 @@ import 'package:buzz/shared/channels/channel_list_snapshot.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/relay/media_disk_cache.dart';
 import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -516,13 +518,30 @@ void main() {
       ]);
     });
 
-    test('startup and credential replacement discard orphan snapshots', () async {
+    test('startup and credential replacement discard orphan snapshots and '
+        'image caches', () async {
+      final mediaRoot = await Directory.systemTemp.createTemp('media_root');
+      addTearDown(() => mediaRoot.delete(recursive: true));
+      Future<Directory> seedMedia(Directory directory) async {
+        await File('${directory.path}/image').create(recursive: true);
+        return directory;
+      }
+
+      // Media sweeps run in the background.
+      Future<bool> eventuallyExists(Directory directory) async {
+        for (var i = 0; i < 50 && await directory.exists(); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        return directory.exists();
+      }
+
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final cache = ChannelListSnapshotStorage(prefs);
       const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
       final oldKeys = nostr.Keys.generate();
       final newKeys = nostr.Keys.generate();
+      final midKeys = nostr.Keys.generate();
       final community = Community.create(
         name: 'Stored',
         relayUrl: 'wss://cached.example.com:443',
@@ -534,21 +553,45 @@ void main() {
       await cache.write(oldToken, snapshot);
       await cache.write(restoredToken, snapshot);
       await prefs.setString('unrelated', 'keep');
+      final oldMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, oldKeys.public),
+      );
+      final orphanMedia = await seedMedia(
+        MediaDiskCache.communityDirectory(mediaRoot, 'restored'),
+      );
       container = createContainer(
-        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          mediaCacheRootProvider.overrideWith((ref) async => mediaRoot),
+        ],
       );
       await container.read(communityListProvider.future);
       expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
       expect(cache.read('restored', 'https://orphan.example'), isNull);
       expect(await cache.write(restoredToken, snapshot), isFalse);
+      expect(await eventuallyExists(orphanMedia), isFalse);
+      expect(await oldMedia.exists(), isTrue);
 
       final notifier = container.read(communityListProvider.notifier);
       await notifier.addCommunity(community);
       expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
       expect(await cache.write(oldToken, snapshot), isTrue);
+      expect(await oldMedia.exists(), isTrue);
+      final midMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, midKeys.public),
+      );
+      final newMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, newKeys.public),
+      );
+      // Two quick replacements: the first one's sweep must not delete the
+      // newest account's cache.
+      await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
       await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
+      expect(await eventuallyExists(midMedia), isFalse);
       expect(cache.read(oldKeys.public, community.relayUrl), isNull);
       expect(await cache.write(oldToken, snapshot), isFalse);
+      expect(await eventuallyExists(oldMedia), isFalse);
+      expect(await newMedia.exists(), isTrue);
       final newToken = cache.capture(newKeys.public, community.relayUrl);
       await cache.write(newToken, snapshot);
       await communityStorage.saveActiveId(community.id);
@@ -556,6 +599,14 @@ void main() {
       expect(await communityStorage.loadAll(), isEmpty);
       expect(prefs.getKeys(), {'unrelated'});
       expect(await cache.write(newToken, snapshot), isFalse);
+      expect(await eventuallyExists(newMedia), isFalse);
+      expect(
+        await MediaDiskCache.communityDirectory(
+          mediaRoot,
+          community.id,
+        ).exists(),
+        isFalse,
+      );
 
       // A backup restored without secure community records is swept at startup.
       container.dispose();
