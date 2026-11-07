@@ -1,6 +1,6 @@
 part of '../channels_page.dart';
 
-class _CommunityMenuSheet extends ConsumerWidget {
+class _CommunityMenuSheet extends StatelessWidget {
   const _CommunityMenuSheet({
     required this.canInvite,
     required this.onSwitchCommunity,
@@ -14,7 +14,7 @@ class _CommunityMenuSheet extends ConsumerWidget {
   final WidgetBuilder? appearancePageBuilder;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     void openPage(WidgetBuilder builder) {
       final navigator = Navigator.of(context, rootNavigator: true);
       Navigator.of(context).pop();
@@ -57,18 +57,10 @@ class _CommunityMenuSheet extends ConsumerWidget {
                     ),
                 ],
               ),
-            AppListCard(
-              children: [
-                // An internal build reaches only its organization's community,
-                // and leaves it by signing out.
-                if (OrganizationEnvironment.enabled)
-                  AppListRow(
-                    key: const Key('community-menu-sign-out'),
-                    icon: BuzzIcons.logOut,
-                    title: 'Sign out',
-                    onTap: () => confirmOrganizationSignOut(context, ref),
-                  )
-                else
+            // An internal build reaches only its organization's community.
+            if (!OrganizationEnvironment.enabled)
+              AppListCard(
+                children: [
                   AppListRow(
                     key: const Key('community-menu-switch'),
                     icon: BuzzIcons.arrowLeftRight,
@@ -76,8 +68,8 @@ class _CommunityMenuSheet extends ConsumerWidget {
                     trailing: const Icon(BuzzIcons.chevronRight, size: 18),
                     onTap: openSwitcher,
                   ),
-              ],
-            ),
+                ],
+              ),
           ],
         ),
       ),

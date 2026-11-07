@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
+import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
@@ -10,7 +11,7 @@ import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -78,8 +79,26 @@ void main() {
         AccountIdentityStore.keysForNsec(first.nsec!).secret,
       );
 
-      // Signing out removes the community; the landing ends the session.
-      await CommunityStorage().remove(first.id);
+      // Sign out, at the bottom of Settings, removes the community; the
+      // landing then ends the session.
+      await harness.open(
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('settings-sign-out')),
+        200,
+      );
+      await tester.tap(find.byKey(const Key('settings-sign-out')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+      for (var i = 0; i < 5; i++) {
+        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+        await tester.pumpAndSettle();
+      }
+      expect(await harness.saved(), isEmpty);
       await harness.open();
       expect(harness.accounts.last.account, isNull);
 
@@ -309,7 +328,7 @@ class _Harness {
     return communities.single;
   }
 
-  Future<void> open() async {
+  Future<void> open({Widget child = const OnboardingAppEntry()}) async {
     final origin = OrganizationEnvironment.origin!;
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/browser_auth'),
@@ -361,7 +380,7 @@ class _Harness {
           authProvider.overrideWith(_Auth.new),
           communityStorageProvider.overrideWithValue(CommunityStorage()),
         ],
-        child: const OnboardingAppEntry(),
+        child: child,
       ),
     );
     await tester.pumpAndSettle();
