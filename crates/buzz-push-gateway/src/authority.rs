@@ -212,6 +212,7 @@ struct MemoryState {
     delivery_auth_replays: HashMap<(String, String), i64>,
     delivery_request_replays: HashMap<(String, Uuid), i64>,
     endpoint_quotas: HashMap<[u8; 32], (i64, i64)>,
+    relay_quotas: HashMap<([u8; 32], String), (i64, i64)>,
 }
 
 /// Executable reference store used by conformance tests. Production uses the
@@ -565,14 +566,28 @@ impl AuthorityStore for MemoryAuthorityStore {
         {
             return Err(AuthorityError::Rejected);
         }
-        let quota = s.endpoint_quotas.entry(fingerprint).or_insert((now, 0));
-        if now.saturating_sub(quota.0) >= quota_window_seconds {
-            *quota = (now, 0);
+        if quota_window_seconds < 1 || quota_max_deliveries < 1 {
+            return Err(AuthorityError::Unavailable);
         }
-        if quota.1 >= quota_max_deliveries {
-            return Err(AuthorityError::Rejected);
+        let relay_key = (fingerprint, relay.to_owned());
+        let current = |quota: Option<&(i64, i64)>| match quota {
+            Some(&(start, count)) if now.saturating_sub(start) < quota_window_seconds => {
+                (start, count)
+            }
+            _ => (now, 0),
+        };
+        let device = current(s.endpoint_quotas.get(&fingerprint));
+        let per_relay = match s.relay_quotas.get(&relay_key) {
+            Some(&(start, count)) if start == device.0 => (start, count),
+            _ => (device.0, 0),
+        };
+        if device.1 >= quota_max_deliveries || per_relay.1 >= (quota_max_deliveries / 2).max(1) {
+            return Err(AuthorityError::RateLimited);
         }
-        quota.1 += 1;
+        s.endpoint_quotas
+            .insert(fingerprint, (device.0, device.1 + 1));
+        s.relay_quotas
+            .insert(relay_key, (per_relay.0, per_relay.1 + 1));
         s.delivery_auth_replays.insert(auth_key, request_expires_at);
         s.delivery_request_replays
             .insert(request_key, request_expires_at);
@@ -604,6 +619,8 @@ impl AuthorityStore for MemoryAuthorityStore {
             .retain(|_, expires_at| *expires_at >= now);
         s.endpoint_quotas
             .retain(|_, (started_at, _)| now.saturating_sub(*started_at) < 86_400);
+        s.relay_quotas
+            .retain(|_, (started, _)| now.saturating_sub(*started) < 86_400);
         Ok(())
     }
 }

@@ -100,6 +100,8 @@ async fn fixture_with_transport(
         })
         .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
+    // Capacity regression holds eight sends; keep its quota above that lane.
+    let quota = if transport.is_some() { 40 } else { 10 };
     let (app, _) = router(AppState {
         trusted_proxy_cidrs: Vec::new(),
         grant_keyring,
@@ -118,7 +120,7 @@ async fn fixture_with_transport(
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
-        endpoint_quota_max_deliveries: 10,
+        endpoint_quota_max_deliveries: quota,
         now,
         accepting: Arc::new(AtomicBool::new(true)),
     });
@@ -553,4 +555,27 @@ async fn slow_enrollment_bodies_are_bounded_without_occupying_revocation_capacit
     socket.write_all(b"POST /v1/installations HTTP/1.1\r\nHost: push.example\r\nContent-Length: 1048576\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
     assert!(headers(&mut socket).await.starts_with("HTTP/1.1 413"));
     server.abort();
+}
+
+#[tokio::test]
+async fn v1_encrypted_grant_relay_budget_returns_bounded_retry_after() {
+    let (app, keys, template, sends) = fixture().await;
+    for attempt in 0..6 {
+        let mut value: serde_json::Value = serde_json::from_slice(&template).unwrap();
+        value["request_id"] = Uuid::new_v4().to_string().into();
+        let body = serde_json::to_vec(&value).unwrap();
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let response = app
+            .clone()
+            .oneshot(request(DIRECT_URL, None, auth, body))
+            .await
+            .unwrap();
+        if attempt < 5 {
+            assert_eq!(response.status(), StatusCode::OK);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()["retry-after"], "60");
+        }
+    }
+    assert_eq!(sends.load(Ordering::SeqCst), 5);
 }
