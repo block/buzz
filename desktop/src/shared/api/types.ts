@@ -126,6 +126,7 @@ export type UsersBatchResponse = {
 export type UserSearchResult = {
   pubkey: string;
   displayName: string | null;
+  name?: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;

@@ -309,6 +309,7 @@ export function MembersSidebar({
             : current.isAgent
               ? currentName
               : (currentName ?? candidateName),
+        name: current.name ?? candidate.name ?? null,
         nip05Handle: current.nip05Handle ?? candidate.nip05Handle ?? null,
         ownerPubkey: current.ownerPubkey ?? candidate.ownerPubkey ?? null,
         isAgent: current.isAgent || candidate.isAgent,

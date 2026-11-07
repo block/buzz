@@ -64,6 +64,7 @@ function fromRawUserSearchResult(user: RawUserSearchResult): UserSearchResult {
   return {
     pubkey: user.pubkey,
     displayName: user.display_name,
+    name: user.name ?? null,
     avatarUrl: user.avatar_url,
     nip05Handle: user.nip05_handle,
     ownerPubkey: user.owner_pubkey,
