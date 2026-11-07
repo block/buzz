@@ -107,6 +107,9 @@ export class RelayClient {
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
   private terminal = false;
+  // Why the session latched terminal (e.g. "restricted: not a relay member"),
+  // so later callers can still classify the rejection instead of a bare refusal.
+  private terminalReason: string | null = null;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
   private stallWatchdog = new RelayStallWatchdog({
@@ -139,6 +142,7 @@ export class RelayClient {
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
     this.terminal = false;
+    this.terminalReason = null;
     this.visibleChannelId = null;
     this.authOkTracker.reset();
     this.connectionStateEmitter.set("idle");
@@ -444,6 +448,7 @@ export class RelayClient {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
     this.terminal = false;
+    this.terminalReason = null;
     this.authOkTracker.reset();
     this.keepAliveRequested = true;
     await this.connectBypassingBackoff();
@@ -507,8 +512,13 @@ export class RelayClient {
       // Terminal (e.g. relay rejected auth): refuse until disconnect() or
       // preconnect() clears the latch, else the reconnect-timer catch and
       // the publish/subscribe retry wrappers would race the terminal
-      // "disconnected" state back to "reconnecting".
-      throw new Error("Relay session is terminal; cannot reconnect.");
+      // "disconnected" state back to "reconnecting". Carry the original
+      // reason so membership denial still reads as denial, not a server error.
+      throw new Error(
+        this.terminalReason
+          ? `Relay session is terminal: ${this.terminalReason}`
+          : "Relay session is terminal; cannot reconnect.",
+      );
     }
 
     if (this.connectPromise) {
@@ -1140,6 +1150,7 @@ export class RelayClient {
 
     if (options?.reconnect === false) {
       this.terminal = true;
+      this.terminalReason = error.message || null;
       this.connectionStateEmitter.set("disconnected");
     } else if (
       // A late retry failure racing a terminal latch must not paint
