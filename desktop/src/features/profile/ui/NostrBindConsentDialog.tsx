@@ -67,7 +67,7 @@ const NOSTR_BIND_PREVIEW_SIGNED_RESPONSE = JSON.stringify({
 });
 
 function isNostrBindPreviewEnabled(): boolean {
-  if (!import.meta.env.DEV) {
+  if (!import.meta.env?.DEV) {
     return false;
   }
 
@@ -280,7 +280,9 @@ export function NostrBindConsentDialog() {
       return;
     }
 
+    let cancelled = false;
     const unlistenPromise = listenForNostrBindDeepLinks((nextPayload) => {
+      if (cancelled) return false;
       clearCopiedState();
       autoSignAttemptRef.current = null;
       activeSignAttemptRef.current = null;
@@ -294,15 +296,20 @@ export function NostrBindConsentDialog() {
       setError(null);
       setIsManualFallbackOpen(false);
       getIdentity()
-        .then(setIdentity)
+        .then((nextIdentity) => {
+          if (!cancelled) setIdentity(nextIdentity);
+        })
         .catch((error) => {
+          if (cancelled) return;
           console.warn("get_identity for nostr bind failed:", error);
           setIdentity(null);
           setError("Could not load the current Buzz identity.");
         });
+      return true;
     });
 
     return () => {
+      cancelled = true;
       void unlistenPromise.then((unlisten) => unlisten());
     };
   }, [clearCopiedState, isPreview]);

@@ -49,6 +49,11 @@ export type NostrBindDeepLinkPayload = {
   callbackUrl?: string;
 };
 
+type PendingNostrBindDeepLink = {
+  id: string;
+  payload: NostrBindDeepLinkPayload;
+};
+
 /**
  * Payload emitted by the Rust deep-link handler for `buzz://join?…` —
  * a relay invite from the web landing page (`/invite/<code>`).
@@ -330,9 +335,51 @@ export function listenForEntityDeepLinks(
 }
 
 export function listenForNostrBindDeepLinks(
-  onOpen: (payload: NostrBindDeepLinkPayload) => void,
+  onOpen: (payload: NostrBindDeepLinkPayload) => boolean,
 ): Promise<UnlistenFn> {
-  return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
-    onOpen(event.payload);
+  let drainRunning = false;
+  let drainRequested = false;
+  const drain = () => {
+    if (drainRunning) {
+      drainRequested = true;
+      return;
+    }
+    drainRunning = true;
+    void (async () => {
+      try {
+        do {
+          drainRequested = false;
+          while (true) {
+            const pending = await invoke<PendingNostrBindDeepLink | null>(
+              "take_pending_nostr_bind_deep_link",
+            );
+            if (!pending) break;
+            if (!onOpen(pending.payload)) break;
+            const acknowledged = await invoke<boolean>(
+              "acknowledge_pending_nostr_bind_deep_link",
+              { id: pending.id },
+            );
+            if (!acknowledged) break;
+          }
+        } while (drainRequested);
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending nostr-bind deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
+  };
+
+  return listen<PendingNostrBindDeepLink | NostrBindDeepLinkPayload>(
+    "deep-link-nostr-bind",
+    (event) => {
+      // Compatibility with older native builds that emitted the payload directly.
+      if (!("payload" in event.payload)) onOpen(event.payload);
+      else drain();
+    },
+  ).then((unlisten) => {
+    drain();
+    return unlisten;
   });
 }
