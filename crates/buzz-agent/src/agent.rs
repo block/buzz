@@ -325,7 +325,28 @@ impl RunCtx<'_> {
         if self.original_task.is_none() {
             *self.original_task = Some(user_text.clone());
         }
+        let preturn_input = preturn_hook_input(&user_text);
         self.history.push(HistoryItem::User(user_text));
+
+        // `_PreTurn` lifecycle hook: once per prompt, after the incoming
+        // message is in history and before the first model request. Output
+        // rides the same untrusted tool-result path as `_Stop` objections.
+        // Off unless `BUZZ_AGENT_PRETURN_HOOK` is set; fail-open (errors,
+        // timeouts and empty output inject nothing).
+        if self.cfg.preturn_hook {
+            let outputs = self
+                .mcp
+                .call_hooks(
+                    "_PreTurn",
+                    &preturn_input,
+                    self.cfg.hook_timeout,
+                    &self.cfg.hook_servers,
+                )
+                .await;
+            if !outputs.is_empty() {
+                push_hook_outputs_as_tool_results(self.history, "_PreTurn", &outputs);
+            }
+        }
 
         // Reset per-turn token accumulators for this prompt.
         *self.turn_input_tokens = TurnIOState::Unseen;
@@ -1220,6 +1241,33 @@ fn format_hook_output_body(hook: &str, server: &str, text: &str) -> String {
     .unwrap_or_else(|_| String::from("{\"hook\":\"\",\"server\":\"\",\"text\":\"\"}"))
 }
 
+/// Maximum characters of the prompt passed to the `_PreTurn` hook.
+const PRETURN_PROMPT_CHARS: usize = 500;
+
+/// Input for the `_PreTurn` hook: `{"prompt": <first 500 chars>}`. A short,
+/// char-boundary-safe excerpt so a memory plugin can key its lookup on the
+/// incoming message without receiving an unbounded payload.
+fn preturn_hook_input(user_text: &str) -> serde_json::Value {
+    let prompt: String = preturn_prompt_body(user_text)
+        .chars()
+        .take(PRETURN_PROMPT_CHARS)
+        .collect();
+    json!({ "prompt": prompt })
+}
+
+/// Buzz prompts open with a `<context>…</context>` header (event metadata)
+/// before the human's text. The hook keys its lookup on what the human
+/// said, so a leading header is skipped; without one the text is used as is.
+fn preturn_prompt_body(user_text: &str) -> &str {
+    let trimmed = user_text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<context>") {
+        if let Some(end) = rest.find("</context>") {
+            return rest[end + "</context>".len()..].trim_start();
+        }
+    }
+    trimmed
+}
+
 /// Synthetic provider id for an injected hook tool-call/result pair. Must
 /// be unique per pair so the LLM wire format (which keys tool results by
 /// id) stays valid across multiple objections in one session.
@@ -1398,6 +1446,31 @@ mod tests {
     /// same fixture, budget set to the window instead) so that "evicted
     /// nothing" is a real observation about the unit mismatch rather than a
     /// blind probe that could never evict.
+    #[test]
+    fn preturn_hook_input_skips_the_context_header() {
+        let text = "<context>\nchannel=design event=abc\n</context>\n@CAD print DDK01 v9";
+        assert_eq!(
+            preturn_hook_input(text),
+            json!({ "prompt": "@CAD print DDK01 v9" })
+        );
+        // no header → unchanged; unterminated header → unchanged
+        assert_eq!(preturn_hook_input("plain"), json!({ "prompt": "plain" }));
+        assert_eq!(
+            preturn_hook_input("<context> open"),
+            json!({ "prompt": "<context> open" })
+        );
+    }
+
+    #[test]
+    fn preturn_hook_input_caps_prompt_on_char_boundary() {
+        assert_eq!(preturn_hook_input("hi"), json!({ "prompt": "hi" }));
+        let long = "é".repeat(PRETURN_PROMPT_CHARS + 10);
+        let input = preturn_hook_input(&long);
+        let prompt = input["prompt"].as_str().unwrap();
+        assert_eq!(prompt.chars().count(), PRETURN_PROMPT_CHARS);
+        assert!(prompt.chars().all(|c| c == 'é'));
+    }
+
     #[test]
     fn truncate_history_is_a_noop_at_context_window_scale() {
         // ~800 KB of history. At any real bytes/token density (densest real
