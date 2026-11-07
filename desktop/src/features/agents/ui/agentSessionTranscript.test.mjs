@@ -768,6 +768,27 @@ test("buildTranscript separates repeated lifecycle text", () => {
   assert.equal(item.text, "recovered: first\nrecovered: second");
 });
 
+test("buildTranscript keeps the Databricks sign-in failure instead of blaming membership", () => {
+  const [item] = buildTranscript([
+    {
+      ...baseEvent,
+      kind: "turn_error",
+      payload: {
+        outcome: "error",
+        code: -32001,
+        error:
+          "Agent reported error (code -32001): llm auth: Databricks rejected the refresh token; sign in again",
+      },
+    },
+  ]);
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.title, "Turn error");
+  assert.equal(
+    item.text,
+    "error: The model provider rejected authentication — check its credentials or sign in again. Databricks rejected the refresh token; sign in again",
+  );
+});
+
 // --- permission outcome (Fix #3) ---
 
 function makePermissionRequest(seq, requestId, turnId = "turn-1") {
