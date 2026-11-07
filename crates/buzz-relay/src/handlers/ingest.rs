@@ -2667,10 +2667,16 @@ async fn ingest_event_inner(
         });
     }
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+    const MAX_TIMESTAMP_DRIFT_SECS: u64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if super::freshness::check_created_at_skew(
+        event.created_at,
+        u64::try_from(now).unwrap_or(0),
+        MAX_TIMESTAMP_DRIFT_SECS,
+    )
+    .is_err()
+    {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -3005,15 +3011,13 @@ async fn ingest_event_inner(
 
         // Freshness check: reject events outside ±120s of now (same as admin commands).
         {
-            let event_ts = event.created_at.as_secs() as i64;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if (event_ts - now).abs() > 120 {
+            use super::freshness::{check_created_at_skew, unix_now_secs, MAX_COMMAND_SKEW_SECS};
+            if let Err(e) =
+                check_created_at_skew(event.created_at, unix_now_secs(), MAX_COMMAND_SKEW_SECS)
+            {
                 return Err(IngestError::Rejected(format!(
-                    "invalid: leave request timestamp out of range (delta={}s, max ±120s)",
-                    event_ts - now
+                    "invalid: leave request timestamp out of range (delta={}s, max ±{MAX_COMMAND_SKEW_SECS}s)",
+                    e.delta()
                 )));
             }
         }
