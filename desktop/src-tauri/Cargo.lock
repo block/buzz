@@ -1271,6 +1271,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "libc",
+ "nix 0.31.3",
  "parking_lot",
  "portable-pty",
 ]

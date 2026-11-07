@@ -11,6 +11,7 @@ portable-pty = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+nix = { version = "0.31", default-features = false, features = ["user", "fs"] }
 
 [dev-dependencies]
 # Tests reach into the grid to prove content survived a frame.
