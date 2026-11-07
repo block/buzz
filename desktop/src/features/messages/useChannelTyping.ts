@@ -7,6 +7,8 @@ import {
 import { relayClient } from "@/shared/api/relayClient";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
+  KIND_FORUM_COMMENT,
+  KIND_FORUM_POST,
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_DIFF,
   KIND_TYPING_INDICATOR,
@@ -52,13 +54,20 @@ function isTypingCompletionEvent(event: RelayEvent | null | undefined) {
   }
 
   return (
+    event.kind === KIND_FORUM_POST ||
+    event.kind === KIND_FORUM_COMMENT ||
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_DIFF
   );
 }
 
-function getTypingScopeId(event: RelayEvent) {
-  return getThreadReference(event.tags).parentId ?? null;
+function getTypingScopeId(
+  event: RelayEvent,
+  channelType: Channel["channelType"] | null,
+) {
+  const reference = getThreadReference(event.tags);
+  // Forums flatten replies under the post, including replies to a comment.
+  return channelType === "forum" ? reference.rootId : reference.parentId;
 }
 
 function getTypingStateKey(pubkey: string, threadHeadId: string | null) {
@@ -94,7 +103,7 @@ export function useChannelTyping(
     }
 
     const typingPubkey = event.pubkey.toLowerCase();
-    const threadHeadId = getTypingScopeId(event);
+    const threadHeadId = getTypingScopeId(event, channelType);
     const typingKey = getTypingStateKey(typingPubkey, threadHeadId);
     if (normalizedCurrentPubkey && typingPubkey === normalizedCurrentPubkey) {
       return;
@@ -156,7 +165,7 @@ export function useChannelTyping(
       relaySelfPubkey,
       requireChannelTagForPTags: true,
     }).toLowerCase();
-    const threadHeadId = getTypingScopeId(latestMessageEvent);
+    const threadHeadId = getTypingScopeId(latestMessageEvent, channelType);
     const typingKey = getTypingStateKey(authorPubkey, threadHeadId);
     latestMessageCreatedAtByPubkeyRef.current[typingKey] = Math.max(
       latestMessageCreatedAtByPubkeyRef.current[typingKey] ?? 0,
@@ -174,10 +183,10 @@ export function useChannelTyping(
       delete updated[typingKey];
       return updated;
     });
-  }, [channelId, latestMessageEvent, relaySelfPubkey]);
+  }, [channelId, channelType, latestMessageEvent, relaySelfPubkey]);
 
   useEffect(() => {
-    if (!channelId || channelType === "forum") {
+    if (!channelId) {
       return;
     }
 
@@ -212,7 +221,7 @@ export function useChannelTyping(
         void cleanup();
       }
     };
-  }, [channelId, channelType]);
+  }, [channelId]);
 
   const hasActiveTypers = Object.keys(typingByPubkey).length > 0;
 
