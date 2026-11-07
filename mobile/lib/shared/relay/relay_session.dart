@@ -624,7 +624,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     try {
       final auth = ref.read(hostedRelayAuthProvider);
-      if (auth.protects(config)) socket.headers = await auth.headers(config);
+      if (auth.protects(config)) {
+        socket.headers = await auth.headers(config, fresh: true);
+      }
       if (_disposed || generation != _connectionGeneration) return;
       await socket.connect();
     } on AccountFailure catch (error) {

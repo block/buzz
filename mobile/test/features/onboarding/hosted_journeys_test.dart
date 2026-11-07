@@ -820,6 +820,73 @@ void main() {
   );
 
   journey(
+    'a hosted community gets assertions only once its relay requires NIP-FI',
+    (tester, f) async {
+      f.relayAuthEnabled = true;
+      f.nipFiRequired = false;
+      await f.initialize();
+      final community = Community.create(
+        name: 'One',
+        relayUrl: 'wss://one.communities.buzz.xyz',
+        pubkey: f.keys.public,
+        nsec: f.keys.nsec,
+      );
+      await f.storage.save(community);
+      await f.storage.saveActiveId(community.id);
+      await f.mount(tester, openEntry: false);
+      final sessionSubscription = f.container.listen(
+        relaySessionProvider,
+        (_, _) {},
+      );
+      addTearDown(sessionSubscription.close);
+      final session = f.container.read(relaySessionProvider.notifier);
+      await f.settle(tester);
+      // The issuer refuses hosts without NIP-FI; the app never asks it.
+      expect(f.socketHeaders, isNotEmpty);
+      expect(f.socketHeaders, everyElement(isEmpty));
+      await session.queryRelay(const []);
+      expect(f.sent('/query'), hasLength(1));
+      expect(f.sent('/identity/assertions'), isEmpty);
+      expect(
+        find.textContaining('cannot reconnect to this community'),
+        findsNothing,
+      );
+      // Cached-only reads (saved profile cards, native media) go out without
+      // an assertion instead of waiting for one that will never come.
+      final auth = f.container.read(hostedRelayAuthProvider);
+      final config = f.container.read(relayConfigProvider);
+      expect(auth.cachedHeaders(config), isEmpty);
+
+      // Unreachable discovery fails transiently, never as a denial.
+      f.nipFiRequired = null;
+      await session.reconnect();
+      await f.settle(tester);
+      expect(f.container.read(hostedRelayAuthProvider).failure, isNull);
+      // Requests keep the last answer instead of failing with discovery.
+      await session.queryRelay(const []);
+      expect(f.sent('/query'), hasLength(2));
+      expect(f.sent('/identity/assertions'), isEmpty);
+
+      // Once the community requires NIP-FI, its next connection carries one.
+      f.nipFiRequired = true;
+      final discoveries = f.discoveries;
+      await session.reconnect();
+      await f.settle(tester);
+      expect(f.discoveries, greaterThan(discoveries));
+      expect(f.socketHeaders.last, {
+        'Nostr-Federated-Identity': 'Bearer synthetic-assertion',
+      });
+      expect(f.sent('/identity/assertions'), hasLength(1));
+      await session.queryRelay(const []);
+      expect(f.sent('/identity/assertions'), hasLength(1));
+      expect(auth.cachedHeaders(config), {
+        'Nostr-Federated-Identity': 'Bearer synthetic-assertion',
+      });
+    },
+    requiresAuthDomain: true,
+  );
+
+  journey(
     'saved community signs in again without changing identity or onboarding',
     (tester, f) async {
       f.relayAuthEnabled = true;
