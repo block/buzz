@@ -104,6 +104,17 @@ export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
   );
 }
 
+/** Empty channel menus describe the roster; typing explicitly searches further. */
+export function channelMentionCandidates<T extends MentionCandidateForRanking>(
+  candidates: readonly T[],
+  query: string,
+  channelId: string | null,
+): readonly T[] {
+  return channelId && query.trim() === ""
+    ? candidates.filter((candidate) => candidate.isMember)
+    : candidates;
+}
+
 export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   query: string,

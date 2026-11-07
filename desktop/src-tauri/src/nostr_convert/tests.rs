@@ -500,7 +500,7 @@ fn managed_agent_directory_uses_the_latest_profile_head() {
 }
 
 #[test]
-fn managed_agent_candidates_use_only_relay_signed_bot_membership() {
+fn member_candidates_use_only_relay_signed_membership_regardless_of_role() {
     let relay_keys = Keys::generate();
     let agent_pubkey = Keys::generate().public_key().to_hex();
     let stranger = Keys::generate().public_key().to_hex();
@@ -518,17 +518,17 @@ fn managed_agent_candidates_use_only_relay_signed_bot_membership() {
         vec![vec!["d", "forged"], vec!["p", &agent_pubkey, "", "bot"]],
     );
 
-    let channel_ids = member_agent_channel_ids_from_events(
-        &[forged, general],
-        &relay_keys.public_key().to_hex(),
-        &Default::default(),
-    );
+    let channel_ids =
+        member_channel_ids_from_events(&[forged, general], &relay_keys.public_key().to_hex());
 
     assert_eq!(
         channel_ids.get(&agent_pubkey),
         Some(&vec!["family".to_string()])
     );
-    assert!(!channel_ids.contains_key(&stranger));
+    assert_eq!(
+        channel_ids.get(&stranger),
+        Some(&vec!["family".to_string()])
+    );
 }
 
 #[test]
@@ -783,11 +783,7 @@ fn known_owned_agents_have_membership_independent_of_role() {
         ])
         .sign_with_keys(&relay)
         .unwrap();
-    let memberships = member_agent_channel_ids_from_events(
-        &[event],
-        &relay.public_key().to_hex(),
-        &std::collections::HashSet::from([agent.clone()]),
-    );
+    let memberships = member_channel_ids_from_events(&[event], &relay.public_key().to_hex());
     assert_eq!(memberships.get(&agent), Some(&vec!["general".to_string()]));
 }
 
