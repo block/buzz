@@ -959,6 +959,7 @@ void main() {
   bubbleLayoutTests();
   messageWidthTests();
   swipeReplyTests();
+  swipeReplyLinkTests();
   reviewAvatarTests();
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
