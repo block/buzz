@@ -78,7 +78,7 @@ import {
   resolveAgentInstruction,
   resolvePanelProfile,
   resolveProfileDisplayName,
-  truncateNpub,
+  resolveOwnerHandle,
   type UserProfilePanelProps,
   useRetainedPersona,
 } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -674,24 +674,14 @@ export function UserProfilePanel({
   });
   const ownerHandle = React.useMemo(() => {
     if (ownerPubkey) {
-      const ownerProfile = ownerProfileQuery.data;
-      return (
-        ownerProfile?.nip05Handle?.trim() ||
-        ownerProfile?.displayName?.trim() ||
-        truncateNpub(ownerPubkey)
-      );
+      return resolveOwnerHandle(ownerProfileQuery.data, ownerPubkey);
     }
 
     if (currentPubkey === undefined || isOwner !== true) {
       return null;
     }
 
-    const currentProfile = currentProfileQuery.data;
-    return (
-      currentProfile?.nip05Handle?.trim() ||
-      currentProfile?.displayName?.trim() ||
-      truncateNpub(currentPubkey)
-    );
+    return resolveOwnerHandle(currentProfileQuery.data, currentPubkey);
   }, [
     currentProfileQuery.data,
     currentPubkey,
