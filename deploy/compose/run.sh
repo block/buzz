@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Git Bash (MSYS) rewrites absolute container paths in arguments — e.g.
+# `/usr/local/bin/buzz-admin` becomes `C:/Program Files/Git/usr/local/bin/...`
+# before docker ever sees it, breaking every `docker compose exec` below with
+# "OCI runtime exec failed". Disabling the conversion is a no-op everywhere
+# except MSYS shells.
+export MSYS_NO_PATHCONV=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
