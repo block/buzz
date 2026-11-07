@@ -2727,6 +2727,9 @@ async fn handle_bridge_search(
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
+        if crate::handlers::req::filter_matches_nothing(filter) {
+            continue;
+        }
 
         let limit = filter.limit.unwrap_or(100).min(500) as u32;
         if limit == 0 {
@@ -2743,45 +2746,44 @@ async fn handle_bridge_search(
         // Scope by channel — push the #h tag (intersected with accessible
         // channels) if present, else the community-wide scope.
         let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-        let filter_channel_scope =
-            if let Some(vs) = filter.generic_tags.get(&h_tag).filter(|vs| !vs.is_empty()) {
-                let valid: Vec<uuid::Uuid> = vs
-                    .iter()
-                    .filter_map(|v| v.parse::<uuid::Uuid>().ok())
-                    .filter(|id| accessible_channels.contains(id))
-                    .collect();
-                if valid.is_empty() {
-                    continue; // All #h values inaccessible — skip filter.
-                }
-                buzz_search::ChannelScope::Channels(valid)
-            } else {
-                // Bridge always includes global (channel-less) events — same
-                // as WS with full scopes.
-                match crate::handlers::req::build_search_channel_scope_filter(
-                    accessible_channels,
-                    true, // include_global
-                ) {
-                    Some(scope) => scope,
-                    None => continue,
-                }
-            };
+        let filter_channel_scope = if let Some(vs) = filter.generic_tags.get(&h_tag) {
+            let valid: Vec<uuid::Uuid> = vs
+                .iter()
+                .filter_map(|v| v.parse::<uuid::Uuid>().ok())
+                .filter(|id| accessible_channels.contains(id))
+                .collect();
+            if valid.is_empty() {
+                continue; // All #h values inaccessible — skip filter.
+            }
+            buzz_search::ChannelScope::Channels(valid)
+        } else {
+            // Bridge always includes global (channel-less) events — same
+            // as WS with full scopes.
+            match crate::handlers::req::build_search_channel_scope_filter(
+                accessible_channels,
+                true, // include_global
+            ) {
+                Some(scope) => scope,
+                None => continue,
+            }
+        };
 
-        let kinds = filter.kinds.as_ref().and_then(|ks| {
-            if ks.is_empty() {
-                None
-            } else {
-                Some(ks.iter().map(|k| k.as_u16() as i32).collect::<Vec<_>>())
-            }
-        });
-        let authors = filter.authors.as_ref().and_then(|au| {
-            if au.is_empty() {
-                None
-            } else {
-                Some(au.iter().map(|a| a.to_bytes().to_vec()).collect::<Vec<_>>())
-            }
-        });
-        let since = filter.since.map(|s| s.as_secs() as i64);
-        let until = filter.until.map(|u| u.as_secs() as i64);
+        let kinds = filter
+            .kinds
+            .as_ref()
+            .map(|ks| ks.iter().map(|k| k.as_u16() as i32).collect::<Vec<_>>());
+        let authors = filter
+            .authors
+            .as_ref()
+            .map(|au| au.iter().map(|a| a.to_bytes().to_vec()).collect::<Vec<_>>());
+        let since = filter
+            .since
+            .and_then(crate::handlers::req::filter_timestamp)
+            .map(|t| t.timestamp());
+        let until = filter
+            .until
+            .and_then(crate::handlers::req::filter_timestamp)
+            .map(|t| t.timestamp());
 
         let search_query = buzz_search::SearchQuery {
             community: tenant.community(),
