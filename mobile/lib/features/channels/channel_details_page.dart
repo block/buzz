@@ -471,6 +471,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 ],
               ],
             ),
+          if (!resolvedChannel.isDm && resolvedChannel.visibility == 'open')
+            _ChannelAdmissionCard(
+              channel: resolvedChannel,
+              canEditJoinRole: canEdit,
+            ),
           AppListCard(
             key: const ValueKey('channel-details-channel-card'),
             verticalPadding: _channelDetailsSectionPadding,

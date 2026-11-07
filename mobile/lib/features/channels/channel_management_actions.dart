@@ -264,6 +264,113 @@ class ChannelActions {
     await _refreshChannelState(channelId);
   }
 
+  /// Sets the role people get when they join [channelId]: `member` lets them
+  /// participate, `guest` lets them only view. Existing members keep theirs.
+  Future<void> setChannelJoinRole(String channelId, String role) =>
+      _setAdmission(channelId, ['join_role', role]);
+
+  /// Makes [channelId] a default channel, which the relay joins every new
+  /// community member to. Only community owners and admins may change it.
+  Future<void> setDefaultChannel(String channelId, {required bool enabled}) =>
+      _setAdmission(channelId, ['auto_join', enabled.toString()]);
+
+  /// Sends one partial kind:9002 change, then confirms it from fresh relay
+  /// metadata. A change the relay may have applied without showing it, or
+  /// whose acknowledgement was lost, is held as uncertain and reported as
+  /// [ChannelChangeUnconfirmed]; no other change is published for the channel
+  /// until [checkAdmissionChange] confirms it.
+  Future<void> _setAdmission(String channelId, List<String> tag) async {
+    final uncertain = _ref.read(
+      uncertainAdmissionChangeProvider(channelId).notifier,
+    );
+    if (_ref.read(uncertainAdmissionChangeProvider(channelId)) != null) {
+      throw const ChannelChangeUnconfirmed();
+    }
+    _ensureCommunityValid();
+    var signed = false;
+    try {
+      await _signedEventRelay.submit(
+        kind: 9002,
+        content: '',
+        tags: [
+          ['h', channelId],
+          tag,
+        ],
+        // From here the relay may apply the change even if its answer is lost.
+        onSigned: (event) {
+          signed = true;
+          uncertain.hold(tag, event);
+        },
+      );
+    } on RelayEventRejected {
+      uncertain.clear();
+      rethrow;
+    } on RelayNotConnected {
+      // Nothing was sent, so nothing can have been applied.
+      uncertain.clear();
+      rethrow;
+    } catch (_) {
+      if (!signed) rethrow;
+      _ref.invalidate(channelAdmissionProvider(channelId));
+      throw const ChannelChangeUnconfirmed();
+    }
+    await checkAdmissionChange(channelId);
+  }
+
+  /// Reads [channelId]'s metadata, without publishing, to resolve an
+  /// uncertain admission change. Throws [ChannelChangeUnconfirmed] while the
+  /// relay still does not show it; once a read shows it unapplied, the change
+  /// may be sent again with [resendAdmissionChange].
+  Future<void> checkAdmissionChange(String channelId) async {
+    final uncertain = _ref.read(
+      uncertainAdmissionChangeProvider(channelId).notifier,
+    );
+    final held = _ref.read(uncertainAdmissionChangeProvider(channelId));
+    if (held == null) return;
+    try {
+      _ensureCommunityValid();
+      final admission = await _fetchChannelAdmission(_session, channelId);
+      if (!admissionShows(admission, held.tag)) {
+        uncertain.markUnseen(true);
+        throw const ChannelChangeUnconfirmed();
+      }
+      uncertain.clear();
+    } on ChannelChangeUnconfirmed {
+      rethrow;
+    } catch (_) {
+      throw const ChannelChangeUnconfirmed();
+    } finally {
+      _ref.invalidate(channelAdmissionProvider(channelId));
+    }
+  }
+
+  /// Sends an uncertain change the relay does not show again, as the exact
+  /// event first signed, then confirms it. A relay that already stored that
+  /// event ignores it, so this can never apply the change twice.
+  Future<void> resendAdmissionChange(String channelId) async {
+    final uncertain = _ref.read(
+      uncertainAdmissionChangeProvider(channelId).notifier,
+    );
+    final held = _ref.read(uncertainAdmissionChangeProvider(channelId));
+    if (held == null || !held.unseen) return;
+    _ensureCommunityValid();
+    uncertain.markUnseen(false);
+    try {
+      await _session.publish(held.event);
+    } on RelayEventRejected {
+      uncertain.clear();
+      rethrow;
+    } on RelayNotConnected {
+      // Nothing new was sent; the last read still stands.
+      uncertain.markUnseen(true);
+      rethrow;
+    } catch (_) {
+      _ref.invalidate(channelAdmissionProvider(channelId));
+      throw const ChannelChangeUnconfirmed();
+    }
+    await checkAdmissionChange(channelId);
+  }
+
   /// Archives the channel and refreshes its cached state.
   Future<void> archiveChannel(String channelId) =>
       _setChannelArchived(channelId, archived: true);

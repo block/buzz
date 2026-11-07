@@ -122,6 +122,10 @@ final currentCommunityRoleProvider = Provider<AsyncValue<CommunityMemberRole?>>(
   },
 );
 
+/// Whether [role] is a community owner or admin.
+bool managesCommunity(CommunityMemberRole? role) =>
+    role == CommunityMemberRole.owner || role == CommunityMemberRole.admin;
+
 /// Whether [role] is allowed to create community invitations.
 bool canManageCommunityInvites(CommunityMemberRole? role) =>
-    role == CommunityMemberRole.owner || role == CommunityMemberRole.admin;
+    managesCommunity(role);

@@ -423,7 +423,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (!_isActiveConnection(generation) || !_socketConnected) {
-      throw StateError('Relay session is not connected');
+      throw RelayNotConnected();
     }
 
     final completer = Completer<NostrEvent>();
@@ -1030,7 +1030,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          Exception(message.isNotEmpty ? message : 'Event rejected'),
+          RelayEventRejected(message.isNotEmpty ? message : 'Event rejected'),
         );
       }
     }
