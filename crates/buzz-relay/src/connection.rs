@@ -769,13 +769,8 @@ async fn handle_active_connection(
     .await;
 
     cancel.cancel();
-    // Whoever cancelled first recorded its own reason; these fill in the rest.
-    if state.shutting_down.load(Ordering::Acquire) {
-        close.closed("shutdown");
-    } else if let Some(reason) = *control.disconnect_reason().borrow() {
-        close.closed(reason.as_str());
-    }
-    close.closed("server_closed");
+    // Whoever cancelled first recorded its own reason; this fills in the rest.
+    close.closed(server_close_reason(&state, &conn).unwrap_or("server_closed"));
     // The socket can no longer AUTH; cleanup below may block.
     conn.community_control.finish_nip_fi_line();
     let close_outcome = if state.shutting_down.load(Ordering::Acquire) {
@@ -1192,6 +1187,29 @@ async fn send_loop_inner<S>(
     }
 }
 
+/// The `close_reason` of a close the server already decided on, if any:
+/// shutdown, then a policy disconnect, then a cancellation (`auth_failed` if
+/// it rejected AUTH). The reader defers to it, so a peer's reply to the
+/// server's Close is not logged as the cause.
+pub(crate) fn server_close_reason(
+    state: &AppState,
+    conn: &ConnectionState,
+) -> Option<&'static str> {
+    if state.shutting_down.load(Ordering::Acquire) {
+        return Some("shutdown");
+    }
+    if let Some(reason) = *conn.community_control.disconnect_reason().borrow() {
+        return Some(reason.as_str());
+    }
+    conn.cancel.is_cancelled().then(|| {
+        if matches!(conn.auth_state_snapshot(), AuthState::Failed) {
+            "auth_failed"
+        } else {
+            "server_closed"
+        }
+    })
+}
+
 /// 3 missed pongs → disconnect.
 ///
 /// Sends Ping through the control channel so it isn't blocked by a full
@@ -1207,6 +1225,10 @@ async fn heartbeat_loop(
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                // A tick racing a close already decided is not a miss.
+                if cancel.is_cancelled() {
+                    break;
+                }
                 // fetch_add returns the *previous* value before incrementing:
                 //   prev=0 → now 1 (first miss)
                 //   prev=1 → now 2 (second miss)
@@ -1317,12 +1339,12 @@ async fn recv_loop(
                     }
                     Some(Ok(WsMessage::Close(_))) | None => {
                         debug!("WebSocket closed by client");
-                        close.closed("client_closed");
+                        close.closed(server_close_reason(&state, &conn).unwrap_or("client_closed"));
                         break;
                     }
                     Some(Err(e)) => {
                         debug!("WebSocket error: {e}");
-                        close.closed("socket_error");
+                        close.closed(server_close_reason(&state, &conn).unwrap_or("socket_error"));
                         break;
                     }
                 }
@@ -2102,6 +2124,149 @@ pub(crate) mod tests {
         (frames, lines)
     }
 
+    /// Serve one real active connection on `state`; once the client has its
+    /// AUTH challenge, run `server_close`, then close from the client, after
+    /// the server's own Close when `reply` is set. Returns the `close_reason`.
+    async fn close_reason_after(
+        state: Arc<AppState>,
+        reply: bool,
+        server_close: impl FnOnce(Arc<AppState>, &CommunityConnectionControl),
+    ) -> serde_json::Value {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4());
+        let conn_id = Uuid::new_v4();
+        let control = CommunityConnectionControl::new(CancellationToken::new());
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let (served, served_control) = (Arc::clone(&state), control.clone());
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let (state, control) = (Arc::clone(&served), served_control.clone());
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let close = crate::access::CloseLine::open(
+                            conn_id,
+                            community,
+                            "127.0.0.1:9999".parse().unwrap(),
+                            None,
+                        );
+                        handle_active_connection(
+                            socket,
+                            state,
+                            "127.0.0.1:9999".parse().unwrap(),
+                            TenantContext::resolved(community, "test.local".to_owned()),
+                            close,
+                            control,
+                            None,
+                            chrono::Utc::now(),
+                            None,
+                        )
+                        .await
+                    })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("connect");
+        assert!(matches!(client.next().await, Some(Ok(Message::Text(_)))));
+        while state.conn_manager.community_for_conn(conn_id).is_none() {
+            tokio::task::yield_now().await;
+        }
+        server_close(Arc::clone(&state), &control);
+        if reply {
+            while let Some(Ok(frame)) = client.next().await {
+                if frame.is_close() {
+                    break;
+                }
+            }
+        }
+        // Send the Close, or flush the reply tungstenite queued to the server's.
+        let _ = client.close(None).await;
+        let _ = client.flush().await;
+        let lines = close_lines(&out).await;
+        server.abort();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        lines[0]["close_reason"].clone()
+    }
+
+    /// A client answering the jittered restart's 1012 with its own Close
+    /// still closes as `shutdown`. Mutation: let the reader record
+    /// `client_closed` without consulting `server_close_reason` → RED.
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_reply_to_a_jittered_restart_closes_as_shutdown() {
+        let state = crate::state::tests::test_state().await;
+        let reason = close_reason_after(state, true, |state, _| {
+            state.begin_shutdown();
+            tokio::spawn(async move { state.conn_manager.drain_all_jittered(1).await });
+        })
+        .await;
+        assert_eq!(reason, "shutdown");
+    }
+
+    /// A client Close that arrives as a policy disconnect cancels keeps the
+    /// policy's reason, whichever the reader sees first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_close_racing_a_policy_disconnect_keeps_the_policy_reason() {
+        let state = crate::state::tests::test_state().await;
+        let reason = close_reason_after(state, false, |_, control| {
+            let (frame_tx, _frame_rx) = mpsc::channel(1);
+            control.deny_authorization(&frame_tx, crate::nip_fi_session::NipFiWsRoute::Root);
+        })
+        .await;
+        assert_eq!(reason, "authorization_denied");
+    }
+
+    /// The reasons the server ranks for a close it already decided on.
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_close_reason_ranks_shutdown_policy_then_cancellation() {
+        let state = crate::state::tests::test_state().await;
+        let (open, _rx) = test_conn_with_auth(pending_state());
+        assert_eq!(server_close_reason(&state, &open), None);
+        open.cancel.cancel();
+        assert_eq!(server_close_reason(&state, &open), Some("server_closed"));
+        let (rejected, _rx) = test_conn_with_auth(AuthState::Failed);
+        rejected.cancel.cancel();
+        assert_eq!(server_close_reason(&state, &rejected), Some("auth_failed"));
+        let (denied, _rx) = test_conn_with_auth(AuthState::Failed);
+        denied.community_control.deny_authorization(
+            &denied.terminal_ctrl_tx,
+            crate::nip_fi_session::NipFiWsRoute::Root,
+        );
+        assert_eq!(
+            server_close_reason(&state, &denied),
+            Some("authorization_denied")
+        );
+        state.begin_shutdown();
+        assert_eq!(server_close_reason(&state, &denied), Some("shutdown"));
+    }
+
+    /// An AUTH rejected without closing leaves the socket open, and its auth
+    /// timeout then closes it as `auth_failed`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_timeout_after_a_rejected_auth_closes_as_auth_failed() {
+        let state = crate::state::tests::test_state().await;
+        let (conn, _rx) = test_conn_with_auth(pending_state());
+        let relay_url: RelayUrl =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant)
+                .parse()
+                .expect("relay url");
+        let event = EventBuilder::auth("wrong-challenge", relay_url)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth");
+        let frame = serde_json::json!(["AUTH", event]).to_string();
+        handle_text_message(frame, Arc::clone(&conn), state).await;
+        assert!(matches!(conn.auth_state_snapshot(), AuthState::Failed));
+        assert!(
+            !conn.cancel.is_cancelled(),
+            "a bad challenge does not close"
+        );
+        assert_eq!(conn.expire_auth(), Some("auth_failed"));
+    }
+
     /// A connection cancelled during the community-active startup check
     /// still writes its one close line, marked not admitted.
     #[tokio::test]
@@ -2201,6 +2366,7 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0]["pubkey"], pubkey.to_hex(), "{}", lines[0]);
         assert!(lines[0].get("refused").is_none(), "{}", lines[0]);
+        assert_eq!(lines[0]["close_reason"], "handler_dropped", "{}", lines[0]);
     }
 
     /// Aborting the production lifecycle owner must synchronously terminalize

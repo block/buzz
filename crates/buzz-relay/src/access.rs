@@ -1057,7 +1057,8 @@ where
 /// after a normal close, a refusal during startup, or the handler being
 /// dropped. `pubkey` is the identity it logged in as, if any, with its
 /// `method` and `pubkey_verified`; the login also wrote its own `auth` line.
-/// `close_reason` is why the connection ended: the first reason recorded wins.
+/// `close_reason` is why the connection ended: the first reason recorded wins,
+/// else `refused` for a refusal, else `handler_dropped`.
 pub(crate) struct CloseLine {
     conn_id: Uuid,
     community: CommunityId,
@@ -1134,7 +1135,8 @@ impl Drop for CloseLine {
                 .close_reason
                 .get()
                 .copied()
-                .or(self.refused.get().map(|_| "refused")),
+                .or(self.refused.get().map(|_| "refused"))
+                .unwrap_or("handler_dropped"),
             pubkey = pubkey.as_deref(),
             method = pubkey.is_some().then_some(AuthMethod::Nip42.as_str()),
             pubkey_verified = pubkey.is_some().then_some(true),
@@ -1823,7 +1825,8 @@ pub(crate) mod tests {
         assert_eq!(RefusalBudget::close(&budget.auths), 0);
     }
 
-    /// The first recorded close reason wins; a refusal with none closes as `refused`.
+    /// The first recorded close reason wins; a refusal with none closes as
+    /// `refused`, and a line dropped with neither as `handler_dropped`.
     #[test]
     fn close_line_keeps_the_first_reason_and_defaults_refusals() {
         let open = || {
@@ -1849,14 +1852,7 @@ pub(crate) mod tests {
             .iter()
             .map(|l| l["close_reason"].clone())
             .collect();
-        assert_eq!(
-            reasons,
-            [
-                "auth_timeout".into(),
-                "refused".into(),
-                serde_json::Value::Null
-            ]
-        );
+        assert_eq!(reasons, ["auth_timeout", "refused", "handler_dropped"]);
     }
 
     /// Refusals charged after `close` was written each log their own line,
