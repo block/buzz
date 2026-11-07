@@ -220,6 +220,49 @@ mod tests {
         assert!(matches!(err, CliError::Usage(_)));
     }
 
+    /// `validate_uuid` passes four spellings of the same id, and only one of
+    /// them is what the tree writes into an `h` or `d` tag. A caller that
+    /// validates and then filters on the raw argument therefore sends a tag
+    /// value that a NIP-01 generic tag filter — which compares byte for byte —
+    /// matches nothing against, and prints an empty result instead of an error.
+    #[test]
+    fn validate_uuid_accepts_non_canonical_spellings() {
+        for spelling in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+            "{550e8400-e29b-41d4-a716-446655440000}",
+            "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            assert!(
+                validate_uuid(spelling).is_ok(),
+                "validate_uuid rejected {spelling}, so the canonicalization below is unnecessary"
+            );
+            assert_ne!(
+                spelling, "550e8400-e29b-41d4-a716-446655440000",
+                "test data error: {spelling} is already canonical"
+            );
+        }
+    }
+
+    /// The canonicalization the query paths apply: parse, then render the one
+    /// form the relay stores. Every spelling above collapses onto it.
+    #[test]
+    fn parse_uuid_hyphenated_is_the_canonical_tag_value() {
+        for spelling in [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+            "{550e8400-e29b-41d4-a716-446655440000}",
+            "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            assert_eq!(
+                parse_uuid(spelling).unwrap().hyphenated().to_string(),
+                "550e8400-e29b-41d4-a716-446655440000",
+                "{spelling} did not canonicalize"
+            );
+        }
+    }
+
     // --- validate_hex64 ---
 
     #[test]
