@@ -140,6 +140,11 @@ To run a relay for your team without managing servers, you can deploy one to Rai
 
 See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for details.
 
+Already generated an owner key in hex? Follow
+[Convert an existing hex secret key to nsec](deploy/compose/README.md#convert-an-existing-hex-secret-key-to-nsec)
+to import that same identity into Buzz Desktop. Use the owner's secret key,
+not the relay signing key.
+
 ### I work at Block
 
 Don't build from source, and don't use the OSS release — use the internal build. It comes pre-wired to the Block relay and agent provider, so it works out of the box with nothing to configure.
