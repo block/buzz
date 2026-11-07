@@ -460,52 +460,98 @@ fn parse_client_ip_header(raw: &str) -> Result<Option<axum::http::HeaderName>, C
         })
 }
 
-fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
+/// Reads `name`: unset is `None`; a non-Unicode value is a startup error.
+fn env_value(name: &str) -> Result<Option<String>, ConfigError> {
     match std::env::var(name) {
-        Ok(raw) => raw
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or_else(|| ConfigError::InvalidValue(format!("{name} must be a positive integer"))),
-        Err(std::env::VarError::NotPresent) => Ok(default),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
             "{name} must be valid Unicode"
         ))),
     }
 }
 
+const POSITIVE_INTEGER: &str = "a positive integer";
+const NON_NEGATIVE_INTEGER: &str = "a non-negative integer";
+
+/// Parses the numeric setting `name`. Unset or blank is `None`; a value that
+/// does not parse as `T` or fails `valid` is a startup error naming the
+/// variable and stating `expected`, never a silent fallback to the default.
+fn parse_optional_number<T: std::str::FromStr>(
+    name: &str,
+    valid: impl Fn(&T) -> bool,
+    expected: &str,
+) -> Result<Option<T>, ConfigError> {
+    let Some(raw) = env_value(name)? else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    raw.parse::<T>()
+        .ok()
+        .filter(|value| valid(value))
+        .map(Some)
+        .ok_or_else(|| ConfigError::InvalidValue(format!("{name} must be {expected}")))
+}
+
+/// [`parse_optional_number`] with `default` for an unset or blank variable.
+fn parse_number<T: std::str::FromStr>(
+    name: &str,
+    default: T,
+    valid: impl Fn(&T) -> bool,
+    expected: &str,
+) -> Result<T, ConfigError> {
+    Ok(parse_optional_number(name, valid, expected)?.unwrap_or(default))
+}
+
+/// [`parse_number`] for counts, sizes and rates where zero would admit
+/// nothing (or panic, for channel capacities).
+fn parse_positive<T: std::str::FromStr + PartialOrd + Default>(
+    name: &str,
+    default: T,
+) -> Result<T, ConfigError> {
+    parse_number(
+        name,
+        default,
+        |value| *value > T::default(),
+        POSITIVE_INTEGER,
+    )
+}
+
 fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigError> {
     let defaults = buzz_auth::RateLimitConfig::default();
     Ok(buzz_auth::RateLimitConfig {
-        human_messages_per_min: positive_u64_from_env(
+        human_messages_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN",
             defaults.human_messages_per_min,
         )?,
-        gif_searches_per_min: positive_u64_from_env(
+        gif_searches_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_GIF_SEARCHES_PER_MIN",
             defaults.gif_searches_per_min,
         )?,
-        human_api_calls_per_min: positive_u64_from_env(
+        human_api_calls_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
             defaults.human_api_calls_per_min,
         )?,
-        human_ws_events_per_sec: positive_u64_from_env(
+        human_ws_events_per_sec: parse_positive(
             "BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC",
             defaults.human_ws_events_per_sec,
         )?,
-        agent_standard_messages_per_min: positive_u64_from_env(
+        agent_standard_messages_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
             defaults.agent_standard_messages_per_min,
         )?,
-        agent_standard_api_calls_per_min: positive_u64_from_env(
+        agent_standard_api_calls_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN",
             defaults.agent_standard_api_calls_per_min,
         )?,
-        agent_elevated_messages_per_min: positive_u64_from_env(
+        agent_elevated_messages_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN",
             defaults.agent_elevated_messages_per_min,
         )?,
-        agent_platform_messages_per_min: positive_u64_from_env(
+        agent_platform_messages_per_min: parse_positive(
             "BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN",
             defaults.agent_platform_messages_per_min,
         )?,
@@ -608,24 +654,20 @@ fn parse_operator_listener_delivery_urls(
     Ok(endpoints)
 }
 
+/// Parses the on/off setting `name`: `true`/`1`/`on` or `false`/`0`/`off` in
+/// any case, with blank meaning off. Anything else is a startup error, so a
+/// typo cannot silently disable (or enable) a security control.
 fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
-    match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(error) => Err(ConfigError::InvalidValue(format!(
-            "{name} must be valid UTF-8: {error}"
+    let Some(value) = env_value(name)? else {
+        return Ok(default);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" => Ok(true),
+        "false" | "0" | "off" | "" => Ok(false),
+        _ => Err(ConfigError::InvalidValue(format!(
+            "{name} must be true or false"
         ))),
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "on" => Ok(true),
-            "false" | "0" | "off" | "" => Ok(false),
-            _ => Err(ConfigError::InvalidValue(format!(
-                "{name} must be true or false"
-            ))),
-        },
     }
-}
-
-fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
-    parse_bool(name, false)
 }
 
 fn ensure_git_repo_path(
@@ -698,49 +740,29 @@ impl Config {
             ));
         }
 
-        // Replica read budget: 0 = off (the rollout default), so this is a
-        // non-negative parse, unlike `positive_u64_from_env`.
-        let replica_read_max_age_ms = match std::env::var("BUZZ_REPLICA_READ_MAX_AGE_MS") {
-            Ok(raw) => raw.trim().parse::<u64>().map_err(|_| {
-                ConfigError::InvalidValue(
-                    "BUZZ_REPLICA_READ_MAX_AGE_MS must be a non-negative integer".to_string(),
-                )
-            })?,
-            Err(_) => 0,
-        };
+        // Replica read budget: 0 = off (the rollout default).
+        let replica_read_max_age_ms = parse_number(
+            "BUZZ_REPLICA_READ_MAX_AGE_MS",
+            0,
+            |_| true,
+            NON_NEGATIVE_INTEGER,
+        )?;
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
-        // hard-drain budget. An empty/whitespace-only value is treated as unset
-        // (jitter off), matching the sibling vars in this file — so setting the
-        // var to "" is a valid kill switch, not a crashloop.
-        let drain_jitter_ms = match std::env::var("BUZZ_DRAIN_JITTER_MS") {
-            Ok(raw) if raw.trim().is_empty() => 0,
-            Ok(raw) => raw
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| {
-                    ConfigError::InvalidValue(
-                        "BUZZ_DRAIN_JITTER_MS must be a non-negative integer".to_string(),
-                    )
-                })?
-                .min(MAX_DRAIN_JITTER_MS),
-            Err(_) => 0,
-        };
+        // hard-drain budget. An empty value means unset (jitter off), so
+        // setting the var to "" is a valid kill switch, not a crashloop.
+        let drain_jitter_ms =
+            parse_number("BUZZ_DRAIN_JITTER_MS", 0, |_| true, NON_NEGATIVE_INTEGER)?
+                .min(MAX_DRAIN_JITTER_MS);
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-        let db_pool_size = std::env::var("BUZZ_DB_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(50);
+        let db_pool_size = parse_positive("BUZZ_DB_POOL_SIZE", 50)?;
 
-        let db_read_pool_size = std::env::var("BUZZ_DB_READ_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&v| v > 0);
+        let db_read_pool_size =
+            parse_optional_number("BUZZ_DB_READ_POOL_SIZE", |&v: &u32| v > 0, POSITIVE_INTEGER)?;
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -764,61 +786,37 @@ impl Config {
             })
             .transpose()?;
 
-        let max_connections = std::env::var("BUZZ_MAX_CONNECTIONS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10_000);
+        // Zero admits nothing: these size semaphores, and `mpsc::channel`
+        // panics on capacity 0 for every connection.
+        let max_connections = parse_positive("BUZZ_MAX_CONNECTIONS", 10_000)?;
+        let max_concurrent_handlers = parse_positive("BUZZ_MAX_CONCURRENT_HANDLERS", 1024)?;
+        let send_buffer_size = parse_positive("BUZZ_SEND_BUFFER", 1_000)?;
 
-        let max_concurrent_handlers = std::env::var("BUZZ_MAX_CONCURRENT_HANDLERS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
+        let max_frame_bytes = parse_positive("BUZZ_MAX_FRAME_BYTES", DEFAULT_MAX_FRAME_BYTES)?;
 
-        let send_buffer_size = std::env::var("BUZZ_SEND_BUFFER")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1_000);
-
-        let max_frame_bytes = std::env::var("BUZZ_MAX_FRAME_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(DEFAULT_MAX_FRAME_BYTES);
-
-        let slow_client_grace_limit = std::env::var("BUZZ_SLOW_CLIENT_GRACE_LIMIT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(15);
+        let slow_client_grace_limit = parse_number(
+            "BUZZ_SLOW_CLIENT_GRACE_LIMIT",
+            15,
+            |_| true,
+            "an integer in 0..=255",
+        )?;
 
         let client_ip_header =
             parse_client_ip_header(&std::env::var("BUZZ_CLIENT_IP_HEADER").unwrap_or_default())?;
 
-        let require_auth_token = std::env::var("BUZZ_REQUIRE_AUTH_TOKEN")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
-        let pubkey_allowlist_enabled = std::env::var("BUZZ_PUBKEY_ALLOWLIST")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
-        let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let require_auth_token = parse_bool("BUZZ_REQUIRE_AUTH_TOKEN", false)?;
+        let pubkey_allowlist_enabled = parse_bool("BUZZ_PUBKEY_ALLOWLIST", false)?;
+        let require_relay_membership = parse_bool("BUZZ_REQUIRE_RELAY_MEMBERSHIP", false)?;
 
         // Defaults true → single-pod (N=1) keeps today's huddle behavior. A
         // horizontally-scaled deployment sets this false; see the field doc.
-        let huddle_audio_available = std::env::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
-            .map(|v| !(v == "false" || v == "0"))
-            .unwrap_or(true);
+        let huddle_audio_available = parse_bool("BUZZ_HUDDLE_AUDIO_AVAILABLE", true)?;
 
         // Mesh opt-in: default OFF. Strict rollout no-regression — an image
         // upgrade with untouched env must not bind a new UDP port or write a
         // new Redis key. Horizontally-scaled deployments explicitly set
-        // `BUZZ_MESH=on`; anything else (absent, `off`, other values) keeps
-        // exact single-instance behavior.
-        let mesh_enabled = std::env::var("BUZZ_MESH")
-            .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
-            .unwrap_or(false);
+        // `BUZZ_MESH=on`; absent or off keeps exact single-instance behavior.
+        let mesh_enabled = parse_bool("BUZZ_MESH", false)?;
         let mesh_bind_addr = std::env::var("BUZZ_MESH_BIND_ADDR")
             .map(|raw| {
                 raw.parse::<SocketAddr>().map_err(|e| {
@@ -832,15 +830,10 @@ impl Config {
             registry_refresh: std::time::Duration::from_secs(15),
         };
 
-        // Demo echo opt-in: same strict pattern as BUZZ_MESH — explicit
-        // `on`/`true`/`1` only, anything else (absent, `off`, typos) is off.
-        let mesh_demo_echo = std::env::var("BUZZ_MESH_DEMO_ECHO")
-            .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
-            .unwrap_or(false);
+        // Demo echo opt-in: default off, same parsing as BUZZ_MESH.
+        let mesh_demo_echo = parse_bool("BUZZ_MESH_DEMO_ECHO", false)?;
 
-        let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let allow_nip_oa_auth = parse_bool("BUZZ_ALLOW_NIP_OA_AUTH", false)?;
 
         let klipy = std::env::var("BUZZ_KLIPY_API_KEY")
             .ok()
@@ -874,9 +867,9 @@ impl Config {
             .transpose()?;
 
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
-        // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
-        // pubkeys. Unlike RELAY_OWNER_PUBKEY (warn-and-ignore), an invalid
-        // entry here is a hard config error: silently dropping an operator
+        // config family as RELAY_OWNER_PUBKEY. RELAY_OPERATOR_PUBKEYS is
+        // comma-separated 64-char hex pubkeys. As with RELAY_OWNER_PUBKEY, an
+        // invalid entry is a hard config error: silently dropping an operator
         // pubkey would silently disable provisioning for that operator.
         let relay_operator_api_origin = std::env::var("RELAY_OPERATOR_API_ORIGIN")
             .ok()
@@ -976,24 +969,20 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let health_port = std::env::var("BUZZ_HEALTH_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8080);
-
-        let metrics_port = std::env::var("BUZZ_METRICS_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(9102);
+        const PORT: &str = "a port number in 0..=65535";
+        let health_port = parse_number("BUZZ_HEALTH_PORT", 8080, |_| true, PORT)?;
+        let metrics_port = parse_number("BUZZ_METRICS_PORT", 9102, |_| true, PORT)?;
 
         // Catalog-only and cheap, but clamp operator mistakes away from a hot
         // loop or a multi-day observability gap.
         let partition_audit_interval = Duration::from_secs(
-            std::env::var("BUZZ_PARTITION_AUDIT_INTERVAL_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(15 * 60)
-                .clamp(60, 24 * 60 * 60),
+            parse_number(
+                "BUZZ_PARTITION_AUDIT_INTERVAL_SECS",
+                15 * 60,
+                |_| true,
+                NON_NEGATIVE_INTEGER,
+            )?
+            .clamp(60, 24 * 60 * 60),
         );
         let partition_manager_create_enabled =
             parse_bool("BUZZ_PARTITION_MANAGER_CREATE_ENABLED", true)?;
@@ -1033,30 +1022,16 @@ impl Config {
                 .or_else(|_| std::env::var("AWS_REGION"))
                 .unwrap_or_else(|_| "us-east-1".to_string()),
             s3_addressing_style,
-            max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(50 * 1024 * 1024),
-            max_gif_bytes: std::env::var("BUZZ_MAX_GIF_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(10 * 1024 * 1024),
-            max_video_bytes: std::env::var("BUZZ_MAX_VIDEO_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(500 * 1024 * 1024),
-            max_file_bytes: std::env::var("BUZZ_MAX_FILE_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(100 * 1024 * 1024),
+            max_image_bytes: parse_positive("BUZZ_MAX_IMAGE_BYTES", 50 * 1024 * 1024)?,
+            max_gif_bytes: parse_positive("BUZZ_MAX_GIF_BYTES", 10 * 1024 * 1024)?,
+            max_video_bytes: parse_positive("BUZZ_MAX_VIDEO_BYTES", 500 * 1024 * 1024)?,
+            max_file_bytes: parse_positive("BUZZ_MAX_FILE_BYTES", 100 * 1024 * 1024)?,
             public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
             // Per-upload-event records (`_uploads/` moderation side channel).
             // Off by default; coherence between the three knobs is enforced in
             // MediaConfig::validate at startup.
-            upload_records_enabled: std::env::var("BUZZ_MEDIA_UPLOAD_RECORDS")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
+            upload_records_enabled: parse_bool("BUZZ_MEDIA_UPLOAD_RECORDS", false)?,
             upload_ip_header: std::env::var("BUZZ_MEDIA_UPLOAD_IP_HEADER")
                 .ok()
                 .map(|s| s.trim().to_lowercase())
@@ -1067,23 +1042,11 @@ impl Config {
                 .filter(|s| !s.is_empty()),
         };
         let media_max_concurrent_uploads: usize =
-            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&v| v > 0)
-                .unwrap_or(8);
+            parse_positive("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS", 8)?;
         let media_max_concurrent_uploads_per_pubkey: u32 =
-            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&v| v > 0)
-                .unwrap_or(2)
+            parse_positive("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY", 2)?
                 .min(u32::try_from(media_max_concurrent_uploads).unwrap_or(u32::MAX));
-        let media_uploads_per_minute: u32 = std::env::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(30);
+        let media_uploads_per_minute: u32 = parse_positive("BUZZ_MEDIA_UPLOADS_PER_MINUTE", 30)?;
 
         for name in inert_env_vars(&INERT_MEDIA_READ_AUTH_VARS, |n| std::env::var(n).ok()) {
             warn!(
@@ -1093,10 +1056,11 @@ impl Config {
             );
         }
 
-        let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
-            .ok()
-            .and_then(|v| v.parse::<i32>().ok())
-            .filter(|&v| v > 0);
+        let ephemeral_ttl_override = parse_optional_number(
+            "BUZZ_EPHEMERAL_TTL_OVERRIDE",
+            |&v: &i32| v > 0,
+            POSITIVE_INTEGER,
+        )?;
 
         if let Some(ttl) = ephemeral_ttl_override {
             warn!(
@@ -1115,32 +1079,34 @@ impl Config {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
         )?;
-        let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(500 * 1024 * 1024); // 500 MB
-        let git_max_repo_bytes: u64 = std::env::var("BUZZ_GIT_MAX_REPO_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
-        let git_pack_cache_max_bytes: u64 = std::env::var("BUZZ_GIT_PACK_CACHE_MAX_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| git_max_repo_bytes.saturating_mul(5)); // 5 GB at defaults
+        let git_max_pack_bytes: u64 = parse_number(
+            "BUZZ_GIT_MAX_PACK_BYTES",
+            500 * 1024 * 1024, // 500 MB
+            |_| true,
+            NON_NEGATIVE_INTEGER,
+        )?;
+        let git_max_repo_bytes: u64 = parse_number(
+            "BUZZ_GIT_MAX_REPO_BYTES",
+            git_max_pack_bytes.saturating_mul(2), // 1 GB at defaults
+            |_| true,
+            NON_NEGATIVE_INTEGER,
+        )?;
+        let git_pack_cache_max_bytes: u64 = parse_number(
+            "BUZZ_GIT_PACK_CACHE_MAX_BYTES",
+            git_max_repo_bytes.saturating_mul(5), // 5 GB at defaults
+            |_| true,
+            NON_NEGATIVE_INTEGER,
+        )?;
         let git_pack_cache_max_concurrent_populations: usize =
-            std::env::var("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(2);
-        let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
-        let git_max_concurrent_ops: usize = std::env::var("BUZZ_GIT_MAX_CONCURRENT_OPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(20);
+            parse_positive("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS", 2)?;
+        let git_max_repos_per_pubkey: u32 = parse_number(
+            "BUZZ_GIT_MAX_REPOS_PER_PUBKEY",
+            100,
+            |_| true,
+            NON_NEGATIVE_INTEGER,
+        )?;
+        // Zero would size the git subprocess semaphore to admit nothing.
+        let git_max_concurrent_ops: usize = parse_positive("BUZZ_GIT_MAX_CONCURRENT_OPS", 20)?;
         let git_hook_hmac_secret: String = std::env::var("BUZZ_GIT_HOOK_HMAC_SECRET")
             .unwrap_or_else(|_| {
                 // Generate a random secret if not configured (dev mode).
@@ -1177,47 +1143,20 @@ impl Config {
                 )));
             }
         };
-        let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
-            Ok(raw) => raw
-                .parse::<u64>()
-                .ok()
-                .filter(|millis| (100..=10_000).contains(millis))
-                .ok_or_else(|| {
-                    ConfigError::InvalidValue(
-                        "BUZZ_PUSH_GATEWAY_TIMEOUT_MS must be an integer in 100..=10000"
-                            .to_string(),
-                    )
-                })?,
-            Err(_) => 2_000,
-        };
-        let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
-        let operator_listener_timeout_millis = match std::env::var(
+        const TIMEOUT_MS: &str = "an integer in 100..=10000";
+        let timeout_ms_in_range = |millis: &u64| (100..=10_000).contains(millis);
+        let push_gateway_timeout = Duration::from_millis(parse_number(
+            "BUZZ_PUSH_GATEWAY_TIMEOUT_MS",
+            2_000,
+            timeout_ms_in_range,
+            TIMEOUT_MS,
+        )?);
+        let operator_listener_timeout = Duration::from_millis(parse_number(
             "BUZZ_OPERATOR_LISTENER_TIMEOUT_MS",
-        ) {
-            Ok(raw) => match raw
-                .parse::<u64>()
-                .ok()
-                .filter(|millis| (100..=10_000).contains(millis))
-            {
-                Some(millis) => millis,
-                None => {
-                    error!(
-                        value = %raw,
-                        "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms (expected integer in 100..=10000)"
-                    );
-                    5_000
-                }
-            },
-            Err(std::env::VarError::NotPresent) => 5_000,
-            Err(err) => {
-                error!(
-                    error = %err,
-                    "invalid BUZZ_OPERATOR_LISTENER_TIMEOUT_MS; using default 5000ms"
-                );
-                5_000
-            }
-        };
-        let operator_listener_timeout = Duration::from_millis(operator_listener_timeout_millis);
+            5_000,
+            timeout_ms_in_range,
+            TIMEOUT_MS,
+        )?);
 
         const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
         let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
@@ -1237,7 +1176,7 @@ impl Config {
         };
         let terms_markdown = read_policy_markdown("BUZZ_TERMS_OF_SERVICE_MARKDOWN")?;
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
-        let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
+        let age_attestation_required = parse_bool("BUZZ_AGE_ATTESTATION_REQUIRED", false)?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
@@ -1402,9 +1341,7 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
-        let serve_git_web_gui = std::env::var("BUZZ_SERVE_GIT_WEB_GUI")
-            .map(|value| value == "true" || value == "1")
-            .unwrap_or(false);
+        let serve_git_web_gui = parse_bool("BUZZ_SERVE_GIT_WEB_GUI", false)?;
 
         if let Some(ref dir) = web_dir {
             if !dir.join("index.html").is_file() {
@@ -1426,13 +1363,15 @@ impl Config {
             ));
         }
 
-        let buzz_v1_enabled = std::env::var("BUZZ_V1_ENABLED").is_ok_and(|v| v == "true");
+        let buzz_v1_enabled = parse_bool("BUZZ_V1_ENABLED", false)?;
         // Read only when enabled: a disabled relay ignores every v1 setting.
-        let buzz_v1_retention_seconds = match std::env::var("BUZZ_V1_RETENTION_SECONDS") {
-            Ok(v) if buzz_v1_enabled => v.parse().ok().filter(|s| *s > 0).ok_or_else(|| {
-                ConfigError::InvalidValue("BUZZ_V1_RETENTION_SECONDS must be positive".into())
-            })?,
-            _ => buzz_db::personal_read::DEFAULT_RETENTION_SECONDS,
+        let buzz_v1_retention_seconds = if buzz_v1_enabled {
+            parse_positive(
+                "BUZZ_V1_RETENTION_SECONDS",
+                buzz_db::personal_read::DEFAULT_RETENTION_SECONDS,
+            )?
+        } else {
+            buzz_db::personal_read::DEFAULT_RETENTION_SECONDS
         };
 
         let nip_fi = crate::nip_fi_config::NipFiRelayConfig::from_env()?;
@@ -1468,10 +1407,8 @@ impl Config {
             auth,
             require_auth_token,
             buzz_v1_enabled,
-            membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
-                .is_ok_and(|v| v == "true"),
-            membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")
-                .is_ok_and(|v| v == "true"),
+            membership_snapshot_enabled: parse_bool("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED", false)?,
+            membership_public_enabled: parse_bool("BUZZ_MEMBERSHIP_PUBLIC_ENABLED", false)?,
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
@@ -2352,57 +2289,51 @@ mod tests {
     }
 
     #[test]
-    fn db_pool_size_env_override_and_invalid_fallback() {
+    fn db_pool_size_env_override_and_invalid_refusal() {
         let _guards = env_guards();
-        let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
-
-        std::env::set_var("BUZZ_DB_POOL_SIZE", "80");
-        let overridden = Config::from_env().expect("config").db_pool_size;
-
-        std::env::set_var("BUZZ_DB_POOL_SIZE", "0");
-        let zero = Config::from_env().expect("config").db_pool_size;
-
-        std::env::set_var("BUZZ_DB_POOL_SIZE", "not-a-number");
-        let junk = Config::from_env().expect("config").db_pool_size;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_DB_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_DB_POOL_SIZE");
-        }
-
+        let overridden = config_with_env("BUZZ_DB_POOL_SIZE", "80")
+            .expect("config")
+            .db_pool_size;
+        let blank = config_with_env("BUZZ_DB_POOL_SIZE", "")
+            .expect("config")
+            .db_pool_size;
         assert_eq!(overridden, 80);
-        assert_eq!(zero, 50, "zero must fall back to the default");
-        assert_eq!(junk, 50, "unparsable value must fall back to the default");
+        assert_eq!(blank, 50, "blank must mean the default");
+        for invalid in ["0", "not-a-number"] {
+            assert!(
+                matches!(
+                    &config_with_env("BUZZ_DB_POOL_SIZE", invalid),
+                    Err(ConfigError::InvalidValue(message)) if message.contains("BUZZ_DB_POOL_SIZE")
+                ),
+                "{invalid:?} must refuse startup, not fall back to the default"
+            );
+        }
     }
 
     #[test]
-    fn db_read_pool_size_env_override_and_invalid_fallback() {
+    fn db_read_pool_size_env_override_and_invalid_refusal() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DB_READ_POOL_SIZE");
-
         std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
         let unset = Config::from_env().expect("config").db_read_pool_size;
-
-        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "40");
-        let overridden = Config::from_env().expect("config").db_read_pool_size;
-
-        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "0");
-        let zero = Config::from_env().expect("config").db_read_pool_size;
-
-        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "not-a-number");
-        let junk = Config::from_env().expect("config").db_read_pool_size;
-
         if let Some(value) = previous {
             std::env::set_var("BUZZ_DB_READ_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
         }
+        let overridden = config_with_env("BUZZ_DB_READ_POOL_SIZE", "40")
+            .expect("config")
+            .db_read_pool_size;
 
         assert_eq!(unset, None, "unset must inherit the writer pool sizing");
         assert_eq!(overridden, Some(40));
-        assert_eq!(zero, None, "zero must fall back to inheriting");
-        assert_eq!(junk, None, "unparsable value must fall back to inheriting");
+        for invalid in ["0", "not-a-number"] {
+            assert!(
+                matches!(
+                    &config_with_env("BUZZ_DB_READ_POOL_SIZE", invalid),
+                    Err(ConfigError::InvalidValue(message)) if message.contains("BUZZ_DB_READ_POOL_SIZE")
+                ),
+                "{invalid:?} must refuse startup, not fall back to inheriting"
+            );
+        }
     }
 
     #[test]
@@ -2577,7 +2508,7 @@ mod tests {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_AGE_ATTESTATION_REQUIRED");
         std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
-        let result = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED");
+        let result = parse_bool("BUZZ_AGE_ATTESTATION_REQUIRED", false);
         if let Some(value) = previous {
             std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", value);
         } else {
@@ -2939,6 +2870,116 @@ mod tests {
             !config.huddle_audio_available,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
         );
+    }
+
+    /// Run `Config::from_env()` with `name` forced to `value`, restoring the
+    /// ambient value afterwards. Callers must hold [`env_guards()`].
+    fn config_with_env(name: &str, value: &str) -> Result<Config, ConfigError> {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        let result = Config::from_env();
+        match previous {
+            Some(previous) => std::env::set_var(name, previous),
+            None => std::env::remove_var(name),
+        }
+        result
+    }
+
+    /// Every on/off setting accepts the same spellings, and every numeric
+    /// setting rejects values it cannot use, through the real `from_env` path.
+    /// An expectation of `None` means startup must fail naming the variable.
+    #[test]
+    fn env_settings_parse_strictly_or_refuse_startup() {
+        type Read = fn(&Config) -> bool;
+        let _guards = env_guards();
+        let mut failures = Vec::new();
+        let mut check = |name: &str, value: &str, expected: Option<(Read, bool)>| {
+            let result = config_with_env(name, value);
+            let passed = match (&result, expected) {
+                (Ok(config), Some((read, want))) => read(config) == want,
+                (Err(ConfigError::InvalidValue(message)), None) => message.contains(name),
+                _ => false,
+            };
+            if !passed {
+                let got = match (result, expected) {
+                    (Ok(_), None) => "accepted".to_string(),
+                    (Ok(_), Some(_)) => "resolved to the wrong value".to_string(),
+                    (Err(error), _) => format!("refused: {error}"),
+                };
+                failures.push(format!("{name}={value:?}: {got}"));
+            }
+        };
+
+        let bools: [(&str, Read); 12] = [
+            ("BUZZ_REQUIRE_AUTH_TOKEN", |c| c.require_auth_token),
+            ("BUZZ_PUBKEY_ALLOWLIST", |c| c.pubkey_allowlist_enabled),
+            ("BUZZ_REQUIRE_RELAY_MEMBERSHIP", |c| {
+                c.require_relay_membership
+            }),
+            ("BUZZ_ALLOW_NIP_OA_AUTH", |c| c.allow_nip_oa_auth),
+            ("BUZZ_HUDDLE_AUDIO_AVAILABLE", |c| c.huddle_audio_available),
+            ("BUZZ_MESH", |c| c.mesh.enabled),
+            ("BUZZ_MESH_DEMO_ECHO", |c| c.mesh_demo_echo),
+            ("BUZZ_MEDIA_UPLOAD_RECORDS", |c| {
+                c.media.upload_records_enabled
+            }),
+            ("BUZZ_SERVE_GIT_WEB_GUI", |c| c.serve_git_web_gui),
+            ("BUZZ_V1_ENABLED", |c| c.buzz_v1_enabled),
+            ("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED", |c| {
+                c.membership_snapshot_enabled
+            }),
+            ("BUZZ_MEMBERSHIP_PUBLIC_ENABLED", |c| {
+                c.membership_public_enabled
+            }),
+        ];
+        for (name, read) in bools {
+            for (value, want) in [
+                ("TRUE", Some(true)),
+                ("On", Some(true)),
+                (" 1 ", Some(true)),
+                ("FALSE", Some(false)),
+                ("Off", Some(false)),
+                ("0", Some(false)),
+                ("yes", None),
+                ("enabled", None),
+            ] {
+                check(name, value, want.map(|want| (read, want)));
+            }
+        }
+
+        let numbers: [(&str, &str, Option<Read>); 14] = [
+            ("BUZZ_SEND_BUFFER", "0", None),
+            (
+                "BUZZ_SEND_BUFFER",
+                " 64 ",
+                Some(|c| c.send_buffer_size == 64),
+            ),
+            (
+                "BUZZ_SEND_BUFFER",
+                "",
+                Some(|c| c.send_buffer_size == 1_000),
+            ),
+            ("BUZZ_MAX_CONNECTIONS", "0", None),
+            ("BUZZ_MAX_CONNECTIONS", "10k", None),
+            ("BUZZ_MAX_CONCURRENT_HANDLERS", "0", None),
+            ("BUZZ_GIT_MAX_CONCURRENT_OPS", "0", None),
+            ("BUZZ_SLOW_CLIENT_GRACE_LIMIT", "300", None),
+            ("BUZZ_DB_POOL_SIZE", "0", None),
+            ("BUZZ_HEALTH_PORT", "70000", None),
+            ("BUZZ_GIT_MAX_PACK_BYTES", "500MB", None),
+            ("BUZZ_MEDIA_UPLOADS_PER_MINUTE", "-1", None),
+            ("BUZZ_OPERATOR_LISTENER_TIMEOUT_MS", "50", None),
+            (
+                "BUZZ_GIT_PACK_CACHE_MAX_BYTES",
+                "0",
+                Some(|c| c.git_pack_cache_max_bytes == 0),
+            ),
+        ];
+        for (name, value, read) in numbers {
+            check(name, value, read.map(|read| (read, true)));
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
