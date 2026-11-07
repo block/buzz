@@ -16,11 +16,14 @@ abstract final class HostedEnvironment {
 
   /// Public CDN serving each published Builderlab agent card's
   /// `<id>/agent.json` and images, for this build's account environment.
-  static Uri get avatarsCdnOrigin => Uri.parse(switch (origin.host) {
-    'app.builderlab.xyz' => 'https://d2z0pbxrxbsiz5.cloudfront.net',
-    'app.builderlabstaging.xyz' => 'https://d10hx6rb3fdt3l.cloudfront.net',
-    _ => throw StateError('Unsupported hosted account environment'),
-  });
+  /// Null for a Builderlab without a known CDN, which has no agent cards.
+  static Uri? get avatarsCdnOrigin => switch (origin.host) {
+    'app.builderlab.xyz' => Uri.parse('https://d2z0pbxrxbsiz5.cloudfront.net'),
+    'app.builderlabstaging.xyz' => Uri.parse(
+      'https://d10hx6rb3fdt3l.cloudfront.net',
+    ),
+    _ => null,
+  };
 
   /// Shortens hostname fallbacks for display without changing relay identity.
   static String communityDisplayName(String name, String relayUrl) {

@@ -1,20 +1,21 @@
 import 'dart:convert';
 
+import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
 import 'package:buzz/onboarding_app_entry.dart';
-import 'package:buzz/organization_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
-import 'package:buzz/shared/hosted/self_hosted_entry.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/widget_helpers.dart';
 
@@ -24,76 +25,16 @@ import '../../helpers/widget_helpers.dart';
 /// `--dart-define=BUZZ_BUILDERLAB_RELAYS=buzz.example.org`
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final skip = !OrganizationEnvironment.enabled;
 
   testWidgets(
-    'one Sign in goes to the organization, joins its community, and a later '
-    'landing signs in again',
+    'one Sign in joins the organization; after signing out, Sign in restores '
+    'the same identity from the organization',
     (tester) async {
       FlutterSecureStorage.setMockInitialValues({});
-      final origin = OrganizationEnvironment.origin!;
-      final relay = 'wss://${OrganizationEnvironment.relayHosts.first}';
-      final browserUrls = <Uri>[];
-      final probes = <Community>[];
-      final joined = <Community>[];
-      final accounts = <BuilderlabAccountClient>[];
-      final expiry = DateTime.now()
-          .toUtc()
-          .add(const Duration(days: 1))
-          .toIso8601String();
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('buzz/browser_auth'),
-        (_) async => null,
-      );
-      final client = MockClient((request) async {
-        expect(request.url.origin, origin.origin);
-        final path = request.url.path;
-        final Object result;
-        if (path.endsWith('/exchange')) {
-          result = {'session_credential': 'session', 'expires_at': expiry};
-        } else if (path.endsWith('/me')) {
-          result = {'subject': 'member', 'expires_at': expiry};
-        } else {
-          return http.Response('{}', 404);
-        }
-        return http.Response(
-          jsonEncode(result),
-          200,
-          headers: {'content-type': 'application/json'},
-        );
-      });
-
-      Widget app() => WidgetHelpers.testable(
-        disableAnimations: true,
-        overrides: [
-          organizationAccountProvider.overrideWith((ref) {
-            final account = BuilderlabAccountClient(
-              accountOrigin: origin,
-              httpClient: client,
-            );
-            accounts.add(account);
-            ref.onDispose(account.dispose);
-            return account;
-          }),
-          organizationSignInProvider.overrideWith((ref) {
-            final signIn = OrganizationSignIn(
-              account: ref.watch(organizationAccountProvider)!,
-              browser: _Browser(browserUrls.add, origin: origin),
-              reconnect: () async {},
-            );
-            ref.onDispose(signIn.dispose);
-            signIn.initialize();
-            return signIn;
-          }),
-          organizationEntryProvider.overrideWithValue(
-            SelfHostedEntry(probe: (community) async => probes.add(community)),
-          ),
-          authProvider.overrideWith(() => _Auth(joined)),
-          communityStorageProvider.overrideWithValue(CommunityStorage()),
-        ],
-        child: const OnboardingAppEntry(),
-      );
-      await tester.pumpWidget(app());
-      await tester.pumpAndSettle();
+      final tenant = _Tenant();
+      final harness = _Harness(tester, tenant);
+      await harness.open();
 
       expect(find.text('Sign in'), findsOneWidget);
       for (final other in [
@@ -105,30 +46,128 @@ void main() {
         expect(find.text(other), findsNothing, reason: other);
       }
 
-      await tester.tap(find.text('Sign in'));
-      await tester.pumpAndSettle();
+      // The first join is cancelled after its probe bound the new key. The
+      // retry must reuse that key, which exists only in the pending slot.
+      _Auth.dropNext = true;
+      await harness.signIn();
+      expect(await harness.saved(), isEmpty);
+      final cancelled = harness.probes.single.community;
+      expect(tenant.bound, cancelled.pubkey);
+      await harness.signIn();
 
-      final login = browserUrls.single;
-      expect(login.origin, origin.origin);
+      final login = harness.browserUrls.single;
+      expect(login.origin, OrganizationEnvironment.origin!.origin);
       expect(login.path, '/api/goose/v1/auth/login');
       expect(login.queryParameters['product'], 'buzz');
-      expect(probes.single.relayUrl, relay);
-      expect(joined.single.relayUrl, relay);
-      expect(joined.single.nsec, probes.single.nsec);
-      expect(accounts.single.account, isNotNull);
+      final first = await harness.joinedCommunity();
+      expect(first.relayUrl, harness.relay);
+      expect(first.pubkey, cancelled.pubkey);
+      expect(tenant.recoveries, 0);
+      // The probe carried the session's assertion, which bound the new key.
+      expect(
+        harness.probes.last.headers['Nostr-Federated-Identity'],
+        'Bearer assertion-${first.pubkey}',
+      );
+      expect(tenant.bound, first.pubkey);
+      expect(harness.accounts.last.account, isNotNull);
 
-      // Signing out returns here; the saved session is ended, not reused.
-      await tester.pumpWidget(const SizedBox());
-      await tester.pumpWidget(app());
-      await tester.pumpAndSettle();
-      expect(accounts.last.account, isNull);
-      await tester.tap(find.text('Sign in'));
-      await tester.pumpAndSettle();
-      expect(browserUrls, hasLength(2));
-      expect(joined, hasLength(2));
+      // Signing out removes the community; the landing ends the session.
+      tenant.backups[first.pubkey!] = first.nsec!;
+      await CommunityStorage().remove(first.id);
+      await harness.open();
+      expect(harness.accounts.last.account, isNull);
+
+      await harness.signIn();
+      expect(harness.browserUrls, hasLength(2));
+      final second = await harness.joinedCommunity();
+      expect(second.pubkey, first.pubkey);
+      expect(tenant.recoveries, 1);
     },
-    skip: !OrganizationEnvironment.enabled,
+    skip: skip,
   );
+
+  // Each row starts signed out with [stored] communities on other relays,
+  // which an internal build keeps but hides.
+  final rows =
+      <
+        ({
+          String name,
+          String? Function(nostr.Keys stored) bound,
+          bool backedUp,
+          String? expectedError,
+          bool picks,
+        })
+      >[
+        (
+          name: 'bound to a key on this device uses it without recovery',
+          bound: (stored) => stored.public,
+          backedUp: false,
+          expectedError: null,
+          picks: false,
+        ),
+        (
+          name: 'bound to a key only in the organization backup recovers it',
+          bound: (_) => _otherKey.public,
+          backedUp: true,
+          expectedError: null,
+          picks: false,
+        ),
+        (
+          name: 'bound to a key with no backup says it cannot restore',
+          bound: (_) => _otherKey.public,
+          backedUp: false,
+          expectedError:
+              'Couldn’t restore your organization identity on this device. '
+              'Sign in on a device that has it, then try again.',
+          picks: false,
+        ),
+        (
+          name: 'unbound with saved keys offers them, then joins',
+          bound: (_) => null,
+          backedUp: false,
+          expectedError: null,
+          picks: true,
+        ),
+      ];
+  for (final row in rows) {
+    testWidgets(row.name, (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final stored = nostr.Keys.generate();
+      await CommunityStorage(visible: (_) => true).saveAll([
+        Community.create(
+          name: 'Elsewhere',
+          relayUrl: 'wss://relay.example.net',
+          pubkey: stored.public,
+          nsec: stored.nsec,
+        ),
+      ]);
+      final tenant = _Tenant()..bound = row.bound(stored);
+      if (row.backedUp) tenant.backups[_otherKey.public] = _otherKey.nsec;
+      final harness = _Harness(tester, tenant);
+      await harness.open();
+      await harness.signIn();
+
+      if (row.picks) {
+        await tester.tap(find.bySemanticsLabel(RegExp('^Use ')));
+        await tester.pumpAndSettle();
+      }
+      if (row.expectedError != null) {
+        expect(find.text(row.expectedError!), findsOneWidget);
+        expect(harness.probes, isEmpty);
+        expect(await harness.saved(), isEmpty);
+        return;
+      }
+      final joined = await harness.joinedCommunity();
+      final expected = tenant.bound ?? stored.public;
+      expect(joined.pubkey, expected);
+      expect(tenant.bound, expected);
+      expect(
+        harness.probes.single.headers['Nostr-Federated-Identity'],
+        'Bearer assertion-$expected',
+      );
+      expect(tenant.recoveries, row.backedUp ? 1 : 0);
+    }, skip: skip);
+  }
 
   test('communities on other relays stay stored but hidden', () async {
     FlutterSecureStorage.setMockInitialValues({});
@@ -148,7 +187,149 @@ void main() {
     await storage.remove(organization.id);
     expect(await storage.loadAll(), isEmpty);
     expect((await everything.loadAll()).map((item) => item.id), [other.id]);
-  }, skip: !OrganizationEnvironment.enabled);
+  }, skip: skip);
+}
+
+final _otherKey = nostr.Keys.generate();
+
+/// The organization's Builderlab at its HTTP boundary: one member whose
+/// account binds the key of its first relay assertion and refuses any other.
+class _Tenant {
+  String? bound;
+  final backups = <String, String>{};
+  var recoveries = 0;
+  final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
+
+  late final client = MockClient((request) async {
+    expect(request.url.origin, OrganizationEnvironment.origin!.origin);
+    final path = request.url.path.replaceFirst('/api/goose', '');
+    final Object result;
+    switch (path) {
+      case '/v1/auth/login/exchange':
+        result = {
+          'session_credential': 'session',
+          'expires_at': expiry.toIso8601String(),
+        };
+      case '/v1/auth/me':
+        result = {'subject': 'member', 'expires_at': expiry.toIso8601String()};
+      case '/v1/buzz/nostr-identities/current':
+        result = {
+          'identity': bound == null ? null : {'pubkey_hex': bound},
+        };
+      case '/v1/buzz/identity/assertions':
+        final pubkey =
+            (jsonDecode(request.body) as Map)['nostr_pubkey'] as String;
+        bound ??= pubkey;
+        if (bound != pubkey) return http.Response('{}', 403);
+        result = {
+          'assertion': 'assertion-$pubkey',
+          'expires_at': expiry.millisecondsSinceEpoch ~/ 1000,
+          'nostr_pubkey': pubkey,
+        };
+      case '/v1/buzz/nsec-backups/recovery':
+        recoveries++;
+        result = {
+          'backups': [
+            for (final MapEntry(key: pubkey, value: nsec) in backups.entries)
+              {
+                'backup_id': 'backup-$pubkey',
+                'nostr_pubkey': pubkey,
+                'secret_key': base64Url
+                    .encode(
+                      _hexBytes(AccountIdentityStore.keysForNsec(nsec).secret),
+                    )
+                    .replaceAll('=', ''),
+              },
+          ],
+          'failed_backup_ids': <String>[],
+        };
+      default:
+        return http.Response('{}', 404);
+    }
+    return http.Response(
+      jsonEncode(result),
+      200,
+      headers: {'content-type': 'application/json'},
+    );
+  });
+
+  static List<int> _hexBytes(String hex) => [
+    for (var i = 0; i < hex.length; i += 2)
+      int.parse(hex.substring(i, i + 2), radix: 16),
+  ];
+}
+
+class _Harness {
+  _Harness(this.tester, this.tenant);
+  final WidgetTester tester;
+  final _Tenant tenant;
+  final relay = 'wss://${OrganizationEnvironment.relayHosts.first}';
+  final browserUrls = <Uri>[];
+  final probes = <({Community community, Map<String, String> headers})>[];
+  final accounts = <BuilderlabAccountClient>[];
+
+  Future<List<Community>> saved() => CommunityStorage().loadAll();
+
+  /// The organization's community, durably saved by the join.
+  Future<Community> joinedCommunity() async {
+    final communities = await saved();
+    expect(communities, hasLength(1));
+    expect(probes.last.community.nsec, communities.single.nsec);
+    return communities.single;
+  }
+
+  Future<void> open() async {
+    final origin = OrganizationEnvironment.origin!;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/browser_auth'),
+      (_) async => null,
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        disableAnimations: true,
+        overrides: [
+          organizationAccountProvider.overrideWith((ref) {
+            final account = BuilderlabAccountClient(
+              accountOrigin: origin,
+              httpClient: tenant.client,
+            );
+            accounts.add(account);
+            ref.onDispose(account.dispose);
+            return account;
+          }),
+          organizationSignInProvider.overrideWith((ref) {
+            final signIn = OrganizationSignIn(
+              account: ref.watch(organizationAccountProvider)!,
+              browser: _Browser(browserUrls.add, origin: origin),
+              reconnect: () async {},
+            );
+            ref.onDispose(signIn.dispose);
+            signIn.initialize();
+            return signIn;
+          }),
+          relayProbeProvider.overrideWithValue(
+            (community, headers) async =>
+                probes.add((community: community, headers: headers)),
+          ),
+          authProvider.overrideWith(_Auth.new),
+          communityStorageProvider.overrideWithValue(CommunityStorage()),
+        ],
+        child: const OnboardingAppEntry(),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> signIn() async {
+    await tester.tap(find.text('Sign in'));
+    await tester.pumpAndSettle();
+    // Secure storage and HTTP complete outside the fake clock.
+    for (var i = 0; i < 5; i++) {
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pumpAndSettle();
+    }
+  }
 }
 
 class _Browser extends BrowserAuth {
@@ -170,9 +351,11 @@ class _Browser extends BrowserAuth {
   Future<void> initialize() async {}
 }
 
+/// Admission at the relay boundary: saves the community as the real
+/// notifier does once the relay accepts it.
 class _Auth extends AuthNotifier {
-  _Auth(this.joined);
-  final List<Community> joined;
+  /// The next admission returns without saving, as a cancelled one does.
+  static var dropNext = false;
 
   @override
   Future<AuthState> build() async =>
@@ -183,5 +366,12 @@ class _Auth extends AuthNotifier {
     Community community, {
     bool Function()? shouldContinue,
     bool activate = true,
-  }) async => joined.add(community);
+  }) async {
+    if (dropNext) {
+      dropNext = false;
+      return;
+    }
+    final storage = CommunityStorage();
+    await storage.saveAll([...await storage.loadAll(), community]);
+  }
 }

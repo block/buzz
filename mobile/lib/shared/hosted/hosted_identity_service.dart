@@ -216,54 +216,16 @@ class HostedIdentityService {
 
     final recovered = await account.post('/v1/buzz/nsec-backups/recovery', {});
     _sameAccount(subject);
-    final backups = recovered['backups'];
-    final failed = recovered['failed_backup_ids'];
-    if (recovered['error'] != null ||
-        backups is! List ||
-        failed is! List ||
-        failed.any((id) => id is! String)) {
-      throw AccountFailure.invalidResponse;
-    }
-    if (failed.isNotEmpty) {
+    final candidates = openRecoveredBackups(recovered);
+    if (candidates == null) {
       return const HostedIdentityResult(HostedIdentityState.recoveryBlocked);
     }
-    if (backups.isEmpty) {
+    if (candidates.isEmpty) {
       return HostedIdentityResult(
         bound == null
             ? HostedIdentityState.needsAuthoritativeAbsence
             : HostedIdentityState.recoveryBlocked,
       );
-    }
-    // Validate the entire result before storing anything. Never trust its
-    // advertised pubkey without deriving it from the actual secret.
-    final candidates = <String, ({nostr.Keys keys, String backupId})>{};
-    try {
-      for (final backup in backups) {
-        if (backup is! Map<String, dynamic>) throw const FormatException();
-        final secret = backup['secret_key'];
-        final backupId = backup['backup_id'];
-        if (secret is! String ||
-            !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(secret) ||
-            backupId is! String ||
-            backupId.isEmpty) {
-          throw const FormatException();
-        }
-        final bytes = base64Url.decode(base64Url.normalize(secret));
-        if (bytes.length != 32) throw const FormatException();
-        final hex = bytes
-            .map((b) => b.toRadixString(16).padLeft(2, '0'))
-            .join();
-        final keys = AccountIdentityStore.keysForHex(hex);
-        if (keys.public != _pubkey(backup['nostr_pubkey'])) {
-          throw const FormatException();
-        }
-        candidates.putIfAbsent(
-          keys.public,
-          () => (keys: keys, backupId: backupId),
-        );
-      }
-    } catch (_) {
-      throw AccountFailure.invalidResponse;
     }
     if (bound == null &&
         (statusKeys.length != candidates.length ||
@@ -412,4 +374,54 @@ class HostedIdentityService {
     }
     return value.toLowerCase();
   }
+}
+
+/// A recovered backup's key, derived from its secret, and its backup id.
+typedef RecoveredBackup = ({nostr.Keys keys, String backupId});
+
+/// Validates an `/v1/buzz/nsec-backups/recovery` response, keyed by the public
+/// key derived from each secret, never by the advertised one. Null when any
+/// backup failed to open; throws [AccountFailure.invalidResponse] when the
+/// response is malformed, so nothing is stored from a partial result.
+Map<String, RecoveredBackup>? openRecoveredBackups(
+  Map<String, dynamic> recovered,
+) {
+  final backups = recovered['backups'];
+  final failed = recovered['failed_backup_ids'];
+  if (recovered['error'] != null ||
+      backups is! List ||
+      failed is! List ||
+      failed.any((id) => id is! String)) {
+    throw AccountFailure.invalidResponse;
+  }
+  if (failed.isNotEmpty) return null;
+  final candidates = <String, RecoveredBackup>{};
+  try {
+    for (final backup in backups) {
+      if (backup is! Map<String, dynamic>) throw const FormatException();
+      final secret = backup['secret_key'];
+      final backupId = backup['backup_id'];
+      if (secret is! String ||
+          !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(secret) ||
+          backupId is! String ||
+          backupId.isEmpty) {
+        throw const FormatException();
+      }
+      final bytes = base64Url.decode(base64Url.normalize(secret));
+      if (bytes.length != 32) throw const FormatException();
+      final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+      final keys = AccountIdentityStore.keysForHex(hex);
+      if (keys.public !=
+          HostedIdentityService._pubkey(backup['nostr_pubkey'])) {
+        throw const FormatException();
+      }
+      candidates.putIfAbsent(
+        keys.public,
+        () => (keys: keys, backupId: backupId),
+      );
+    }
+  } catch (_) {
+    throw AccountFailure.invalidResponse;
+  }
+  return candidates;
 }

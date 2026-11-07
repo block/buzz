@@ -6,6 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/organization_environment.dart';
+import '../../shared/hosted/organization_sign_out.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/community/community_membership_provider.dart';
@@ -126,6 +127,12 @@ class HomePage extends HookConsumerWidget {
               onPressed: () => openPage(communityAppearancePageBuilder!),
             ),
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
+          if (OrganizationEnvironment.enabled)
+            (
+              label: 'Sign out',
+              symbol: 'rectangle.portrait.and.arrow.right',
+              onPressed: () => confirmOrganizationSignOut(context, ref),
+            ),
         ];
         return [
           if (defaultTargetPlatform == TargetPlatform.iOS &&
@@ -212,7 +219,7 @@ class HomePage extends HookConsumerWidget {
                 ? IosMessageCreateButton(
                     actions: moreActions,
                     dividerBefore: OrganizationEnvironment.enabled
-                        ? const {}
+                        ? {moreActions.length - 1}
                         : const {1},
                     icon: 'more',
                     avatarUrl: communityIcon,
@@ -229,7 +236,7 @@ class HomePage extends HookConsumerWidget {
                     backgroundColor: context.colors.surfaceContainerHighest,
                     actions: moreActions,
                     dividerBefore: OrganizationEnvironment.enabled
-                        ? const {}
+                        ? {moreActions.length - 1}
                         : const {1},
                     width: 48,
                     height: 48,

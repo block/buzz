@@ -80,8 +80,8 @@ class HostedJourneyFixture {
   bool refuseUpgrade = false;
   String subject = 'journey-owner';
 
-  /// A separate organization realm, as BUZZ_ORGANIZATION_URL and
-  /// BUZZ_ORGANIZATION_RELAYS configure. Enable before [mount].
+  /// An organization realm, as an internal build's BUZZ_BUILDERLAB_URL and
+  /// BUZZ_BUILDERLAB_RELAYS configure. Enable before [mount].
   static final organizationOrigin = Uri.parse('https://block.example.com');
   static const organizationRelayHost = 'buzz.block.example.com';
   bool organizationEnabled = false;

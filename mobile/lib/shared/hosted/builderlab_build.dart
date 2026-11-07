@@ -31,8 +31,9 @@ abstract final class BuilderlabBuild {
   /// `BUZZ_BUILDERLAB_URL`: this build's Builderlab HTTPS origin.
   static Uri? get origin => _config.origin;
 
-  /// `BUZZ_BUILDERLAB_RELAYS`: comma-separated DNS domains whose relays, and
-  /// their subdomains, use this build's Builderlab session.
+  /// `BUZZ_BUILDERLAB_RELAYS`: comma-separated DNS domains whose relays use
+  /// this build's Builderlab session. A public build also matches their
+  /// subdomains; an internal build matches only these exact hosts.
   static List<String> get relayDomains => _config.relayDomains;
 
   /// Matches a configured domain and its subdomains, never a string suffix.

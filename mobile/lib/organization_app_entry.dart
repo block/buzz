@@ -8,19 +8,12 @@ import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'features/pairing/pairing_page.dart';
 import 'shared/auth/auth_provider.dart';
 import 'shared/community/community.dart';
+import 'shared/community/community_provider.dart';
 import 'shared/hosted/account_identity_store.dart';
 import 'shared/hosted/hosted_relay_auth.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'shared/hosted/organization_sign_in.dart';
-import 'shared/hosted/self_hosted_entry.dart';
-import 'shared/relay/relay_provider.dart';
-import 'shared/relay/relay_socket.dart';
-
-/// Joins the organization's community with the build's session assertion.
-final organizationEntryProvider = Provider<SelfHostedEntry>((ref) {
-  final auth = ref.watch(hostedRelayAuthProvider);
-  return SelfHostedEntry(probe: (community) => _probe(community, auth));
-});
+import 'shared/hosted/organization_identity.dart';
 
 /// An internal build's landing: one "Sign in" that goes to the organization's
 /// single sign-on, then joins the organization's community.
@@ -32,7 +25,7 @@ class OrganizationAppEntry extends HookConsumerWidget {
     final signIn = ref.watch(organizationSignInProvider)!;
     useListenable(signIn);
     final joining = useState(false);
-    final joinFailed = useState(false);
+    final joinFailed = useState<_JoinFailure?>(null);
     // Set by a tap, so restoring a saved session never joins on its own.
     final joinRequested = useRef(false);
     final relay = 'wss://${OrganizationEnvironment.relayHosts.first}';
@@ -41,34 +34,73 @@ class OrganizationAppEntry extends HookConsumerWidget {
       if (joining.value) return;
       joinRequested.value = false;
       joining.value = true;
-      joinFailed.value = false;
+      joinFailed.value = null;
       bool current() => context.mounted;
-      final entry = ref.read(organizationEntryProvider);
+      final entry = ref.read(selfHostedEntryProvider);
+      final account = ref.read(organizationAccountProvider)!;
+      final storage = ref.read(communityStorageProvider);
       try {
-        final Community community;
-        try {
-          community = await entry.prepare(
-            relay: relay,
-            name: '',
-            create: true,
-            isCurrent: current,
-          );
-        } on AccountIdentityFailure catch (error) {
-          // Saved identities exist: the member picks one or a new key.
-          if (error != AccountIdentityFailure.absent || !context.mounted) {
-            rethrow;
+        final bound = await organizationBoundPubkey(account);
+        if (!current()) return;
+        Community community;
+        if (bound != null) {
+          // The relay admits only the bound key: use this device's copy, or
+          // the organization's backup of it. Never offer or create another.
+          try {
+            community = await entry.prepare(
+              relay: relay,
+              name: '',
+              savedPubkey: bound,
+              isCurrent: current,
+            );
+          } on AccountIdentityFailure catch (error) {
+            if (error != AccountIdentityFailure.absent) rethrow;
+            final nsec = await recoverOrganizationKey(account, bound);
+            if (!current()) return;
+            if (nsec == null) {
+              joinFailed.value = _JoinFailure.notRestored;
+              return;
+            }
+            community = await entry.prepare(
+              relay: relay,
+              name: '',
+              nsec: nsec,
+              isCurrent: current,
+            );
           }
-          await showSelfHostedEntry(context, relay: relay, name: '');
-          return;
+        } else {
+          try {
+            community = await entry.prepare(
+              relay: relay,
+              name: '',
+              create: true,
+              isCurrent: current,
+            );
+          } on AccountIdentityFailure catch (error) {
+            // Saved identities exist: the member picks one or a new key, which
+            // the organization binds at its first assertion.
+            if (error != AccountIdentityFailure.absent || !context.mounted) {
+              rethrow;
+            }
+            await showSelfHostedEntry(context, relay: relay, name: '');
+            return;
+          }
         }
         if (!current()) return;
         await ref
             .read(authProvider.notifier)
             .authenticateWithCommunity(community, shouldContinue: current);
-        await entry.complete(community);
+        // Admission can return early after cancellation. Check the durable
+        // record before retiring the only retry copy of a generated key.
+        final saved = await storage.loadAll();
+        if (saved.any(
+          (item) => item.id == community.id && item.nsec == community.nsec,
+        )) {
+          await entry.complete(community);
+        }
       } catch (error) {
         debugPrint('Organization community entry failed: $error');
-        if (context.mounted) joinFailed.value = true;
+        if (context.mounted) joinFailed.value = _JoinFailure.failed;
       } finally {
         if (context.mounted) joining.value = false;
       }
@@ -98,11 +130,16 @@ class OrganizationAppEntry extends HookConsumerWidget {
         joining.value ||
         signIn.status == OrganizationSessionStatus.checking ||
         signIn.status == OrganizationSessionStatus.signingIn;
-    final status = joinFailed.value
-        ? 'Couldn’t connect to your organization. Try again.'
-        : signIn.failure != null
-        ? 'Couldn’t sign in. Try again.'
-        : null;
+    final status =
+        switch (joinFailed.value) {
+          _JoinFailure.failed =>
+            'Couldn’t connect to your organization. Try again.',
+          _JoinFailure.notRestored =>
+            'Couldn’t restore your organization identity on this device. '
+                'Sign in on a device that has it, then try again.',
+          null => null,
+        } ??
+        (signIn.failure != null ? 'Couldn’t sign in. Try again.' : null);
 
     return PairingPage(
       connectionLanding: true,
@@ -115,32 +152,11 @@ class OrganizationAppEntry extends HookConsumerWidget {
           return;
         }
         joinRequested.value = true;
-        joinFailed.value = false;
+        joinFailed.value = null;
         unawaited(signIn.signIn());
       },
     );
   }
 }
 
-/// Entry must authenticate before the community becomes active, and an
-/// organization relay refuses the upgrade without the session's assertion.
-Future<void> _probe(Community community, HostedRelayAuth auth) async {
-  final socket = RelaySocket(
-    wsUrl: community.relayUrl,
-    nsec: community.nsec,
-    onMessage: (_) {},
-    onConnected: () {},
-    onDisconnected: (_) {},
-  );
-  try {
-    socket.headers = await auth.headers(
-      RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
-    );
-    await socket.connect().timeout(const Duration(seconds: 20));
-    if (socket.state != SocketState.connected) {
-      throw StateError('Community refused entry');
-    }
-  } finally {
-    socket.dispose();
-  }
-}
+enum _JoinFailure { failed, notRestored }

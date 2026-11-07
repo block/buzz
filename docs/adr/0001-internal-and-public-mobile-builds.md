@@ -12,3 +12,7 @@ We chose this so that an organization's members cannot reach public communities 
 ## Consequences
 
 Upgrading an internal build that had joined public communities or signed in to the public Builderlab clears that public session and hides those communities. Their saved keys stay on the device.
+
+An internal build has no QR pairing, so it cannot receive a member's key from another device. When the organization's Builderlab already binds an identity to the member, Sign in uses that key from this device or restores it from the Builderlab's key backup. An identity the Builderlab never backed up cannot be restored, and Sign in says so rather than creating a new identity.
+
+On iOS, the native sign-in browser currently opens only Builderlab's own hosts, so an internal build's `BUZZ_BUILDERLAB_URL` must be a Builderlab tenant until that allowlist follows build configuration.
