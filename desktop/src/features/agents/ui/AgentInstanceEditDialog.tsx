@@ -49,6 +49,7 @@ import {
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
+  withDiscoveredProviderOptions,
 } from "./agentConfigOptions";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
@@ -79,6 +80,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
+import { useAgentProviderDiscovery } from "./useAgentProviderDiscovery";
 import { EditAgentProviderModelFields } from "./EditAgentProviderModelFields";
 import {
   getBakedModelInheritLabel,
@@ -442,6 +444,14 @@ export function AgentInstanceEditDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
+  // Harness-published provider inventory (goose), same env the dialog already
+  // discovers models with so credential-gated inventories resolve.
+  const { discoveredProviders, providerDiscoveryLoading } =
+    useAgentProviderDiscovery({
+      enabled: open,
+      envVars: envVarsForDiscovery,
+      selectedRuntime,
+    });
 
   // D2/D3: the top-level API key owns display while the readiness gate keeps the
   // complete required-key list; advancedRequiredEnvKeys drives EnvVarsEditor
@@ -892,18 +902,24 @@ export function AgentInstanceEditDialog({
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const providerDropdownOptions: PersonaDropdownOption[] = [
-    ...providerOptions.map((option) => ({
-      label:
-        option.id === "" && inheritedProviderDefault.source === "build"
-          ? getBakedProviderInheritLabel(
-              inheritedProviderDefault.value,
-              providerOptions,
-            )
-          : option.label,
-      value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
-    })),
+    ...withDiscoveredProviderOptions(
+      providerOptions.map((option) => ({
+        label:
+          option.id === "" && inheritedProviderDefault.source === "build"
+            ? getBakedProviderInheritLabel(
+                inheritedProviderDefault.value,
+                providerOptions,
+              )
+            : option.label,
+        value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
+      })),
+      discoveredProviders,
+    ),
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
+  // A harness publishing its own inventory lists dozens of providers; use the
+  // searchable control there instead of a scroll-through menu.
+  const providerSearchable = selectedRuntime?.providerInventory === true;
 
   const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
@@ -1084,6 +1100,8 @@ export function AgentInstanceEditDialog({
               providerRequired={providerRequired}
               providerDropdownOptions={providerDropdownOptions}
               providerSelectValue={providerSelectValue}
+              providerSearchable={providerSearchable}
+              providerDiscoveryLoading={providerDiscoveryLoading}
               onProviderDropdownChange={handleProviderDropdownChange}
               isCustomProviderEditing={isCustomProviderEditing}
               provider={provider}

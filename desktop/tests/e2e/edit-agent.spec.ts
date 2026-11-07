@@ -78,6 +78,21 @@ async function pickDropdownOption(
   await page.getByRole("menuitemradio", { name: optionName }).click();
 }
 
+/**
+ * Pick a provider from the searchable combobox. The Goose harness publishes
+ * its own provider inventory, so its provider control is a filtered list
+ * (`ProviderSelectField` → `PersonaModelCombobox`) rather than the menu the
+ * other fields use. Option rows carry `${id}-option-${value}` test ids.
+ */
+async function pickProviderOption(
+  page: import("@playwright/test").Page,
+  triggerId: string,
+  providerId: string,
+) {
+  await page.locator(`#${triggerId}`).click();
+  await page.getByTestId(`${triggerId}-option-${providerId}`).click();
+}
+
 test.describe("agent definition dialog", () => {
   test("owner-only-access build shows disabled agent access with an explanation", async ({
     page,
@@ -204,7 +219,7 @@ test.describe("edit agent dialog", () => {
     await openEditDialog(page);
 
     // Pick a provider so model discovery has a scope, then set a custom model.
-    await pickDropdownOption(page, "edit-agent-llm-provider", "Anthropic");
+    await pickProviderOption(page, "edit-agent-llm-provider", "anthropic");
     await pickDropdownOption(page, "edit-agent-model", "Custom model...");
     await page.locator("#edit-agent-custom-model").fill("claude-opus-4-5");
     // Anthropic requires a credential before save unlocks.
@@ -350,7 +365,7 @@ test.describe("edit agent dialog", () => {
       exact: true,
     });
     await expect(advanced).toHaveAttribute("aria-expanded", "false");
-    await pickDropdownOption(page, "edit-agent-llm-provider", "Databricks v2");
+    await pickProviderOption(page, "edit-agent-llm-provider", "databricks_v2");
     await expect(advanced).toHaveAttribute("aria-expanded", "false");
     await expect(
       page.getByTestId("edit-agent-advanced-required-badge"),

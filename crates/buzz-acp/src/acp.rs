@@ -374,6 +374,13 @@ pub(crate) fn build_codex_config_env(
 /// `_meta.goose.activeRunId`. Emitted by goose and buzz-agent only.
 const GOOSE_STEER_METHOD: &str = "_goose/unstable/session/steer";
 
+/// goose's provider-inventory extension (ACP custom request). Returns one
+/// entry per provider goose knows about (`providerId`, `providerName`,
+/// `configured`, `available`, `defaultModel`, `models`, `acp`). Adapters that
+/// do not implement it answer with a JSON-RPC `-32601` error, which callers
+/// treat as "no inventory" rather than a failure.
+pub const GOOSE_PROVIDERS_LIST_METHOD: &str = "_goose/unstable/providers/list";
+
 /// The cross-adapter mid-turn steer method, shipped by claude-agent-acp
 /// (`src/acp-agent.ts:200`) and codex-acp (`src/AcpExtensions.ts:11`).
 /// Params are `{sessionId, prompt}` — no run id — and the result is
@@ -798,6 +805,23 @@ impl AcpClient {
                 "key": "buzz",
                 "text": text,
             }),
+        )
+        .await
+    }
+
+    /// Query goose's provider inventory via the `_goose/unstable/providers/list`
+    /// extension.
+    ///
+    /// `provider_ids` empty means "all providers". Adapters without the
+    /// extension return an error; callers must treat that as an empty
+    /// inventory (see [`GOOSE_PROVIDERS_LIST_METHOD`]).
+    pub async fn goose_list_providers(
+        &mut self,
+        provider_ids: Vec<String>,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request(
+            GOOSE_PROVIDERS_LIST_METHOD,
+            serde_json::json!({ "providerIds": provider_ids }),
         )
         .await
     }
