@@ -180,7 +180,7 @@ class SendMessage {
 
   void _ensureDeliveryValid() {
     if (_isDeliveryValid?.call() == false) {
-      throw StateError(
+      throw ActiveCommunityChangedError(
         'Message delivery cancelled because the active community changed',
       );
     }

@@ -1,6 +1,9 @@
 import 'package:flutter/scheduler.dart';
+
 import 'dart:async';
+
 import 'package:buzz/features/channels/composer_send_origin.dart';
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -1366,6 +1369,76 @@ void main() {
         'new draft',
       );
     });
+
+    for (final (name, fail, message)
+        in <(String, Future<void> Function(ProviderContainer), String)>[
+          (
+            'a disconnected relay',
+            // The real session: never connected in this harness, so publish
+            // classifies the failure itself.
+            (container) => container
+                .read(relaySessionProvider.notifier)
+                .publish(
+                  const NostrEvent(
+                    id: 'event-1',
+                    pubkey: 'pubkey-1',
+                    createdAt: 0,
+                    kind: 9,
+                    tags: [],
+                    content: 'hello',
+                    sig: 'sig-1',
+                  ),
+                ),
+            'Not sent. No connection.',
+          ),
+          (
+            'an unacknowledged publish',
+            (_) => Future.error(TimeoutException('not acknowledged')),
+            "Not sent. The relay didn't respond.",
+          ),
+          (
+            'a relay rejection',
+            (_) => Future.error(Exception('restricted: not a member')),
+            'Not sent: restricted: not a member',
+          ),
+          (
+            'any other state error',
+            (_) => Future.error(StateError('Relay session is disposed')),
+            'Not sent: Relay session is disposed',
+          ),
+        ]) {
+      testWidgets('reports $name as itself, not a community switch', (
+        tester,
+      ) async {
+        late final ProviderContainer container;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) => fail(container),
+          ),
+        );
+        container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+
+        expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'hello',
+        );
+      });
+    }
 
     testWidgets('smoothly resizes the text field when a new line is added', (
       tester,

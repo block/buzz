@@ -145,7 +145,7 @@ class ForumEventDelivery {
   }) async {
     final currentConfig = _container.read(relayConfigProvider);
     if (currentConfig.baseUrl != _relayUrl || currentConfig.nsec != _nsec) {
-      throw StateError(
+      throw ActiveCommunityChangedError(
         'Forum delivery cancelled because the active community changed',
       );
     }
