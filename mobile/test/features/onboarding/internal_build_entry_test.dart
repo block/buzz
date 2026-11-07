@@ -83,9 +83,10 @@ void main() {
         AccountIdentityStore.keysForNsec(first.nsec!).secret,
       );
 
-      // Sign out, at the bottom of Settings, removes the community and ends
-      // the session. Clearing the notification extension's copy fails, so
-      // the session stays live.
+      // Sign out, at the bottom of Settings, ends the session and then
+      // removes the community. Clearing the notification extension's copy
+      // fails first, so the session stays live and the community stays:
+      // removing it would let a relaunch restore the uncleared session.
       const push = MethodChannel('buzz/push');
       final messenger = tester.binding.defaultBinaryMessenger;
       var extensionFails = true;
@@ -104,31 +105,43 @@ void main() {
       await harness.settle();
       await tester.tap(find.text('Home'));
       await tester.pumpAndSettle();
-      await tester.scrollUntilVisible(
-        find.byKey(const Key('settings-sign-out')),
-        200,
-      );
-      await tester.tap(find.byKey(const Key('settings-sign-out')));
-      await tester.pumpAndSettle();
-      // Only iOS shares the session with its notification extension.
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
-      await harness.settle();
+      Future<void> signOut() async {
+        await tester.scrollUntilVisible(
+          find.byKey(const Key('settings-sign-out')),
+          200,
+        );
+        await tester.tap(find.byKey(const Key('settings-sign-out')));
+        await tester.pumpAndSettle();
+        // Only iOS shares the session with its notification extension.
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+        await harness.settle();
+        debugDefaultTargetPlatformOverride = null;
+      }
+
+      await signOut();
+      expect(find.textContaining('Failed to sign out'), findsOneWidget);
+      expect(find.byType(SettingsPage), findsOneWidget);
+      expect(await harness.saved(), hasLength(1));
+      expect(harness.accounts.last.account, isNotNull);
+
+      // Retrying once the extension's copy clears signs out.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+      extensionFails = false;
+      await signOut();
       expect(await harness.saved(), isEmpty);
+      expect(harness.accounts.last.account, isNull);
       // The key stays on this device: sign-in must not depend on the backup,
       // which a device without HPKE sealing never uploads.
       tenant.backups.clear();
       // Signing out closes Settings, uncovering the Sign in landing.
       expect(find.byType(SettingsPage), findsNothing);
       expect(find.text('Sign in'), findsOneWidget);
-      expect(harness.accounts.last.account, isNotNull);
-      extensionFails = false;
 
-      // Sign in must go through single sign-on again rather than reuse the
-      // credential that sign-out was retiring.
+      // Sign in goes through single sign-on again.
       await harness.signIn();
-      debugDefaultTargetPlatformOverride = null;
       expect(harness.browserUrls, hasLength(2));
       final second = await harness.joinedCommunity();
       expect(second.pubkey, first.pubkey);

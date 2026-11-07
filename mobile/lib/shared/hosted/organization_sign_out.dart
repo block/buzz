@@ -7,10 +7,10 @@ import 'organization_sign_in.dart';
 import '../widgets/confirmation_dialog.dart';
 import '../widgets/feedback_snackbar.dart';
 
-/// Signs an internal build out of its organization: removes the
-/// organization's community, which returns to the Sign in landing, and ends
-/// the organization session so the next sign-in goes through single sign-on.
-/// It is the only way an internal build signs out.
+/// Signs an internal build out of its organization: ends the organization
+/// session, so the next sign-in goes through single sign-on, then removes the
+/// organization's community, which returns to the Sign in landing. It is the
+/// only way an internal build signs out.
 ///
 /// The community's key stays on this device as a saved identity, so signing
 /// back in reuses it even when the organization holds no backup of it.
@@ -39,10 +39,14 @@ Future<void> confirmOrganizationSignOut(
           .forPairing(AccountIdentityStore.publicKeyForNsec(nsec))
           .create(nsec);
     }
+    // End the session first: a session that could not be cleared would be
+    // restored at the next launch, so the community stays until it is.
+    await signIn.signOut();
+    final failure = signIn.failure;
+    if (failure != null) throw failure;
     await ref
         .read(communityListProvider.notifier)
         .removeCommunity(community.id);
-    await signIn.signOut();
     // Reveal the Sign in landing under the page that signed out.
     navigator.popUntil((route) => route.isFirst);
   } catch (e) {
