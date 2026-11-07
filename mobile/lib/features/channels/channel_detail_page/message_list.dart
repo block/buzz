@@ -632,8 +632,12 @@ class _MessageList extends HookConsumerWidget {
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
         if (position.index >= displayEntries.length ||
-            position.itemLeadingEdge < bottomEdge ||
-            position.itemTrailingEdge > topEdge) {
+            !isReadableRow(
+              leadingEdge: position.itemLeadingEdge,
+              trailingEdge: position.itemTrailingEdge,
+              start: bottomEdge,
+              end: topEdge,
+            )) {
           continue;
         }
         final group =

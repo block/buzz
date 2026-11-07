@@ -2663,6 +2663,71 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('reading the bottom of an archived Solo chat reads a tall '
+        'mention', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final solo = Channel(
+        id: _channelId,
+        name: 'Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+        archivedAt: DateTime.utc(2025, 1, 2),
+      );
+      final messages = [
+        _textMsg(
+          id: 'tall',
+          pubkey: 'alice',
+          content: List.filled(120, 'A long answer line.').join('\n\n'),
+          createdAt: 1100,
+          extraTags: const [
+            ['p', 'self'],
+          ],
+        ),
+        _textMsg(
+          id: 'latest',
+          pubkey: 'alice',
+          content: 'Latest',
+          createdAt: 1200,
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channel: solo,
+          personalChat: true,
+          signingPubkey: 'self',
+          channelMessagesNotifier: _FakeMessagesNotifier(messages),
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(
+        find.text('This channel is archived and read-only on mobile.'),
+        findsOneWidget,
+      );
+      expect(readState.markedContexts, {
+        'activity:$_channelId': 1200,
+        'msg:tall': 1100,
+      });
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('hidden huddle end does not block bottom catch-up', (
       tester,
     ) async {
@@ -3178,8 +3243,9 @@ void main() {
           context: messageListElement,
           direction: ScrollDirection.reverse,
         ).dispatch(messageListElement);
-        // Settling can already complete the read dwell; record the whole jump.
-        readState.markedContexts.clear();
+        // Settling at the bottom catches up every mention; forget those
+        // marks so only the jump's reads count.
+        readState.forgetMarks();
         tester
             .widget<ScrollablePositionedList>(messageList)
             .itemScrollController!
@@ -18988,6 +19054,11 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  void forgetMarks() {
+    markedContexts.clear();
+    state = _initialState;
   }
 
   final List<String> clearedForcedContexts = [];

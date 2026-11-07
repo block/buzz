@@ -21,6 +21,10 @@ const readingDwell = Duration(milliseconds: 300);
 ///   `activity:<channel>` and a thread writes `thread-activity:<root>`. These
 ///   catch-up marks read ordinary messages and that thread's replies. They do
 ///   not read mentions, broadcasts or DMs.
+/// - The same channel catch-up also gives each loaded top-level mention and
+///   broadcast through the bottom row its own `msg:` mark, at most the newest
+///   [catchUpMessageMarkLimit], so a mention taller than the screen is still
+///   read. Messages the reader marked unread keep that intent.
 /// - Each fully visible message gets its own `msg:` mark unless its own mark,
 ///   the channel mark, or (for an ordinary top-level message) `activity:`
 ///   already reads it. A thread mark never counts here: a reply finds its
@@ -29,7 +33,8 @@ const readingDwell = Duration(milliseconds: 300);
 ///   Mark read does that.
 ///
 /// [loaded] is every message loaded for the channel or thread, including
-/// replies. [visible] is the messages fully visible for the whole dwell.
+/// replies. [visible] is the messages fully visible for the whole dwell; see
+/// [isReadableRow].
 /// [bottom] is the newest message when its bottom edge is visible at the
 /// bottom of the list; otherwise null. Set [threadRootId] when reading a
 /// thread, and [isRootThread] when its head is the thread root rather than a
@@ -51,26 +56,12 @@ Map<String, int> readingMarks({
   int? markerOf(String contextId) =>
       maxReadAt([marks[contextId], readState.effectiveTimestamp(contextId)]);
 
-  // A nested thread view shows only one branch, so reaching its bottom does
-  // not read the whole thread.
-  if (bottom != null && (threadRootId == null || isRootThread)) {
-    final catchUp = _catchUpMark(
-      channelId: channelId,
-      loaded: loaded,
-      bottom: bottom,
-      threadRootId: threadRootId,
-      markerOf: markerOf,
-      now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
-    );
-    if (catchUp != null) marks[catchUp.key] = catchUp.value;
-  }
-
   final self = currentPubkey?.toLowerCase();
-  for (final message in visible) {
-    if (message.isSystem || message.pubkey.toLowerCase() == self) continue;
+  bool needsMark(TimelineMessage message) {
+    if (message.isSystem || message.pubkey.toLowerCase() == self) return false;
     final contextId = msgContextKey(message.id);
     // Automatic reading keeps a message the reader marked unread.
-    if (readState.isForcedUnread(contextId)) continue;
+    if (readState.isForcedUnread(contextId)) return false;
     final ordinary = readByChannelCatchUp(
       isDm: isDm,
       isReply: message.parentId != null && !_isBroadcast(message),
@@ -81,35 +72,91 @@ Map<String, int> readingMarks({
       markerOf(channelId),
       if (ordinary) markerOf(activityContextKey(channelId)),
     ]);
-    if (readAt != null && readAt >= message.createdAt) continue;
-    marks[contextId] = message.createdAt;
+    return readAt == null || readAt < message.createdAt;
   }
+
+  void markMessage(TimelineMessage message) {
+    if (needsMark(message)) {
+      marks[msgContextKey(message.id)] = message.createdAt;
+    }
+  }
+
+  // A nested thread view shows only one branch, so reaching its bottom does
+  // not read the whole thread.
+  if (bottom != null &&
+      (threadRootId == null || isRootThread) &&
+      _showsNewest(
+        loaded: loaded,
+        bottom: bottom,
+        threadRootId: threadRootId,
+      )) {
+    final catchUp = _catchUpMark(
+      channelId: channelId,
+      bottom: bottom,
+      threadRootId: threadRootId,
+      markerOf: markerOf,
+      now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    if (catchUp != null) marks[catchUp.key] = catchUp.value;
+    if (threadRootId == null && !isDm && self != null) {
+      final attention = [
+        for (final message in loaded)
+          if (message.createdAt <= bottom.createdAt &&
+              (message.parentId == null || _isBroadcast(message)) &&
+              isHighPriorityEvent(message.tags, self) &&
+              needsMark(message))
+            message,
+      ]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      attention.take(catchUpMessageMarkLimit).forEach(markMessage);
+    }
+  }
+
+  visible.forEach(markMessage);
   return marks;
 }
+
+/// The most mentions and broadcasts one channel catch-up marks, as in
+/// `buzz-app`, so a backlog cannot crowd older marks out of the synced budget.
+const catchUpMessageMarkLimit = 128;
+
+/// Whether a row with these item-position edges counts as read: it lies
+/// inside the reading area from [start] to [end], or it is taller than that
+/// area and covers all of it.
+bool isReadableRow({
+  required double leadingEdge,
+  required double trailingEdge,
+  required double start,
+  required double end,
+}) =>
+    (leadingEdge >= start && trailingEdge <= end) ||
+    (leadingEdge <= start && trailingEdge >= end);
+
+/// Whether [bottom] is the live bottom. A loaded message newer than the
+/// bottom row means the list does not show it, for example after a jump
+/// into history.
+bool _showsNewest({
+  required Iterable<TimelineMessage> loaded,
+  required TimelineMessage bottom,
+  required String? threadRootId,
+}) => !loaded.any(
+  (message) =>
+      (threadRootId != null || !isCollapsedHuddleEnding(message, loaded)) &&
+      // The main timeline never renders these, so they can't be its bottom.
+      !isHiddenMembershipNotice(message) &&
+      message.createdAt > bottom.createdAt &&
+      (threadRootId != null
+          ? _threadRootOf(message) == threadRootId
+          : message.parentId == null || _isBroadcast(message)),
+);
 
 /// The catch-up mark for [bottom], or null when it would read nothing new.
 MapEntry<String, int>? _catchUpMark({
   required String channelId,
-  required Iterable<TimelineMessage> loaded,
   required TimelineMessage bottom,
   required String? threadRootId,
   required int? Function(String contextId) markerOf,
   required int now,
 }) {
-  // A loaded message newer than the bottom row means the list does not show
-  // the live bottom, for example after a jump into history.
-  final showsNewest = !loaded.any(
-    (message) =>
-        (threadRootId != null || !isCollapsedHuddleEnding(message, loaded)) &&
-        // The main timeline never renders these, so they can't be its bottom.
-        !isHiddenMembershipNotice(message) &&
-        message.createdAt > bottom.createdAt &&
-        (threadRootId != null
-            ? _threadRootOf(message) == threadRootId
-            : message.parentId == null || _isBroadcast(message)),
-  );
-  if (!showsNewest) return null;
-
   // Never read beyond the last rendered message: a message between that
   // row and a hidden lifecycle event may still arrive out of order.
   final cut = bottom.createdAt < now ? bottom.createdAt : now;

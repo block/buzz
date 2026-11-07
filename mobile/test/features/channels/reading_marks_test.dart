@@ -209,6 +209,123 @@ void main() {
       });
     });
 
+    test('catch-up marks unseen top-level mentions and broadcasts', () {
+      // A mention taller than the screen is never fully visible, so the
+      // bottom catch-up reads it, as `buzz-app` does.
+      final mention = _msg(
+        'm',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final broadcast = _msg(
+        'bc',
+        110,
+        parentId: 'root',
+        rootId: 'root',
+        tags: const [
+          ['broadcast', '1'],
+          ['p', _self],
+        ],
+      );
+      final reply = _msg(
+        'r',
+        120,
+        parentId: 'root',
+        rootId: 'root',
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final marked = _msg(
+        'marked',
+        130,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final read = _msg(
+        'read',
+        140,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200);
+      expect(
+        _marks(
+          readState: _state({'msg:read': 140}, {'msg:marked': _channel}),
+          loaded: [mention, broadcast, reply, marked, read, b],
+          visible: [b],
+          bottom: b,
+        ),
+        {'activity:$_channel': 200, 'msg:m': 100, 'msg:bc': 110},
+      );
+    });
+
+    test('catch-up marks mentions even when activity already covers it', () {
+      final mention = _msg(
+        'm',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200);
+      expect(
+        _marks(
+          readState: _state({'activity:$_channel': 200}),
+          loaded: [mention, b],
+          visible: [b],
+          bottom: b,
+        ),
+        {'msg:m': 100},
+      );
+    });
+
+    test('catch-up marks at most the newest $catchUpMessageMarkLimit '
+        'unread mentions', () {
+      final mentions = [
+        for (var i = 0; i < catchUpMessageMarkLimit + 2; i++)
+          _msg(
+            'm$i',
+            100 + i,
+            tags: const [
+              ['p', _self],
+            ],
+          ),
+      ];
+      final b = _msg('b', 1000);
+      final first = _marks(loaded: [...mentions, b], visible: [b], bottom: b);
+      expect(first.keys.where((key) => key.startsWith('msg:')), hasLength(128));
+      expect(first.containsKey('msg:m0'), isFalse);
+      expect(first.containsKey('msg:m1'), isFalse);
+
+      final second = _marks(
+        readState: _state(first),
+        loaded: [...mentions, b],
+        visible: [b],
+        bottom: b,
+      );
+      expect(second, {'msg:m0': 100, 'msg:m1': 101});
+    });
+
+    test('catch-up does not mark a mention away from the live bottom', () {
+      final mention = _msg(
+        'm',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final a = _msg('a', 150);
+      final b = _msg('b', 200);
+      expect(_marks(loaded: [mention, a, b], visible: [a], bottom: a), {
+        'msg:a': 150,
+      });
+    });
+
     test('away from the bottom, visible unread rows get message marks', () {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
@@ -279,6 +396,32 @@ void main() {
         'msg:a': 100,
         'msg:b': 200,
       });
+    });
+  });
+
+  group('isReadableRow', () {
+    bool readable(double leading, double trailing) => isReadableRow(
+      leadingEdge: leading,
+      trailingEdge: trailing,
+      start: 0.1,
+      end: 0.9,
+    );
+
+    test('reads a row inside the reading area', () {
+      expect(readable(0.2, 0.8), isTrue);
+      expect(readable(0.1, 0.9), isTrue);
+    });
+
+    test('reads a row that covers the whole reading area', () {
+      expect(readable(-0.5, 1.4), isTrue);
+      expect(readable(0.1, 1.4), isTrue);
+    });
+
+    test('does not read a row cut off at one edge', () {
+      expect(readable(0.05, 0.5), isFalse);
+      expect(readable(0.5, 0.95), isFalse);
+      expect(readable(0.5, 2), isFalse);
+      expect(readable(-1, 0.5), isFalse);
     });
   });
 
