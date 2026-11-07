@@ -1186,6 +1186,47 @@ void main() {
       expect(uploadRequested, isFalse);
     });
 
+    test('sanitizes an image picked as a file attachment', () async {
+      http.Request? capturedRequest;
+      final sanitizedBytes = Uint8List.fromList([..._pngBytes]);
+      String? sanitizedMimeType;
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          capturedRequest = request;
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': request.bodyBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            HttpStatus.ok,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickAttachmentFile: () async =>
+            XFile.fromData(_pngBytes, name: 'Screenshot.png'),
+        sanitizeImageBytes: (bytes, mimeType) async {
+          sanitizedMimeType = mimeType;
+          return sanitizedBytes;
+        },
+      );
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      final descriptor = await service.pickAndUploadFile();
+
+      expect(sanitizedMimeType, 'image/png');
+      expect(capturedRequest!.headers['content-type'], 'image/png');
+      expect(descriptor!.type, 'image/png');
+      expect(descriptor.filename, isNull);
+    });
+
     test('sanitizes generic filenames to relay imeta constraints', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
