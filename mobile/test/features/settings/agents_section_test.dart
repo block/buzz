@@ -1,6 +1,7 @@
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -145,4 +146,63 @@ void main() {
     expect(find.textContaining('Bestie:'), findsOneWidget);
     expect(find.textContaining('2 agents'), findsOneWidget);
   });
+
+  testWidgets(
+    'renders auto-mention agents switch with default false and updates state & prefs',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+            ownedAgentDirectoryProvider.overrideWith((ref) async => const []),
+          ],
+          child: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final switchFinder = find.byKey(
+        const ValueKey('settings-auto-mention-agents-switch'),
+      );
+      expect(switchFinder, findsOneWidget);
+      expect(tester.widget<Switch>(switchFinder).value, isFalse);
+
+      final rowFinder = find.byKey(
+        const ValueKey('settings-auto-mention-agents-row'),
+      );
+      expect(rowFinder, findsOneWidget);
+      expect(find.text('Automatically mention agents'), findsOneWidget);
+      expect(
+        find.text('Address selected agents in thread replies'),
+        findsOneWidget,
+      );
+
+      // Tap row to toggle
+      await tester.tap(rowFinder);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Switch>(switchFinder).value, isTrue);
+      expect(
+        prefs.getBool('buzz.messages.keepMentionedAgentsPinned'),
+        isTrue,
+      );
+
+      // Tap switch to toggle back
+      await tester.tap(switchFinder);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Switch>(switchFinder).value, isFalse);
+      expect(
+        prefs.getBool('buzz.messages.keepMentionedAgentsPinned'),
+        isFalse,
+      );
+    },
+  );
 }
