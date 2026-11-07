@@ -68,6 +68,9 @@ void main() {
                 return true;
               },
         ),
+        communityPushGatewayCleanupEnqueuerProvider.overrideWithValue(
+          (community) async => true,
+        ),
         communityPushLeaseRevocationTriggerProvider.overrideWithValue(
           revocationTrigger,
         ),
