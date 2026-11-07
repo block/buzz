@@ -12,7 +12,9 @@
 //! syncs it would have reached get `CLOSED "resync: ..."` (NIP-AR Sync rule 5),
 //! and the connections it would have reached are fenced and closed so their
 //! clients catch up from their cursor. A recipient the access gate could not
-//! check is lost the same way. When the dispatcher itself lags the broadcast,
+//! check (a visibility or membership read failed) is checked again, with
+//! backoff, until the deadline, and is lost the same way only if the gate
+//! still cannot check it. When the dispatcher itself lags the broadcast,
 //! it cannot tell which events it skipped, so it does the same for every
 //! subscribed connection.
 //!
@@ -135,17 +137,24 @@ async fn run_worker(
 
 /// Deliver a queued event by its deadline, or handle it as lost. A delivery
 /// cut off at the deadline may have reached some recipients; they close too.
-/// Recipients the access gate could not check are lost too.
+/// Recipients the access gate could not check are checked again until the
+/// deadline, and are lost only if the gate still cannot check them. An
+/// ephemeral event is not worth holding its worker for, so it is not retried.
 async fn deliver_or_lose(state: &Arc<AppState>, closer: &LagCloser, queued: Queued) {
     let Queued {
         community_id,
         stored,
         deadline,
     } = queued;
+    let ephemeral = is_ephemeral(event_kind_u32(&stored.event));
+    let retry_until = if ephemeral { Instant::now() } else { deadline };
     let unverified = if Instant::now() < deadline {
-        tokio::time::timeout_at(deadline, deliver_pubsub_event(state, community_id, &stored))
-            .await
-            .ok()
+        tokio::time::timeout_at(
+            deadline,
+            deliver_pubsub_event(state, community_id, &stored, retry_until),
+        )
+        .await
+        .ok()
     } else {
         None
     };
@@ -153,7 +162,7 @@ async fn deliver_or_lose(state: &Arc<AppState>, closer: &LagCloser, queued: Queu
         lose(state, closer, community_id, &stored, "stale");
         return;
     };
-    if unverified.is_empty() || is_ephemeral(event_kind_u32(&stored.event)) {
+    if unverified.is_empty() || ephemeral {
         return;
     }
     metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => "unverified").increment(1);
@@ -627,10 +636,11 @@ mod tests {
         assert!(!cancel.is_cancelled());
     }
 
-    /// A recipient the access gate could not check did not get the event, so
-    /// it is lost like a late one: fenced and queued to close. A lost
-    /// ephemeral event closes nothing, as on every other loss path.
-    #[tokio::test]
+    /// A recipient the access gate still cannot check at the deadline did not
+    /// get the event, so it is lost like a late one: fenced and queued to
+    /// close. A lost ephemeral event is not retried and closes nothing, as on
+    /// every other loss path.
+    #[tokio::test(start_paused = true)]
     async fn recipient_the_access_gate_could_not_check_is_lost() {
         let state = crate::state::tests::test_state().await;
         state.db.pool().close().await;
@@ -654,15 +664,71 @@ mod tests {
         };
         let closer = LagCloser::default();
 
+        let started = Instant::now();
         deliver_or_lose(&state, &closer, Queued::new(in_channel(PRESENCE))).await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "an ephemeral is not retried"
+        );
         assert!(closer.pending.lock().expect("pending").is_empty());
 
+        let started = Instant::now();
         deliver_or_lose(&state, &closer, Queued::new(in_channel(STORED))).await;
+        assert!(
+            started.elapsed() > MAX_DELIVERY_DELAY - Duration::from_secs(3),
+            "retried until its deadline: {:?}",
+            started.elapsed()
+        );
         assert!(frames.try_recv().is_err(), "the gate let nothing through");
         assert_eq!(
             closer.pending.lock().expect("pending").clone(),
             HashSet::from([conn])
         );
+    }
+
+    /// A database stall shorter than the deadline delays a recipient the
+    /// access gate could not check; it does not close it. The gate is checked
+    /// again until it can answer, and the event is then delivered.
+    #[tokio::test(start_paused = true)]
+    async fn recipient_the_gate_checks_on_a_retry_gets_the_event_late() {
+        let state = crate::state::tests::test_state().await;
+        state.db.pool().close().await;
+        let channel_id = Uuid::new_v4();
+        let (conn, mut frames, cancel) = subscriber(&state, STORED);
+        state.sub_registry.register(
+            conn,
+            "channel".to_string(),
+            vec![Filter::new().kind(Kind::Custom(STORED))],
+            Some(channel_id),
+        );
+        let queued = Queued::new(ChannelEvent {
+            topic: EventTopic::Channel(channel_id),
+            ..event(STORED, 0)
+        });
+        let closer = Arc::new(LagCloser::default());
+        let delivery = tokio::spawn({
+            let (state, closer) = (Arc::clone(&state), Arc::clone(&closer));
+            async move { deliver_or_lose(&state, &closer, queued).await }
+        });
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            frames.try_recv().is_err(),
+            "nothing while the visibility read fails"
+        );
+        // The stall ends: the channel's visibility can be read again.
+        state
+            .channel_visibility_cache
+            .insert((community(), channel_id), "open".to_string());
+        delivery.await.expect("delivery task");
+
+        assert!(frames.try_recv().is_ok(), "delivered late");
+        assert!(
+            closer.pending.lock().expect("pending").is_empty(),
+            "nothing to close"
+        );
+        assert!(!cancel.is_cancelled());
     }
 
     /// The deadline runs from Redis receipt: an event that already waited out
