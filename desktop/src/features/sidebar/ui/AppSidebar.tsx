@@ -272,6 +272,7 @@ export function AppSidebar({
     createSection,
     renameSection,
     deleteSection,
+    setSectionParent,
     moveSectionUp,
     moveSectionDown,
     reorderSections,
@@ -279,9 +280,25 @@ export function AppSidebar({
     unassignChannel,
   } = useChannelSections(currentPubkey, activeCommunity?.relayUrl);
 
+  /** Top-level sections and, per parent id, the subsections nested under it. */
+  const sectionTree = React.useMemo(() => {
+    const subsectionsByParent = new Map<string, ChannelSection[]>();
+    for (const section of channelSections) {
+      if (!section.parentId) continue;
+      const siblings = subsectionsByParent.get(section.parentId);
+      if (siblings) siblings.push(section);
+      else subsectionsByParent.set(section.parentId, [section]);
+    }
+    return {
+      roots: channelSections.filter((section) => !section.parentId),
+      subsectionsByParent,
+    };
+  }, [channelSections]);
+
+  // Only top-level sections are sortable; a subsection moves with its parent.
   const sectionIds = React.useMemo(
-    () => channelSections.map((s) => s.id),
-    [channelSections],
+    () => sectionTree.roots.map((s) => s.id),
+    [sectionTree],
   );
 
   const { sortModeFor, setSortModeFor } = useChannelSortPreference(
@@ -292,7 +309,8 @@ export function AppSidebar({
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
     pendingChannelId: string | null;
-  }>({ open: false, pendingChannelId: null });
+    parentSectionId: string | null;
+  }>({ open: false, pendingChannelId: null, parentSectionId: null });
   const [renameSectionTarget, setRenameSectionTarget] =
     React.useState<ChannelSection | null>(null);
   const [deleteSectionTarget, setDeleteSectionTarget] =
@@ -346,6 +364,47 @@ export function AppSidebar({
     sortModeFor,
   ]);
 
+  /**
+   * A section's channels plus those of its subsections. A collapsed parent
+   * hides its subsections, so its unread dot and "Mark all as read" have to
+   * cover them.
+   */
+  const sectionTreeChannels = React.useCallback(
+    (sectionId: string): Channel[] => [
+      ...(sectionBuckets.bySection[sectionId] ?? []),
+      ...(sectionTree.subsectionsByParent.get(sectionId) ?? []).flatMap(
+        (child) => sectionBuckets.bySection[child.id] ?? [],
+      ),
+    ],
+    [sectionBuckets, sectionTree],
+  );
+
+  /** Sidebar render order: each top-level section followed by its subsections. */
+  const renderedSections = React.useMemo(() => {
+    const rows: {
+      section: ChannelSection;
+      isFirst: boolean;
+      isLast: boolean;
+    }[] = [];
+    for (const [index, section] of sectionTree.roots.entries()) {
+      rows.push({
+        section,
+        isFirst: index === 0,
+        isLast: index === sectionTree.roots.length - 1,
+      });
+      if (collapsedSections[section.id]) continue;
+      const children = sectionTree.subsectionsByParent.get(section.id) ?? [];
+      for (const [childIndex, child] of children.entries()) {
+        rows.push({
+          section: child,
+          isFirst: childIndex === 0,
+          isLast: childIndex === children.length - 1,
+        });
+      }
+    }
+    return rows;
+  }, [sectionTree, collapsedSections]);
+
   const starredChannels = React.useMemo(() => {
     if (!starredChannelIds || starredChannelIds.size === 0) return [];
     return sortChannelsForSidebar(
@@ -356,23 +415,51 @@ export function AppSidebar({
 
   const handleCreateSectionForChannel = React.useCallback(
     (channelId: string) => {
-      setCreateSectionState({ open: true, pendingChannelId: channelId });
+      setCreateSectionState({
+        open: true,
+        pendingChannelId: channelId,
+        parentSectionId: null,
+      });
+    },
+    [],
+  );
+
+  const handleCreateSubsection = React.useCallback(
+    (parentSectionId: string) => {
+      setCreateSectionState({
+        open: true,
+        pendingChannelId: null,
+        parentSectionId,
+      });
     },
     [],
   );
 
   const handleCreateSectionConfirm = React.useCallback(
     (value: SectionDialogValue) => {
-      const section = createSection(value.name, value.icon);
+      const section = createSection(
+        value.name,
+        value.icon,
+        createSectionState.parentSectionId ?? undefined,
+      );
       if (!section) {
         return;
       }
       if (createSectionState.pendingChannelId) {
         assignChannel(createSectionState.pendingChannelId, section.id);
       }
-      setCreateSectionState({ open: false, pendingChannelId: null });
+      setCreateSectionState({
+        open: false,
+        pendingChannelId: null,
+        parentSectionId: null,
+      });
     },
-    [createSection, assignChannel, createSectionState.pendingChannelId],
+    [
+      createSection,
+      assignChannel,
+      createSectionState.pendingChannelId,
+      createSectionState.parentSectionId,
+    ],
   );
 
   const forumChannels = React.useMemo(
@@ -627,16 +714,14 @@ export function AppSidebar({
                     onUnassignChannel={unassignChannel}
                     onReorderSections={reorderSections}
                   >
-                    {channelSections.map((section, idx) => (
+                    {renderedSections.map(({ section, isFirst, isLast }) => (
                       <CustomChannelSection
                         key={section.id}
                         section={section}
                         channels={sectionBuckets.bySection[section.id] ?? []}
-                        hasUnread={
-                          sectionBuckets.bySection[section.id]?.some((c) =>
-                            unreadChannelIds.has(c.id),
-                          ) ?? false
-                        }
+                        hasUnread={sectionTreeChannels(section.id).some((c) =>
+                          unreadChannelIds.has(c.id),
+                        )}
                         isCollapsed={collapsedSections[section.id] ?? false}
                         isActiveChannel={selectedView === "channel"}
                         activeWorkingByChannelId={activeWorkingByChannelId}
@@ -644,8 +729,8 @@ export function AppSidebar({
                         unreadChannelIds={unreadChannelIds}
                         sections={channelSections}
                         assignments={channelAssignments}
-                        isFirst={idx === 0}
-                        isLast={idx === channelSections.length - 1}
+                        isFirst={isFirst}
+                        isLast={isLast}
                         sortMode={sortModeFor(sectionSortGroupKey(section.id))}
                         onSortModeChange={(mode) =>
                           setSortModeFor(sectionSortGroupKey(section.id), mode)
@@ -657,9 +742,9 @@ export function AppSidebar({
                         onMarkChannelRead={onMarkChannelRead}
                         onMarkChannelUnread={onMarkChannelUnread}
                         onMarkSectionRead={() => {
-                          for (const channel of sectionBuckets.bySection[
-                            section.id
-                          ] ?? []) {
+                          for (const channel of sectionTreeChannels(
+                            section.id,
+                          )) {
                             onMarkChannelRead(
                               channel.id,
                               channel.lastMessageAt,
@@ -675,6 +760,16 @@ export function AppSidebar({
                           handleCreateChannelInSection(section.id)
                         }
                         onRenameSection={() => setRenameSectionTarget(section)}
+                        onCreateSubsection={
+                          section.parentId
+                            ? undefined
+                            : () => handleCreateSubsection(section.id)
+                        }
+                        onPromoteSection={
+                          section.parentId
+                            ? () => setSectionParent(section.id, null)
+                            : undefined
+                        }
                         onDeleteSection={() => setDeleteSectionTarget(section)}
                         onMoveSectionUp={() => moveSectionUp(section.id)}
                         onMoveSectionDown={() => moveSectionDown(section.id)}
@@ -911,9 +1006,18 @@ export function AppSidebar({
         open={createSectionState.open}
         onOpenChange={(open) => {
           if (!open) {
-            setCreateSectionState({ open: false, pendingChannelId: null });
+            setCreateSectionState({
+              open: false,
+              pendingChannelId: null,
+              parentSectionId: null,
+            });
           }
         }}
+        parentName={
+          channelSections.find(
+            (section) => section.id === createSectionState.parentSectionId,
+          )?.name
+        }
         onConfirm={handleCreateSectionConfirm}
       />
 
@@ -941,6 +1045,12 @@ export function AppSidebar({
         channelCount={
           deleteSectionTarget
             ? (sectionBuckets.bySection[deleteSectionTarget.id]?.length ?? 0)
+            : 0
+        }
+        subsectionCount={
+          deleteSectionTarget
+            ? (sectionTree.subsectionsByParent.get(deleteSectionTarget.id)
+                ?.length ?? 0)
             : 0
         }
         onConfirm={() => {

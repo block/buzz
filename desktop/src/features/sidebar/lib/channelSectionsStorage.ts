@@ -9,6 +9,13 @@ export type ChannelSection = {
   name: string;
   icon?: string;
   order: number;
+  /**
+   * Id of the section this one nests under; absent for a top-level section.
+   * The sidebar is two levels deep, so a section carrying a `parentId` never
+   * has children of its own (enforced when projecting, see
+   * `channelSectionsSync`).
+   */
+  parentId?: string;
 };
 
 export type ChannelSectionStore = {
@@ -54,12 +61,19 @@ export function parseChannelSectionPayload(
           typeof section.icon === "string" && section.icon.trim().length > 0
             ? section.icon.trim()
             : undefined;
+        const parentId =
+          typeof section.parentId === "string" &&
+          section.parentId.length > 0 &&
+          section.parentId !== section.id
+            ? section.parentId
+            : undefined;
         return [
           {
             id: section.id,
             name: section.name,
             ...(icon ? { icon } : {}),
             order: section.order,
+            ...(parentId ? { parentId } : {}),
           },
         ];
       })

@@ -164,3 +164,25 @@ test("parseChannelSectionPayload: omits icon field when empty or whitespace", ()
     { id: "s3", name: "C", order: 2 },
   ]);
 });
+
+test("parseChannelSectionPayload: keeps a parentId and drops a self-reference", () => {
+  const payload = {
+    version: 1,
+    sections: [
+      { id: "s1", name: "Work", order: 0 },
+      { id: "s2", name: "Alpha", order: 1, parentId: "s1" },
+      { id: "s3", name: "Loop", order: 2, parentId: "s3" },
+      { id: "s4", name: "Blank", order: 3, parentId: "" },
+      { id: "s5", name: "Wrong type", order: 4, parentId: 7 },
+    ],
+    assignments: {},
+  };
+  const result = parseChannelSectionPayload(payload);
+  assert.deepEqual(result?.sections, [
+    { id: "s1", name: "Work", order: 0 },
+    { id: "s2", name: "Alpha", order: 1, parentId: "s1" },
+    { id: "s3", name: "Loop", order: 2 },
+    { id: "s4", name: "Blank", order: 3 },
+    { id: "s5", name: "Wrong type", order: 4 },
+  ]);
+});
