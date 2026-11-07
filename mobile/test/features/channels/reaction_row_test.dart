@@ -139,8 +139,11 @@ class _RecordingReactionActions implements ChannelActions {
   Future<void> removeReaction(String eventId, String emoji) async =>
       removed.add(eventId);
   @override
-  Future<void> addReaction(String eventId, String emoji) async =>
-      added.add(eventId);
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async => added.add(eventId);
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
