@@ -53,9 +53,7 @@ live edit's full imeta set controls that reference. A file remains readable if
 another live readable reference or upload authority grants access. An empty
 replacement set does not fall back to the original.
 
-The released v1 request uses the exact five-kind filter above. Earlier two-kind
-v1 shapes existed only in this unshipped draft; they reject the five-kind request
-with 400. Clients abort on that response without publishing or falling back.
+The v1 request uses the exact five-kind filter above.
 
 Deploy the relay before releasing the CLI or paired MCP producer. Edits of any
 of these five kinds fail closed on community relays that lack the lookup. The

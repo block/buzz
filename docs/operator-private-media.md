@@ -104,14 +104,16 @@ body does not retain access.
 Deploy the relay with the [versioned effective-edit
 lookup](effective-message-edits.md) before releasing the new CLI. When editing
 kinds 9/40002/40008/45001/45003, a new CLI against an older relay aborts without publishing; an
-old CLI against a new relay keeps its previous attachment-removing behavior.
+old CLI against a new relay emits empty imeta and revokes attachments on all
+five kinds, including diff/forum attachments that previously remained readable.
 Other kinds use plain edits without a lookup or a relay-version dependency. The
 `buzz-dev-mcp` multicall named `buzz` delegates to the same CLI entrypoint. The
 PostgreSQL regression `cli_successive_edits_preserve_and_revoke_attachments`
 exercises that entrypoint through HTTP and checks GET/HEAD, removal, and
 mixed-case edit targets.
 
-**One remaining enforce blocker: the separate `block/buzz-app` MCP edit producer.**
+**Remaining enforce blockers include the separate `block/buzz-app` MCP edit producer
+and the active producers listed below.**
 Its direct publisher at `src/buzz-mcp/tools.ts` copies the original event's
 imeta rather than resolving successive edits. It must adopt effective state
 and pass the same removal regression before enabling enforce for its users.
@@ -129,7 +131,10 @@ precondition on message edits.
 This client change has no feature flag. Observe
 `buzz_media_publication_access_total{mode="shadow",reason="denied"}` before
 enforcement. Roll back the CLI by reverting its release; retain the additive
-relay lookup. Rolling the relay back first causes new CLI edits to abort.
+relay lookup. Rolling the relay back first causes new CLI/MCP edits on all five kinds to
+abort without publishing. Already-published imeta edits remain valid; rollback
+restores the older relay's media-reference rules, so recheck access before
+resuming enforcement.
 
 There is no grant backfill: existing stored references are evaluated directly,
 and signed event tags are never rewritten. Legacy unreferenced/orphan blobs
@@ -219,7 +224,6 @@ their keys, or remove/unlink those instances, then retry. The previous persona
 and instance avatars remain unchanged, so the same requested avatar is retryable.
 Keys may be permanently lost; waiting alone does not repair a lost key.
 
-
 The relay folds effective attachment state for the same five kinds accepted by
 the lookup: 9/40002/40008/45001/45003. CLI and MCP text edits preserve that state;
 `--clear-attachments` replaces it with an empty set on all five. After removal,
@@ -251,6 +255,7 @@ claimed by this PR.
 
 | Producer | Current behavior and rollout requirement |
 | --- | --- |
+| Old CLI (through `96af488d`) | Plain edits emit no imeta; on the new relay they revoke diff/forum attachments that previously remained readable. |
 | Updated CLI | Resolves the full effective set for all five kinds; explicit clear stays empty. Release after the relay. |
 | SDK | `build_edit` emits no imeta. `build_edit_with_media` copies the supplied set; callers must resolve latest state. Third-party callers remain a prerequisite. |
 | Legacy desktop chat | Carries rendered attachment state through `submitMessageEdit.ts` and `events.rs`; its local edit selection does not provide the primary lookup's full ordering guarantees. Audit deployed versions. |

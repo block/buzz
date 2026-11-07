@@ -658,6 +658,64 @@ async fn governed_kinds_journey(
             )
             .await;
         }
+        if kind == 45001 {
+            // A is no longer referenced by the attachment journey. Give only
+            // this forum original a snapshot reference, with no reader grant.
+            let image_url = tags[0][1].strip_prefix("url ").unwrap();
+            let preview = EventBuilder::new(Kind::Custom(kind), "forum preview")
+                .tags([
+                    Tag::parse(["h", &channel.to_string()]).unwrap(),
+                    Tag::parse([
+                        "link-preview",
+                        "snapshot",
+                        "1",
+                        "https://example.org/page",
+                        "title",
+                        "site",
+                        "description",
+                        image_url,
+                        &hashes[0],
+                        "",
+                        "",
+                    ])
+                    .unwrap(),
+                ])
+                .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 20))
+                .sign_with_keys(owner)
+                .unwrap();
+            state
+                .db
+                .insert_event(tenant.community(), &preview, Some(channel))
+                .await
+                .unwrap();
+            readable(state, host, &hashes[..1], &[member], &[StatusCode::OK]).await;
+            cli_edit(url, owner, preview.id, false, "keep forum preview").await;
+            readable(state, host, &hashes[..1], &[member], &[StatusCode::OK]).await;
+            let suppressed =
+                buzz_sdk::build_edit_with_media(channel, preview.id, "hide preview", &[])
+                    .unwrap()
+                    .tags([Tag::parse(["link-preview", "none"]).unwrap()])
+                    .sign_with_keys(owner)
+                    .unwrap();
+            publish(state, tenant, owner, suppressed).await.unwrap();
+            readable(
+                state,
+                host,
+                &hashes[..1],
+                &[member],
+                &[StatusCode::NOT_FOUND],
+            )
+            .await;
+            cli_edit(url, owner, preview.id, false, "preview stays hidden").await;
+            readable(
+                state,
+                host,
+                &hashes[..1],
+                &[member],
+                &[StatusCode::NOT_FOUND],
+            )
+            .await;
+        }
         let public = EventBuilder::new(Kind::Custom(kind), "public original")
             .tags([Tag::parse(["h", &open.to_string()]).unwrap()])
             .sign_with_keys(outsider)

@@ -218,6 +218,7 @@ async fn historical_edit_preflight_matches_selected_live_edit() {
         (4, 45001, "mixed", true),
         (5, 45003, "cross-channel", false),
         (6, 9, "control", true),
+        (7, 45001, "deleted-original", true),
     ] {
         let hash = format!("{index:064x}");
         let media = [vec![
@@ -273,6 +274,11 @@ async fn historical_edit_preflight_matches_selected_live_edit() {
         }
         if scenario == "deleted" {
             db.soft_delete_event_and_update_thread(community, empty.id.as_bytes(), None, None)
+                .await
+                .unwrap();
+        }
+        if scenario == "deleted-original" {
+            db.soft_delete_event_and_update_thread(community, original.id.as_bytes(), None, None)
                 .await
                 .unwrap();
         }
