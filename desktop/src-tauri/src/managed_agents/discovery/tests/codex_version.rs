@@ -66,3 +66,52 @@ fn codex_adapter_availability_outdated_for_older_1x_binary() {
         assert!(codex_adapter_is_outdated(&bin));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_available_for_supported_versions() {
+    use super::super::codex_adapter_availability;
+    use crate::managed_agents::AcpAvailabilityStatus;
+
+    // 1.10.0 is the supported floor; the whole 2.x line is validated.
+    for version in ["1.10.0", "1.11.2", "2.0.0", "2.2.2", "2.3.0"] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("codex-acp");
+        write_executable_script(
+            &bin,
+            format!("#!/bin/sh\necho '@agentclientprotocol/codex-acp {version}'\nexit 0\n"),
+        );
+
+        assert_eq!(
+            codex_adapter_availability(&bin),
+            AcpAvailabilityStatus::Available,
+            "adapter {version} is inside the supported window"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_outdated_for_unvalidated_major() {
+    use super::super::codex_adapter_availability;
+    use crate::managed_agents::AcpAvailabilityStatus;
+
+    // A major beyond the validated line may change the ACP contract again
+    // (2.0 already did). The app must not run it unreviewed: it offers the
+    // supported line instead, rather than leaving managed agents unable to
+    // start a session.
+    for version in ["3.0.0", "3.4.2", "4.0.0"] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("codex-acp");
+        write_executable_script(
+            &bin,
+            format!("#!/bin/sh\necho '@agentclientprotocol/codex-acp {version}'\nexit 0\n"),
+        );
+
+        assert_eq!(
+            codex_adapter_availability(&bin),
+            AcpAvailabilityStatus::AdapterOutdated,
+            "adapter {version} is beyond the validated major line"
+        );
+    }
+}

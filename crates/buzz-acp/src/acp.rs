@@ -41,6 +41,26 @@ pub struct McpServer {
     pub env: Vec<EnvVar>,
 }
 
+impl McpServer {
+    /// Serialize the server as an ACP MCP server descriptor.
+    ///
+    /// ACP v1 described a stdio server by the presence of `command`/`args`. ACP
+    /// v2 requires an explicit `type: "stdio"` discriminator and rejects a
+    /// v1-shaped descriptor outright — a `session/new` that omits it fails
+    /// with JSON-RPC -32602 and the agent never starts a session. Adapters that
+    /// still parse the v1 schema ignore the extra field, so one payload
+    /// satisfies both dialects.
+    fn to_wire_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "stdio",
+            "name": self.name,
+            "command": self.command,
+            "args": self.args,
+            "env": self.env,
+        })
+    }
+}
+
 /// A single environment variable for an MCP server.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvVar {
@@ -117,6 +137,23 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+impl AcpError {
+    /// True when the agent rejected the *parameters* of our request.
+    ///
+    /// JSON-RPC uses -32602 ("Invalid params") for a request that is
+    /// well-formed JSON-RPC but does not satisfy the agent's schema. For the
+    /// `initialize` handshake this means the agent speaks a different
+    /// `initialize` contract than we sent — not that the agent is unhealthy.
+    ///
+    /// Adapters validate `initialize` against their own schema and terminate
+    /// the session when the params do not match, so a caller that wants to
+    /// retry with a different handshake has to respawn the agent rather than
+    /// resend the request.
+    pub fn is_invalid_params(&self) -> bool {
+        matches!(self, AcpError::AgentError { code: -32602, .. })
+    }
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
@@ -130,14 +167,75 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
-fn build_initialize_params() -> serde_json::Value {
+/// ACP protocol version Buzz asks for by default.
+///
+/// Requesting version 2 is an intentional temporary pin — we are squatting
+/// on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
+pub(crate) const ACP_PROTOCOL_VERSION_PREFERRED: u32 = 2;
+
+/// Stable ACP protocol version used when an adapter rejects our v2 handshake.
+///
+/// Every adapter that has ever shipped accepts a v1 `initialize`, so v1 is the
+/// safest shape to retry with when the adapter's schema rejects ours.
+pub(crate) const ACP_PROTOCOL_VERSION_FALLBACK: u32 = 1;
+
+/// Build the `initialize` params for the given protocol version.
+///
+/// ACP v2 renamed the client fields: `clientCapabilities` became
+/// `capabilities` and `clientInfo` became `info`, and `auth.terminal`
+/// changed from a boolean flag to an object. Adapters validate `initialize`
+/// against their own schema and drop the session when the shape does not
+/// match, so for v2 we send the v2 field names *and* the v1 aliases in a
+/// single payload: a v2-capable adapter reads the v2 fields and ignores the
+/// aliases, while an adapter that still parses the v1 schema reads the
+/// aliases and ignores the v2 fields. One handshake then works across both
+/// dialects instead of breaking whenever an adapter tightens its schema.
+fn build_initialize_params(protocol_version: u32) -> serde_json::Value {
+    let client_info = serde_json::json!({
+        "name": "buzz-acp",
+        "version": env!("CARGO_PKG_VERSION")
+    });
+    if protocol_version < ACP_PROTOCOL_VERSION_PREFERRED {
+        // ACP v1: `clientCapabilities` + `clientInfo`.
+        return serde_json::json!({
+            "protocolVersion": protocol_version,
+            "clientCapabilities": build_client_capabilities(),
+            "clientInfo": client_info,
+        });
+    }
     serde_json::json!({
-        "protocolVersion": 2,
+        "protocolVersion": protocol_version,
+        "capabilities": build_client_capabilities_v2(),
+        "info": client_info.clone(),
         "clientCapabilities": build_client_capabilities(),
-        "clientInfo": {
-            "name": "buzz-acp",
-            "version": env!("CARGO_PKG_VERSION")
+        "clientInfo": client_info,
+    })
+}
+
+/// ACP v2 shape of the client capability block.
+///
+/// v2 renamed `clientCapabilities` to `capabilities` and changed
+/// `auth.terminal` from a boolean flag to an object. The `_meta` extensions
+/// are unchanged, and an adapter that downgrades a v2 handshake to v1 copies
+/// `capabilities._meta` across, so the goose notification flag and the
+/// terminal-auth hint survive the downgrade.
+fn build_client_capabilities_v2() -> serde_json::Value {
+    serde_json::json!({
+        "auth": {
+            "terminal": {}
         },
+        "_meta": {
+            // Signal to goose that we handle `_goose/unstable/session/update`
+            // notifications. Without this the custom notification is suppressed
+            // on goose's side and usage data is never emitted.
+            "goose": {
+                "customNotifications": true
+            },
+            // Non-standard extension used by claude-agent-acp to advertise the
+            // exact terminal login argv for subscription auth. Unknown `_meta`
+            // keys are ignored by other adapters.
+            "terminal-auth": true
+        }
     })
 }
 
@@ -680,9 +778,21 @@ impl AcpClient {
     /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
     /// Parsed here rather than at each call site so no caller can forget it.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
-        // Requesting version 2 is an intentional temporary pin — we are squatting
-        // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = build_initialize_params();
+        self.initialize_with(ACP_PROTOCOL_VERSION_PREFERRED).await
+    }
+
+    /// Send `initialize` requesting a specific protocol version.
+    ///
+    /// [`initialize`](Self::initialize) asks for
+    /// [`ACP_PROTOCOL_VERSION_PREFERRED`]; callers that need to retry against
+    /// an adapter whose schema rejects the preferred handshake use
+    /// [`ACP_PROTOCOL_VERSION_FALLBACK`] here. A rejected handshake kills the
+    /// agent process, so the retry has to happen on a freshly spawned agent.
+    pub async fn initialize_with(
+        &mut self,
+        protocol_version: u32,
+    ) -> Result<serde_json::Value, AcpError> {
+        let params = build_initialize_params(protocol_version);
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
@@ -729,6 +839,8 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        let mcp_servers: Vec<serde_json::Value> =
+            mcp_servers.iter().map(McpServer::to_wire_value).collect();
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -5266,5 +5378,89 @@ sleep 1"#,
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
         );
+    }
+
+    /// The v2 handshake must carry BOTH dialects.
+    ///
+    /// ACP v2 renamed `clientInfo` to `info` and `clientCapabilities` to
+    /// `capabilities`. Adapters validate the params against their own schema
+    /// and drop the session when the shape does not match, so sending only
+    /// the v1 names breaks against a v2 adapter and sending only the v2 names
+    /// breaks against a v1 adapter. One payload has to satisfy both.
+    #[test]
+    fn initialize_params_carry_both_acp_dialects() {
+        let params = build_initialize_params(ACP_PROTOCOL_VERSION_PREFERRED);
+
+        assert_eq!(
+            params["protocolVersion"].as_u64(),
+            Some(ACP_PROTOCOL_VERSION_PREFERRED as u64),
+            "v2 handshake must advertise protocol version 2"
+        );
+
+        // v2 field names.
+        assert_eq!(params["info"]["name"].as_str(), Some("buzz-acp"));
+        assert!(params["info"]["version"].is_string());
+        assert!(
+            params["capabilities"].is_object(),
+            "v2 handshake must carry `capabilities`"
+        );
+        assert!(
+            params["capabilities"]["auth"]["terminal"].is_object(),
+            "v2 `auth.terminal` is an object, not a boolean"
+        );
+
+        // v1 aliases, for adapters that still parse the v1 schema.
+        assert_eq!(params["clientInfo"]["name"].as_str(), Some("buzz-acp"));
+        assert!(params["clientCapabilities"].is_object());
+        assert!(
+            params["clientCapabilities"]["auth"]["terminal"].is_boolean(),
+            "v1 `auth.terminal` stays a boolean"
+        );
+    }
+
+    /// The fallback handshake is plain ACP v1 — the shape every adapter that
+    /// has ever shipped accepts.
+    #[test]
+    fn initialize_params_v1_omits_the_v2_field_names() {
+        let params = build_initialize_params(ACP_PROTOCOL_VERSION_FALLBACK);
+
+        assert_eq!(
+            params["protocolVersion"].as_u64(),
+            Some(ACP_PROTOCOL_VERSION_FALLBACK as u64),
+            "fallback handshake must advertise protocol version 1"
+        );
+        assert_eq!(params["clientInfo"]["name"].as_str(), Some("buzz-acp"));
+        assert!(params["clientCapabilities"].is_object());
+        assert!(
+            params.get("info").is_none(),
+            "the v1 fallback must not carry the v2 `info` field"
+        );
+        assert!(
+            params.get("capabilities").is_none(),
+            "the v1 fallback must not carry the v2 `capabilities` field"
+        );
+    }
+
+    /// ACP v2 rejects a v1-shaped MCP descriptor outright, and adapters that
+    /// still parse the v1 schema ignore the extra discriminator.
+    #[test]
+    fn mcp_server_descriptor_declares_the_stdio_transport() {
+        let server = McpServer {
+            name: "buzz-dev-mcp".to_string(),
+            command: "/usr/bin/true".to_string(),
+            args: vec![],
+            env: vec![],
+        };
+        let value = server.to_wire_value();
+
+        assert_eq!(
+            value["type"].as_str(),
+            Some("stdio"),
+            "ACP v2 requires an explicit `type: \"stdio\"` discriminator"
+        );
+        assert_eq!(value["name"].as_str(), Some("buzz-dev-mcp"));
+        assert_eq!(value["command"].as_str(), Some("/usr/bin/true"));
+        assert!(value["args"].is_array());
+        assert!(value["env"].is_array());
     }
 }

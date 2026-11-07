@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{AcpClient, AcpError, EnvVar, McpServer};
 use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -6061,14 +6061,20 @@ async fn initialize_agent_pool(
         )
         .await;
         match spawn_result {
-            Ok(mut acp) => {
-                acp.set_observer(startup.observer.clone(), i);
-                let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
+            Ok(acp) => {
+                let initialize = initialize_client_with_fallback(
+                    acp,
+                    &startup.command,
+                    &startup.args,
+                    &startup.extra_env,
+                    startup.has_generated_codex_config,
+                    i,
+                    startup.observer.clone(),
+                );
                 let initialize_result = match shutdown.as_mut() {
                     Some(shutdown) => tokio::select! {
                         biased;
                         _ = shutdown.changed() => {
-                            acp.shutdown().await;
                             shutdown_agent_slots(&mut agent_slots).await;
                             return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
                         }
@@ -6077,29 +6083,13 @@ async fn initialize_agent_pool(
                     None => initialize.await,
                 };
                 match initialize_result {
-                    Ok(Ok(init_result)) => {
-                        tracing::info!(agent = i, "agent initialized: {init_result}");
-                        let protocol_version =
-                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                    Ok((acp, protocol_version, agent_name)) => {
                         tracing::info!(
                             agent = i,
-                            name = init_result
-                                .get("agentInfo")
-                                .or_else(|| init_result.get("serverInfo"))
-                                .and_then(|info| info.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
+                            name = %agent_name,
                             steering_supported = acp.steering_supported(),
                             "agent initialized"
                         );
-                        acp.observe(
-                            "agent_initialized",
-                            serde_json::json!({
-                                "agentIndex": i,
-                                "initializeResult": init_result,
-                            }),
-                        );
-                        let agent_name = normalized_agent_name(&init_result);
                         agent_slots.push(Some(OwnedAgent {
                             index: i,
                             acp,
@@ -6115,14 +6105,8 @@ async fn initialize_agent_pool(
                             protocol_version,
                         }));
                     }
-                    Ok(Err(e)) => {
-                        tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                    Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
-                        acp.shutdown().await;
+                    Err(e) => {
+                        tracing::error!(agent = i, "agent failed to start: {e}");
                         agent_slots.push(None);
                     }
                 }
@@ -6164,33 +6148,153 @@ async fn spawn_and_init(
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
-    acp.set_observer(observer, agent_index);
+    let (acp, protocol_version, agent_name) = spawn_and_initialize_with_fallback(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        agent_index,
+        observer,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    match acp.initialize().await {
-        Ok(init_result) => {
-            tracing::info!("agent initialized: {init_result}");
-            let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-            acp.observe(
-                "agent_initialized",
-                serde_json::json!({
-                    "agentIndex": agent_index,
-                    "initializeResult": init_result,
-                }),
-            );
-            let agent_name = normalized_agent_name(&init_result);
-            Ok((acp, protocol_version, agent_name))
-        }
-        Err(e) => {
-            // Explicitly shut down the spawned child to prevent zombie/leak.
-            // Drop only does start_kill + try_wait (best-effort); shutdown()
-            // does start_kill + bounded wait (guaranteed reap).
-            acp.shutdown().await;
-            Err(anyhow::anyhow!("agent initialize failed: {e}"))
+    Ok((acp, protocol_version, agent_name))
+}
+
+/// Failure while bringing an agent process up.
+#[derive(Debug)]
+enum AgentStartupError {
+    /// The agent binary could not be spawned at all.
+    Spawn(AcpError),
+    /// The agent spawned but the `initialize` handshake failed.
+    Initialize(AcpError),
+    /// The agent spawned but did not answer the handshake in time.
+    InitializeTimeout,
+}
+
+impl std::fmt::Display for AgentStartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(e) => write!(f, "failed to spawn agent: {e}"),
+            Self::Initialize(e) => write!(f, "agent initialize failed: {e}"),
+            Self::InitializeTimeout => write!(f, "agent timed out during init"),
         }
     }
+}
+
+/// How long a single `initialize` handshake may take before the agent is torn
+/// down and the attempt is abandoned.
+const AGENT_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run the ACP `initialize` handshake against a spawned agent, falling back to
+/// the stable ACP v1 handshake when the adapter rejects our v2 params.
+///
+/// Adapters validate `initialize` against their own schema and drop the
+/// session when the params do not match, so a rejected handshake kills the
+/// child: the fallback has to respawn the agent and retry with
+/// [`crate::acp::ACP_PROTOCOL_VERSION_FALLBACK`] rather than resend the
+/// request on the dead process.
+///
+/// Without this, an adapter that tightens its `initialize` schema leaves every
+/// managed agent stuck in a silent retry loop — no session, no turn, no reply,
+/// and nothing but a harness-side log line to show for it.
+async fn initialize_client_with_fallback(
+    mut acp: AcpClient,
+    command: &str,
+    args: &[String],
+    extra_env: &[(String, String)],
+    has_generated_codex_config: bool,
+    agent_index: usize,
+    observer: Option<observer::ObserverHandle>,
+) -> Result<(AcpClient, u32, String), AgentStartupError> {
+    acp.set_observer(observer.clone(), agent_index);
+
+    match tokio::time::timeout(AGENT_INITIALIZE_TIMEOUT, acp.initialize()).await {
+        Ok(Ok(init_result)) => Ok(initialized_client(acp, init_result, agent_index)),
+        Ok(Err(err)) if err.is_invalid_params() => {
+            tracing::warn!(
+                agent = agent_index,
+                "adapter rejected the ACP v2 initialize handshake ({err}); \
+                 respawning with the ACP v1 handshake"
+            );
+            acp.shutdown().await;
+            let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+                .await
+                .map_err(AgentStartupError::Spawn)?;
+            acp.set_observer(observer, agent_index);
+            match tokio::time::timeout(
+                AGENT_INITIALIZE_TIMEOUT,
+                acp.initialize_with(crate::acp::ACP_PROTOCOL_VERSION_FALLBACK),
+            )
+            .await
+            {
+                Ok(Ok(init_result)) => Ok(initialized_client(acp, init_result, agent_index)),
+                Ok(Err(err)) => {
+                    acp.shutdown().await;
+                    Err(AgentStartupError::Initialize(err))
+                }
+                Err(_) => {
+                    acp.shutdown().await;
+                    Err(AgentStartupError::InitializeTimeout)
+                }
+            }
+        }
+        Ok(Err(err)) => {
+            acp.shutdown().await;
+            Err(AgentStartupError::Initialize(err))
+        }
+        Err(_) => {
+            acp.shutdown().await;
+            Err(AgentStartupError::InitializeTimeout)
+        }
+    }
+}
+
+/// Spawn an agent subprocess and run the `initialize` handshake with the
+/// compatibility fallback described on [`initialize_client_with_fallback`].
+async fn spawn_and_initialize_with_fallback(
+    command: &str,
+    args: &[String],
+    extra_env: &[(String, String)],
+    has_generated_codex_config: bool,
+    agent_index: usize,
+    observer: Option<observer::ObserverHandle>,
+) -> Result<(AcpClient, u32, String), AgentStartupError> {
+    let acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+        .await
+        .map_err(AgentStartupError::Spawn)?;
+    initialize_client_with_fallback(
+        acp,
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        agent_index,
+        observer,
+    )
+    .await
+}
+
+/// Package an initialized client with the protocol version and agent name the
+/// caller needs from the handshake response, and record the handshake in the
+/// observer feed.
+fn initialized_client(
+    acp: AcpClient,
+    init_result: serde_json::Value,
+    agent_index: usize,
+) -> (AcpClient, u32, String) {
+    tracing::info!("agent initialized: {init_result}");
+    let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+    let agent_name = normalized_agent_name(&init_result);
+    acp.observe(
+        "agent_initialized",
+        serde_json::json!({
+            "agentIndex": agent_index,
+            "initializeResult": init_result,
+        }),
+    );
+    (acp, protocol_version, agent_name)
 }
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
@@ -13648,5 +13752,81 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod acp_initialize_fallback_tests {
+    use super::{initialize_client_with_fallback, AcpClient};
+    use crate::acp::ACP_PROTOCOL_VERSION_FALLBACK;
+
+    /// The fake adapter runs under `bash -c` rather than as an executable file
+    /// on disk: writing an executable and exec'ing it while other tests spawn
+    /// processes races the child's inherited fd and fails with ETXTBSY.
+    fn fake_adapter_command(script_body: &str) -> (String, Vec<String>) {
+        (
+            "bash".to_string(),
+            vec!["-c".to_string(), script_body.to_string()],
+        )
+    }
+
+    /// An adapter whose schema rejects our v2 params answers JSON-RPC -32602
+    /// and exits — exactly what `@agentclientprotocol/codex-acp` 2.3.0 does
+    /// when it is handed a v1-shaped `initialize`.
+    ///
+    /// The rejected handshake kills the child, so the compatibility fallback
+    /// has to respawn the agent and retry with ACP v1. Without that, every
+    /// managed agent sits in a retry loop with no session, no turn and no
+    /// reply — the failure mode that left a managed Codex agent silent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialize_respawns_with_v1_when_the_adapter_rejects_v2_params() {
+        let (command, args) = fake_adapter_command(
+            r#"read -r init
+if [[ "$init" == *'"protocolVersion":2'* ]]; then
+  printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Invalid params"}}'
+  exit 0
+fi
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"fake-adapter"}}}'
+sleep 5"#,
+        );
+
+        let client = AcpClient::spawn(&command, &args, &[], false)
+            .await
+            .expect("spawn fake adapter");
+        let (mut client, protocol_version, agent_name) =
+            initialize_client_with_fallback(client, &command, &args, &[], false, 0, None)
+                .await
+                .expect("the ACP v1 fallback must bring the agent up");
+
+        assert_eq!(
+            protocol_version, ACP_PROTOCOL_VERSION_FALLBACK,
+            "the agent must come up on the ACP v1 handshake"
+        );
+        assert_eq!(agent_name, "fake-adapter");
+        client.shutdown().await;
+    }
+
+    /// An adapter that accepts the v2 handshake must not trigger the fallback.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialize_keeps_v2_when_the_adapter_accepts_it() {
+        let (command, args) = fake_adapter_command(
+            r#"read -r init
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentInfo":{"name":"fake-adapter"}}}'
+sleep 5"#,
+        );
+
+        let client = AcpClient::spawn(&command, &args, &[], false)
+            .await
+            .expect("spawn fake adapter");
+        let (mut client, protocol_version, agent_name) =
+            initialize_client_with_fallback(client, &command, &args, &[], false, 0, None)
+                .await
+                .expect("the v2 handshake must be accepted as-is");
+
+        assert_eq!(protocol_version, 2, "the agent must stay on ACP v2");
+        assert_eq!(agent_name, "fake-adapter");
+        client.shutdown().await;
     }
 }
