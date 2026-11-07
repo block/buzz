@@ -26,6 +26,10 @@ void _requestPathCases() {
     latestGate.complete();
 
     final channel = (await load).single;
+    // Membership pages carry whole rosters (megabytes for large channels), so
+    // they get the large-read timeout; ordinary reads keep the default.
+    expect(session.queryTimeouts[39002], {relayLargeReadTimeout});
+    expect(session.queryTimeouts[9], {const Duration(seconds: 8)});
     expect(channel.displayLabel(currentPubkey: 'me'), 'Alice');
     expect(channel.memberCount, 2);
     expect(channel.lastMessageAt?.millisecondsSinceEpoch, 50000);
@@ -252,6 +256,7 @@ class _RequestPathSession extends _FakeRelaySession {
   Object? profileFailure;
   int profileRequests = 0;
   int latestRequests = 0;
+  final queryTimeouts = <int, Set<Duration>>{};
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -275,6 +280,9 @@ class _RequestPathSession extends _FakeRelaySession {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    for (final kind in filters.expand((filter) => filter.kinds)) {
+      queryTimeouts.putIfAbsent(kind, () => {}).add(timeout);
+    }
     if (filters.isNotEmpty &&
         filters.every(
           (filter) => filter.kinds.contains(9) && filter.since == null,

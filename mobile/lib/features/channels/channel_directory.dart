@@ -104,6 +104,9 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
     '#p': [pubkey],
   },
   operation: 'Channel memberships',
+  // Each page carries the full rosters of up to 500 channels: megabytes when
+  // the viewer is in a few channels with thousands of members.
+  timeout: relayLargeReadTimeout,
   ensureCurrent: ensureCurrent,
 );
 
@@ -484,6 +487,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   required int kind,
   required String operation,
   Map<String, List<String>> tags = const {},
+  Duration timeout = const Duration(seconds: 8),
   void Function()? ensureCurrent,
 }) async {
   final events = <NostrEvent>[];
@@ -500,7 +504,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         until: until,
         extensions: {'before_id': ?beforeId},
       ),
-    ]);
+    ], timeout: timeout);
     ensureCurrent?.call();
     if (page.isEmpty) break;
     var madeProgress = false;

@@ -7,6 +7,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -132,6 +133,48 @@ void main() {
     );
     final events = await h.session.fetchReadStateSnapshot();
     expect(events.single.id, event()['id']);
+  });
+
+  test('a slow multi-megabyte snapshot gets the snapshot timeout', () {
+    // Busy accounts have multi-megabyte snapshots, and relay bodies have been
+    // measured at about 200 KB/s. The ordinary 8 s query timeout cancelled
+    // every attempt. A stalled snapshot must still fail at the 60 s bound,
+    // and the small discovery document keeps the ordinary 8 s bound.
+    for (final (method, delay, failsAt) in [
+      ('POST', const Duration(seconds: 59), null),
+      ('POST', const Duration(seconds: 61), const Duration(seconds: 60)),
+      ('GET', const Duration(seconds: 9), const Duration(seconds: 8)),
+    ]) {
+      fakeAsync((async) {
+        final session = RelaySessionNotifier(
+          httpClient: MockClient((request) async {
+            if (request.method == method) await Future<void>.delayed(delay);
+            return http.Response(
+              request.method == 'GET' ? discovery : jsonEncode(envelope()),
+              200,
+            );
+          }),
+          // The production decoder runs on another isolate, outside fake time.
+          snapshotDecoder: (input) async => validateReadStateSnapshot(input),
+        );
+        _container(session, _Config(keys.nsec));
+        Object? outcome;
+        session.fetchReadStateSnapshot().then<void>(
+          (events) => outcome = events,
+          onError: (Object error) => outcome = error,
+        );
+        final reason = '$method $delay';
+        if (failsAt == null) {
+          async.elapse(delay + const Duration(milliseconds: 1));
+          expect(outcome, hasLength(1), reason: reason);
+        } else {
+          async.elapse(failsAt - const Duration(milliseconds: 1));
+          expect(outcome, isNull, reason: reason);
+          async.elapse(const Duration(milliseconds: 2));
+          expect(outcome, isA<TimeoutException>(), reason: reason);
+        }
+      });
+    }
   });
 
   test('rejects a gzip body that inflates past the snapshot cap', () async {
