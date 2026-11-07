@@ -337,6 +337,11 @@ class _ComposeBarLayout extends HookWidget {
       inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
+      // Follow the platform keyboard convention for prose: capitalize
+      // sentence starts (issue #7579). Messages are prose, not code or
+      // identifiers; `none` keeps the iOS keyboard lowercase after a
+      // period while Messages/Mail/Notes capitalize.
+      textCapitalization: TextCapitalization.sentences,
       contextMenuBuilder: contextMenuBuilder,
       // Flutter's Cupertino magnifier rebuilds its overlay on every
       // selection-handle update. Keep the iOS handles and native edit menu,
