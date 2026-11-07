@@ -200,17 +200,18 @@ impl ConnectionState {
 
     /// Finish a pending challenge on timeout and preserve the historical rule
     /// that an already-failed connection is closed when its timeout expires.
-    fn expire_auth(&self) -> bool {
+    /// Returns the `close_reason` to close with, if the connection must close.
+    fn expire_auth(&self) -> Option<&'static str> {
         let mut auth = self.lock_auth_state();
         match &*auth {
             AuthState::Pending { started_at, .. } => {
                 let duration = started_at.elapsed();
                 *auth = AuthState::Failed;
                 crate::metrics::record_auth_outcome(AuthOutcome::Timeout, duration);
-                true
+                Some("auth_timeout")
             }
-            AuthState::Failed => true,
-            AuthState::Authenticated(_) => false,
+            AuthState::Failed => Some("auth_failed"),
+            AuthState::Authenticated(_) => None,
         }
     }
 
@@ -653,6 +654,7 @@ async fn handle_active_connection(
         .is_err()
     {
         warn!(conn_id = %conn_id, "Failed to send AUTH challenge — client disconnected immediately");
+        close.closed("client_closed");
         return;
     }
 
@@ -697,15 +699,18 @@ async fn handle_active_connection(
         ctrl_tx,
         Arc::clone(&missed_pongs),
         heartbeat_cancel,
+        Arc::clone(&close),
     ));
 
     let auth_timeout_conn = Arc::clone(&conn);
     let auth_timeout_cancel = cancel.clone();
+    let auth_timeout_close = Arc::clone(&close);
     let auth_timeout_task = tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep(AUTH_TIMEOUT) => {
-                if auth_timeout_conn.expire_auth() {
-                    warn!(
+                if let Some(reason) = auth_timeout_conn.expire_auth() {
+                    auth_timeout_close.closed(reason);
+                    debug!(
                         conn_id = %auth_timeout_conn.conn_id,
                         timeout_secs = AUTH_TIMEOUT.as_secs(),
                         "NIP-42 auth timeout — closing connection"
@@ -759,10 +764,18 @@ async fn handle_active_connection(
         Arc::clone(&state),
         Arc::clone(&missed_pongs),
         cancel.clone(),
+        &close,
     )
     .await;
 
     cancel.cancel();
+    // Whoever cancelled first recorded its own reason; these fill in the rest.
+    if state.shutting_down.load(Ordering::Acquire) {
+        close.closed("shutdown");
+    } else if let Some(reason) = *control.disconnect_reason().borrow() {
+        close.closed(reason.as_str());
+    }
+    close.closed("server_closed");
     // The socket can no longer AUTH; cleanup below may block.
     conn.community_control.finish_nip_fi_line();
     let close_outcome = if state.shutting_down.load(Ordering::Acquire) {
@@ -1188,6 +1201,7 @@ async fn heartbeat_loop(
     ctrl_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
+    close: Arc<crate::access::CloseLine>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -1199,12 +1213,15 @@ async fn heartbeat_loop(
                 //   prev=2 → now 3 (third miss → disconnect)
                 let missed = missed_pongs.fetch_add(1, Ordering::Relaxed);
                 if missed >= 2 {
-                    warn!("3 missed pongs — closing connection");
+                    debug!("3 missed pongs — closing connection");
+                    metrics::counter!("buzz_ws_missed_pong_disconnects_total").increment(1);
+                    close.closed("missed_pongs");
                     cancel.cancel();
                     break;
                 }
                 if ctrl_tx.try_send(WsMessage::Ping(axum::body::Bytes::new())).is_err() {
                     warn!("control channel full — cannot send Ping, closing");
+                    close.closed("control_channel_full");
                     cancel.cancel();
                     break;
                 }
@@ -1225,6 +1242,7 @@ async fn recv_loop(
     state: Arc<AppState>,
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
+    close: &crate::access::CloseLine,
 ) -> (
     futures_util::stream::SplitStream<WebSocket>,
     Option<tokio::task::JoinHandle<()>>,
@@ -1247,6 +1265,7 @@ async fn recv_loop(
                                 text.len(),
                                 max_frame_bytes
                             ));
+                            close.closed("frame_too_large");
                             break;
                         }
                         trace!(len = text.len(), "frame received");
@@ -1269,6 +1288,7 @@ async fn recv_loop(
                                 bytes.len(),
                                 max_frame_bytes
                             ));
+                            close.closed("frame_too_large");
                             break;
                         }
                         // Binary frames: attempt UTF-8 decode and treat as text. Some clients
@@ -1291,15 +1311,18 @@ async fn recv_loop(
                             // Control channel full means the socket writer is
                             // completely stalled — treat as terminal.
                             warn!(conn_id = %conn.conn_id, "control channel full — cannot send Pong, closing");
+                            close.closed("control_channel_full");
                             break;
                         }
                     }
                     Some(Ok(WsMessage::Close(_))) | None => {
                         debug!("WebSocket closed by client");
+                        close.closed("client_closed");
                         break;
                     }
                     Some(Err(e)) => {
                         debug!("WebSocket error: {e}");
+                        close.closed("socket_error");
                         break;
                     }
                 }
@@ -1729,6 +1752,45 @@ pub(crate) mod tests {
         DebugValue,
     )>;
 
+    /// A connection that misses three pongs closes as `missed_pongs` and is
+    /// counted. Mutation: drop the counter or the `closed` call → RED.
+    #[test]
+    fn missed_pongs_close_with_their_reason_and_count() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let (_, out) = crate::access::tests::capture(|| {
+            metrics::with_local_recorder(&recorder, || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .start_paused(true)
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let close = crate::access::CloseLine::open(
+                            Uuid::nil(),
+                            buzz_core::CommunityId::from_uuid(Uuid::nil()),
+                            "127.0.0.1:1".parse().unwrap(),
+                            None,
+                        );
+                        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+                        let cancel = CancellationToken::new();
+                        heartbeat_loop(ctrl_tx, Arc::new(AtomicU8::new(0)), cancel.clone(), close)
+                            .await;
+                        assert!(cancel.is_cancelled());
+                    });
+            });
+        });
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(
+            counter_value(&snapshot, "buzz_ws_missed_pong_disconnects_total", None),
+            1
+        );
+        let lines = out.lines();
+        let close: Vec<_> = lines.iter().filter(|l| l["event"] == "close").collect();
+        assert_eq!(close.len(), 1, "{lines:?}");
+        assert_eq!(close[0]["close_reason"], "missed_pongs", "{lines:?}");
+    }
+
     fn counter_value(snapshot: &MetricSnapshot, name: &str, outcome: Option<&str>) -> u64 {
         snapshot
             .iter()
@@ -1867,7 +1929,12 @@ pub(crate) mod tests {
 
         crate::metrics::record_auth_attempt_started();
         let (timed_out, _rx) = test_conn_with_auth(pending_state());
-        assert!(timed_out.expire_auth());
+        assert_eq!(timed_out.expire_auth(), Some("auth_timeout"));
+        assert_eq!(
+            timed_out.expire_auth(),
+            Some("auth_failed"),
+            "a failed connection closes as auth_failed"
+        );
         assert!(timed_out
             .finish_auth_on_close(AuthOutcome::Disconnect)
             .is_none());
@@ -3171,6 +3238,7 @@ pub(crate) mod tests {
             assert_eq!(close["pubkey_verified"], true, "{close}");
             assert_eq!(close["peer_addr"], PEER, "{close}");
             assert_eq!(lines[1]["outcome"], "served", "{lines:?}");
+            assert_eq!(close["close_reason"], "client_closed", "{close}");
         }
 
         /// A refused login writes one WARN `auth` line, no success line, and a close line with no identity.
@@ -3781,6 +3849,7 @@ pub(crate) mod tests {
             let events: Vec<_> = lines.iter().map(|l| l["event"].clone()).collect();
             assert_eq!(events, ["auth", "close"], "{lines:?}");
             assert_eq!(lines[0]["outcome"], "success", "{lines:?}");
+            assert_eq!(lines[1]["close_reason"], "removed", "{lines:?}");
         }
     }
 
