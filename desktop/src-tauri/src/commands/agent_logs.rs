@@ -3,8 +3,8 @@ use tauri::{AppHandle, Manager};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        latest_managed_agent_log_path, load_managed_agents, read_log_tail, BackendKind,
-        ManagedAgentLogResponse,
+        latest_managed_agent_log_path, load_managed_agents, read_log_tail, truncate_log_file,
+        BackendKind, ManagedAgentLogResponse,
     },
 };
 
@@ -34,6 +34,31 @@ pub async fn get_managed_agent_log(
             content: read_log_tail(&log_path, line_count.unwrap_or(120) as usize)?,
             log_path: log_path.display().to_string(),
         })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Truncate the log `get_managed_agent_log` reads, so a running harness keeps
+/// appending to the same file rather than the viewer and the writer diverging.
+#[tauri::command]
+pub async fn clear_managed_agent_log(pubkey: String, app: AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        if record.backend != BackendKind::Local {
+            return Err("logs are not available for remote agents".to_string());
+        }
+
+        truncate_log_file(&latest_managed_agent_log_path(&app, &pubkey)?)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
