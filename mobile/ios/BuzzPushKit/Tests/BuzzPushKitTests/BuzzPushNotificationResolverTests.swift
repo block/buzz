@@ -1207,11 +1207,20 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       loadHostedSession: { sharedHosted }, now: { clock })
     let issued = "hosted.payload.signature"
     var issuedRelays: [String] = []
+    var identityChecks = 0
+    var boundPubkey: String?
     var relayAssertions: [String: [String?]] = [:]
     URLProtocolStub.handler = { request in
       let body = Self.body(of: request)
       if request.url?.host == "app.example" {
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-BB-Session-Credential"), "hosted-credential")
+        if request.url?.path == "/api/goose/v1/buzz/nostr-identities/current" {
+          identityChecks += 1
+          let identity: Any = boundPubkey.map { ["pubkey_hex": $0] } ?? NSNull()
+          return Self.response(request, status: 200,
+            data: try JSONSerialization.data(withJSONObject: ["identity": identity]))
+        }
+        XCTAssertEqual(request.url?.path, "/api/goose/v1/buzz/identity/assertions")
         let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let relay = try XCTUnwrap(fields["relay_url"] as? String)
         issuedRelays.append(relay)
@@ -1243,6 +1252,18 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       return resolver
     }
 
+    // Issuance can bind the account's first identity, which only the app chooses: while the
+    // account is unbound, or bound to another key, the extension never asks the issuer.
+    _ = try notify("wss://pending.communities.example")
+    boundPubkey = String(repeating: "f", count: 64)
+    clock += BuzzRelayAssertionIssuer.refusalLifetime + 1
+    _ = try notify("wss://pending.communities.example")
+    XCTAssertEqual(identityChecks, 2)
+    XCTAssertTrue(issuedRelays.isEmpty)
+    XCTAssertTrue(relayAssertions["pending.communities.example"]?.allSatisfy { $0 == nil } == true)
+    boundPubkey = Self.ownPubkey
+    clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
+
     // An enforcing hosted community gets the hosted assertion.
     let enforced = try notify("wss://team.communities.example")
     XCTAssertTrue(enforced.isStillAuthorized())
@@ -1257,6 +1278,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     _ = try notify("wss://open.communities.example")
     XCTAssertEqual(issuedRelays.filter { $0 == "wss://open.communities.example" }.count, 2)
     XCTAssertTrue(relayAssertions["open.communities.example"]?.allSatisfy { $0 == nil } == true)
+    // A confirmed binding is checked once per session and key.
+    XCTAssertEqual(identityChecks, 3)
 
     // Hosts outside the hosted community domain never reach the hosted issuer.
     let before = issuedRelays.count

@@ -57,6 +57,14 @@ public struct BuzzOrganizationSession: Codable, Equatable, Sendable {
     return route.url
   }
 
+  /// The account's current identity binding route, beside [assertionURL].
+  var currentIdentityURL: URL? {
+    guard var route = assertionURL.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) })
+    else { return nil }
+    route.path = "/api/goose/v1/buzz/nostr-identities/current"
+    return route.url
+  }
+
   /// Matches the app's `OrganizationEnvironment.protects`, or for a hosted session
   /// `HostedRelayAuth`'s hosted rule, for an HTTPS relay URL.
   func protects(_ relayURL: URL) -> Bool {
@@ -96,6 +104,8 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   private let lock = NSLock()
   private var cached: [String: (token: String, expiry: Date)] = [:]
   private var refused: [String: Date] = [:]
+  /// Hosted credential and key pairs the account is already bound to.
+  private var bound: Set<String> = []
 
   public init(
     session: URLSession,
@@ -157,8 +167,70 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
       completion(nil)
       return
     }
+    let needsBinding = organization.isHosted && !bound.contains("\(organization.credential)|\(pubkey)")
     lock.unlock()
 
+    guard needsBinding else {
+      mint(
+        organization: organization, issuerURL: issuerURL, relay: relay, pubkey: pubkey,
+        privateKeyHex: privateKeyHex, cacheKey: cacheKey, completion: completion)
+      return
+    }
+    // Issuance can create the account's first identity binding, and the extension must never
+    // choose that identity: the app may still be selecting it, and this key may be one the user
+    // discarded. Mint only for a key the hosted account is already bound to, as the app does
+    // for background requests.
+    guard let identityURL = organization.currentIdentityURL,
+      let body = try? JSONSerialization.data(withJSONObject: [String: Any]())
+    else {
+      completion(nil)
+      return
+    }
+    var request = URLRequest(url: identityURL)
+    request.httpMethod = "POST"
+    request.httpBody = body
+    request.timeoutInterval = 8
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue(organization.origin, forHTTPHeaderField: "Origin")
+    request.setValue(organization.credential, forHTTPHeaderField: "X-BB-Session-Credential")
+    BuzzNotificationDownload.start(
+      request: request, configuration: session.configuration,
+      maximumBytes: Self.maximumResponseBytes
+    ) { [self] result in
+      guard case .success(let data) = result,
+        let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        value["error"] == nil || value["error"] is NSNull
+      else {
+        if case .failure(let error) = result {
+          NSLog("Notification identity check failed: %@", String(describing: error))
+        }
+        completion(nil)
+        return
+      }
+      guard let identity = value["identity"] as? [String: Any],
+        (identity["pubkey_hex"] as? String)?.lowercased() == pubkey
+      else {
+        // Unbound or bound to another key: ask again only after the refusal lapses.
+        lock.lock()
+        refused[cacheKey] = now().addingTimeInterval(Self.refusalLifetime)
+        lock.unlock()
+        completion(nil)
+        return
+      }
+      lock.lock()
+      bound.insert("\(organization.credential)|\(pubkey)")
+      lock.unlock()
+      mint(
+        organization: organization, issuerURL: issuerURL, relay: relay, pubkey: pubkey,
+        privateKeyHex: privateKeyHex, cacheKey: cacheKey, completion: completion)
+    }
+  }
+
+  private func mint(
+    organization: BuzzOrganizationSession, issuerURL: URL, relay: String, pubkey: String,
+    privateKeyHex: String, cacheKey: String, completion: @escaping (BuzzRelayAssertion?) -> Void
+  ) {
     guard
       let body = try? JSONSerialization.data(
         withJSONObject: ["relay_url": relay, "nostr_pubkey": pubkey], options: [.sortedKeys]),
