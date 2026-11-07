@@ -19,7 +19,7 @@ async fn live_nip11_probe_discovers_configured_pairing_relay() {
             .to_ascii_lowercase()
             .contains("accept: application/nostr+json"));
 
-        let body = r#"{"pairing_relay_url":"ws://127.0.0.1:5000"}"#;
+        let body = r#"{"pairing_relay_url":"ws://127.0.0.1:18765"}"#;
         let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -32,7 +32,7 @@ async fn live_nip11_probe_discovers_configured_pairing_relay() {
 
     assert_eq!(
         probe_pairing_relay(&format!("ws://{addr}")).await,
-        PairingRelay::Configured("ws://127.0.0.1:5000".to_string())
+        PairingRelay::Configured("ws://127.0.0.1:18765".to_string())
     );
     server.await.expect("NIP-11 server task");
 }
