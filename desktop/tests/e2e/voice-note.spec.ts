@@ -67,6 +67,9 @@ test.beforeEach(async ({ page }, testInfo) => {
     sendMessageErrors: testInfo.title.includes("shows a send error")
       ? ["relay rejected voice note"]
       : undefined,
+    uploadDelayMs: testInfo.title.includes("typed during its upload")
+      ? 1_500
+      : undefined,
     uploadDescriptors: [
       {
         duration: 9.4,
@@ -102,6 +105,35 @@ test("restores the voice note and shows a send error after upload succeeds", asy
   await expect(
     page.getByText("Message failed to send: relay rejected voice note"),
   ).toBeVisible();
+});
+
+test("shows a send error and keeps the voice note beside text typed during its upload", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  await page.getByRole("button", { name: "Record voice note" }).click();
+  await expect(page.getByTestId("voice-note-recorder")).toBeVisible();
+  await page.waitForTimeout(100);
+  await page.getByRole("button", { name: "Finish voice note" }).click();
+
+  const composerCard = page.getByTestId("composer-voice-note-card");
+  await expect(composerCard).toBeVisible();
+  await page.getByTestId("send-message").click();
+
+  // The send clears the composer optimistically; the user starts a new
+  // message while the note is still uploading, then the publish fails.
+  await expect(composerCard).toHaveCount(0);
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("not yet");
+
+  await expect(
+    page.getByText("Message failed to send: relay rejected voice note"),
+  ).toBeVisible();
+  await expect(input).toHaveText("not yet");
+  await expect(composerCard).toBeVisible();
 });
 
 test("keeps pasted snapshots and channel drops out of an active voice note", async ({

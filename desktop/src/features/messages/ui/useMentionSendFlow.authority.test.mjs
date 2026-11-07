@@ -159,6 +159,77 @@ test("cross-visit author clear prevents old media error restoring text, refs or 
   assert.equal(s.options.contentRef.current, "B preserved");
 });
 
+// Newer authored text still wins, but a failed send's attachments have no
+// other copy (a voice note is an in-memory recording): they come back beside
+// it, as the already-uploaded descriptors so a retry does not re-upload.
+for (const failure of ["publish", "upload"]) {
+  test(`voice-note-only ${failure} failure hands the note back beside text typed during upload`, async () => {
+    const s = await setup({ lifecycle: true });
+    s.dismiss();
+    const pending = [];
+    const restoredFiles = [];
+    s.options.mentions.memberPubkeys = new Set([KEY]);
+    s.options.mentions.extractMentionPubkeys = () => [];
+    s.options.setPendingImeta = (value) => pending.push(value);
+    s.options.restoreQueuedAttachments = (value) => restoredFiles.push(value);
+    s.options.onSendRef.current = async () => {
+      throw new Error("relay returned 500");
+    };
+    s.rerender();
+    const recording = { id: 7, file: { name: "voice-note-1.wav" } };
+    let promise;
+    await s.act(async () => {
+      s.options.contentRef.current = "";
+      promise = s.result.current.sendMessageWithMentionFlow({
+        capturedChannelId: "general",
+        pendingImeta: [],
+        trimmed: "",
+        recoveryDraftKey: "thread:a",
+        queuedAttachments: [{ ...recording, spoilered: false }],
+      });
+    });
+    assert.ok(s.control.uploadCallbacks);
+    s.edit("ok", []);
+    const note = {
+      url: "https://relay.example/media/a.mp4",
+      filename: "voice-note-1.mp4",
+      type: "video/mp4",
+    };
+    await s.act(async () => {
+      if (failure === "publish")
+        await s.control.uploadCallbacks.onComplete(
+          [note],
+          new AbortController().signal,
+        );
+      else s.control.uploadCallbacks.onError(new Error("disk full"));
+      await promise;
+    });
+    assert.equal(s.options.contentRef.current, "ok", "newer text wins");
+    if (failure === "publish") {
+      assert.deepEqual(
+        [...pending.at(-1)],
+        [note],
+        "uploaded note, no re-upload",
+      );
+      assert.deepEqual([...(restoredFiles.at(-1) ?? ["not restored"])], []);
+      assert.deepEqual(s.events("error"), [
+        ["error", "Message failed to send: relay returned 500"],
+      ]);
+    } else {
+      assert.deepEqual(
+        [...(restoredFiles.at(-1) ?? [])],
+        [{ ...recording, spoilered: false }],
+        "the recording comes back to upload again",
+      );
+      assert.deepEqual([...pending.at(-1)], []);
+      assert.deepEqual(s.events("error"), [
+        ["error", "Upload failed: disk full"],
+      ]);
+    }
+    assert.equal(s.events("SEND").length, 0);
+  });
+}
+
 for (const replacement of ["delete", "same-text", "new-text"]) {
   test(`outgoing lifecycle cleanup cannot overwrite shared ${replacement} from another owner`, async () => {
     const { deleteDraftEntry, saveDraftEntry } = await import(
