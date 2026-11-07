@@ -2,7 +2,9 @@ import { ImagePlus, Trash2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { customEmojiCatalogNotice } from "@/features/custom-emoji/catalogStatus";
 import {
+  useCustomEmojiCatalogStatus,
   useCustomEmojiQuery,
   useOwnCustomEmojiQuery,
   useRemoveCustomEmojiMutation,
@@ -32,6 +34,8 @@ export function CustomEmojiSettingsCard() {
   const { data: own = [], isLoading: ownLoading } = useOwnCustomEmojiQuery();
   const { data: community = [], isLoading: communityLoading } =
     useCustomEmojiQuery();
+  const catalogStatus = useCustomEmojiCatalogStatus();
+  const catalogNotice = customEmojiCatalogNotice(catalogStatus);
   const setEmoji = useSetCustomEmojiMutation();
   const removeEmoji = useRemoveCustomEmojiMutation();
 
@@ -311,6 +315,16 @@ export function CustomEmojiSettingsCard() {
             </SettingsOptionGroup>
           )}
         </div>
+
+        {catalogNotice ? (
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="custom-emoji-catalog-notice"
+            role="status"
+          >
+            {catalogNotice}
+          </p>
+        ) : null}
 
         {!communityLoading && othersEmoji.length > 0 ? (
           <div data-testid="custom-emoji-community">
