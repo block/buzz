@@ -272,7 +272,8 @@ fn start_pair<R: tauri::Runtime>(
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let relay_target = super::ManagedAgentRelayTarget::new(pubkey, &relay_url)?;
+    let key = relay_target.key.clone();
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -295,7 +296,7 @@ fn start_pair<R: tauri::Runtime>(
     let mut process = spawn_agent_child(
         &app,
         record,
-        &key.relay_url,
+        &relay_target,
         &admitted,
         lazy,
         owner.as_deref(),
