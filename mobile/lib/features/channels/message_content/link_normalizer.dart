@@ -7,10 +7,10 @@ const _backslashUnit = 0x5C;
 const _markdownDelimiters = ['***', '___', '**', '__', '~~', '*', '_'];
 
 final _autolinkPattern = RegExp(
-  r'<((?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo)\?))[^>]+)>',
+  r'<((?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo|project)\?))[^>]+)>',
 );
 final _bareLinkPattern = RegExp(
-  r'(?<![(\]=])(?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo)\?))[^\s)>\]]+',
+  r'(?<![(\]=])(?:https?://|buzz://(?:message\?|join\?|channel/|(?:pr|issue|repo|project)\?))[^\s)>\]]+',
 );
 final _trailingPunctuationPattern = RegExp(r'[.,!?:;]+$');
 final _backtickRunPattern = RegExp(r'`+');
