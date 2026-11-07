@@ -1186,6 +1186,91 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     XCTAssertEqual(issuerBodies.count, 1)
   }
 
+  /// Hosted communities enforce NIP-FI one by one. The extension mints from the shared hosted
+  /// session for hosted relays only, and a community the hosted issuer refuses (one that doesn't
+  /// enforce) is queried without an assertion and not asked about again for a while.
+  func testHostedRelayQueriesMintFromHostedSession() throws {
+    let message = try Self.signedEvent(privateKey: Self.profilePrivateKey,
+      createdAt: Self.now, kind: 9, tags: [["h", Self.channelID]], content: "Hosted hello")
+    let organization = BuzzOrganizationSession(
+      origin: "https://identity.org.example", credential: "org-credential",
+      relayHosts: ["relay.org.example"])
+    let hosted = BuzzOrganizationSession(
+      origin: "https://app.example", credential: "hosted-credential", relayHosts: [],
+      relayDomains: ["communities.example"], communityDomain: "communities.example")
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [URLProtocolStub.self]
+    var sharedHosted: BuzzOrganizationSession? = hosted
+    var clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: configuration), loadSession: { organization },
+      loadHostedSession: { sharedHosted }, now: { clock })
+    let issued = "hosted.payload.signature"
+    var issuedRelays: [String] = []
+    var relayAssertions: [String: [String?]] = [:]
+    URLProtocolStub.handler = { request in
+      let body = Self.body(of: request)
+      if request.url?.host == "app.example" {
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-BB-Session-Credential"), "hosted-credential")
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let relay = try XCTUnwrap(fields["relay_url"] as? String)
+        issuedRelays.append(relay)
+        guard relay == "wss://team.communities.example" else {
+          return Self.response(request, status: 403, data: Data())
+        }
+        return Self.response(request, status: 200, data: try JSONSerialization.data(withJSONObject: [
+          "assertion": issued, "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now + 300,
+        ]))
+      }
+      XCTAssertNotEqual(request.url?.host, "identity.org.example")
+      XCTAssertNil(request.value(forHTTPHeaderField: "X-BB-Session-Credential"))
+      let host = try XCTUnwrap(request.url?.host)
+      let assertion = request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
+      relayAssertions[host, default: []].append(assertion)
+      if host == "team.communities.example", assertion != "Bearer \(issued)" {
+        return Self.response(request, status: 401, data: Data())
+      }
+      let filters = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Any]])
+      let kinds = filters.flatMap { $0["kinds"] as? [Int] ?? [] }
+      return Self.response(request, status: 200,
+        data: try JSONEncoder().encode(kinds.contains(9) ? [message] : []))
+    }
+    func notify(_ relayUrl: String) throws -> BuzzPushNotificationResolver {
+      let resolver = makeResolver(
+        communitiesData: try snapshotData([community(relayUrl: relayUrl)]),
+        now: clock, assertionIssuer: issuer)
+      XCTAssertEqual(resolve(resolver)?.body, "Hosted hello", relayUrl)
+      return resolver
+    }
+
+    // An enforcing hosted community gets the hosted assertion.
+    let enforced = try notify("wss://team.communities.example")
+    XCTAssertTrue(enforced.isStillAuthorized())
+    XCTAssertEqual(issuedRelays, ["wss://team.communities.example"])
+    XCTAssertTrue(relayAssertions["team.communities.example"]?.allSatisfy { $0 == "Bearer \(issued)" } == true)
+
+    // A refused community is queried without one, and its refusal stands until it lapses.
+    _ = try notify("wss://open.communities.example")
+    _ = try notify("wss://open.communities.example")
+    XCTAssertEqual(issuedRelays.filter { $0 == "wss://open.communities.example" }.count, 1)
+    clock += BuzzRelayAssertionIssuer.refusalLifetime + 1
+    _ = try notify("wss://open.communities.example")
+    XCTAssertEqual(issuedRelays.filter { $0 == "wss://open.communities.example" }.count, 2)
+    XCTAssertTrue(relayAssertions["open.communities.example"]?.allSatisfy { $0 == nil } == true)
+
+    // Hosts outside the hosted community domain never reach the hosted issuer.
+    let before = issuedRelays.count
+    for relayUrl in ["wss://communities.example", "wss://team.other.example", "wss://communities.example.evil"] {
+      _ = try notify(relayUrl)
+    }
+    XCTAssertEqual(issuedRelays.count, before)
+
+    // Signing out of the hosted account revokes delivery of what its assertion fetched.
+    clock = Date(timeIntervalSince1970: TimeInterval(Self.now))
+    sharedHosted = nil
+    XCTAssertFalse(enforced.isStillAuthorized())
+  }
+
   /// A refused or malformed issuance never produces a header.
   func testOrganizationAssertionIssuanceFailuresSendNoHeader() throws {
     let configuration = URLSessionConfiguration.ephemeral

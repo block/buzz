@@ -13,7 +13,17 @@ import 'organization_key_backup.dart';
 import '../push/push_bridge.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
-  final account = BuilderlabAccountClient();
+  final account = BuilderlabAccountClient(
+    // Hosted communities that enforce NIP-FI need the extension to mint too.
+    onSessionChanged: HostedRelayAuth.configured && HostedEnvironment.enabled
+        ? (credential) => shareHostedSessionWithNotifications(
+            origin: HostedEnvironment.origin,
+            credential: credential,
+            relayDomains: HostedEnvironment.authDomains,
+            communityDomain: HostedEnvironment.communitySuffix,
+          )
+        : null,
+  );
   ref.onDispose(account.dispose);
   return account;
 });
@@ -70,9 +80,12 @@ class HostedRelayAuth extends ChangeNotifier {
     this.organization,
     this.organizationBackup,
     this.organizationRelay = OrganizationEnvironment.protects,
-    this.enabled = const bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH'),
+    this.enabled = configured,
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now;
+
+  /// Whether this build turns hosted relay auth on.
+  static const configured = bool.fromEnvironment('BUZZ_HOSTED_RELAY_AUTH');
 
   final BuilderlabAccountClient account;
   final BuilderlabAccountClient? organization;

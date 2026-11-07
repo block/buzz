@@ -176,6 +176,37 @@ void main() {
     },
   );
 
+  test('shares and clears the hosted session with the extension', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final shared = <Object?>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'syncPushSnapshot');
+          shared.add(call.arguments);
+          return null;
+        });
+
+    for (final credential in ['session-credential', null]) {
+      await shareHostedSessionWithNotifications(
+        origin: Uri.parse('https://app.example'),
+        credential: credential,
+        relayDomains: const ['communities.example'],
+        communityDomain: 'communities.example',
+      );
+    }
+
+    expect(shared, [
+      for (final credential in ['session-credential', null])
+        {
+          'section': 'hostedSession',
+          'origin': 'https://app.example',
+          'credential': credential,
+          'relayDomains': ['communities.example'],
+          'communityDomain': 'communities.example',
+        },
+    ]);
+  });
+
   test('development push gateway matches the compiled configuration', () {
     const expectedGateway = String.fromEnvironment(
       'BUZZ_PUSH_GATEWAY_URL',
