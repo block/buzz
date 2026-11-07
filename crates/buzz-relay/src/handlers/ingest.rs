@@ -2523,25 +2523,60 @@ pub async fn ingest_event(
 ///   client ceiling (60 s, CANVAS_MAX_FUTURE_SKEW_SECS) < canvas relay bound (300 s) < relay general bound (900 s)
 const CANVAS_MAX_INGEST_FUTURE_SECS: i64 = 300;
 
+/// Largest event `content`, in bytes, the relay will store.
+pub(crate) const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
+
+/// Why event content cannot be stored. `Display` omits the `invalid:` prefix
+/// so each write path can map it into its own error type.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum StoredContentError {
+    /// Content is longer than [`MAX_EVENT_CONTENT_BYTES`].
+    #[error("content exceeds maximum size of {MAX_EVENT_CONTENT_BYTES} bytes (got {0})")]
+    TooLarge(usize),
+    /// Content contains `\0`, which Postgres `text` cannot store.
+    #[error("content contains a NUL byte")]
+    NulInContent,
+    /// A tag value contains `\0`, which Postgres `text` cannot store.
+    #[error("tag contains a NUL byte")]
+    NulInTag,
+}
+
+/// Refuse content longer than [`MAX_EVENT_CONTENT_BYTES`]. Pure and cheap, so
+/// callers run it before any database read or signature check.
+pub(crate) fn check_content_size(content: &str) -> Result<(), StoredContentError> {
+    if content.len() > MAX_EVENT_CONTENT_BYTES {
+        return Err(StoredContentError::TooLarge(content.len()));
+    }
+    Ok(())
+}
+
+/// Refuse content containing a NUL byte. Postgres `text` cannot store `\0`,
+/// so such content would otherwise fail at insert with an encoding error.
+pub(crate) fn check_content_nul(content: &str) -> Result<(), StoredContentError> {
+    if content.contains('\0') {
+        return Err(StoredContentError::NulInContent);
+    }
+    Ok(())
+}
+
 /// Reject events whose content or any tag value contains a NUL byte.
 /// Postgres `text` cannot store `\0`, so such an event would otherwise fail
 /// at insert with an encoding error and surface as an internal error.
 fn reject_nul_bytes(event: &Event) -> Result<(), IngestError> {
-    if event.content.contains('\0') {
-        return Err(IngestError::Rejected(
-            "invalid: content contains a NUL byte".into(),
-        ));
-    }
+    check_content_nul(&event.content).map_err(stored_content_rejection)?;
     if event
         .tags
         .iter()
         .any(|tag| tag.as_slice().iter().any(|value| value.contains('\0')))
     {
-        return Err(IngestError::Rejected(
-            "invalid: tag contains a NUL byte".into(),
-        ));
+        return Err(stored_content_rejection(StoredContentError::NulInTag));
     }
     Ok(())
+}
+
+/// Map a stored-content refusal to the client-facing `invalid:` rejection.
+fn stored_content_rejection(error: StoredContentError) -> IngestError {
+    IngestError::Rejected(format!("invalid: {error}"))
 }
 
 /// Returns `Ok(())` if the canvas event timestamp is within the allowed future
@@ -2605,14 +2640,7 @@ async fn ingest_event_inner(
     // The size check is a pure, cheap reject: it needs neither the DB nor
     // signature verification, so oversized events never cost a writer-pool
     // read or a blocking-pool Schnorr check.
-    const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
-    if event.content.len() > MAX_EVENT_CONTENT_BYTES {
-        return Err(IngestError::Rejected(format!(
-            "invalid: content exceeds maximum size of {} bytes (got {})",
-            MAX_EVENT_CONTENT_BYTES,
-            event.content.len()
-        )));
-    }
+    check_content_size(&event.content).map_err(stored_content_rejection)?;
 
     // Durable community write fence: persistent ingest is a DB write the
     // deletion engine cannot exclude via serving-write leases (those cover

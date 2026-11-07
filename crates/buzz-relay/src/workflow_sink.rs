@@ -222,6 +222,16 @@ impl ActionSink for RelayActionSink {
                 .upgrade()
                 .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
 
+            // The rendered text is the only caller-supplied value stored
+            // unparsed (it can carry webhook output), so it gets ingest's
+            // stored-content checks before any database work; every tag below
+            // is built from parsed or stored values. Without them an oversized
+            // body is stored past ingest's limit and a NUL byte fails the
+            // insert as a database error.
+            crate::handlers::ingest::check_content_size(&text)
+                .and_then(|()| crate::handlers::ingest::check_content_nul(&text))
+                .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?;
+
             // The run carries its owning community (`community_id`); the
             // relay-signed kind:9 message belongs to *that* community, never the
             // deployment default. Re-deriving the tenant from `config.relay_url`
@@ -772,6 +782,59 @@ mod tests {
 
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].as_slice(), ["p", owner.as_str(), "", "owner"]);
+    }
+
+    /// Rendered workflow text can carry webhook output (up to 1 MiB, NUL
+    /// bytes kept by lossy UTF-8 decoding). The sink must refuse what ingest
+    /// refuses — oversized or NUL-bearing content — as invalid input before
+    /// it reads or writes the database. The database here is unreachable, so
+    /// any text that gets past the checks fails as `Database` instead.
+    /// Mutation: drop either check in `send_message` and its case fails.
+    #[tokio::test]
+    async fn send_message_refuses_unstorable_text_before_touching_the_database() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1
+        )
+        .await;
+        let sink = RelayActionSink::new(&state);
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let channel = Uuid::new_v4().to_string();
+        let owner = pk('1');
+        let max = crate::handlers::ingest::MAX_EVENT_CONTENT_BYTES;
+
+        let send = |text: String| {
+            let sink = &sink;
+            let channel = channel.clone();
+            let owner = owner.clone();
+            async move {
+                sink.send_message(community, &channel, &text, "{{text}}", &owner, None)
+                    .await
+            }
+        };
+
+        for (text, expected) in [
+            (
+                "a\0b".to_string(),
+                "content contains a NUL byte".to_string(),
+            ),
+            (
+                "x".repeat(max + 1),
+                format!("content exceeds maximum size of {max} bytes"),
+            ),
+        ] {
+            match send(text).await {
+                Err(ActionSinkError::InvalidInput(msg)) => {
+                    assert!(msg.contains(&expected), "{expected}: {msg}");
+                }
+                other => panic!("{expected}: must be refused as invalid input, got {other:?}"),
+            }
+        }
+
+        // Text at the limit passes the checks and reaches the database.
+        match send("x".repeat(max)).await {
+            Err(ActionSinkError::Database(_)) => {}
+            other => panic!("text at the limit must reach the database, got {other:?}"),
+        }
     }
 }
 
