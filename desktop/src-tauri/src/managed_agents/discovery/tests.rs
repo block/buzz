@@ -502,11 +502,11 @@ fn create_time_override_preserves_selected_runtime_alias() {
 }
 
 #[test]
-fn create_time_override_inherits_exact_persona_command() {
+fn create_time_override_preserves_exact_persona_command_when_explicit() {
     let personas = vec![persona_with_runtime("p1", Some("claude"))];
     assert_eq!(
         create_time_agent_command_override(Some("p1"), &personas, Some("claude-agent-acp"), true),
-        None
+        Some("claude-agent-acp".to_string())
     );
 }
 
