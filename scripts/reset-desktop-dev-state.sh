@@ -32,7 +32,20 @@ remove_bundle_state() {
   shopt -u nullglob
 }
 
-case "$(uname -s)" in
+# Windows Credential Manager names each keyring entry `secrets.<service>`.
+# The trailing pattern keeps per-worktree `buzz-desktop-dev.<slug>` variants in
+# scope while the required `-dev` segment keeps production `buzz-desktop` out.
+remove_dev_credentials() {
+  command -v cmdkey >/dev/null 2>&1 || return 0
+  local target
+  while IFS= read -r target; do
+    log "Removing credential $target"
+    cmdkey "/delete:${target}" >/dev/null 2>&1 || true
+  done < <(cmdkey /list | tr -d '\r' |
+    grep -oE 'secrets\.(buzz|sprout)-desktop-dev(\.[A-Za-z0-9-]+)?$' | sort -u)
+}
+
+case "${BUZZ_TEST_PLATFORM:-$(uname -s)}" in
   Darwin)
     remove_bundle_state "$HOME/Library/Application Support"
     remove_bundle_state "$HOME/Library/Caches"
@@ -52,6 +65,11 @@ case "$(uname -s)" in
     remove_bundle_state "${XDG_DATA_HOME:-$HOME/.local/share}"
     remove_bundle_state "${XDG_CONFIG_HOME:-$HOME/.config}"
     remove_bundle_state "${XDG_CACHE_HOME:-$HOME/.cache}"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    remove_bundle_state "${APPDATA:-$HOME/AppData/Roaming}"
+    remove_bundle_state "${LOCALAPPDATA:-$HOME/AppData/Local}"
+    remove_dev_credentials
     ;;
   *)
     log "Desktop bundle cleanup is not implemented for $(uname -s); continuing"

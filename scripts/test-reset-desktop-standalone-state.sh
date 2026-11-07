@@ -35,4 +35,33 @@ if "$repo_root/scripts/reset-desktop-standalone-state.sh" \
     exit 1
 fi
 
+win=$(mktemp -d)
+trap 'rm -rf "$tmp" "$win"' EXIT
+export HOME="$win/home"
+export APPDATA="$HOME/AppData/Roaming"
+export LOCALAPPDATA="$HOME/AppData/Local"
+export BUZZ_TEST_PLATFORM=MINGW64_NT-10.0-26100
+mkdir -p "$APPDATA/xyz.block.buzz.app.dev.example"
+mkdir -p "$APPDATA/xyz.block.buzz.app.dev.other"
+mkdir -p "$APPDATA/xyz.block.buzz.app"
+mkdir -p "$LOCALAPPDATA/xyz.block.buzz.app.dev.example"
+mkdir -p "$LOCALAPPDATA/xyz.block.buzz.app"
+mkdir -p "$win/bin"
+cat > "$win/bin/cmdkey" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HOME/cmdkey-calls"
+MOCK
+chmod +x "$win/bin/cmdkey"
+export PATH="$win/bin:$PATH"
+
+"$repo_root/scripts/reset-desktop-standalone-state.sh" \
+    xyz.block.buzz.app.dev.example buzz-desktop-dev.example
+
+[[ ! -e "$APPDATA/xyz.block.buzz.app.dev.example" ]]
+[[ ! -e "$LOCALAPPDATA/xyz.block.buzz.app.dev.example" ]]
+[[ -d "$APPDATA/xyz.block.buzz.app.dev.other" ]]
+[[ -d "$APPDATA/xyz.block.buzz.app" ]]
+[[ -d "$LOCALAPPDATA/xyz.block.buzz.app" ]]
+grep -Fx -- "/delete:secrets.buzz-desktop-dev.example" "$HOME/cmdkey-calls" >/dev/null
+
 echo "standalone desktop reset scope test passed"
