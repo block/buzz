@@ -292,3 +292,41 @@ void swipeReplyTests() {
     expect(find.byType(ThreadDetailPage), findsNothing);
   });
 }
+
+void swipeReplyLinkTests() {
+  for (final onLink in [true, false]) {
+    testWidgets(
+      'right drag starting ${onLink ? 'on a link' : 'beside a link'} replies',
+      variant: const TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+      (tester) async {
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'swipe-link',
+                pubkey: 'alice',
+                content: 'Read [the doc](https://example.com/doc) carefully',
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        final gesture = await tester.startGesture(
+          tester.getCenter(
+            onLink ? find.text('the doc') : find.textContaining('carefully'),
+          ),
+        );
+        await gesture.moveBy(const Offset(25, 0));
+        await gesture.moveBy(const Offset(100, 0));
+        await tester.pump();
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsOneWidget);
+        expect(find.text('Copy link'), findsNothing);
+      },
+    );
+  }
+}
