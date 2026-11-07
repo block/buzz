@@ -106,13 +106,6 @@ class OrganizationAppEntry extends HookConsumerWidget {
       }
     }
 
-    // This landing shows only without the organization's community, so the
-    // member has signed out: end the session rather than reuse it.
-    useEffect(() {
-      unawaited(signIn.signOut());
-      return null;
-    }, [signIn]);
-
     useEffect(() {
       if (joinRequested.value &&
           signIn.status == OrganizationSessionStatus.signedIn) {

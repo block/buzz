@@ -83,9 +83,9 @@ void main() {
         AccountIdentityStore.keysForNsec(first.nsec!).secret,
       );
 
-      // Sign out, at the bottom of Settings, removes the community; the
-      // landing that replaces Home then ends the session. Clearing the
-      // notification extension's copy fails, so the session stays live.
+      // Sign out, at the bottom of Settings, removes the community and ends
+      // the session. Clearing the notification extension's copy fails, so
+      // the session stays live.
       const push = MethodChannel('buzz/push');
       final messenger = tester.binding.defaultBinaryMessenger;
       var extensionFails = true;
@@ -133,6 +133,35 @@ void main() {
       final second = await harness.joinedCommunity();
       expect(second.pubkey, first.pubkey);
       expect(tenant.recoveries, 0);
+    },
+    skip: skip,
+  );
+
+  testWidgets(
+    'a session saved before a relaunch is reused: Sign in joins without '
+    'single sign-on again',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final tenant = _Tenant();
+      final harness = _Harness(tester, tenant);
+      await harness.open();
+
+      // Single sign-on completes but the join does not, as when the app is
+      // closed or killed before admission.
+      _Auth.dropNext = true;
+      await harness.signIn();
+      expect(await harness.saved(), isEmpty);
+      expect(harness.browserUrls, hasLength(1));
+
+      // A relaunch restores the saved session under the Sign in landing.
+      await harness.open();
+      await harness.settle();
+      expect(find.text('Sign in'), findsOneWidget);
+      await harness.signIn();
+
+      expect(harness.browserUrls, hasLength(1));
+      final community = await harness.joinedCommunity();
+      expect(community.relayUrl, harness.relay);
     },
     skip: skip,
   );
