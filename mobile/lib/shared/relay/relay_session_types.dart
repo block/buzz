@@ -21,5 +21,21 @@ class SessionState {
   const SessionState({required this.status, this.reconnectAttempt = 0});
 }
 
+/// The relay answered an EVENT with `OK false`: it definitely did not apply it.
+class RelayEventRejected implements Exception {
+  const RelayEventRejected(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'Exception: $message';
+}
+
+/// [RelaySessionNotifier.publish] had no connection to send on, so it sent
+/// nothing.
+class RelayNotConnected extends StateError {
+  RelayNotConnected() : super('Relay session is not connected');
+}
+
 /// Recovery lifecycle for a live relay subscription.
 enum RelaySubscriptionStatus { ready, retrying }

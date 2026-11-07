@@ -373,6 +373,141 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
   return channelDetailsFromEvent(events.first);
 });
 
+/// Who a channel admits, from its relay-signed kind:39000 metadata.
+@immutable
+class ChannelAdmission {
+  const ChannelAdmission({
+    required this.joinRole,
+    required this.autoJoin,
+    required this.canBeDefault,
+  });
+
+  /// Role people get when they join or are joined: `member` or `guest`.
+  final String joinRole;
+
+  /// Whether the relay joins new community members to this channel.
+  final bool autoJoin;
+
+  /// Only an open, unarchived stream channel can be a default channel.
+  final bool canBeDefault;
+}
+
+/// Builds [ChannelAdmission] from kind:39000 metadata.
+@visibleForTesting
+ChannelAdmission channelAdmissionFromEvent(NostrEvent event) {
+  final data = ChannelData.fromEvent(event);
+  return ChannelAdmission(
+    joinRole: data.joinRole,
+    autoJoin: data.isAutoJoin,
+    canBeDefault:
+        data.channelType == 'stream' &&
+        data.visibility == 'open' &&
+        !data.isArchived,
+  );
+}
+
+Future<ChannelAdmission> _fetchChannelAdmission(
+  RelaySessionNotifier session,
+  String channelId,
+) async {
+  final events = await session.fetchHistory(
+    NostrFilter(
+      kinds: [39000],
+      tags: {
+        '#d': [channelId],
+      },
+      limit: 1,
+    ),
+  );
+  if (events.isEmpty) throw Exception('Channel not found: $channelId');
+  return channelAdmissionFromEvent(events.first);
+}
+
+/// Fresh admission settings for one channel; read on demand, never cached.
+final channelAdmissionProvider = FutureProvider.autoDispose
+    .family<ChannelAdmission, String>((ref, channelId) {
+      ref.watch(relayConfigProvider);
+      return _fetchChannelAdmission(
+        ref.watch(relaySessionProvider.notifier),
+        channelId,
+      );
+    });
+
+/// Whether [admission] shows the kind:9002 admission [tag] as applied.
+///
+/// Archived and private channels keep a stored default-channel flag without
+/// advertising it, so only an eligible channel's metadata proves either value.
+bool admissionShows(ChannelAdmission admission, List<String> tag) =>
+    switch (tag) {
+      ['join_role', final role] => admission.joinRole == role,
+      ['auto_join', final value] =>
+        admission.canBeDefault && admission.autoJoin == (value == 'true'),
+      _ => false,
+    };
+
+/// An admission change the relay may have applied but has not shown yet.
+@immutable
+class HeldAdmissionChange {
+  const HeldAdmissionChange({
+    required this.tag,
+    required this.event,
+    this.unseen = false,
+  });
+
+  /// The kind:9002 admission tag the change sets.
+  final List<String> tag;
+
+  /// The exact signed command. The relay ignores an event id it already
+  /// stored, so sending this again applies the change at most once.
+  final NostrEvent event;
+
+  /// A read since the change was last sent did not show it.
+  final bool unseen;
+}
+
+/// Holds [HeldAdmissionChange] for one channel.
+///
+/// It outlives the channel details page so an uncertain change cannot be
+/// published again by closing and reopening it; switching communities clears it.
+class UncertainAdmissionChange extends Notifier<HeldAdmissionChange?> {
+  UncertainAdmissionChange(this.channelId);
+
+  final String channelId;
+
+  @override
+  HeldAdmissionChange? build() {
+    ref.watch(relayConfigProvider);
+    return null;
+  }
+
+  void hold(List<String> tag, NostrEvent event) =>
+      state = HeldAdmissionChange(tag: tag, event: event);
+
+  void markUnseen(bool unseen) {
+    final held = state;
+    if (held == null) return;
+    state = HeldAdmissionChange(
+      tag: held.tag,
+      event: held.event,
+      unseen: unseen,
+    );
+  }
+
+  void clear() => state = null;
+}
+
+final uncertainAdmissionChangeProvider =
+    NotifierProvider.family<
+      UncertainAdmissionChange,
+      HeldAdmissionChange?,
+      String
+    >(UncertainAdmissionChange.new);
+
+/// The relay may have applied a change that its metadata does not show yet.
+class ChannelChangeUnconfirmed implements Exception {
+  const ChannelChangeUnconfirmed();
+}
+
 /// Channel members from kind:39002 NIP-29 members event.
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {

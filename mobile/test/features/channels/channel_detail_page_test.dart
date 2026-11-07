@@ -3842,7 +3842,10 @@ void main() {
       );
       expect(_previewRowAvatarInitial(tester, 'self'), 'Y');
 
-      await tester.ensureVisible(seeAllRow);
+      // Centre the row: aligned to the top it sits under the frosted bar.
+      unawaited(
+        Scrollable.ensureVisible(tester.element(seeAllRow), alignment: 0.5),
+      );
       await tester.pumpAndSettle();
       await tester.tap(seeAllRow);
       await tester.pumpAndSettle();
