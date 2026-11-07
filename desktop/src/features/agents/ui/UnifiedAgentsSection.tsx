@@ -394,6 +394,10 @@ function StandaloneAgentCard({
   const availability = getAvailability(agent.pubkey);
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
+  const avatarUrl = resolveAgentCardAvatarUrl(
+    agent.avatarUrl,
+    profileQuery.data?.avatarUrl,
+  );
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
@@ -407,7 +411,7 @@ function StandaloneAgentCard({
       avatar={
         <AgentRuntimeAvatarControl
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
-          avatarUrl={profileQuery.data?.avatarUrl}
+          avatarUrl={avatarUrl}
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
@@ -427,7 +431,7 @@ function StandaloneAgentCard({
           }
         />
       }
-      avatarUrl={profileQuery.data?.avatarUrl}
+      avatarUrl={avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
       footerAccessory={
         <ProtectedBestieCardBadge agent={agent} isBestie={isBestie} />
