@@ -850,6 +850,7 @@ pub fn run() {
             fetch_workspace_icon,
             fetch_relay_entry_requirements,
             fetch_join_policy,
+            mint_invite,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,

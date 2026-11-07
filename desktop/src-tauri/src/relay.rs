@@ -667,6 +667,8 @@ pub struct AgentProfileInfo {
 
 mod get;
 pub use get::get_relay_json;
+mod post;
+pub use post::post_relay_json;
 
 mod submit;
 pub use submit::{
