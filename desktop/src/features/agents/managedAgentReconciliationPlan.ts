@@ -16,17 +16,22 @@ import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
  * unit-tested directly; the hook only owns the refs, timer, and IPC calls.
  */
 
-/** Capped retry backoff: 5s, then 30s, then 2m, then give up. */
+/** Capped retry backoff: 5s, then 30s, capped at 2m thereafter. */
 const RETRY_BACKOFF_MS = [5_000, 30_000, 120_000] as const;
 
 /**
  * Delay before the next retry for a relay that has failed `failureCount` times
- * (1-based: 1 = first failure). Returns null once the cap is exhausted, meaning
- * stop retrying until the community set changes again.
+ * (1-based: 1 = first failure). Once `failureCount` reaches the final tier,
+ * retries continue at that capped maximum delay rather than giving up
+ * permanently, so a relay rebooting or down during launch eventually recovers.
+ * Returns null only for non-positive failure counts.
  */
 export function reconcileRetryDelayMs(failureCount: number): number | null {
   if (failureCount < 1) return null;
-  return RETRY_BACKOFF_MS[failureCount - 1] ?? null;
+  return (
+    RETRY_BACKOFF_MS[failureCount - 1] ??
+    RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]
+  );
 }
 
 /**
