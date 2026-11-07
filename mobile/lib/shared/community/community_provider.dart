@@ -15,7 +15,7 @@ import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/signed_event_relay.dart';
-import '../relay/relay_provider.dart' show pubkeyFromNsec;
+import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -101,8 +101,11 @@ typedef CommunityPushLeaseDeactivator =
 
 final communityPushLeaseDeactivatorProvider =
     Provider<CommunityPushLeaseDeactivator>((ref) {
-      return (community, {generation}) =>
-          _deactivateCommunityPushLease(community, generation: generation);
+      return (community, {generation}) => _deactivateCommunityPushLease(
+        community,
+        generation: generation,
+        relayAuth: ref.read(hostedRelayAuthProvider),
+      );
     });
 
 typedef CommunityPushLeaseRevocationEnqueuer =
@@ -123,6 +126,7 @@ final communityPushLeaseRevocationTriggerProvider =
 Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
+  required HostedRelayAuth relayAuth,
 }) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
@@ -154,6 +158,12 @@ Future<void> _deactivateCommunityPushLease(
   };
   final wsScheme = httpScheme == 'https' ? 'wss' : 'ws';
   final wsUrl = uri.replace(scheme: wsScheme).toString();
+  // The community being removed may not be the active session, so ask for its
+  // own assertion: a hosted relay refuses the socket upgrade without one.
+  final relayConfig = RelayConfig(
+    baseUrl: uri.replace(scheme: httpScheme).toString(),
+    nsec: nsec,
+  );
   // Skip over the one renewal generation that could already be in flight
   // when removal begins. Strict relay monotonicity then makes any stale
   // active publication lose to this tombstone.
@@ -165,15 +175,21 @@ Future<void> _deactivateCommunityPushLease(
     generation: tombstoneGeneration,
     nsec: nsec,
     memberPubkey: memberPubkey,
-    submit: ({required kind, required content, required tags, createdAt}) =>
-        submitSignedEventOnce(
-          wsUrl: wsUrl,
-          nsec: nsec,
-          kind: kind,
-          content: content,
-          tags: tags,
-          createdAt: createdAt,
-        ),
+    submit:
+        ({required kind, required content, required tags, createdAt}) async =>
+            submitSignedEventOnce(
+              wsUrl: wsUrl,
+              headers: await relayAuth.headers(
+                relayConfig,
+                background: true,
+                fresh: true,
+              ),
+              nsec: nsec,
+              kind: kind,
+              content: content,
+              tags: tags,
+              createdAt: createdAt,
+            ),
   );
   pushLeaseCleanupError.value = null;
 }

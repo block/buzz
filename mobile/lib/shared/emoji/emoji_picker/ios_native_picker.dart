@@ -119,6 +119,8 @@ Future<void> _presentIosEmojiPicker({
   }
   final recent = container.read(recentEmojiProvider);
   final mediaAuth = container.read(mediaGetAuthServiceProvider);
+  final hostedAuth = container.read(hostedRelayAuthProvider);
+  final relayConfig = container.read(relayConfigProvider);
   final prefs = container.read(savedPrefsProvider);
   final colors = context.colors;
   var dismissed = false;
@@ -135,9 +137,16 @@ Future<void> _presentIosEmojiPicker({
     switch (call.method) {
       case 'mediaHeaders':
         final url = call.arguments;
-        return url is String
-            ? mediaAuth.headersFor(url)
-            : const <String, String>{};
+        if (url is! String) return const <String, String>{};
+        // Native downloads bypass the hosted HTTP client, so add its relay
+        // assertion here too: a hosted relay refuses media reads without it.
+        // Await the assertion before minting the short-lived media proof so a
+        // slow refresh cannot age it.
+        final assertion = await hostedAuth.headersForUrl(
+          relayConfig,
+          Uri.parse(url),
+        );
+        return <String, String>{...mediaAuth.headersFor(url), ...assertion};
       case 'selected':
         final emoji = call.arguments;
         if (emoji is String && emoji.isNotEmpty) onSelect(emoji);

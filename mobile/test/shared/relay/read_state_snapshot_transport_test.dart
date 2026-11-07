@@ -572,7 +572,11 @@ class _SnapshotAuth extends HostedRelayAuth {
   bool protects(RelayConfig config) => true;
 
   @override
-  Future<Map<String, String>> headers(RelayConfig config) async {
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+    bool fresh = false,
+  }) async {
     await beforeHeaders?.call();
     return {'Nostr-Federated-Identity': 'assertion'};
   }
