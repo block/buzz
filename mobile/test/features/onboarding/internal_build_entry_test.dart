@@ -29,8 +29,8 @@ void main() {
   final skip = !OrganizationEnvironment.enabled;
 
   testWidgets(
-    'one Sign in joins the organization; after signing out, Sign in restores '
-    'the same identity from the organization',
+    'one Sign in joins the organization; after signing out, Sign in reuses '
+    'the same identity from this device',
     (tester) async {
       FlutterSecureStorage.setMockInitialValues({});
       final tenant = _Tenant();
@@ -110,6 +110,9 @@ void main() {
         await tester.pumpAndSettle();
       }
       expect(await harness.saved(), isEmpty);
+      // The key stays on this device: sign-in must not depend on the backup,
+      // which a device without HPKE sealing never uploads.
+      tenant.backups.clear();
       // Signing out closes Settings, uncovering what is beneath it.
       expect(find.byType(SettingsPage), findsNothing);
       expect(find.text('Home'), findsOneWidget);
@@ -120,7 +123,7 @@ void main() {
       expect(harness.browserUrls, hasLength(2));
       final second = await harness.joinedCommunity();
       expect(second.pubkey, first.pubkey);
-      expect(tenant.recoveries, 1);
+      expect(tenant.recoveries, 0);
     },
     skip: skip,
   );
