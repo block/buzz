@@ -11,6 +11,11 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::Metrics {
+            agent,
+            since,
+            limit,
+        } => super::agent_metrics::dispatch(client, agent.as_deref(), since, limit).await,
         AgentsCmd::DraftCreate {
             channel,
             display_name,
