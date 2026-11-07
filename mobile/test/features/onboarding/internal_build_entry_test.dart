@@ -82,11 +82,22 @@ void main() {
       // Sign out, at the bottom of Settings, removes the community; the
       // landing then ends the session.
       await harness.open(
-        child: SettingsPage(
-          profileHeader: const SizedBox.shrink(),
-          identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => SettingsPage(
+                  profileHeader: const SizedBox.shrink(),
+                  identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+                ),
+              ),
+            ),
+            child: const Text('Home'),
+          ),
         ),
       );
+      await tester.tap(find.text('Home'));
+      await tester.pumpAndSettle();
       await tester.scrollUntilVisible(
         find.byKey(const Key('settings-sign-out')),
         200,
@@ -99,6 +110,9 @@ void main() {
         await tester.pumpAndSettle();
       }
       expect(await harness.saved(), isEmpty);
+      // Signing out closes Settings, uncovering what is beneath it.
+      expect(find.byType(SettingsPage), findsNothing);
+      expect(find.text('Home'), findsOneWidget);
       await harness.open();
       expect(harness.accounts.last.account, isNull);
 
