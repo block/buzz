@@ -143,6 +143,27 @@
       "normalization_policy": "none"
     },
     {
+      "id": "anthropic-adaptive-xhigh-haiku-5",
+      "_comment": "Haiku 5.5 (API id claude-haiku-5-5, released 2026-10-07). Adaptive thinking, all five effort levels, default medium — unlike the other xhigh families, whose API default is high. Same shape in the code harness at v2.1.293 or later. Docs: https://platform.claude.com/docs/en/models/haiku-5-5/overview and https://platform.claude.com/docs/en/build-with-claude/effort. Prefix claude-haiku-5 does not match claude-haiku-4-5.",
+      "match_kind": "prefix",
+      "match_value": "claude-haiku-5",
+      "providers": [
+        "anthropic",
+        "databricks_v2"
+      ],
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none"
+    },
+    {
       "id": "anthropic-adaptive-xhigh-fable-5",
       "match_kind": "prefix",
       "match_value": "claude-fable-5",
