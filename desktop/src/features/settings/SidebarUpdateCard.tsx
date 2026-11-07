@@ -1,5 +1,5 @@
 import * as React from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { CircleArrowUp, ExternalLink } from "lucide-react";
 
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
@@ -103,7 +103,7 @@ export function SidebarUpdateCard({ onDismiss }: SidebarUpdateCardProps) {
         dismissLabel="Dismiss update notification"
         icon={<ExternalLink aria-hidden="true" className="h-5 w-5" />}
         iconKey="manual"
-        onAction={() => void openUrl(status.releaseUrl)}
+        onAction={() => void openExternalUrl(status.releaseUrl)}
         onDismiss={onDismiss}
         testId="sidebar-update-card-manual"
         title="Update available"
