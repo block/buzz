@@ -112,3 +112,12 @@ export type MeshModelCatalog = {
 export async function meshModelCatalog(): Promise<MeshModelCatalog> {
   return await invokeTauri<MeshModelCatalog>("mesh_model_catalog");
 }
+
+/**
+ * Whether this desktop binary was compiled with `--features mesh-llm`.
+ * Linux/Windows release packages currently ship without it (#3841); macOS
+ * release/canary builds enable it. Prefer this over catching stub errors.
+ */
+export async function meshFeatureEnabled(): Promise<boolean> {
+  return await invokeTauri<boolean>("mesh_feature_enabled");
+}
