@@ -23,6 +23,19 @@ abstract final class BuilderlabBuild {
     distribution: const String.fromEnvironment('BUZZ_DISTRIBUTION'),
     url: const String.fromEnvironment('BUZZ_BUILDERLAB_URL'),
     relays: const String.fromEnvironment('BUZZ_BUILDERLAB_RELAYS'),
+    retired: [
+      if (const bool.hasEnvironment('BUZZ_AUTH_DOMAINS')) 'BUZZ_AUTH_DOMAINS',
+      if (const bool.hasEnvironment('BUZZ_ORGANIZATION_URL'))
+        'BUZZ_ORGANIZATION_URL',
+      if (const bool.hasEnvironment('BUZZ_ORGANIZATION_RELAYS'))
+        'BUZZ_ORGANIZATION_RELAYS',
+    ],
+  );
+
+  /// Keys the public Builderlab session's storage in builds without a public
+  /// Builderlab, which an internal build clears at launch.
+  static final Uri publicStorageOrigin = Uri.parse(
+    'https://app.builderlab.xyz',
   );
 
   /// `BUZZ_DISTRIBUTION`: `internal` or `public`. Null for a Nostr-only build.
@@ -66,7 +79,16 @@ abstract final class BuilderlabBuild {
     required String distribution,
     required String url,
     required String relays,
+    List<String> retired = const [],
   }) {
+    // A pipeline still passing the former settings would otherwise ship a
+    // Nostr-only build without its organization restriction.
+    if (retired.isNotEmpty) {
+      throw StateError(
+        '${retired.join(', ')} retired: set BUZZ_DISTRIBUTION, '
+        'BUZZ_BUILDERLAB_URL and BUZZ_BUILDERLAB_RELAYS instead',
+      );
+    }
     final domains = _parseDomains(relays);
     if (distribution.isEmpty && url.isEmpty && domains.isEmpty) {
       return (distribution: null, origin: null, relayDomains: const []);
@@ -97,11 +119,16 @@ abstract final class BuilderlabBuild {
         (uri.path.isNotEmpty && uri.path != '/')) {
       throw StateError('BUZZ_BUILDERLAB_URL must be an HTTPS origin');
     }
-    return (
-      distribution: kind,
-      origin: Uri.parse(uri.origin),
-      relayDomains: domains,
-    );
+    final origin = Uri.parse(uri.origin);
+    // Sessions are stored per origin host, so the internal build's cleanup of
+    // the public session would delete its own.
+    if (kind == BuilderlabDistribution.internal &&
+        origin.host == publicStorageOrigin.host) {
+      throw StateError(
+        'An internal build needs its own Builderlab, not ${origin.host}',
+      );
+    }
+    return (distribution: kind, origin: origin, relayDomains: domains);
   }
 
   static List<String> _parseDomains(String relays) => List.unmodifiable(

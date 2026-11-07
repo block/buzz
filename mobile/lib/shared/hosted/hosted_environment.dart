@@ -12,7 +12,7 @@ abstract final class HostedEnvironment {
   /// value only keys inert local storage.
   static final Uri origin = enabled
       ? BuilderlabBuild.origin!
-      : Uri.parse('https://app.builderlab.xyz');
+      : BuilderlabBuild.publicStorageOrigin;
 
   /// Public CDN serving each published Builderlab agent card's
   /// `<id>/agent.json` and images, for this build's account environment.

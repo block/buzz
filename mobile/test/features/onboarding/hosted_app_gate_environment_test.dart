@@ -10,7 +10,9 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_identity_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -34,6 +36,44 @@ class _Flow extends HostedFlow {
 }
 
 void main() {
+  testWidgets(
+    'launching outside an internal build removes the organization session '
+    'a previous build shared with the notification extension',
+    (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final shared = <Object?>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/push'),
+        (call) async {
+          final args = call.arguments;
+          if (args is Map && args['section'] == 'organizationSession') {
+            shared.add(args['credential'] ?? 'cleared');
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('buzz/push'),
+          null,
+        ),
+      );
+      // Only iOS shares the session with its notification extension.
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: MaterialApp(
+            home: HostedAppGate(authenticated: false, child: SizedBox()),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+      expect(shared, ['cleared']);
+    },
+  );
+
   testWidgets('app dispatch keeps staging invites out of legacy generation', (
     tester,
   ) async {

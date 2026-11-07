@@ -149,6 +149,22 @@ class CommunityStorage {
     await _saveList(all);
   }
 
+  /// Communities kept on this device that this build hides.
+  Future<List<Community>> loadHidden() async =>
+      (await _loadStored()).where((item) => !_visible(item)).toList();
+
+  /// Replaces one hidden community's record, keeping every other record.
+  Future<void> saveHidden(Community community) async {
+    final raw = await _secure.read(key: _keyCommunities);
+    if (raw == null) return;
+    final json = jsonEncode([
+      for (final item in _decodeList(raw))
+        (item.id == community.id && !_visible(item) ? community : item)
+            .toJson(),
+    ]);
+    await _secure.write(key: _keyCommunities, value: json);
+  }
+
   /// Replaces the complete stored community list in one secure-storage write.
   Future<void> saveAll(List<Community> communities) => _saveList(communities);
 

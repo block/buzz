@@ -57,6 +57,11 @@ class OrganizationSignIn extends ChangeNotifier {
   bool _initialized = false;
   bool _disposed = false;
 
+  /// A sign-out whose session is still saved. Until it is cleared, the
+  /// session counts as signed out and the next sign-in clears it first, so a
+  /// retired credential is never reused.
+  bool _retiring = false;
+
   Future<void> initialize() async {
     if (_initialized || _disposed) return;
     _initialized = true;
@@ -84,7 +89,9 @@ class OrganizationSignIn extends ChangeNotifier {
       // An unreadable saved session blocks every exchange, and its subject is
       // unknown. Signing in again explicitly replaces only that session.
       _begin(
-        clear: failure == AccountFailure.storage && account.account == null,
+        clear:
+            _retiring ||
+            (failure == AccountFailure.storage && account.account == null),
       );
 
   /// Drops only the organization session and signs in again, for an account
@@ -106,6 +113,7 @@ class OrganizationSignIn extends ChangeNotifier {
         _set(_currentStatus());
         return;
       }
+      _retiring = false;
       if (_disposed || attempt != _attempt) return;
     }
     try {
@@ -126,7 +134,9 @@ class OrganizationSignIn extends ChangeNotifier {
     _set(OrganizationSessionStatus.checking);
     try {
       await account.clearLocalSession();
+      _retiring = false;
     } on AccountFailure catch (error) {
+      _retiring = true;
       if (attempt != _attempt) return;
       failure = error;
     }
@@ -188,7 +198,8 @@ class OrganizationSignIn extends ChangeNotifier {
     _set(_currentStatus());
   }
 
-  OrganizationSessionStatus _currentStatus() => account.account == null
+  OrganizationSessionStatus _currentStatus() =>
+      account.account == null || _retiring
       ? OrganizationSessionStatus.signedOut
       : OrganizationSessionStatus.signedIn;
 

@@ -7,13 +7,17 @@ import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/device_identity_source.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_environment.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
-import 'package:flutter/services.dart';
+import 'package:buzz/shared/push/push_bridge.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -80,22 +84,24 @@ void main() {
       );
 
       // Sign out, at the bottom of Settings, removes the community; the
-      // landing then ends the session.
-      await harness.open(
-        child: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => SettingsPage(
-                  profileHeader: const SizedBox.shrink(),
-                  identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
-                ),
-              ),
-            ),
-            child: const Text('Home'),
-          ),
-        ),
-      );
+      // landing that replaces Home then ends the session. Clearing the
+      // notification extension's copy fails, so the session stays live.
+      const push = MethodChannel('buzz/push');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      var extensionFails = true;
+      messenger.setMockMethodCallHandler(push, (call) async {
+        final args = call.arguments;
+        if (extensionFails &&
+            args is Map &&
+            args['section'] == 'organizationSession' &&
+            args['credential'] == null) {
+          throw PlatformException(code: 'unavailable');
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(push, null));
+      await harness.open(child: const _SignedInGate());
+      await harness.settle();
       await tester.tap(find.text('Home'));
       await tester.pumpAndSettle();
       await tester.scrollUntilVisible(
@@ -104,22 +110,25 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('settings-sign-out')));
       await tester.pumpAndSettle();
+      // Only iOS shares the session with its notification extension.
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
-      for (var i = 0; i < 5; i++) {
-        await tester.runAsync(() => Future<void>.delayed(Duration.zero));
-        await tester.pumpAndSettle();
-      }
+      await harness.settle();
       expect(await harness.saved(), isEmpty);
       // The key stays on this device: sign-in must not depend on the backup,
       // which a device without HPKE sealing never uploads.
       tenant.backups.clear();
-      // Signing out closes Settings, uncovering what is beneath it.
+      // Signing out closes Settings, uncovering the Sign in landing.
       expect(find.byType(SettingsPage), findsNothing);
-      expect(find.text('Home'), findsOneWidget);
-      await harness.open();
-      expect(harness.accounts.last.account, isNull);
+      expect(find.text('Sign in'), findsOneWidget);
+      expect(harness.accounts.last.account, isNotNull);
+      extensionFails = false;
 
+      // Sign in must go through single sign-on again rather than reuse the
+      // credential that sign-out was retiring.
       await harness.signIn();
+      debugDefaultTargetPlatformOverride = null;
       expect(harness.browserUrls, hasLength(2));
       final second = await harness.joinedCommunity();
       expect(second.pubkey, first.pubkey);
@@ -211,21 +220,55 @@ void main() {
     }, skip: skip);
   }
 
-  test('communities on other relays stay stored but hidden', () async {
+  test('communities on other relays stay stored but hidden, stop notifying '
+      'and are never queried', () async {
     FlutterSecureStorage.setMockInitialValues({});
     final storage = CommunityStorage();
+    final keys = nostr.Keys.generate();
     final organization = Community.create(
       name: 'Organization',
       relayUrl: 'wss://${OrganizationEnvironment.relayHosts.first}',
-    );
+    ).copyWith(pushNotificationsEnabled: true);
     final other = Community.create(
       name: 'Other',
       relayUrl: 'wss://relay.example.net',
-    );
+      pubkey: keys.public,
+      nsec: keys.nsec,
+    ).copyWith(pushNotificationsEnabled: true);
     final everything = CommunityStorage(visible: (_) => true);
     await everything.saveAll([other, organization]);
 
     expect((await storage.loadAll()).map((item) => item.id), [organization.id]);
+
+    // A saved identity's profile is never fetched from a hidden relay.
+    final queried = <String>[];
+    await DeviceIdentitySource().loadProfile(keys.public, (config) async {
+      queried.add(config.baseUrl);
+      return null;
+    });
+    expect(queried, isEmpty);
+
+    // The hidden community's push lease is journaled for revocation once.
+    final journaled = <String>[];
+    var triggers = 0;
+    for (var launch = 0; launch < 2; launch++) {
+      await retireHiddenCommunityPushLeases(
+        storage: storage,
+        enqueue: (community) async {
+          journaled.add(community.id);
+          return true;
+        },
+        trigger: () async => triggers++,
+      );
+    }
+    expect(journaled, [other.id]);
+    expect(triggers, 1);
+    final stored = {
+      for (final item in await everything.loadAll()) item.id: item,
+    };
+    expect(stored[other.id]!.pushNotificationsEnabled, isFalse);
+    expect(stored[organization.id]!.pushNotificationsEnabled, isTrue);
+
     await storage.remove(organization.id);
     expect(await storage.loadAll(), isEmpty);
     expect((await everything.loadAll()).map((item) => item.id), [other.id]);
@@ -375,6 +418,12 @@ class _Harness {
             final account = BuilderlabAccountClient(
               accountOrigin: origin,
               httpClient: tenant.client,
+              onSessionChanged: (credential) =>
+                  shareOrganizationSessionWithNotifications(
+                    origin: origin,
+                    credential: credential,
+                    relayHosts: OrganizationEnvironment.relayHosts,
+                  ),
             );
             accounts.add(account);
             ref.onDispose(account.dispose);
@@ -406,11 +455,47 @@ class _Harness {
   Future<void> signIn() async {
     await tester.tap(find.text('Sign in'));
     await tester.pumpAndSettle();
-    // Secure storage and HTTP complete outside the fake clock.
+    await settle();
+  }
+
+  /// Secure storage and HTTP complete outside the fake clock.
+  Future<void> settle() async {
     for (var i = 0; i < 5; i++) {
       await tester.runAsync(() => Future<void>.delayed(Duration.zero));
       await tester.pumpAndSettle();
     }
+  }
+}
+
+/// Home while the organization's community is saved, else the landing, as
+/// the app's root does.
+class _SignedInGate extends ConsumerWidget {
+  const _SignedInGate();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // As HostedAppGate does, keep the organization session alive under Home.
+    ref.watch(organizationSignInProvider);
+    return ref
+        .watch(activeCommunityProvider)
+        .when(
+          data: (community) => community == null
+              ? const OnboardingAppEntry()
+              : TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => SettingsPage(
+                        profileHeader: const SizedBox.shrink(),
+                        identityRecoveryPageBuilder: (_) =>
+                            const SizedBox.shrink(),
+                      ),
+                    ),
+                  ),
+                  child: const Text('Home'),
+                ),
+          loading: () => const SizedBox.shrink(),
+          error: (_, _) => const SizedBox.shrink(),
+        );
   }
 }
 

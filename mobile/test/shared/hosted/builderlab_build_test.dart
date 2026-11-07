@@ -40,6 +40,7 @@ void main() {
       ('public', 'https://id.example.org', '*.example.org'),
       ('public', 'https://id.example.org', 'localhost'),
       ('internal', 'https://id.example.org', 'buzz.example.org,b.example.org'),
+      ('internal', 'https://app.builderlab.xyz', 'buzz.example.org'),
     ]) {
       expect(
         () => BuilderlabBuild.parse(
@@ -51,6 +52,15 @@ void main() {
         reason: '$distribution $url $relays',
       );
     }
+    expect(
+      () => BuilderlabBuild.parse(
+        distribution: '',
+        url: '',
+        relays: '',
+        retired: ['BUZZ_ORGANIZATION_URL'],
+      ),
+      throwsStateError,
+    );
   });
 
   test('relays match configured domains and subdomains, never suffixes', () {

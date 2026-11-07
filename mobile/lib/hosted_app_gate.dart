@@ -17,6 +17,7 @@ import 'shared/hosted/hosted_community_connection.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_environment.dart';
 import 'shared/hosted/hosted_relay_auth.dart';
+import 'shared/push/push_bridge.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'features/onboarding/hosted_reconnect_banner.dart';
 import 'features/onboarding/organization_sign_in_banner.dart';
@@ -57,7 +58,8 @@ class HostedAppGate extends HookConsumerWidget {
     ref.watch(organizationSignInProvider);
     useEffect(() {
       // An internal build keeps one Builderlab session: drop any public
-      // session a previous build saved. Its communities stay stored, hidden.
+      // session a previous build saved. Its communities stay stored, hidden,
+      // and stop notifying.
       if (OrganizationEnvironment.enabled) {
         unawaited(
           ref
@@ -66,6 +68,27 @@ class HostedAppGate extends HookConsumerWidget {
               .catchError(
                 (Object error) => debugPrint('Public session cleanup: $error'),
               ),
+        );
+        unawaited(
+          retireHiddenCommunityPushLeases(
+            storage: ref.read(communityStorageProvider),
+            enqueue: ref.read(communityPushLeaseRevocationEnqueuerProvider),
+            trigger: ref.read(communityPushLeaseRevocationTriggerProvider),
+          ),
+        );
+      } else {
+        // A previous internal build may have shared its organization session
+        // with the notification extension, which would keep minting
+        // assertions for the organization's relays.
+        unawaited(
+          shareOrganizationSessionWithNotifications(
+            origin: HostedEnvironment.origin,
+            credential: null,
+            relayHosts: const [],
+          ).catchError(
+            (Object error) =>
+                debugPrint('Organization session cleanup: $error'),
+          ),
         );
       }
       return null;
