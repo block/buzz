@@ -298,7 +298,23 @@ async fn run_connection<S>(
             }
             incoming = socket.next() => {
                 let message = match incoming {
-                    Some(Ok(message)) => outbound_message(message),
+                    Some(Ok(message)) => {
+                        if matches!(&message, Message::Ping(_)) {
+                            let result = tokio::time::timeout(WRITE_TIMEOUT, socket.flush())
+                                .await
+                                .map_err(|_| "WebSocket Pong flush timed out".to_string())
+                                .and_then(|result| result.map_err(|error| error.to_string()));
+                            if let Err(error) = result {
+                                if let Ok(value) =
+                                    serde_json::to_value(OutboundMessage::Error(error))
+                                {
+                                    let _ = on_message.send(value);
+                                }
+                                break;
+                            }
+                        }
+                        outbound_message(message)
+                    }
                     Some(Err(error)) => OutboundMessage::Error(error.to_string()),
                     None => OutboundMessage::Close(None),
                 };
@@ -660,6 +676,63 @@ mod tests {
             .await
             .expect("live server should observe native socket shutdown")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_connection_replies_to_and_forwards_server_ping() {
+        let manager = WebSocketManager::default();
+        let (client_io, server_io) = duplex(1024);
+        let (client, mut server) = tokio::join!(
+            WebSocketStream::from_raw_socket(client_io, Role::Client, None),
+            WebSocketStream::from_raw_socket(server_io, Role::Server, None),
+        );
+        let (sender, receiver) = mpsc::channel(SEND_QUEUE_CAPACITY);
+        let (message_tx, mut message_rx) = mpsc::unbounded_channel();
+        let on_message = Channel::new(move |body| {
+            let _ = message_tx.send(body);
+            Ok(())
+        });
+        let handle = Arc::new(ConnectionHandle {
+            sender,
+            cancel: CancellationToken::new(),
+            task: Mutex::new(None),
+        });
+        manager.connections.lock().await.insert(1, handle.clone());
+        let task = tauri::async_runtime::spawn(run_connection(
+            1,
+            client,
+            receiver,
+            handle.cancel.clone(),
+            on_message,
+            manager.clone(),
+        ));
+        *handle.task.lock().await = Some(task);
+
+        let payload = b"buzz-heartbeat".to_vec();
+        server
+            .send(Message::Ping(payload.clone().into()))
+            .await
+            .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(1), server.next())
+            .await
+            .expect("idle client should answer a relay Ping")
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply, Message::Pong(payload.clone().into()));
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), message_rx.recv())
+            .await
+            .expect("relay Ping should still reach the webview")
+            .unwrap();
+        let InvokeResponseBody::Json(json) = forwarded else {
+            panic!("relay Ping should be forwarded as JSON")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({ "type": "Ping", "data": payload })
+        );
+
+        manager.disconnect(1).await;
     }
 
     #[tokio::test]
