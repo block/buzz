@@ -123,31 +123,6 @@ final communityPushLeaseRevocationTriggerProvider =
       return ref.watch(buzzPushLeaseRevocationOutboxProvider).trigger;
     });
 
-/// Journals push-lease revocation for each community this build hides, where
-/// the member can no longer turn its notifications off. Each is then saved
-/// with notifications off, so it is journaled once.
-Future<void> retireHiddenCommunityPushLeases({
-  required CommunityStorage storage,
-  required CommunityPushLeaseRevocationEnqueuer enqueue,
-  required CommunityPushLeaseRevocationTrigger trigger,
-}) async {
-  var journaled = false;
-  for (final community in await storage.loadHidden()) {
-    if (!community.pushNotificationsEnabled) continue;
-    try {
-      if (!await enqueue(community)) continue;
-      journaled = true;
-      await storage.saveHidden(
-        community.copyWith(pushNotificationsEnabled: false),
-      );
-    } catch (error, stackTrace) {
-      // Retried at the next launch.
-      reportPushLeaseCleanupError(error, stackTrace);
-    }
-  }
-  if (journaled) await trigger();
-}
-
 Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,

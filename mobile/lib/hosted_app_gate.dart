@@ -57,8 +57,7 @@ class HostedAppGate extends HookConsumerWidget {
     ref.watch(organizationSignInProvider);
     useEffect(() {
       // An internal build keeps one Builderlab session: drop any public
-      // session a previous build saved. Its communities stay stored, hidden,
-      // and stop notifying.
+      // session a previous build saved. Its communities stay stored, hidden.
       if (OrganizationEnvironment.enabled) {
         unawaited(
           ref
@@ -67,13 +66,6 @@ class HostedAppGate extends HookConsumerWidget {
               .catchError(
                 (Object error) => debugPrint('Public session cleanup: $error'),
               ),
-        );
-        unawaited(
-          retireHiddenCommunityPushLeases(
-            storage: ref.read(communityStorageProvider),
-            enqueue: ref.read(communityPushLeaseRevocationEnqueuerProvider),
-            trigger: ref.read(communityPushLeaseRevocationTriggerProvider),
-          ),
         );
       }
       return null;

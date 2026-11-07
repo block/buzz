@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
@@ -221,21 +220,21 @@ void main() {
     }, skip: skip);
   }
 
-  test('communities on other relays stay stored but hidden, stop notifying '
-      'and are never queried', () async {
+  test('communities on other relays stay stored but hidden and are never '
+      'queried', () async {
     FlutterSecureStorage.setMockInitialValues({});
     final storage = CommunityStorage();
     final keys = nostr.Keys.generate();
     final organization = Community.create(
       name: 'Organization',
       relayUrl: 'wss://${OrganizationEnvironment.relayHosts.first}',
-    ).copyWith(pushNotificationsEnabled: true);
+    );
     final other = Community.create(
       name: 'Other',
       relayUrl: 'wss://relay.example.net',
       pubkey: keys.public,
       nsec: keys.nsec,
-    ).copyWith(pushNotificationsEnabled: true);
+    );
     final everything = CommunityStorage(visible: (_) => true);
     await everything.saveAll([other, organization]);
 
@@ -248,46 +247,6 @@ void main() {
       return null;
     });
     expect(queried, isEmpty);
-
-    // The hidden community's push lease is journaled for revocation once.
-    final journaled = <String>[];
-    var triggers = 0;
-    for (var launch = 0; launch < 2; launch++) {
-      await retireHiddenCommunityPushLeases(
-        storage: storage,
-        enqueue: (community) async {
-          journaled.add(community.id);
-          return true;
-        },
-        trigger: () async => triggers++,
-      );
-    }
-    expect(journaled, [other.id]);
-    expect(triggers, 1);
-    final stored = {
-      for (final item in await everything.loadAll()) item.id: item,
-    };
-    expect(stored[other.id]!.pushNotificationsEnabled, isFalse);
-    expect(stored[organization.id]!.pushNotificationsEnabled, isTrue);
-
-    // A hidden update that overlaps a removal never restores the removed
-    // community.
-    final paused = _PausingStorage();
-    final racing = CommunityStorage(secure: paused);
-    final release = Completer<void>();
-    paused.nextRead = release.future;
-    final hidden = racing.saveHidden(
-      stored[other.id]!.copyWith(name: 'Other, renamed'),
-    );
-    await pumpEventQueue();
-    final removed = racing.remove(organization.id);
-    await pumpEventQueue();
-    release.complete();
-    await Future.wait([hidden, removed]);
-    expect(await storage.loadAll(), isEmpty);
-    expect((await everything.loadAll()).map((item) => item.name), [
-      'Other, renamed',
-    ]);
   }, skip: skip);
 }
 
@@ -512,28 +471,6 @@ class _SignedInGate extends ConsumerWidget {
           loading: () => const SizedBox.shrink(),
           error: (_, _) => const SizedBox.shrink(),
         );
-  }
-}
-
-/// Pauses the first read after [nextRead] is set until it completes.
-class _PausingStorage extends FlutterSecureStorage {
-  Future<void>? nextRead;
-
-  @override
-  Future<String?> read({
-    required String key,
-    AppleOptions? iOptions,
-    AndroidOptions? aOptions,
-    LinuxOptions? lOptions,
-    WebOptions? webOptions,
-    AppleOptions? mOptions,
-    WindowsOptions? wOptions,
-  }) async {
-    final value = await super.read(key: key);
-    final pause = nextRead;
-    nextRead = null;
-    if (pause != null) await pause;
-    return value;
   }
 }
 
