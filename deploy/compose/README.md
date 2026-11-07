@@ -28,6 +28,11 @@ keypair.
 - Requires Docker Compose v2.24.4 or newer; the TLS override uses Compose's
   `!reset` tag to remove the direct relay port when Caddy terminates HTTPS.
 - Default `BUZZ_IMAGE` tracks `ghcr.io/block/buzz:main` for early testing. Pin it to `ghcr.io/block/buzz:sha-<7>` or a semver release tag for production once available.
+- `BUZZ_CORS_ORIGINS` must keep the desktop webview origins (`tauri://localhost`
+  for macOS/Linux, `http://tauri.localhost` for Windows) alongside your public
+  domain. The relay treats the list as exact origins with no permissive
+  fallback, so without the tauri entries desktop flows that use the HTTP API
+  (joining a community, invites, moderation) fail with a generic "Load failed".
 - Keep `BUZZ_RELAY_PRIVATE_KEY`, `BUZZ_GIT_HOOK_HMAC_SECRET`, database/Redis,
   and S3 secrets stable across restarts.
 - `RELAY_OWNER_PUBKEY` is intentionally not prefixed with `BUZZ_`; it must be a
