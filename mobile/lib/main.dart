@@ -20,15 +20,14 @@ void main() => runBuzzApp(const App());
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
   installBuzzPushMethodHandler();
-  // Relay upgrades name the app version once the platform reports it.
-  unawaited(
-    PackageInfo.fromPlatform()
-        .then((info) => setRelayUserAgent(info.version))
-        .catchError((Object _) {}),
+  // Relay upgrades name the app version, so learn it before any socket opens.
+  final userAgent = loadRelayUserAgent(
+    () async => (await PackageInfo.fromPlatform()).version,
   );
 
   // Pre-load preferences so the first frame uses the saved theme/accent.
   final prefs = await SharedPreferences.getInstance();
+  await userAgent;
 
   runApp(buildRootProviderScope(prefs: prefs, child: app));
 }

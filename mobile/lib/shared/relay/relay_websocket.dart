@@ -15,6 +15,19 @@ String relayUserAgent = 'Buzz-Mobile';
 void setRelayUserAgent(String version) =>
     relayUserAgent = 'Buzz-Mobile/$version';
 
+/// Sets [relayUserAgent] from [lookupVersion] before any socket opens, giving
+/// up after [timeout] so a hung or failed lookup cannot stall launch.
+Future<void> loadRelayUserAgent(
+  Future<String> Function() lookupVersion, {
+  Duration timeout = const Duration(milliseconds: 500),
+}) async {
+  try {
+    setRelayUserAgent(await lookupVersion().timeout(timeout));
+  } catch (_) {
+    // Keep the unversioned fallback.
+  }
+}
+
 /// WebSocket's default HTTP client follows redirects, including custom headers.
 /// Keep key-bound assertions at their original origin and bound upgrade time.
 ///

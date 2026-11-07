@@ -329,4 +329,37 @@ void main() {
     expect(agents, ['Buzz-Mobile/1.2.3', 'Buzz-Mobile/1.2.3']);
     await server.close(force: true);
   });
+
+  test('first upgrade waits for a delayed version lookup', () async {
+    final agents = <String?>[];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((request) async {
+      agents.add(request.headers.value(HttpHeaders.userAgentHeader));
+      final ws = await WebSocketTransformer.upgrade(request);
+      ws.listen((_) {}, onError: (_) {}, onDone: () {});
+    });
+    relayUserAgent = 'Buzz-Mobile';
+    await loadRelayUserAgent(
+      () => Future.delayed(const Duration(milliseconds: 100), () => '4.5.6'),
+    );
+    final socket = await openRelayWebSocket(
+      Uri.parse('ws://127.0.0.1:${server.port}'),
+      headers: const {},
+      pingInterval: const Duration(seconds: 30),
+    );
+    await socket.close();
+    expect(agents, ['Buzz-Mobile/4.5.6']);
+    await server.close(force: true);
+  });
+
+  test('a hung or failed version lookup keeps the unversioned agent', () async {
+    relayUserAgent = 'Buzz-Mobile';
+    await loadRelayUserAgent(
+      () => Completer<String>().future,
+      timeout: const Duration(milliseconds: 10),
+    );
+    expect(relayUserAgent, 'Buzz-Mobile');
+    await loadRelayUserAgent(() async => throw StateError('no platform'));
+    expect(relayUserAgent, 'Buzz-Mobile');
+  });
 }
