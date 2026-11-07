@@ -1,4 +1,8 @@
 import {
+  isProjectHomeWorkspaceSheetTab,
+  type ProjectHomeWorkspaceSheetTab,
+} from "@/features/projects/lib/projectHomeWorkspaceSheet";
+import {
   parseProfilePanelTab,
   parseProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -23,6 +27,11 @@ export function parseProjectDetailSearch(search: Record<string, unknown>) {
   return {
     commitHash: optionalSearchString(search.commitHash),
     filePath: optionalSearchString(search.filePath),
+    homeTab: isProjectHomeWorkspaceSheetTab(
+      optionalSearchString(search.homeTab),
+    )
+      ? (search.homeTab as ProjectHomeWorkspaceSheetTab)
+      : undefined,
     pullRequestId: optionalSearchString(search.pullRequestId),
     issueId: optionalSearchString(search.issueId),
     repositoryId: optionalSearchString(search.repositoryId),
@@ -48,12 +57,14 @@ export function parseProjectDetailSearch(search: Record<string, unknown>) {
 export function wantsProjectRepositorySurface(input: {
   commitHash?: string;
   filePath?: string;
+  homeTab?: ProjectHomeWorkspaceSheetTab;
   issueId?: string;
   projectId: string;
   pullRequestId?: string;
   repositoryId?: string;
   tab?: string;
 }): boolean {
+  if (input.homeTab) return false;
   if (
     input.repositoryId ||
     input.tab ||
