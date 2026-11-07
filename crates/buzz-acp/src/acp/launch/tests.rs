@@ -230,13 +230,25 @@ async fn spawn_child() {
                         .unwrap()
                         .raw["meta"]
                         .clone();
-                    let expected = match std::env::var_os(PREFIX_ENV) {
-                        Some(_) => Value::Null,
-                        None => json!({"claudeCode": {"options": {"extraArgs": {
-                            "thinking-display": "summarized"
-                        }}}}),
-                    };
-                    assert_eq!(meta, expected, "prefix leaves summaries off");
+                    assert_eq!(
+                        meta["claudeCode"]["emitRawSDKMessages"],
+                        crate::acp::background::emit_raw_filter()
+                    );
+                    let options = &meta["claudeCode"]["options"];
+                    let summaries = &options["extraArgs"]["thinking-display"];
+                    let stop_hook = &options["settings"]["hooks"]["Stop"];
+                    if std::env::var_os(PREFIX_ENV).is_some() {
+                        // The prefixed agent may not run on this host, so
+                        // neither this host's Claude CLI nor buzz-acp binary
+                        // is assumed.
+                        assert!(
+                            options.is_null(),
+                            "prefix leaves summaries and hook off: {meta}"
+                        );
+                    } else {
+                        assert_eq!(summaries, "summarized", "{meta}");
+                        assert!(stop_hook.is_array(), "{meta}");
+                    }
                 }
                 client.shutdown().await;
             }
