@@ -862,6 +862,9 @@ async fn handle_search_req(
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
         };
+        if filter_matches_nothing(filter) {
+            continue;
+        }
         // Implicit channels plus the readable named-only channels this filter
         // names; never another filter's.
         let accessible_channels =
@@ -885,41 +888,40 @@ async fn handle_search_req(
         // values with accessible channels; if all are invalid/inaccessible,
         // skip the filter entirely (match nothing) rather than broadening.
         let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-        let channel_scope =
-            if let Some(vs) = filter.generic_tags.get(&h_tag).filter(|vs| !vs.is_empty()) {
-                let valid: Vec<uuid::Uuid> = vs
-                    .iter()
-                    .filter_map(|v| v.parse::<uuid::Uuid>().ok())
-                    .filter(|id| accessible_channels.contains(id))
-                    .collect();
-                if valid.is_empty() {
-                    continue; // all #h values invalid/inaccessible — skip filter
-                }
-                buzz_search::ChannelScope::Channels(valid)
-            } else {
-                // The community-wide scope (no #h tag on the filter).
-                match build_search_channel_scope_filter(accessible_channels, include_global) {
-                    Some(scope) => scope,
-                    None => continue,
-                }
-            };
+        let channel_scope = if let Some(vs) = filter.generic_tags.get(&h_tag) {
+            let valid: Vec<uuid::Uuid> = vs
+                .iter()
+                .filter_map(|v| v.parse::<uuid::Uuid>().ok())
+                .filter(|id| accessible_channels.contains(id))
+                .collect();
+            if valid.is_empty() {
+                continue; // all #h values invalid/inaccessible — skip filter
+            }
+            buzz_search::ChannelScope::Channels(valid)
+        } else {
+            // The community-wide scope (no #h tag on the filter).
+            match build_search_channel_scope_filter(accessible_channels, include_global) {
+                Some(scope) => scope,
+                None => continue,
+            }
+        };
 
-        let kinds = filter.kinds.as_ref().and_then(|ks| {
-            if ks.is_empty() {
-                None
-            } else {
-                Some(ks.iter().map(|k| k.as_u16() as i32).collect::<Vec<_>>())
-            }
-        });
-        let authors = filter.authors.as_ref().and_then(|au| {
-            if au.is_empty() {
-                None
-            } else {
-                Some(au.iter().map(|a| a.to_bytes().to_vec()).collect::<Vec<_>>())
-            }
-        });
-        let since = filter.since.map(|s| s.as_secs() as i64);
-        let until = filter.until.map(|u| u.as_secs() as i64);
+        let kinds = filter
+            .kinds
+            .as_ref()
+            .map(|ks| ks.iter().map(|k| k.as_u16() as i32).collect::<Vec<_>>());
+        let authors = filter
+            .authors
+            .as_ref()
+            .map(|au| au.iter().map(|a| a.to_bytes().to_vec()).collect::<Vec<_>>());
+        let since = filter
+            .since
+            .and_then(filter_timestamp)
+            .map(|t| t.timestamp());
+        let until = filter
+            .until
+            .and_then(filter_timestamp)
+            .map(|t| t.timestamp());
 
         // Paginate: keep fetching pages until we've emitted `limit` results or
         // exhausted the search result set. Post-filtering discards an unpredictable
@@ -1163,6 +1165,9 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 ///
 /// Anything else (multi-#p, #t, #a, search, #d on non-NIP-33) requires
 /// post-filtering and cannot use the fast COUNT path.
+///
+/// A filter that matches nothing (`filter_matches_nothing`) becomes the
+/// store's match-nothing query, which counts zero on either path.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
@@ -1244,6 +1249,35 @@ fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     values.iter().next()?.parse::<uuid::Uuid>().ok()
 }
 
+/// Whether `filter` matches no event under NIP-01 matching
+/// ([`buzz_core::filter::filters_match`]): it has a present-but-empty `kinds`,
+/// `authors`, `ids` or tag set, or a `since` later than any time the store can
+/// represent.
+///
+/// [`filter_to_query_params`] turns such a filter into the store's
+/// match-nothing query, and the NIP-50 search paths skip it.
+pub(crate) fn filter_matches_nothing(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_some_and(|kinds| kinds.is_empty())
+        || filter
+            .authors
+            .as_ref()
+            .is_some_and(|authors| authors.is_empty())
+        || filter.ids.as_ref().is_some_and(|ids| ids.is_empty())
+        || filter.generic_tags.values().any(|values| values.is_empty())
+        || filter
+            .since
+            .is_some_and(|since| filter_timestamp(since).is_none())
+}
+
+/// A filter `since`/`until` as a store timestamp, or `None` when the store
+/// cannot represent it. An unrepresentable `until` is no bound; an
+/// unrepresentable `since` matches nothing (see [`filter_matches_nothing`]).
+pub(crate) fn filter_timestamp(ts: nostr::Timestamp) -> Option<chrono::DateTime<chrono::Utc>> {
+    i64::try_from(ts.as_secs())
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+}
+
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
 ///
 /// Each filter is queried independently so that per-filter `limit` and time
@@ -1253,24 +1287,20 @@ fn filter_to_query_params(
     channel_id: Option<uuid::Uuid>,
     community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
-    let kinds: Option<Vec<i32>> = filter.kinds.as_ref().map(|ks| {
-        if ks.is_empty() {
-            // kinds:[] means "match no kinds" — skip this filter entirely by
-            // returning a sentinel that the DB query will produce zero rows for.
-            // We use Some(vec![]) which the DB layer treats as "no matching kinds".
-            vec![]
-        } else {
-            // Cast to i32 for Postgres INT column; safe because all Buzz kinds fit in i32.
-            ks.iter().map(|k| k.as_u16() as i32).collect()
-        }
-    });
+    let kinds: Option<Vec<i32>> = if filter_matches_nothing(filter) {
+        // An empty kind list is the store's match-nothing query: every query
+        // and count entry point answers it without SQL.
+        Some(Vec::new())
+    } else {
+        // Cast to i32 for Postgres INT column; safe because all Buzz kinds fit in i32.
+        filter
+            .kinds
+            .as_ref()
+            .map(|ks| ks.iter().map(|k| k.as_u16() as i32).collect())
+    };
 
-    let since = filter
-        .since
-        .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
-    let until = filter
-        .until
-        .and_then(|u| chrono::DateTime::from_timestamp(u.as_secs() as i64, 0));
+    let since = filter.since.and_then(filter_timestamp);
+    let until = filter.until.and_then(filter_timestamp);
     let limit = filter
         .limit
         .map(|l| (l as i64).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT))
@@ -3026,6 +3056,76 @@ mod tests {
             .limit(1);
         let q = filter_to_query_params(&other, None, community);
         assert_eq!(q.d_tag_values, None);
+    }
+
+    /// A present-but-empty set or a `since` past what the store can represent
+    /// matches no event under NIP-01 matching (`filters_match`), so the query
+    /// that REQ, COUNT, HTTP `/query` and `/count` build from it must match
+    /// nothing as well: `kinds: Some([])`, which every store entry point
+    /// answers without SQL. Otherwise the fast COUNT path counts every kind-9
+    /// event in scope.
+    #[test]
+    fn filter_that_matches_nothing_builds_a_match_nothing_query() {
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let keys = nostr::Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hi")
+            .tags([
+                nostr::Tag::parse(["e", &"a".repeat(64)]).unwrap(),
+                nostr::Tag::parse(["p", &keys.public_key().to_hex()]).unwrap(),
+                nostr::Tag::parse(["t", "x"]).unwrap(),
+                nostr::Tag::parse(["h", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let stored = buzz_core::StoredEvent::new(event, Some(channel));
+        let filter =
+            |value: serde_json::Value| -> Filter { serde_json::from_value(value).unwrap() };
+
+        let control = filter(serde_json::json!({"kinds": [9]}));
+        assert!(buzz_core::filter::filters_match(
+            std::slice::from_ref(&control),
+            &stored
+        ));
+        assert_eq!(
+            filter_to_query_params(&control, None, community).kinds,
+            Some(vec![9])
+        );
+
+        for value in [
+            serde_json::json!({"kinds": []}),
+            serde_json::json!({"kinds": [9], "authors": []}),
+            serde_json::json!({"kinds": [9], "ids": []}),
+            serde_json::json!({"kinds": [9], "#e": []}),
+            serde_json::json!({"kinds": [9], "#p": []}),
+            serde_json::json!({"kinds": [9], "#t": []}),
+            serde_json::json!({"kinds": [9], "#h": []}),
+            serde_json::json!({"kinds": [9], "#d": []}),
+            serde_json::json!({"kinds": [9], "since": 9_000_000_000_000_u64}),
+            serde_json::json!({"kinds": [9], "since": u64::MAX}),
+        ] {
+            let f = filter(value.clone());
+            assert!(
+                !buzz_core::filter::filters_match(std::slice::from_ref(&f), &stored),
+                "{value} matches nothing in memory"
+            );
+            let query = filter_to_query_params(&f, None, community);
+            assert_eq!(
+                query.kinds,
+                Some(vec![]),
+                "{value} must build the match-nothing query"
+            );
+        }
+
+        // An `until` the store cannot represent is no upper bound, as in
+        // memory; it must not wrap into a bound before the epoch.
+        let open_until = filter(serde_json::json!({"kinds": [9], "until": u64::MAX}));
+        assert!(buzz_core::filter::filters_match(
+            std::slice::from_ref(&open_until),
+            &stored
+        ));
+        let query = filter_to_query_params(&open_until, None, community);
+        assert_eq!((query.kinds, query.until), (Some(vec![9]), None));
     }
 
     #[test]
