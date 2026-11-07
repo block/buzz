@@ -78,6 +78,7 @@ buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
+buzz messages edit --event <event-id> --content - < message.md   # read replacement body from stdin
 buzz messages delete --event <event-id>
 buzz messages report --event <event-id> --reason spam --note "why"   # to moderators only
 buzz messages report --pubkey <pubkey> --reason impersonation
