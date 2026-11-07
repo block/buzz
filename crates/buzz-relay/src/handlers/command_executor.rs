@@ -855,12 +855,22 @@ async fn handle_workflow_trigger(
         .await
         .map_err(|_| IngestError::Rejected(WORKFLOW_NOT_FOUND.into()))?;
 
-    // 3. Manual triggers execute with the workflow owner's authority, so only
-    // the owner may start them. Channel membership alone is insufficient: a
-    // member could otherwise invoke another user's webhook or message actions.
-    // Anyone else is told the workflow is not found, so the response never
-    // reveals whether a workflow ID exists.
-    if workflow.owner_pubkey != self_bytes {
+    // 3. Manual triggers execute with the workflow owner's authority. Permit
+    // that principal and, when the owner is a managed agent, its NIP-OA human
+    // owner. Channel membership alone is insufficient: a member could
+    // otherwise invoke another user's webhook or message actions.
+    let caller_controls_workflow = if workflow.owner_pubkey == self_bytes {
+        true
+    } else {
+        state
+            .db
+            .is_agent_owner(community_id, &workflow.owner_pubkey, &self_bytes)
+            .await
+            // Keep authorization failures indistinguishable from a missing
+            // workflow so callers cannot use this check as an existence oracle.
+            .map_err(|_| IngestError::Rejected(WORKFLOW_NOT_FOUND.into()))?
+    };
+    if !caller_controls_workflow {
         return Err(IngestError::Rejected(WORKFLOW_NOT_FOUND.into()));
     }
 
