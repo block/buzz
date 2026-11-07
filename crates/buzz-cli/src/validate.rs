@@ -164,18 +164,24 @@ pub fn sdk_err(e: buzz_sdk::SdkError) -> CliError {
     }
 }
 
-/// Read content from a string value or stdin if the value is "-".
-pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
+/// Read content from a string value, or from `src` if the value is exactly "-".
+///
+/// The reader is a parameter so the sentinel behaviour can be unit tested
+/// without touching the process's stdin. Use [`read_or_stdin`] in commands.
+pub fn read_or_from(value: &str, src: &mut impl std::io::Read) -> Result<String, CliError> {
     if value == "-" {
-        use std::io::Read;
         let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
+        src.read_to_string(&mut buf)
             .map_err(|e| CliError::Other(format!("failed to read stdin: {e}")))?;
         Ok(buf)
     } else {
         Ok(value.to_string())
     }
+}
+
+/// Read content from a string value or stdin if the value is "-".
+pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
+    read_or_from(value, &mut std::io::stdin())
 }
 
 /// Read content from a file path, or stdin if the value is "-".
@@ -474,6 +480,22 @@ mod tests {
     #[test]
     fn read_or_stdin_passthrough_empty_string() {
         assert_eq!(super::read_or_stdin("").unwrap(), "");
+    }
+
+    #[test]
+    fn read_or_from_dash_is_a_sentinel_not_literal_content() {
+        // When `send` and `edit` disagreed on what "-" means, `edit` stored a
+        // literal "-" and overwrote the message it was meant to correct.
+        let mut src = std::io::Cursor::new(b"## Notes\n\nfull body".to_vec());
+        assert_eq!(
+            super::read_or_from("-", &mut src).unwrap(),
+            "## Notes\n\nfull body"
+        );
+        // Only a bare "-" is the sentinel; anything else is literal content.
+        assert_eq!(
+            super::read_or_from("- not a sentinel", &mut src).unwrap(),
+            "- not a sentinel"
+        );
     }
 
     // --- read_file_or_stdin ---
