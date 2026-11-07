@@ -2156,8 +2156,8 @@ impl Db {
     /// This runs on every admitted human AUTH to a community that does not
     /// require relay membership, so it stays off the writer. A stale answer
     /// is safe: [`Db::put_first_member`] decides again under the membership
-    /// lock, so a channel joined since is skipped, and a channel flagged since
-    /// is joined on the next admission. Falls back to the writer as
+    /// lock, so a channel joined or unflagged since is skipped, and a channel
+    /// flagged since is joined on the next admission. Falls back to the writer as
     /// [`Db::pending_default_channel_join_routed`] does.
     #[datastore_span(
         name = "list_never_joined_auto_join_channels_routed",
