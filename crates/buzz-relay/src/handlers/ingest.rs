@@ -3602,6 +3602,9 @@ async fn ingest_event_inner(
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
             .map_err(|e| match e {
+                buzz_db::DbError::AccessDenied(reason) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
                 buzz_db::DbError::ChannelNameTaken(_) => {
                     IngestError::Rejected(format!("invalid: {e}"))
                 }
