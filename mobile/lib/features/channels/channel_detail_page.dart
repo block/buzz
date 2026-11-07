@@ -962,6 +962,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
+                        enableSlashCommands: true,
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,
                         channelName: resolvedChannel.isDm
