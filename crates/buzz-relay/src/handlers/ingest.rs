@@ -542,6 +542,13 @@ impl IngestError {
             other => other,
         }
     }
+
+    /// The internal error for a failed database call. It names only the
+    /// error kind: DB error text can repeat a bound value, and the ephemeral
+    /// WebSocket arm forwards `Internal` text verbatim.
+    pub(crate) fn db(e: &buzz_db::DbError) -> Self {
+        Self::Internal(format!("error: database error: {}", e.kind()))
+    }
 }
 
 /// Map the durable community write-fence lookup onto the ingest error taxonomy.
@@ -941,6 +948,26 @@ impl ChannelWrite {
 const NOT_A_CHANNEL_MEMBER: &str = "restricted: not a channel member";
 const MEMBERS_ONLY_POSTING: &str = "restricted: only members can post in this channel";
 
+/// Why [`check_channel_membership`] refused a write.
+#[derive(Debug)]
+pub(crate) enum ChannelWriteRefusal {
+    /// The actor may not write to the channel; the text is client-safe.
+    Denied(&'static str),
+    /// A lookup the gate needed failed, so no decision was made.
+    Db(buzz_db::DbError),
+}
+
+impl From<ChannelWriteRefusal> for IngestError {
+    /// A denial is a client rejection; a failed lookup is internal and
+    /// never carries the database error text.
+    fn from(refusal: ChannelWriteRefusal) -> Self {
+        match refusal {
+            ChannelWriteRefusal::Denied(reason) => Self::Rejected(reason.to_owned()),
+            ChannelWriteRefusal::Db(e) => Self::db(&e),
+        }
+    }
+}
+
 /// The channel write gate: member OR open-visibility channel, plus, for
 /// [`ChannelWrite::Post`], the role-table write rule ([`may_post`]).
 ///
@@ -948,7 +975,7 @@ const MEMBERS_ONLY_POSTING: &str = "restricted: only members can post in this ch
 /// one (E1 within-request threading; correctness ruling §4.8). Callers without
 /// a row pass `None` and the gate reads the DB directly when it needs the row.
 ///
-/// Returns `Ok(())` if allowed, `Err(reason)` if denied.
+/// Returns `Ok(())` if allowed, otherwise why the write was refused.
 pub(crate) async fn check_channel_membership(
     community_id: CommunityId,
     state: &AppState,
@@ -956,11 +983,11 @@ pub(crate) async fn check_channel_membership(
     pubkey_bytes: &[u8],
     channel: Option<&buzz_db::channel::ChannelRecord>,
     write: ChannelWrite,
-) -> Result<(), String> {
+) -> Result<(), ChannelWriteRefusal> {
     let is_member = state
         .is_member_cached(community_id, ch_id, pubkey_bytes)
         .await
-        .map_err(|e| format!("error: database error: {e}"))?;
+        .map_err(ChannelWriteRefusal::Db)?;
     if is_member && write == ChannelWrite::Membership {
         return Ok(());
     }
@@ -976,19 +1003,19 @@ pub(crate) async fn check_channel_membership(
                 fetched = ch;
                 &fetched
             }
-            Err(_) if !is_member => return Err(NOT_A_CHANNEL_MEMBER.to_string()),
-            Err(e) => return Err(format!("error: database error: {e}")),
+            Err(_) if !is_member => return Err(ChannelWriteRefusal::Denied(NOT_A_CHANNEL_MEMBER)),
+            Err(e) => return Err(ChannelWriteRefusal::Db(e)),
         },
     };
     if !is_member && channel.visibility != "open" {
-        return Err(NOT_A_CHANNEL_MEMBER.to_string());
+        return Err(ChannelWriteRefusal::Denied(NOT_A_CHANNEL_MEMBER));
     }
     if write == ChannelWrite::Post
         && !may_post(state, community_id, ch_id, pubkey_bytes, channel, is_member)
             .await
-            .map_err(|e| format!("error: database error: {e}"))?
+            .map_err(ChannelWriteRefusal::Db)?
     {
-        return Err(MEMBERS_ONLY_POSTING.to_string());
+        return Err(ChannelWriteRefusal::Denied(MEMBERS_ONLY_POSTING));
     }
     Ok(())
 }
@@ -1051,8 +1078,7 @@ pub(crate) async fn check_channel_write(
         channel.as_ref(),
         ChannelWrite::Post,
     )
-    .await
-    .map_err(IngestError::Rejected)?;
+    .await?;
     if channel.is_some_and(|ch| ch.archived_at.is_some()) {
         return Err(IngestError::Rejected("invalid: channel is archived".into()));
     }
@@ -1459,22 +1485,23 @@ async fn validate_edit_ownership(
     community_id: CommunityId,
     event: &Event,
     state: &AppState,
-) -> Result<(), String> {
+) -> Result<(), IngestError> {
+    let invalid = |reason: &str| IngestError::Rejected(format!("invalid: {reason}"));
     let target_bytes = buzz_core::media::first_edit_target(event)
-        .ok_or_else(|| "missing e tag for edit target".to_string())?;
+        .ok_or_else(|| invalid("missing e tag for edit target"))?;
     // Kind 40003 skips the generic membership gate, so this validator is the
     // only authority: a target outside the edit's `h` channel, unreadable, or
     // not the actor's to edit is denied exactly like a missing one.
     let edit_channel_id =
-        extract_channel_id(event).ok_or_else(|| "missing h tag for edit".to_string())?;
+        extract_channel_id(event).ok_or_else(|| invalid("missing h tag for edit"))?;
     let actor = event.pubkey.to_bytes().to_vec();
     let target_event = state
         .db
         .get_event_by_id_for_event_write(community_id, &target_bytes)
         .await
-        .map_err(|e| format!("db error: {e}"))?
+        .map_err(|e| IngestError::db(&e))?
         .filter(|target| target_readable_in_channel(target, edit_channel_id, &actor))
-        .ok_or_else(|| EDIT_TARGET_DENIED.to_string())?;
+        .ok_or_else(|| invalid(EDIT_TARGET_DENIED))?;
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
     if author == actor {
@@ -1483,15 +1510,12 @@ async fn validate_edit_ownership(
         // A guest may not edit what they wrote before they became a guest.
         if let Some(ch_id) = target_event.channel_id {
             // A refused write is denied exactly like a missing target;
-            // database errors keep their own message.
+            // a failed lookup stays internal.
             check_channel_membership(community_id, state, ch_id, &actor, None, ChannelWrite::Post)
                 .await
-                .map_err(|error| {
-                    if error.starts_with("error:") {
-                        error
-                    } else {
-                        EDIT_TARGET_DENIED.to_string()
-                    }
+                .map_err(|refusal| match refusal {
+                    ChannelWriteRefusal::Denied(_) => invalid(EDIT_TARGET_DENIED),
+                    ChannelWriteRefusal::Db(e) => IngestError::db(&e),
                 })?;
         }
     } else {
@@ -1500,9 +1524,9 @@ async fn validate_edit_ownership(
             .db
             .is_agent_owner(community_id, &author, &actor)
             .await
-            .map_err(|e| format!("db error checking agent ownership: {e}"))?;
+            .map_err(|e| IngestError::db(&e))?;
         if !is_owner {
-            return Err(EDIT_TARGET_DENIED.to_string());
+            return Err(invalid(EDIT_TARGET_DENIED));
         }
     }
     Ok(())
@@ -2763,9 +2787,7 @@ async fn ingest_event_inner(
     // report; that is tolerated because reports are non-actioning signals and
     // remain visible only to moderators.
     if kind_u32 == KIND_REPORT {
-        super::report::handle_report_event(tenant, &event, state, auth.channel_ids())
-            .await
-            .map_err(IngestError::Rejected)?;
+        super::report::handle_report_event(tenant, &event, state, auth.channel_ids()).await?;
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2975,7 +2997,7 @@ async fn ingest_event_inner(
             );
             auth_result.map_err(|e| match target_denial {
                 Some(reason) => target_denied(reason),
-                None => IngestError::Rejected(e),
+                None => e.into(),
             })?;
         }
     }
@@ -3180,9 +3202,7 @@ async fn ingest_event_inner(
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
-        validate_edit_ownership(tenant.community(), &event, state)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        validate_edit_ownership(tenant.community(), &event, state).await?;
     }
 
     if kind_u32 == KIND_FORUM_VOTE {
@@ -3767,9 +3787,7 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    other => {
-                        IngestError::Internal(format!("error: database error: {}", other.kind()))
-                    }
+                    other => IngestError::db(&other),
                 });
             }
         }
