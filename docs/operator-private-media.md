@@ -91,22 +91,27 @@ media access through the ordinary media endpoint.
    uploader before restarting every serving pod in `enforce`.
 
 **Enforce prerequisite: upgrade every edit producer.** The updated
-`buzz messages edit` resolves the latest live attachment state on the primary
-and carries its complete imeta set. `--clear-attachments` explicitly removes
-all attachments; later text edits preserve that empty set. SDK integrations
-must use `buzz_sdk::build_edit_with_media` with the latest effective metadata.
-The compatibility `build_edit` helper still emits an empty attachment set and
-therefore removes attachments. A URL in the body does not retain access.
+`buzz messages edit` resolves the latest live attachment state on the primary and
+carries its complete imeta set for kinds 9/40002/40008/45001/45003. For those kinds,
+`--clear-attachments` explicitly removes all attachments; later text edits
+preserve that empty set. Other channel-tagged kinds keep their original media references after edits,
+and the CLI rejects `--clear-attachments` for them. SDK
+integrations must use `buzz_sdk::build_edit_with_media` with the latest
+effective metadata. The compatibility `build_edit` helper still emits an empty
+attachment set and therefore removes attachments on kinds 9/40002/40008/45001/45003. A URL in the
+body does not retain access.
 
-Deploy the relay with the [versioned effective-edit lookup](effective-message-edits.md)
-before releasing the new CLI. A new CLI against an older relay aborts without
-publishing; an old CLI against a new relay keeps its previous attachment-removing
-behavior. The `buzz-dev-mcp` multicall named `buzz` delegates to the same CLI
-entrypoint. The PostgreSQL regression
-`cli_successive_edits_preserve_and_revoke_attachments` exercises that entrypoint
-through HTTP and checks GET/HEAD, removal, and mixed-case edit targets.
+Deploy the relay with the [versioned effective-edit
+lookup](effective-message-edits.md) before releasing the new CLI. When editing
+kinds 9/40002/40008/45001/45003, a new CLI against an older relay aborts without publishing; an
+old CLI against a new relay keeps its previous attachment-removing behavior.
+Other kinds use plain edits without a lookup or a relay-version dependency. The
+`buzz-dev-mcp` multicall named `buzz` delegates to the same CLI entrypoint. The
+PostgreSQL regression `cli_successive_edits_preserve_and_revoke_attachments`
+exercises that entrypoint through HTTP and checks GET/HEAD, removal, and
+mixed-case edit targets.
 
-**Remaining enforce blocker: the separate `block/buzz-app` MCP edit producer.**
+**One remaining enforce blocker: the separate `block/buzz-app` MCP edit producer.**
 Its direct publisher at `src/buzz-mcp/tools.ts` copies the original event's
 imeta rather than resolving successive edits. It must adopt effective state
 and pass the same removal regression before enabling enforce for its users.
@@ -213,3 +218,58 @@ instance has no usable signing key. The error names affected instances; restore
 their keys, or remove/unlink those instances, then retry. The previous persona
 and instance avatars remain unchanged, so the same requested avatar is retryable.
 Keys may be permanently lost; waiting alone does not repair a lost key.
+
+
+The relay folds effective attachment state for the same five kinds accepted by
+the lookup: 9/40002/40008/45001/45003. CLI and MCP text edits preserve that state;
+`--clear-attachments` replaces it with an empty set on all five. After removal,
+access through that reference is revoked; another live reference or upload
+proof may independently authorize the blob. An older community relay without
+the lookup refuses these edits through the new CLI/MCP, so upgrade relays first.
+
+## Historical diff and forum edits
+
+**Readiness blocker:** before enforcement, audit existing kind 40008/45001/45003
+originals and every active edit producer. Expanding read folding applies to
+stored events, including old CLI edits that emitted no imeta. Upgrading clients
+does not repair those signed historical edits. An authorized writer must review
+and republish the intended full set; never infer that an empty edit meant to
+retain the original's files. No automatic historical rewrite is included.
+
+Run the read-only [preflight query](sql/private-media-edit-preflight.sql), binding
+`$1` to a community UUID. For psql, prepare its SELECT as
+`PREPARE private_media_edit_preflight(uuid) AS ...;`, then execute
+`EXECUTE private_media_edit_preflight('<community UUID>');` inside a read-only
+repeatable-read transaction. Use a bounded statement timeout. Each row counts
+live added-kind originals with imeta whose selected live edit omits imeta. The
+selection uses the same normalized first-valid target, same channel/community,
+and descending `(created_at,id)` ordering as the read path. Missing kinds have
+zero matches. These are affected references, not necessarily inaccessible blobs:
+another live reference or upload proof can independently authorize the bytes.
+Partial attachment changes require separate review. No production count is
+claimed by this PR.
+
+| Producer | Current behavior and rollout requirement |
+| --- | --- |
+| Updated CLI | Resolves the full effective set for all five kinds; explicit clear stays empty. Release after the relay. |
+| SDK | `build_edit` emits no imeta. `build_edit_with_media` copies the supplied set; callers must resolve latest state. Third-party callers remain a prerequisite. |
+| Legacy desktop chat | Carries rendered attachment state through `submitMessageEdit.ts` and `events.rs`; its local edit selection does not provide the primary lookup's full ordering guarantees. Audit deployed versions. |
+| Legacy native generic edit | Copies supplied media, defaulting to empty; no effective lookup. Its forum readers keep showing original metadata and only fold preview suppression. Audit any direct generic callers before enforcement. |
+| Mobile editor | `message_actions.dart` passes only custom emoji tags to `editMessage`; no imeta is retained. This remains an uncorrected producer blocker. |
+| App MCP | Current main copies original metadata; the paired MCP fix adopts latest state. The fix must ship before enforcement for its users. |
+| App UI | `fold.ts` selects the latest edit having imeta, falling back to the original. The UI editor can restore older files after an empty removal; it remains an uncorrected producer blocker. |
+| ACP | Edit routing consumes events; generic publication forwards already-built signed events. It does not resolve attachments for producers. |
+
+Source paths are relative to this repository, or to `block/buzz-app` for app
+entries. App audit snapshot: `cae3922574`; paired MCP implementation is tracked
+in [the counterpart PR](https://github.com/block/buzz-app/pull/2937). This audit
+identifies source behavior, not installed versions.
+
+Mode effects are precise: `off` skips reference checks for media reads and
+publication. `shadow` evaluates the five-kind policy and records its metrics,
+but does not deny reads/publication for policy failures; it also records sticky
+publication boundaries best effort. `enforce` denies reads without a current
+readable reference and rejects inaccessible carried attachments. Thus historical
+empty edits change shadow observations immediately, and deny their superseded
+original reference in enforce. Storage and tenant admission still apply in all
+modes. The lookup and new CLI behavior apply independently of read mode.

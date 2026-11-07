@@ -20,14 +20,30 @@ pub(super) async fn edit_message(
     let channel = channel_id_from_event(event_id, &raw)?;
     let original: Event = serde_json::from_value(raw)
         .map_err(|e| CliError::Other(format!("invalid edit target: {e}")))?;
-    if original.id != target || !matches!(original.kind.as_u16(), 9 | 40002) {
-        return Err(CliError::Usage(
-            "edit requires the original message's event ID (kind 9 or 40002)".into(),
+    if original.id != target {
+        return Err(CliError::Other(
+            "relay returned the wrong edit target".into(),
         ));
+    }
+    // Keep this boundary aligned with media_reference_query and the relay lookup.
+    // Other channel-tagged events retain the historical plain-edit behavior.
+    if !buzz_core::media::EDIT_GOVERNED_KINDS.contains(&original.kind.as_u16()) {
+        if clear_attachments {
+            return Err(CliError::Usage(format!(
+                "attachments on kind {} are not edit-governed",
+                original.kind.as_u16()
+            )));
+        }
+        let builder = buzz_sdk::build_edit(channel, target, content)
+            .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
+        let event = client.sign_event(builder).await?;
+        let resp = client.submit_event(event).await?;
+        println!("{}", crate::client::normalize_write_response(&resp));
+        return Ok(());
     }
     let raw = client
         .query(&serde_json::json!({
-            "kinds": [9,40002], "ids": [target.to_hex()], "#h": [channel.to_string()],
+            "kinds": buzz_core::media::EDIT_GOVERNED_KINDS, "ids": [target.to_hex()], "#h": [channel.to_string()],
             "effective_edit": 1, "consistency": "strong",
         }))
         .await?;
@@ -43,7 +59,7 @@ pub(super) async fn edit_message(
     let original: Event = serde_json::from_value(snapshot["original"].clone())
         .map_err(|e| CliError::Other(format!("invalid effective original: {e}")))?;
     if original.id != target
-        || !matches!(original.kind.as_u16(), 9 | 40002)
+        || !buzz_core::media::EDIT_GOVERNED_KINDS.contains(&original.kind.as_u16())
         || channel_id_from_event(event_id, &snapshot["original"])? != channel
     {
         return Err(CliError::Other(

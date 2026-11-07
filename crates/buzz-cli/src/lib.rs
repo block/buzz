@@ -682,7 +682,7 @@ pub enum MessagesCmd {
         /// New message content
         #[arg(long)]
         content: String,
-        /// Remove all attachments (later edits keep them removed)
+        /// Remove all attachments on kinds 9/40002/40008/45001/45003 (later edits keep them removed)
         #[arg(long)]
         clear_attachments: bool,
     },

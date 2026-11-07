@@ -18,7 +18,7 @@ async fn lookup(
     channel: Uuid,
     target: nostr::EventId,
 ) -> (StatusCode, serde_json::Value) {
-    let body = serde_json::to_vec(&serde_json::json!([{"kinds":[9,40002],"ids":[target.to_hex()],"#h":[channel.to_string()],"effective_edit":1,"consistency":"strong"}])).unwrap();
+    let body = serde_json::to_vec(&serde_json::json!([{"kinds":[9,40002,40008,45001,45003],"ids":[target.to_hex()],"#h":[channel.to_string()],"effective_edit":1,"consistency":"strong"}])).unwrap();
     let proof = EventBuilder::new(Kind::Custom(27235), "")
         .tags([
             Tag::parse(["u", &format!("http://{host}/query")]).unwrap(),
@@ -459,6 +459,25 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         &[StatusCode::NOT_FOUND; 2],
     )
     .await;
+    let additional_targets = Box::pin(governed_kinds_journey(
+        &state, &tenant, host, &url, channel, open, &owner, &member, &outsider,
+    ))
+    .await;
+    for kind in [40003, 7, 45002] {
+        let unsupported = EventBuilder::new(Kind::Custom(kind), "unsupported lookup target")
+            .tags([Tag::parse(["h", &open.to_string()]).unwrap()])
+            .sign_with_keys(&outsider)
+            .unwrap();
+        state
+            .db
+            .insert_event(tenant.community(), &unsupported, Some(open))
+            .await
+            .unwrap();
+        assert_eq!(
+            lookup(&state, host, &member, open, unsupported.id).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
     let forbidden = lookup(&state, host, &outsider, channel, original.id).await;
     let missing = lookup(
         &state,
@@ -488,6 +507,13 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
         missing,
         "fresh snapshot must reject a removed member"
     );
+    for target in additional_targets {
+        assert_eq!(
+            lookup(&state, host, &member, channel, target).await,
+            missing,
+            "removed member must not read added target kind"
+        );
+    }
     assert_eq!(
         lookup(&state, host, &member, open, harmless.id).await.0,
         StatusCode::OK,
@@ -495,4 +521,156 @@ async fn cli_successive_edits_preserve_and_revoke_attachments() {
     );
     http_server.abort();
     s3_server.abort();
+}
+
+// Keep this larger journey's future separately allocated on the default stack.
+#[allow(clippy::too_many_arguments)]
+async fn governed_kinds_journey(
+    state: &Arc<AppState>,
+    tenant: &buzz_core::TenantContext,
+    host: &str,
+    url: &str,
+    channel: Uuid,
+    open: Uuid,
+    owner: &Keys,
+    member: &Keys,
+    outsider: &Keys,
+) -> Vec<nostr::EventId> {
+    let mut targets = Vec::new();
+    for kind in [9, 40002, 40008, 45001, 45003] {
+        // Each original has isolated A/B bytes. Only the signer uploaded them;
+        // the member reader has no upload grant or alternate live reference.
+        let mut tags = Vec::new();
+        let mut hashes = Vec::new();
+        for label in ["A", "B"] {
+            let bytes = format!("kind {kind} {label} {}", Uuid::new_v4()).into_bytes();
+            let hash = hex::encode(Sha256::digest(&bytes));
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/upload")
+                        .header(header::HOST, host)
+                        .header(header::AUTHORIZATION, proof(owner, host, &hash, "upload"))
+                        .header("X-SHA-256", &hash)
+                        .body(Body::from(bytes.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let descriptor: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap())
+                    .unwrap();
+            tags.push(vec![
+                "imeta".into(),
+                format!("url {}", descriptor["url"].as_str().unwrap()),
+                format!("x {hash}"),
+                "m application/octet-stream".into(),
+                format!("size {}", bytes.len()),
+            ]);
+            hashes.push(hash);
+        }
+        // Creation schemas differ by surface; seed signed originals, then use
+        // the real HTTP lookup, CLI, ingest and media handlers for every edit.
+        let source = EventBuilder::new(Kind::Custom(kind), "original A")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(tags[0].clone()).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 20))
+            .sign_with_keys(owner)
+            .unwrap();
+        state
+            .db
+            .insert_event(tenant.community(), &source, Some(channel))
+            .await
+            .unwrap();
+        targets.push(source.id);
+        let denied = lookup(state, host, outsider, channel, source.id).await;
+        let absent = lookup(
+            state,
+            host,
+            outsider,
+            channel,
+            nostr::EventId::from_byte_array([0x43; 32]),
+        )
+        .await;
+        assert_eq!(denied, absent, "kind {kind} leaks private state");
+        assert_eq!(denied.0, StatusCode::NOT_FOUND);
+        let retaining =
+            buzz_sdk::build_edit_with_media(channel, source.id, "unauthorized owner", &tags[..1])
+                .unwrap()
+                .sign_with_keys(outsider)
+                .unwrap();
+        let Err(error) = publish(state, tenant, outsider, retaining).await else {
+            panic!("owner gained media access for kind {kind}")
+        };
+        assert!(
+            matches!(error,crate::handlers::ingest::IngestError::Rejected(ref reason) if reason=="restricted: attachment is not accessible"),
+            "{error:?}"
+        );
+        readable(
+            state,
+            host,
+            &hashes,
+            &[member],
+            &[StatusCode::OK, StatusCode::NOT_FOUND],
+        )
+        .await;
+        let replacement =
+            buzz_sdk::build_edit_with_media(channel, source.id, "replace A with B", &tags[1..])
+                .unwrap()
+                .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - 1))
+                .sign_with_keys(owner)
+                .unwrap();
+        publish(state, tenant, owner, replacement).await.unwrap();
+        for (clear, content, expected) in [
+            (false, "retain B", &tags[1..]),
+            (true, "clear", &tags[0..0]),
+            (false, "still empty", &tags[0..0]),
+        ] {
+            cli_edit(url, owner, source.id, clear, content).await;
+            let (status, snapshot) = lookup(state, host, member, channel, source.id).await;
+            assert_eq!(status, StatusCode::OK);
+            let edit: nostr::Event = serde_json::from_value(snapshot["edit"].clone()).unwrap();
+            assert_eq!(edit.content, content);
+            let carried: Vec<_> = edit
+                .tags
+                .iter()
+                .filter(|t| t.as_slice()[0] == "imeta")
+                .map(|t| t.as_slice().to_vec())
+                .collect();
+            assert_eq!(carried, expected, "kind {kind} metadata");
+            readable(
+                state,
+                host,
+                &hashes,
+                &[member],
+                &[
+                    StatusCode::NOT_FOUND,
+                    if expected.is_empty() {
+                        StatusCode::NOT_FOUND
+                    } else {
+                        StatusCode::OK
+                    },
+                ],
+            )
+            .await;
+        }
+        let public = EventBuilder::new(Kind::Custom(kind), "public original")
+            .tags([Tag::parse(["h", &open.to_string()]).unwrap()])
+            .sign_with_keys(outsider)
+            .unwrap();
+        state
+            .db
+            .insert_event(tenant.community(), &public, Some(open))
+            .await
+            .unwrap();
+        assert_eq!(
+            lookup(state, host, member, open, public.id).await.0,
+            StatusCode::OK
+        );
+    }
+    targets
 }

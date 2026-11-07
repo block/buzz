@@ -25,7 +25,7 @@ fn request(filters: &[Value]) -> Result<(Uuid, EventId), &'static str> {
         .ok_or("invalid target")?;
     if filters
         != [
-            json!({"kinds":[9,40002], "ids":[target.to_hex()], "#h":[channel.to_string()], "effective_edit":1, "consistency":"strong"}),
+            json!({"kinds":buzz_core::media::EDIT_GOVERNED_KINDS, "ids":[target.to_hex()], "#h":[channel.to_string()], "effective_edit":1, "consistency":"strong"}),
         ]
     {
         return Err("effective_edit requires one exact version-1 original-message filter with strong consistency");
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn exact_versioned_shape_is_required() {
         let channel = Uuid::new_v4();
-        let valid = json!({"kinds":[9,40002],"ids":["a".repeat(64)],"#h":[channel.to_string()],"effective_edit":1,"consistency":"strong"});
+        let valid = json!({"kinds":[9,40002,40008,45001,45003],"ids":["a".repeat(64)],"#h":[channel.to_string()],"effective_edit":1,"consistency":"strong"});
         assert!(request(std::slice::from_ref(&valid)).is_ok());
         for (key, value) in [
             ("effective_edit", json!(2)),

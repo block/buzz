@@ -112,6 +112,7 @@ struct Relay {
     events: Arc<Mutex<Vec<Event>>>,
     submitted: Arc<Mutex<Vec<Event>>>,
     fail_history: bool,
+    effective_queries: Arc<std::sync::atomic::AtomicUsize>,
     ignore_extension: Arc<std::sync::atomic::AtomicBool>,
 }
 async fn relay(events: Vec<Event>, fail_history: bool) -> (String, Relay) {
@@ -119,16 +120,24 @@ async fn relay(events: Vec<Event>, fail_history: bool) -> (String, Relay) {
         events: Arc::new(Mutex::new(events)),
         submitted: Default::default(),
         fail_history,
+        effective_queries: Default::default(),
         ignore_extension: Default::default(),
     };
     let app = Router::new()
         .route("/query", post(|State(state): State<Relay>, Json(filters): Json<Vec<serde_json::Value>>| async move {
             let filter = &filters[0];
+            if filter.get("effective_edit").is_some() {
+                state.effective_queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             if state.fail_history && filter.get("kinds").is_some() {
                 return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"denied"})));
             }
             if filter.get("effective_edit").is_some() && !state.ignore_extension.load(std::sync::atomic::Ordering::SeqCst) {
                 assert_eq!(filter["consistency"], "strong");
+                assert_eq!(filter, &serde_json::json!({
+                    "kinds":[9,40002,40008,45001,45003], "ids":filter["ids"],
+                    "#h":filter["#h"], "effective_edit":1, "consistency":"strong"
+                }));
                 let events = state.events.lock().unwrap();
                 let original = events.iter().find(|event| serde_json::json!(event.id.to_hex()) == filter["ids"][0]).unwrap();
                 let latest = events.iter().filter(|event| event.kind.as_u16() == 40003 && buzz_core::media::first_edit_target(event).as_deref() == Some(original.id.as_bytes().as_slice()))
@@ -225,16 +234,76 @@ async fn command_aborts_on_unreadable_history_or_future_head() {
 
 #[tokio::test]
 async fn command_refuses_an_older_relay_that_ignores_the_extension() {
-    let keys = Keys::generate();
-    let original = message(&keys, Uuid::new_v4(), &[imeta("kept")]);
-    let (url, state) = relay(vec![original.clone()], false).await;
-    state
-        .ignore_extension
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let client = client(url, keys);
-    let error = edit_message(&client, &original.id.to_hex(), "new", false)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("upgrade the relay"));
-    assert!(state.submitted.lock().unwrap().is_empty());
+    for kind in [9, 40002, 40008, 45001, 45003] {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let original = EventBuilder::new(Kind::Custom(kind), "original")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(imeta("kept")).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (url, state) = relay(vec![original.clone()], false).await;
+        state
+            .ignore_extension
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let client = client(url, keys);
+        let error = edit_message(&client, &original.id.to_hex(), "new", false)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("upgrade the relay"),
+            "kind {kind}"
+        );
+        assert!(state.submitted.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn other_channel_kinds_keep_plain_edits_on_older_relays() {
+    for kind in [40003, 7, 45002, 12345] {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let original = EventBuilder::new(Kind::Custom(kind), "original")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(imeta("original")).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let (url, state) = relay(vec![original.clone()], false).await;
+        state
+            .ignore_extension
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let client = client(url, keys);
+        for content in ["first edit", "second edit"] {
+            edit_message(&client, &original.id.to_hex(), content, false)
+                .await
+                .unwrap();
+        }
+        let error = edit_message(&client, &original.id.to_hex(), "clear", true)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&format!("attachments on kind {kind} are not edit-governed")));
+        assert_eq!(
+            state
+                .effective_queries
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let submitted = state.submitted.lock().unwrap();
+        assert_eq!(submitted.len(), 2, "clear must not publish");
+        for (event, content) in submitted.iter().zip(["first edit", "second edit"]) {
+            assert_eq!(event.kind.as_u16(), 40003);
+            assert_eq!(event.content, content);
+            assert_eq!(
+                buzz_core::media::first_edit_target(event).as_deref(),
+                Some(original.id.as_bytes().as_slice())
+            );
+            assert!(!event.tags.iter().any(|tag| tag.as_slice()[0] == "imeta"));
+        }
+    }
 }

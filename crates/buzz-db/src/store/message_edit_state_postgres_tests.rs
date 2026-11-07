@@ -35,7 +35,7 @@ async fn effective_edit_uses_target_index_and_fresh_channel_authorization() {
         .await
         .unwrap()
         .id;
-    let original = EventBuilder::new(Kind::Custom(9), "original")
+    let original = EventBuilder::new(Kind::Custom(45001), "original")
         .tags([Tag::parse(["h", &channel.to_string()]).unwrap()])
         .sign_with_keys(&owner)
         .unwrap();
@@ -172,4 +172,132 @@ async fn effective_edit_uses_target_index_and_fresh_channel_authorization() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn historical_edit_preflight_matches_selected_live_edit() {
+    let sql = include_str!("../../../../docs/sql/private-media-edit-preflight.sql");
+    // The checked-in operator query uses the exact normalized target expression.
+    assert!(sql.contains(super::media::MEDIA_EDIT_TARGET_SQL));
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let db = Db::from_pool(pool.clone());
+    let community = db
+        .ensure_configured_community("preflight.example")
+        .await
+        .unwrap()
+        .id;
+    let owner = Keys::generate();
+    db.ensure_user(community, owner.public_key().as_bytes())
+        .await
+        .unwrap();
+    let mut channels = Vec::new();
+    for name in ["originals", "decoys"] {
+        channels.push(
+            db.create_channel(
+                community,
+                name,
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                owner.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .unwrap()
+            .id,
+        );
+    }
+    let now = Timestamp::now().as_secs();
+    for (index, kind, scenario, denied) in [
+        (1, 45001, "empty", true),
+        (2, 45003, "later-retained", false),
+        (3, 40008, "deleted", false),
+        (4, 45001, "mixed", true),
+        (5, 45003, "cross-channel", false),
+        (6, 9, "control", true),
+    ] {
+        let hash = format!("{index:064x}");
+        let media = [vec![
+            "imeta".into(),
+            format!("url https://preflight.example/media/{hash}"),
+            format!("x {hash}"),
+        ]];
+        let original = EventBuilder::new(Kind::Custom(kind), scenario)
+            .tags([
+                Tag::parse(["h", &channels[0].to_string()]).unwrap(),
+                Tag::parse(media[0].clone()).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(now - 20))
+            .sign_with_keys(&owner)
+            .unwrap();
+        db.insert_event(community, &original, Some(channels[0]))
+            .await
+            .unwrap();
+        let channel = if scenario == "cross-channel" {
+            channels[1]
+        } else {
+            channels[0]
+        };
+        let target = if scenario == "mixed" {
+            original.id.to_hex().to_uppercase()
+        } else {
+            original.id.to_hex()
+        };
+        let empty = EventBuilder::new(Kind::Custom(40003), "empty")
+            .tags([
+                Tag::parse(["h", &channel.to_string()]).unwrap(),
+                Tag::parse(["e", &target]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(now - 2))
+            .sign_with_keys(&owner)
+            .unwrap();
+        db.insert_event(community, &empty, Some(channel))
+            .await
+            .unwrap();
+        if scenario == "later-retained" {
+            let retained = EventBuilder::new(Kind::Custom(40003), "retained")
+                .tags([
+                    Tag::parse(["h", &channels[0].to_string()]).unwrap(),
+                    Tag::parse(["e", &original.id.to_hex()]).unwrap(),
+                    Tag::parse(media[0].clone()).unwrap(),
+                ])
+                .custom_created_at(Timestamp::from(now - 1))
+                .sign_with_keys(&owner)
+                .unwrap();
+            db.insert_event(community, &retained, Some(channels[0]))
+                .await
+                .unwrap();
+        }
+        if scenario == "deleted" {
+            db.soft_delete_event_and_update_thread(community, empty.id.as_bytes(), None, None)
+                .await
+                .unwrap();
+        }
+        let access = db
+            .media_access(
+                community,
+                &hash,
+                "",
+                "https://preflight.example/media",
+                owner.public_key().as_bytes(),
+                false,
+                |_, _| true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            access == super::media::MediaAccess::Allowed,
+            !denied,
+            "{scenario}"
+        );
+    }
+    let counts: Vec<(i32, i64)> = sqlx::query_as(sql)
+        .bind(community.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(counts, vec![(45001, 2)]);
 }

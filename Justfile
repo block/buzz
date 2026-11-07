@@ -682,7 +682,7 @@ test-integration:
 # Enforce-mode upload/publication/read journey (requires PostgreSQL and Redis).
 # Uses the isolated PostgreSQL runner, including CLI edits and the target index.
 test-media-access:
-    ./scripts/postgres-test-run.sh -p buzz-relay -p buzz-db --lib -E 'test(/^api::media_access_postgres_tests::/) | test(effective_edit_uses_target_index)'
+    ./scripts/postgres-test-run.sh -p buzz-relay -p buzz-db --lib -E 'test(/^api::media_access_postgres_tests::/) | test(effective_edit_uses_target_index) | test(historical_edit_preflight)'
 
 # Regenerate the model-capability normative corpus from the production Rust
 # resolver. The corpus is a golden snapshot, never hand-edited: this runs the
