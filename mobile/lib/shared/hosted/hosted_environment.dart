@@ -16,14 +16,20 @@ abstract final class HostedEnvironment {
 
   /// Public CDN serving each published Builderlab agent card's
   /// `<id>/agent.json` and images, for this build's account environment.
-  /// Null for a Builderlab without a known CDN, which has no agent cards.
-  static Uri? get avatarsCdnOrigin => switch (origin.host) {
-    'app.builderlab.xyz' => Uri.parse('https://d2z0pbxrxbsiz5.cloudfront.net'),
-    'app.builderlabstaging.xyz' => Uri.parse(
-      'https://d10hx6rb3fdt3l.cloudfront.net',
-    ),
-    _ => null,
-  };
+  /// Null for an internal build or a Builderlab without a known CDN, which
+  /// have no agent cards.
+  static Uri? get avatarsCdnOrigin =>
+      BuilderlabBuild.distribution == BuilderlabDistribution.internal
+      ? null
+      : switch (origin.host) {
+          'app.builderlab.xyz' => Uri.parse(
+            'https://d2z0pbxrxbsiz5.cloudfront.net',
+          ),
+          'app.builderlabstaging.xyz' => Uri.parse(
+            'https://d10hx6rb3fdt3l.cloudfront.net',
+          ),
+          _ => null,
+        };
 
   /// Shortens hostname fallbacks for display without changing relay identity.
   static String communityDisplayName(String name, String relayUrl) {
