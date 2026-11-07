@@ -58,11 +58,13 @@ export function eventToProjectIssue(
   issue: RelayEvent,
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
+  maintainers?: string[],
 ): ProjectIssue;
 export function projectIssueEventsToIssues(
   issueEvents: RelayEvent[],
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
+  maintainers?: string[],
 ): ProjectIssue[];
 export function nextProjectIssueCommentCreatedAt(
   issue: ProjectIssue,

@@ -239,6 +239,7 @@ async function fetchProjectIssues(
     issueEvents,
     statusEvents,
     mergeEventsById(commentEvents, assignmentEvents),
+    project.maintainers ?? [],
   );
 }
 
@@ -279,6 +280,7 @@ async function fetchProjectPullRequests(
     updateEvents,
     commentEvents,
     statusEvents,
+    project.maintainers ?? [],
   );
 }
 

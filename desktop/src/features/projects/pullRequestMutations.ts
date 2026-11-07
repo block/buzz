@@ -13,6 +13,7 @@ import {
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ProjectPullRequest, Repository as Project } from "./hooks";
+import { isRepositoryMaintainer } from "./projectModels";
 import { nextProjectPullRequestStatusCreatedAt } from "./projectPullRequests.mjs";
 import { useProjectPullRequestWriteInvalidation } from "./pullRequestReviews";
 
@@ -102,7 +103,8 @@ export function canPublishProjectPullRequestUpdate(
   const viewer = normalizePubkey(viewerPubkey);
   return (
     viewer === normalizePubkey(project.owner) ||
-    viewer === normalizePubkey(pullRequest.author)
+    viewer === normalizePubkey(pullRequest.author) ||
+    isRepositoryMaintainer(project, viewer)
   );
 }
 
