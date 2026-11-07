@@ -371,3 +371,120 @@ fn record_field_updates_persist_effort_to_disk() {
     );
     // _home_guard and _xdg_guard restore HOME and XDG_DATA_HOME via Drop.
 }
+
+// ── apply_backend_update ─────────────────────────────────────────────────────
+
+fn docker(config: serde_json::Value) -> crate::managed_agents::BackendKind {
+    crate::managed_agents::BackendKind::Provider {
+        id: "docker".into(),
+        config,
+    }
+}
+
+fn move_to(
+    record: &mut ManagedAgentRecord,
+    backend: &crate::managed_agents::BackendKind,
+    force: bool,
+    local_running: bool,
+) -> Result<bool, String> {
+    apply_backend_update(
+        record,
+        BackendUpdate {
+            backend,
+            force,
+            local_running,
+            provider_binary_path: Some("/bin/buzz-backend-docker".into()),
+        },
+    )
+}
+
+#[test]
+fn unchanged_backend_is_a_no_op() {
+    let mut record = provider_record(true);
+    let same = record.backend.clone();
+    assert!(!move_to(&mut record, &same, false, false).unwrap());
+    assert_eq!(record.backend_agent_id.as_deref(), Some("deployment"));
+}
+
+#[test]
+fn same_provider_settings_change_keeps_the_deployment() {
+    let mut record = provider_record(true);
+    record.backend = docker(serde_json::json!({"host": "ssh://old"}));
+    let updated = docker(serde_json::json!({"host": "ssh://new"}));
+
+    assert!(move_to(&mut record, &updated, false, false).unwrap());
+
+    assert_eq!(record.backend, updated);
+    assert_eq!(record.backend_agent_id.as_deref(), Some("deployment"));
+}
+
+#[test]
+fn moving_a_running_local_agent_is_refused() {
+    let mut record = local_record();
+    let error = move_to(&mut record, &docker(serde_json::json!({})), false, true)
+        .expect_err("a running local agent must be stopped first");
+    assert!(error.contains("Stop this agent"), "{error}");
+    assert_eq!(record.backend, crate::managed_agents::BackendKind::Local);
+}
+
+#[test]
+fn moving_a_deployed_agent_needs_confirmation_then_resets_the_deployment() {
+    let mut record = provider_record(true);
+    record.provider_policy_pending = true;
+    let target = docker(serde_json::json!({}));
+
+    let error = move_to(&mut record, &target, false, false)
+        .expect_err("an unconfirmed move must not orphan the deployment silently");
+    assert!(error.contains("provider provider"), "{error}");
+    assert_eq!(record.backend_agent_id.as_deref(), Some("deployment"));
+
+    assert!(move_to(&mut record, &target, true, false).unwrap());
+    assert_eq!(record.backend, target);
+    assert_eq!(record.backend_agent_id, None);
+    assert!(!record.provider_policy_pending);
+    assert_eq!(
+        record.provider_binary_path.as_deref(),
+        Some("/bin/buzz-backend-docker")
+    );
+}
+
+#[test]
+fn moving_to_a_provider_disables_start_on_launch_and_back_to_local_clears_the_binary() {
+    let mut record = local_record();
+    record.start_on_app_launch = true;
+    assert!(move_to(&mut record, &docker(serde_json::json!({})), false, false).unwrap());
+    assert!(!record.start_on_app_launch);
+
+    assert!(move_to(
+        &mut record,
+        &crate::managed_agents::BackendKind::Local,
+        false,
+        false
+    )
+    .unwrap());
+    assert_eq!(record.backend, crate::managed_agents::BackendKind::Local);
+    assert_eq!(record.provider_binary_path, None);
+}
+
+#[test]
+fn provider_settings_are_validated_like_at_create() {
+    let mut record = local_record();
+    let error = move_to(
+        &mut record,
+        &docker(serde_json::json!({"api_token": "x"})),
+        false,
+        false,
+    )
+    .expect_err("secret-shaped provider settings must be refused");
+    assert!(!error.is_empty());
+    assert_eq!(record.backend, crate::managed_agents::BackendKind::Local);
+}
+
+#[test]
+fn shared_compute_agents_stay_local() {
+    let mut record = local_record();
+    record.provider = Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID.to_string());
+    let error = move_to(&mut record, &docker(serde_json::json!({})), false, false)
+        .expect_err("relay-mesh agents run on the relay");
+    assert!(error.contains("shared compute"), "{error}");
+}
