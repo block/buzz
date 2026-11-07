@@ -89,7 +89,9 @@ class CommunityStorage {
     return [];
   }
 
-  static final _pendingInvites = SerialQueue();
+  /// Serializes every read-modify-write of the community list and the pending
+  /// invite journal, so no write can restore a record another one removed.
+  static final _mutations = SerialQueue();
   static const _pendingInvitePrefix = 'buzz_pending_invite_v1_';
 
   static String _pendingInviteKey(String relayUrl, String code) {
@@ -108,7 +110,7 @@ class CommunityStorage {
     String relayUrl,
     String code,
     String Function() generate,
-  ) => _pendingInvites.run(() async {
+  ) => _mutations.run(() async {
     final key = _pendingInviteKey(relayUrl, code);
     final saved = await _secure.read(key: key);
     if (saved != null) return saved;
@@ -125,7 +127,7 @@ class CommunityStorage {
     String relayUrl,
     String code,
     Community community,
-  ) => _pendingInvites.run(() async {
+  ) => _mutations.run(() async {
     final saved = await loadAll();
     if (!saved.any(
       (item) => item.id == community.id && item.nsec == community.nsec,
@@ -138,7 +140,7 @@ class CommunityStorage {
     }
   });
 
-  Future<void> save(Community community) async {
+  Future<void> save(Community community) => _mutations.run(() async {
     final all = await loadAll();
     final index = all.indexWhere((w) => w.id == community.id);
     if (index >= 0) {
@@ -147,14 +149,14 @@ class CommunityStorage {
       all.add(community);
     }
     await _saveList(all);
-  }
+  });
 
   /// Communities kept on this device that this build hides.
   Future<List<Community>> loadHidden() async =>
       (await _loadStored()).where((item) => !_visible(item)).toList();
 
   /// Replaces one hidden community's record, keeping every other record.
-  Future<void> saveHidden(Community community) async {
+  Future<void> saveHidden(Community community) => _mutations.run(() async {
     final raw = await _secure.read(key: _keyCommunities);
     if (raw == null) return;
     final json = jsonEncode([
@@ -163,12 +165,13 @@ class CommunityStorage {
             .toJson(),
     ]);
     await _secure.write(key: _keyCommunities, value: json);
-  }
+  });
 
   /// Replaces the complete stored community list in one secure-storage write.
-  Future<void> saveAll(List<Community> communities) => _saveList(communities);
+  Future<void> saveAll(List<Community> communities) =>
+      _mutations.run(() => _saveList(communities));
 
-  Future<void> remove(String id) => _pendingInvites.run(() async {
+  Future<void> remove(String id) => _mutations.run(() async {
     final all = await loadAll();
     final removedKeys = all
         .where((item) => item.id == id)

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
@@ -269,9 +270,24 @@ void main() {
     expect(stored[other.id]!.pushNotificationsEnabled, isFalse);
     expect(stored[organization.id]!.pushNotificationsEnabled, isTrue);
 
-    await storage.remove(organization.id);
+    // A hidden update that overlaps a removal never restores the removed
+    // community.
+    final paused = _PausingStorage();
+    final racing = CommunityStorage(secure: paused);
+    final release = Completer<void>();
+    paused.nextRead = release.future;
+    final hidden = racing.saveHidden(
+      stored[other.id]!.copyWith(name: 'Other, renamed'),
+    );
+    await pumpEventQueue();
+    final removed = racing.remove(organization.id);
+    await pumpEventQueue();
+    release.complete();
+    await Future.wait([hidden, removed]);
     expect(await storage.loadAll(), isEmpty);
-    expect((await everything.loadAll()).map((item) => item.id), [other.id]);
+    expect((await everything.loadAll()).map((item) => item.name), [
+      'Other, renamed',
+    ]);
   }, skip: skip);
 }
 
@@ -496,6 +512,28 @@ class _SignedInGate extends ConsumerWidget {
           loading: () => const SizedBox.shrink(),
           error: (_, _) => const SizedBox.shrink(),
         );
+  }
+}
+
+/// Pauses the first read after [nextRead] is set until it completes.
+class _PausingStorage extends FlutterSecureStorage {
+  Future<void>? nextRead;
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    final value = await super.read(key: key);
+    final pause = nextRead;
+    nextRead = null;
+    if (pause != null) await pause;
+    return value;
   }
 }
 

@@ -69,15 +69,15 @@ class OrganizationSignIn extends ChangeNotifier {
     _subscriptions
       ..add(browser.codes.listen((code) => unawaited(_exchange(code))))
       ..add(browser.failures.listen(_onBrowserFailure));
+    // A sign-in or sign-out started meanwhile owns the status.
+    final attempt = _attempt;
     await browser.initialize();
     try {
-      final restored = account.account ?? await account.restore();
-      _set(
-        restored == null
-            ? OrganizationSessionStatus.signedOut
-            : OrganizationSessionStatus.signedIn,
-      );
+      if (account.account == null) await account.restore();
+      if (attempt != _attempt) return;
+      _set(_currentStatus());
     } on AccountFailure catch (error) {
+      if (attempt != _attempt) return;
       // Unknown, for example offline. Relay connection retries the restore.
       // An unreadable record is kept so the next sign-in can replace it.
       if (error == AccountFailure.storage) failure = error;
