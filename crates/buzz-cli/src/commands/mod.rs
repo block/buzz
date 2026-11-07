@@ -23,6 +23,7 @@ pub mod projects;
 pub mod reactions;
 pub(crate) mod read_state;
 mod repo_default_branch;
+mod repo_state;
 pub mod repos;
 pub(crate) mod sent_from_thread;
 pub mod sidebar;
