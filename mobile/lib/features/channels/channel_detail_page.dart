@@ -676,6 +676,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             .read(channelSectionsProvider)
             .store
             .assignments[resolvedChannel.id],
+        personalChat: personalChat,
       );
       if (shouldClose == true && context.mounted) {
         Navigator.of(context).pop();
