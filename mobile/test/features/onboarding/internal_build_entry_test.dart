@@ -71,8 +71,14 @@ void main() {
       expect(tenant.bound, first.pubkey);
       expect(harness.accounts.last.account, isNotNull);
 
+      // The app backed the new key up to the organization on its own.
+      expect(tenant.backups.keys, [first.pubkey]);
+      expect(
+        tenant.backups[first.pubkey],
+        AccountIdentityStore.keysForNsec(first.nsec!).secret,
+      );
+
       // Signing out removes the community; the landing ends the session.
-      tenant.backups[first.pubkey!] = first.nsec!;
       await CommunityStorage().remove(first.id);
       await harness.open();
       expect(harness.accounts.last.account, isNull);
@@ -142,7 +148,7 @@ void main() {
         ),
       ]);
       final tenant = _Tenant()..bound = row.bound(stored);
-      if (row.backedUp) tenant.backups[_otherKey.public] = _otherKey.nsec;
+      if (row.backedUp) tenant.backups[_otherKey.public] = _otherKey.secret;
       final harness = _Harness(tester, tenant);
       await harness.open();
       await harness.signIn();
@@ -194,9 +200,12 @@ final _otherKey = nostr.Keys.generate();
 
 /// The organization's Builderlab at its HTTP boundary: one member whose
 /// account binds the key of its first relay assertion and refuses any other.
+/// It holds each backup as the secret key hex that the app sealed for it.
 class _Tenant {
   String? bound;
   final backups = <String, String>{};
+  String? sealed;
+  var enrollments = 0;
   var recoveries = 0;
   final expiry = DateTime.now().toUtc().add(const Duration(days: 1));
 
@@ -226,18 +235,40 @@ class _Tenant {
           'expires_at': expiry.millisecondsSinceEpoch ~/ 1000,
           'nostr_pubkey': pubkey,
         };
+      case '/v1/buzz/nsec-backups/status':
+        result = {
+          'backup_nostr_pubkeys': backups.keys.toList(),
+          'current_nostr_pubkey': bound,
+        };
+      case '/v1/buzz/nsec-backups/enrollment':
+        enrollments++;
+        result = {
+          'version': 1,
+          'suite': {'kem_id': 16, 'kdf_id': 1, 'aead_id': 2},
+          'recipient_key_id': 'test-key',
+          'service_namespace': 'buzz',
+          'owner_id': 'member',
+          'backup_id':
+              '12345678-1234-1234-1234-${enrollments.toString().padLeft(12, '0')}',
+          'nostr_pubkey': bound,
+          'recipient_public_key': base64Url
+              .encode([4, ...List.filled(64, 1)])
+              .replaceAll('=', ''),
+        };
+      case '/v1/buzz/nsec-backups':
+        final envelope = jsonDecode(request.body) as Map;
+        backups[envelope['nostr_pubkey'] as String] = sealed!;
+        result = {'stored': true, 'backup_id': envelope['backup_id']};
       case '/v1/buzz/nsec-backups/recovery':
         recoveries++;
         result = {
           'backups': [
-            for (final MapEntry(key: pubkey, value: nsec) in backups.entries)
+            for (final MapEntry(key: pubkey, value: secret) in backups.entries)
               {
                 'backup_id': 'backup-$pubkey',
                 'nostr_pubkey': pubkey,
                 'secret_key': base64Url
-                    .encode(
-                      _hexBytes(AccountIdentityStore.keysForNsec(nsec).secret),
-                    )
+                    .encode(_hexBytes(secret))
                     .replaceAll('=', ''),
               },
           ],
@@ -283,6 +314,21 @@ class _Harness {
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/browser_auth'),
       (_) async => null,
+    );
+    // Sealing records the plaintext so the fake tenant can later recover it.
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/hosted_hpke'),
+      (call) async {
+        if (call.method == 'isSupported') return true;
+        final plaintext = (call.arguments as Map)['plaintext'] as Uint8List;
+        tenant.sealed = [
+          for (final byte in plaintext) byte.toRadixString(16).padLeft(2, '0'),
+        ].join();
+        return {
+          'enc': Uint8List.fromList([4, ...List.filled(64, 2)]),
+          'ciphertext': Uint8List(48),
+        };
+      },
     );
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(
