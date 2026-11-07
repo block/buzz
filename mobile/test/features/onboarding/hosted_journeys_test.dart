@@ -850,6 +850,11 @@ void main() {
         find.textContaining('cannot reconnect to this community'),
         findsNothing,
       );
+      // Cached-only reads (saved profile cards, native media) go out without
+      // an assertion instead of waiting for one that will never come.
+      final auth = f.container.read(hostedRelayAuthProvider);
+      final config = f.container.read(relayConfigProvider);
+      expect(auth.cachedHeaders(config), isEmpty);
 
       // Unreachable discovery fails transiently, never as a denial.
       f.nipFiRequired = null;
@@ -873,6 +878,9 @@ void main() {
       expect(f.sent('/identity/assertions'), hasLength(1));
       await session.queryRelay(const []);
       expect(f.sent('/identity/assertions'), hasLength(1));
+      expect(auth.cachedHeaders(config), {
+        'Nostr-Federated-Identity': 'Bearer synthetic-assertion',
+      });
     },
     requiresAuthDomain: true,
   );

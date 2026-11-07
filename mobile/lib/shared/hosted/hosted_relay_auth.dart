@@ -149,8 +149,9 @@ class HostedRelayAuth extends ChangeNotifier {
   /// recovery state. Null means protected metadata must wait for active auth.
   Map<String, String>? cachedHeaders(RelayConfig config) {
     if (_disposed) return null;
-    if (!protects(config)) return const {};
-    if (_hostedOrigin(config) case final origin?
+    final client = _accountFor(config);
+    if (client == null) return const {};
+    if (_hostedOrigin(config, client) case final origin?
         when _required[origin] == false) {
       return const {};
     }
@@ -162,7 +163,7 @@ class HostedRelayAuth extends ChangeNotifier {
           pubkey: pubkey,
         )];
     if (cached == null ||
-        !identical(cached.account, _accountFor(config)?.account) ||
+        !identical(cached.account, client.account) ||
         !cached.expiry.isAfter(_now())) {
       return null;
     }
@@ -212,7 +213,7 @@ class HostedRelayAuth extends ChangeNotifier {
     final client = _accountFor(config);
     if (client == null) return const {};
     try {
-      if (_hostedOrigin(config) case final origin?
+      if (_hostedOrigin(config, client) case final origin?
           when !await _requires(origin, fresh)) {
         return const {};
       }
@@ -233,11 +234,8 @@ class HostedRelayAuth extends ChangeNotifier {
 
   /// The relay origin whose discovery decides, or null for organization relays,
   /// which always use their own issuer.
-  String? _hostedOrigin(RelayConfig config) {
-    final client = _accountFor(config);
-    if (client == null || identical(client, organization)) return null;
-    return Uri.parse(config.baseUrl).origin;
-  }
+  String? _hostedOrigin(RelayConfig config, BuilderlabAccountClient client) =>
+      identical(client, organization) ? null : Uri.parse(config.baseUrl).origin;
 
   Future<bool> _requires(String origin, bool fresh) async {
     final known = _required[origin];

@@ -104,6 +104,7 @@ void main() {
       );
       expect(requests.single.url.toString(), 'https://one.example.org/');
       expect(requests.single.headers, {'Accept': 'application/nostr+json'});
+      expect(requests.single.followRedirects, isFalse);
 
       await expectLater(
         discover(() => document({'error': 'unknown'}, status: 404)),
