@@ -18,10 +18,17 @@ const IDLE_POLL_FLOOR: Duration = Duration::from_millis(250);
 const IDLE_POLL_CEILING: Duration = Duration::from_secs(2);
 const OUTBOX_REAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const REGISTRATION_REAP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Largest channel `about` a notification carries. A larger one omits the
+/// whole `channel` object and the listener reads the channel itself. Even
+/// escaped, this keeps a body with a frame-sized event well under kgoose's
+/// 1 MiB cap.
+const MAX_NOTIFICATION_ABOUT_BYTES: usize = 16 * 1024;
 
 /// Notification sent to the configured operator-listener endpoint.
 ///
-/// Version 2 adds the full signed `event` to version 1's metadata.
+/// Version 2 adds the full signed `event` to version 1's metadata. `channel`
+/// is an optional version 2 field, omitted for a channel-less event or an
+/// oversized `about`.
 #[derive(Debug, Serialize)]
 struct MentionNotification<'a> {
     v: u8,
@@ -31,6 +38,36 @@ struct MentionNotification<'a> {
     event_kind: i32,
     event_created_at: i64,
     event: &'a nostr::Event,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<NotificationChannel<'a>>,
+}
+
+/// The mentioning event's channel, from the row the delivery access check read.
+#[derive(Debug, Serialize)]
+struct NotificationChannel<'a> {
+    id: String,
+    name: &'a str,
+    channel_type: &'a str,
+    visibility: &'a str,
+    /// Omitted when empty, like the kind:39000 `about` tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    about: Option<&'a str>,
+}
+
+impl<'a> NotificationChannel<'a> {
+    fn new(channel: &'a buzz_db::operator_listener::DeliveryChannel) -> Option<Self> {
+        let about = channel.about.as_deref().filter(|about| !about.is_empty());
+        if about.is_some_and(|about| about.len() > MAX_NOTIFICATION_ABOUT_BYTES) {
+            return None;
+        }
+        Some(Self {
+            id: channel.id.to_string(),
+            name: &channel.name,
+            channel_type: &channel.channel_type,
+            visibility: &channel.visibility,
+            about,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +148,7 @@ trait DeliveryStore: Sync {
     async fn load(
         &self,
         delivery: &buzz_db::operator_listener::ClaimedDelivery,
-    ) -> Result<Option<buzz_core::StoredEvent>, String>;
+    ) -> Result<Option<buzz_db::operator_listener::DeliverableEvent>, String>;
     async fn release(&self, id: Uuid, claim_id: Uuid, next: DateTime<Utc>) -> Result<bool, String>;
     async fn complete(&self, id: Uuid, claim_id: Uuid) -> Result<bool, String>;
     async fn retry(&self, id: Uuid, claim_id: Uuid, next: DateTime<Utc>) -> Result<bool, String>;
@@ -128,7 +165,7 @@ impl DeliveryStore for DbDeliveryStore<'_> {
     async fn load(
         &self,
         delivery: &buzz_db::operator_listener::ClaimedDelivery,
-    ) -> Result<Option<buzz_core::StoredEvent>, String> {
+    ) -> Result<Option<buzz_db::operator_listener::DeliverableEvent>, String> {
         self.db
             .load_operator_listener_delivery_event(delivery, self.admission)
             .await
@@ -258,9 +295,11 @@ async fn deliver_one<T: DeliveryTransport, S: DeliveryStore>(
             .increment(1);
         return;
     };
-    let stored = match store.load(&delivery).await {
-        Ok(Some(stored)) if event_visible_to_reader(&stored.event, &delivery.target_pubkey) => {
-            stored
+    let loaded = match store.load(&delivery).await {
+        Ok(Some(loaded))
+            if event_visible_to_reader(&loaded.stored.event, &delivery.target_pubkey) =>
+        {
+            loaded
         }
         // Retry rather than drop: a mention can commit just before the
         // target is added to the channel.
@@ -280,7 +319,8 @@ async fn deliver_one<T: DeliveryTransport, S: DeliveryStore>(
         event_id: hex::encode(&delivery.event_id),
         event_kind: delivery.event_kind,
         event_created_at: delivery.event_created_at.timestamp(),
-        event: &stored.event,
+        event: &loaded.stored.event,
+        channel: loaded.channel.as_ref().and_then(NotificationChannel::new),
     }) {
         Ok(body) => body,
         Err(error) => {
@@ -412,17 +452,19 @@ mod tests {
 
     struct MockStore {
         calls: Mutex<Vec<StoreCall>>,
-        loaded: Result<Option<buzz_core::StoredEvent>, String>,
+        loaded: Result<Option<buzz_db::operator_listener::DeliverableEvent>, String>,
     }
 
     impl Default for MockStore {
         fn default() -> Self {
-            Self::loading(Ok(Some(stored_event(Kind::Custom(9)))))
+            Self::loading(Ok(Some(deliverable_event(Kind::Custom(9)))))
         }
     }
 
     impl MockStore {
-        fn loading(loaded: Result<Option<buzz_core::StoredEvent>, String>) -> Self {
+        fn loading(
+            loaded: Result<Option<buzz_db::operator_listener::DeliverableEvent>, String>,
+        ) -> Self {
             Self {
                 calls: Mutex::default(),
                 loaded,
@@ -434,11 +476,14 @@ mod tests {
         }
     }
 
-    fn stored_event(kind: Kind) -> buzz_core::StoredEvent {
+    fn deliverable_event(kind: Kind) -> buzz_db::operator_listener::DeliverableEvent {
         let event = EventBuilder::new(kind, "hello agent")
             .sign_with_keys(&Keys::generate())
             .expect("sign test event");
-        buzz_core::StoredEvent::new(event, None)
+        buzz_db::operator_listener::DeliverableEvent {
+            stored: buzz_core::StoredEvent::new(event, None),
+            channel: None,
+        }
     }
 
     #[async_trait::async_trait]
@@ -446,7 +491,7 @@ mod tests {
         async fn load(
             &self,
             _delivery: &buzz_db::operator_listener::ClaimedDelivery,
-        ) -> Result<Option<buzz_core::StoredEvent>, String> {
+        ) -> Result<Option<buzz_db::operator_listener::DeliverableEvent>, String> {
             self.loaded.clone()
         }
 
@@ -614,8 +659,16 @@ mod tests {
     #[tokio::test]
     async fn successful_delivery_posts_payload_and_completes_claim() {
         let (routes, relay_keypair, delivery) = delivery_fixture(1);
-        let loaded = stored_event(Kind::Custom(9));
-        let expected = loaded.event.clone();
+        let mut loaded = deliverable_event(Kind::Custom(9));
+        let channel = buzz_db::operator_listener::DeliveryChannel {
+            id: Uuid::new_v4(),
+            name: "general".to_owned(),
+            channel_type: "stream".to_owned(),
+            visibility: "private".to_owned(),
+            about: Some("Buzz session (buzz.sessions/v1)\n[personal]".to_owned()),
+        };
+        loaded.channel = Some(channel.clone());
+        let expected = loaded.stored.event.clone();
         let store = MockStore::loading(Ok(Some(loaded)));
         let transport = MockTransport::new(Ok(StatusCode::NO_CONTENT));
 
@@ -648,15 +701,72 @@ mod tests {
             .verify()
             .expect("delivered event keeps a valid signature");
         assert_eq!(
+            body["channel"],
+            serde_json::json!({
+                "id": channel.id.to_string(),
+                "name": "general",
+                "channel_type": "stream",
+                "visibility": "private",
+                "about": "Buzz session (buzz.sessions/v1)\n[personal]",
+            })
+        );
+        assert_eq!(
             store.calls(),
             [StoreCall::Complete(delivery.id, delivery.claim_id)]
+        );
+    }
+
+    async fn delivered_channel(
+        channel: Option<buzz_db::operator_listener::DeliveryChannel>,
+    ) -> Option<serde_json::Value> {
+        let (routes, relay_keypair, delivery) = delivery_fixture(1);
+        let mut loaded = deliverable_event(Kind::Custom(9));
+        loaded.channel = channel;
+        let store = MockStore::loading(Ok(Some(loaded)));
+        let transport = MockTransport::new(Ok(StatusCode::NO_CONTENT));
+
+        deliver_one(&routes, &relay_keypair, &store, &transport, delivery).await;
+
+        let request = transport.take_request().expect("delivery request");
+        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("JSON body");
+        assert!(body.get("event").is_some());
+        body.get("channel").cloned()
+    }
+
+    #[tokio::test]
+    async fn channel_is_omitted_without_a_channel_or_with_an_oversized_about() {
+        let channel = |about: Option<String>| buzz_db::operator_listener::DeliveryChannel {
+            id: Uuid::new_v4(),
+            name: String::new(),
+            channel_type: "dm".to_owned(),
+            visibility: "private".to_owned(),
+            about,
+        };
+        assert_eq!(delivered_channel(None).await, None);
+        for about in [None, Some(String::new())] {
+            let delivered = delivered_channel(Some(channel(about)))
+                .await
+                .expect("channel");
+            assert_eq!(delivered["channel_type"], "dm");
+            assert!(delivered.get("about").is_none(), "{delivered}");
+        }
+        let largest = "a".repeat(MAX_NOTIFICATION_ABOUT_BYTES);
+        assert_eq!(
+            delivered_channel(Some(channel(Some(largest.clone()))))
+                .await
+                .expect("channel")["about"],
+            largest
+        );
+        assert_eq!(
+            delivered_channel(Some(channel(Some(format!("{largest}a"))))).await,
+            None
         );
     }
 
     #[tokio::test]
     async fn unreadable_event_retries_then_fails_without_http_request() {
         // Author-only kinds pass the database check but not the reader check.
-        for loaded in [None, Some(stored_event(Kind::Custom(30300)))] {
+        for loaded in [None, Some(deliverable_event(Kind::Custom(30300)))] {
             for (attempt, expect_retry) in [
                 (1, true),
                 (buzz_db::operator_listener::MAX_DELIVERY_ATTEMPTS, false),
