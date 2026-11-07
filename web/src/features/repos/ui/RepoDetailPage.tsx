@@ -194,6 +194,7 @@ export function RepoDetailPage() {
     preview: showMockRepo,
   });
   const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId, {
+    ownerPubkey: repo?.owner,
     preview: showMockRepo,
   });
 

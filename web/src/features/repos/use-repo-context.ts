@@ -27,6 +27,7 @@ export function useRepoContext(
     error: repoError,
   } = useRepo(repoId, { preview });
   const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId, {
+    ownerPubkey: repo?.owner,
     preview,
   });
 
