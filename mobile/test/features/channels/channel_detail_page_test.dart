@@ -2728,6 +2728,127 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('a tall row away from the bottom is read once it fills the '
+        'screen', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'tall',
+              pubkey: 'alice',
+              content: List.filled(120, 'A long answer line.').join('\n\n'),
+              createdAt: 1100,
+              extraTags: const [
+                ['p', 'self'],
+              ],
+            ),
+            for (var i = 0; i < 3; i++)
+              _textMsg(
+                id: 'later$i',
+                pubkey: 'alice',
+                content: List.filled(40, 'Later line.').join('\n\n'),
+                createdAt: 1200 + i,
+              ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+      readState.forgetMarks();
+
+      final messageList = find.byKey(const ValueKey('channel-message-list'));
+      tester
+          .widget<ScrollablePositionedList>(messageList)
+          .itemScrollController!
+          .jumpTo(index: 3, alignment: -0.5);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final row = tester.getRect(
+        find.byKey(const ValueKey('channel-message-group-tall')),
+      );
+      final screen = tester.getRect(messageList);
+      expect(row.top, lessThan(screen.top));
+      expect(row.bottom, greaterThan(screen.bottom));
+      expect(readState.markedContexts, {'msg:tall': 1100});
+    });
+
+    testWidgets('reading the bottom of a Solo chat reads an inline reply '
+        'mention', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final solo = Channel(
+        id: _channelId,
+        name: 'Solo',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: const ['buzz.solo'],
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+      );
+      final rootId = 'a' * 64;
+      final messages = [
+        _textMsg(
+          id: 'root',
+          pubkey: 'self',
+          content: 'Question',
+          createdAt: 1000,
+        ),
+        _textMsg(
+          id: 'tall-reply',
+          pubkey: 'alice',
+          content: List.filled(120, 'A long answer line.').join('\n\n'),
+          createdAt: 1100,
+          extraTags: [
+            ['e', rootId, '', 'reply'],
+            ['p', 'self'],
+          ],
+        ),
+        _textMsg(
+          id: 'latest',
+          pubkey: 'bob',
+          content: 'Latest',
+          createdAt: 1200,
+          extraTags: [
+            ['e', rootId, '', 'reply'],
+          ],
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channel: solo,
+          personalChat: true,
+          signingPubkey: 'self',
+          channelMessagesNotifier: _FakeMessagesNotifier(messages),
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts['msg:tall-reply'], 1100);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('hidden huddle end does not block bottom catch-up', (
       tester,
     ) async {

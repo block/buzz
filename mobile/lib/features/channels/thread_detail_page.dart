@@ -733,12 +733,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           1 - ((Grid.xs + navigationBottomInset) / viewportHeight) + 0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        if (!isReadableRow(
-          leadingEdge: position.itemLeadingEdge,
-          trailingEdge: position.itemTrailingEdge,
-          start: topEdge,
-          end: bottomEdge,
-        )) {
+        if (!isReadableRow(position, start: topEdge, end: bottomEdge)) {
           continue;
         }
         if (position.index == headIndex) {

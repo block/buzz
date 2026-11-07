@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
@@ -22,7 +23,8 @@ const readingDwell = Duration(milliseconds: 300);
 ///   catch-up marks read ordinary messages and that thread's replies. They do
 ///   not read mentions, broadcasts or DMs.
 /// - The same channel catch-up also gives each loaded top-level mention and
-///   broadcast through the bottom row its own `msg:` mark, at most the newest
+///   broadcast through the bottom row its own `msg:` mark (in a [flat]
+///   timeline, each mention through it, replies included), at most the newest
 ///   [catchUpMessageMarkLimit], so a mention taller than the screen is still
 ///   read. Messages the reader marked unread keep that intent.
 /// - Each fully visible message gets its own `msg:` mark unless its own mark,
@@ -38,7 +40,8 @@ const readingDwell = Duration(milliseconds: 300);
 /// [bottom] is the newest message when its bottom edge is visible at the
 /// bottom of the list; otherwise null. Set [threadRootId] when reading a
 /// thread, and [isRootThread] when its head is the thread root rather than a
-/// nested reply. [now] is the current Unix time in seconds; it defaults to
+/// nested reply. Set [flat] for a channel timeline that shows replies inline,
+/// as a Solo chat does. [now] is the current Unix time in seconds; it defaults to
 /// the clock. The result maps each read-state context to its new time.
 Map<String, int> readingMarks({
   required ReadStateState readState,
@@ -50,6 +53,7 @@ Map<String, int> readingMarks({
   TimelineMessage? bottom,
   String? threadRootId,
   bool isRootThread = true,
+  bool flat = false,
   int? now,
 }) {
   final marks = <String, int>{};
@@ -89,6 +93,7 @@ Map<String, int> readingMarks({
         loaded: loaded,
         bottom: bottom,
         threadRootId: threadRootId,
+        flat: flat,
       )) {
     final catchUp = _catchUpMark(
       channelId: channelId,
@@ -102,7 +107,7 @@ Map<String, int> readingMarks({
       final attention = [
         for (final message in loaded)
           if (message.createdAt <= bottom.createdAt &&
-              (message.parentId == null || _isBroadcast(message)) &&
+              (flat || message.parentId == null || _isBroadcast(message)) &&
               isHighPriorityEvent(message.tags, self) &&
               needsMark(message))
             message,
@@ -119,17 +124,16 @@ Map<String, int> readingMarks({
 /// `buzz-app`, so a backlog cannot crowd older marks out of the synced budget.
 const catchUpMessageMarkLimit = 128;
 
-/// Whether a row with these item-position edges counts as read: it lies
-/// inside the reading area from [start] to [end], or it is taller than that
-/// area and covers all of it.
-bool isReadableRow({
-  required double leadingEdge,
-  required double trailingEdge,
+/// Whether a row at [position] counts as read: it lies inside the reading
+/// area from [start] to [end], or it is taller than that area and covers all
+/// of it.
+bool isReadableRow(
+  ItemPosition position, {
   required double start,
   required double end,
 }) =>
-    (leadingEdge >= start && trailingEdge <= end) ||
-    (leadingEdge <= start && trailingEdge >= end);
+    (position.itemLeadingEdge >= start && position.itemTrailingEdge <= end) ||
+    (position.itemLeadingEdge <= start && position.itemTrailingEdge >= end);
 
 /// Whether [bottom] is the live bottom. A loaded message newer than the
 /// bottom row means the list does not show it, for example after a jump
@@ -138,6 +142,7 @@ bool _showsNewest({
   required Iterable<TimelineMessage> loaded,
   required TimelineMessage bottom,
   required String? threadRootId,
+  required bool flat,
 }) => !loaded.any(
   (message) =>
       (threadRootId != null || !isCollapsedHuddleEnding(message, loaded)) &&
@@ -146,7 +151,7 @@ bool _showsNewest({
       message.createdAt > bottom.createdAt &&
       (threadRootId != null
           ? _threadRootOf(message) == threadRootId
-          : message.parentId == null || _isBroadcast(message)),
+          : flat || message.parentId == null || _isBroadcast(message)),
 );
 
 /// The catch-up mark for [bottom], or null when it would read nothing new.

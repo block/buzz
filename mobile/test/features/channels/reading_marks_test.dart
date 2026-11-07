@@ -4,6 +4,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 const _channel = 'channel-1';
 const _self = 'self';
@@ -326,6 +327,33 @@ void main() {
       });
     });
 
+    test('a flat timeline catches up inline reply mentions', () {
+      final reply = _msg(
+        'r',
+        120,
+        parentId: 'root',
+        rootId: 'root',
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200, parentId: 'root', rootId: 'root');
+      expect(
+        readingMarks(
+          readState: _state(),
+          channelId: _channel,
+          isDm: false,
+          currentPubkey: _self,
+          loaded: [reply, b],
+          visible: [b],
+          bottom: b,
+          flat: true,
+          now: 10000,
+        ),
+        {'activity:$_channel': 200, 'msg:r': 120, 'msg:b': 200},
+      );
+    });
+
     test('away from the bottom, visible unread rows get message marks', () {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
@@ -401,8 +429,11 @@ void main() {
 
   group('isReadableRow', () {
     bool readable(double leading, double trailing) => isReadableRow(
-      leadingEdge: leading,
-      trailingEdge: trailing,
+      ItemPosition(
+        index: 0,
+        itemLeadingEdge: leading,
+        itemTrailingEdge: trailing,
+      ),
       start: 0.1,
       end: 0.9,
     );

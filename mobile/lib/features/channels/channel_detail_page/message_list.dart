@@ -20,6 +20,7 @@ class _MessageList extends HookConsumerWidget {
   final String? welcomeAgent;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
+  final bool flat;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -46,6 +47,7 @@ class _MessageList extends HookConsumerWidget {
     this.welcomeAgent,
     required this.notifier,
     required this.isDm,
+    required this.flat,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -632,12 +634,7 @@ class _MessageList extends HookConsumerWidget {
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
         if (position.index >= displayEntries.length ||
-            !isReadableRow(
-              leadingEdge: position.itemLeadingEdge,
-              trailingEdge: position.itemTrailingEdge,
-              start: bottomEdge,
-              end: topEdge,
-            )) {
+            !isReadableRow(position, start: bottomEdge, end: topEdge)) {
           continue;
         }
         final group =
@@ -659,6 +656,7 @@ class _MessageList extends HookConsumerWidget {
         loaded: allMessages,
         visible: visible,
         bottom: atBottom ? latest : null,
+        flat: flat,
       );
       final notifier = ref.read(readStateProvider.notifier);
       // Reading to the bottom ends a manual "mark unread" on the channel.
