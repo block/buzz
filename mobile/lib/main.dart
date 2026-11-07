@@ -9,6 +9,7 @@ import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/agents/agents_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/agents/agents_surface.dart';
+import 'shared/app_on_mac.dart';
 import 'shared/push/push_bridge.dart';
 import 'shared/relay/relay_closed_policy.dart';
 import 'shared/theme/theme_provider.dart';
@@ -21,6 +22,7 @@ Future<void> runBuzzApp(Widget app) async {
 
   // Pre-load preferences so the first frame uses the saved theme/accent.
   final prefs = await SharedPreferences.getInstance();
+  await loadIosAppOnMac();
 
   runApp(buildRootProviderScope(prefs: prefs, child: app));
 }
