@@ -94,7 +94,10 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+        if (
+          notificationSettings.soundEnabled &&
+          shouldPlayNotificationSound(channel.id, silentChannelIds)
+        ) {
           playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
         }
         void requestDockBounce();
@@ -137,7 +140,10 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
+        if (
+          notificationSettings.soundEnabled &&
+          shouldPlayNotificationSound(channelId, silentChannelIds)
+        ) {
           playNotificationSound(
             resolveSlotSound(notificationSettings, "thread_reply"),
           );
