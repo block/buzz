@@ -99,8 +99,13 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private let loadAvatar: (String, String, @escaping (Data?) -> Void) -> Void
   /// Loaded avatars by key. Every state update rebuilds the cells, so a row
   /// draws its known avatar at once instead of blinking to its initial while
-  /// the image comes back over the channel.
-  private var avatars: [String: UIImage] = [:]
+  /// the image comes back over the channel. Bounded like the Dart-side
+  /// cache, so browsing a large community doesn't grow it without limit.
+  private let avatars: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.countLimit = 64
+    return cache
+  }()
   private let search = UISearchController(searchResultsController: nil)
   private let pageColor: UIColor
   private let rowColor: UIColor
@@ -344,7 +349,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     content.secondaryText = user["detail"] as? String
     content.textProperties.numberOfLines = 0
     content.secondaryTextProperties.numberOfLines = 1
-    content.image = key.flatMap { avatars[$0] } ?? fallbackAvatar(user)
+    content.image = key.flatMap { avatars.object(forKey: $0 as NSString) } ?? fallbackAvatar(user)
     content.imageProperties.maximumSize = CGSize(width: 40, height: 40)
     content.imageProperties.reservedLayoutSize = CGSize(width: 40, height: 40)
     cell.accessoryType = chosen ? .checkmark : .none
@@ -362,11 +367,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     cell.contentView.accessibilityElementsHidden = true
     guard let key else { return }
     cell.accessibilityIdentifier = key
-    guard avatars[key] == nil else { return }
+    guard avatars.object(forKey: key as NSString) == nil else { return }
     loadAvatar(pubkey, key) { [weak self, weak cell] data in
       guard let data, let image = UIImage(data: data) else { return }
       let avatar = image.withRenderingMode(.alwaysOriginal)
-      self?.avatars[key] = avatar
+      self?.avatars.setObject(avatar, forKey: key as NSString)
       guard let cell, cell.accessibilityIdentifier == key,
         var configuration = cell.contentConfiguration as? UIListContentConfiguration else { return }
       configuration.image = avatar
