@@ -7,9 +7,9 @@
 //! ```text
 //! buzz-relay process
 //!   │
-//!   ├── deadpool-redis pool → PUBLISH, SET, ZADD, etc.
+//!   ├── shared RedisConnection (one multiplexed socket) → PUBLISH, SET, ZADD, etc.
 //!   │
-//!   └── dedicated redis::aio::PubSub connection (NOT from pool)
+//!   └── dedicated redis::aio::PubSub connection (NOT the shared one)
 //!         └── dynamic SUBSCRIBE buzz:{community}:channel:{id} / buzz:{community}:global
 //!               └── run_subscriber() → broadcast::channel(4096) → N WS receivers
 //! ```
@@ -18,13 +18,18 @@
 //! backoff (1s → 2s → 4s → … → 30s max).
 //!
 //! Dedicated pub/sub connection is stateful and cannot be shared.
-//! Pool connections handle all other commands.
+//! The shared [`RedisConnection`] handles all other commands.
 //! Lagged receivers get `RecvError::Lagged`.
 
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
 /// Cross-pod connection-control commands over Redis pub/sub.
 pub mod conn_control;
+/// The shared Redis command connection.
+pub mod connection;
+pub use connection::{
+    redis_connection, RedisConnection, REDIS_CONNECT_TIMEOUT, REDIS_RESPONSE_TIMEOUT,
+};
 /// Error types for pub/sub operations.
 pub mod error;
 /// Redis-backed NIP-98 replay seen-set.
@@ -70,6 +75,9 @@ pub struct ChannelEvent {
     pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
+    /// When this node read the event from Redis. Delivery deadlines start
+    /// here, so time spent waiting in the local broadcast counts.
+    pub received_at: tokio::time::Instant,
 }
 
 /// Health of this node's Redis event subscription link.
@@ -116,7 +124,7 @@ impl PubSubConfig {
 
 /// Central pub/sub manager for a Buzz relay instance.
 pub struct PubSubManager {
-    pool: deadpool_redis::Pool,
+    pool: crate::RedisConnection,
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.
     redis_url: String,
     /// Delay before unsubscribing after the last local interest is released.
@@ -134,14 +142,14 @@ pub struct PubSubManager {
 
 impl PubSubManager {
     /// Creates a new `PubSubManager` connected to the given Redis URL.
-    pub async fn new(redis_url: &str, pool: deadpool_redis::Pool) -> Result<Self, PubSubError> {
+    pub async fn new(redis_url: &str, pool: crate::RedisConnection) -> Result<Self, PubSubError> {
         Self::with_config(PubSubConfig::new(redis_url), pool).await
     }
 
     /// Creates a new `PubSubManager` using explicit pub/sub configuration.
     pub async fn with_config(
         config: PubSubConfig,
-        pool: deadpool_redis::Pool,
+        pool: crate::RedisConnection,
     ) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
@@ -343,7 +351,7 @@ impl PubSubManager {
         ctx: &TenantContext,
         invalidation: &CacheInvalidation,
     ) -> Result<i64, PubSubError> {
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.pool.clone();
         let payload = serde_json::to_string(invalidation)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(cache_invalidation_channel(ctx))
@@ -363,7 +371,7 @@ impl PubSubManager {
         ctx: &TenantContext,
         command: &ConnControl,
     ) -> Result<i64, PubSubError> {
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.pool.clone();
         let payload = serde_json::to_string(command)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(conn_control_channel(ctx))
@@ -384,7 +392,7 @@ impl PubSubManager {
         command: &NipFiDisconnect,
     ) -> Result<i64, PubSubError> {
         use crate::conn_control::encode_nip_fi_disconnect;
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.pool.clone();
         let payload = encode_nip_fi_disconnect(command)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(channel)
@@ -477,10 +485,8 @@ impl PubSubManager {
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    pub fn make_test_pool() -> deadpool_redis::Pool {
-        let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("Failed to create Redis pool")
+    pub fn make_test_pool() -> crate::RedisConnection {
+        crate::redis_connection("redis://127.0.0.1:6379").expect("Failed to build Redis connection")
     }
 }
 
@@ -599,7 +605,7 @@ mod tests {
         let status = presence::get_presence(&pool, &ctx, &pubkey).await.unwrap();
         assert_eq!(status.as_deref(), Some("online"));
 
-        let mut conn = pool.get().await.unwrap();
+        let mut conn = pool.clone();
         let ttl: i64 = redis::cmd("TTL")
             .arg(presence::presence_key(&ctx, &pubkey))
             .query_async(&mut conn)

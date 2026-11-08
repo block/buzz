@@ -77,6 +77,10 @@ Members are assigned deterministically by global index, so every shard and
 - **Agent**: authenticates with a NIP-OA tag from its owner, polls HTTP
   `/query` (channel window plus mentions), posts messages through HTTP
   `/events`, and sends encrypted kind:24200 observer frames to its owner.
+  With `agent.channel_subscriptions` it also opens one live REQ per channel
+  for its mentions there, and with `agent.presence_interval_secs` it sends
+  presence heartbeats. `agent.turn` adds turns of work, described under
+  [Agent turns](#agent-turns).
 - **Desktop human**: the `desktop.fraction` of humans that model the desktop
   app instead of the basic human above. They keep the basic human's presence,
   typing, messages and reactions; the subscriptions and HTTP reads are the
@@ -97,6 +101,55 @@ results as the scenario's rates. Then a ramp step's `users` reads as a
 multiple of that deployment's population. Keep such scenarios with that
 deployment's own configuration.
 
+## Agent turns
+
+An agent harness is idle between prompts and then works in bursts. Set
+`agent.turn.per_hour` above 0 to model that. An idle agent starts a turn in
+one of its channels on a Poisson schedule and runs one turn at a time. A
+turn lasts 0.5–1.5 times `agent.turn.mean_secs` and does what the harness
+does around a prompt:
+
+1. **Start**: an HTTP `/query` for the channel's newest message, the one
+   the turn answers. A harness is handed it by its subscription, so this
+   read is `http_query`, not `turn_context`. Then, as `turn_context`, the
+   harness's own reads. For a message in a thread, one `/query` for the
+   root, the thread's newest 13 replies and the agent's own newest reply,
+   then a `/count` of the replies when all 13 came back. After that, the
+   channel's kind:39000 metadata, its project home (kind:30621 and
+   kind:30617, one read each) and the message author's profile. Then two
+   kind:7 reactions on the message through HTTP `/events`.
+2. **Work**: a typing indicator every `typing_secs` and an encrypted
+   observer frame of `frame_bytes` plaintext every `frame_secs` over the
+   socket, plus `reads` HTTP `/query` reads of the channel's newest 50
+   messages at random points in the turn, as tool calls.
+3. **End**: a timed reply through HTTP `/events`, at the first level of the
+   message's thread (under its root), as a harness answers a person; a
+   top-level message becomes the root of a new thread. Then each
+   reaction's removal: a `/query` for the agent's reactions on
+   the message and a kind:5 deletion of each one found.
+
+An agent makes one HTTP request sequence at a time, and the socket keeps
+running beside it: presence, typing and frames are sent without waiting for
+their `OK`, so they stay on schedule while a request or an `OK` is slow, as a
+harness's do. A publish has 30 seconds from the start of its send: one the
+socket cannot write by then fails and drops the connection, and an `OK` not
+back by then is an error. A read counts as an error when its response is not
+valid JSON of the expected shape. Requests and publishes do not start after
+the stop; one under way finishes, and publishes awaiting their `OK` settle
+within the shutdown grace or fail the run.
+
+The request mix is an approximation of sustained turns, not a replay of the
+harness. Every turn reads as a first prompt does. A harness that keeps
+working in one thread reads 25 replies instead of 13, batches profile
+lookups across prompts and caches project-home lookups for 30 seconds, so
+the turn context here reads profiles and project homes more often than a
+busy harness does.
+
+For a harness-like agent, also set `agent.query_interval_secs = 0` (no
+polling) and `events_per_hour = observer_frames_per_hour = 0`, so turns are
+its only work. A turn under way when the socket drops continues after the
+reconnect.
+
 ## Targeting and membership
 
 `target.connect_addr` (`host:port`) applies only together with
@@ -115,9 +168,24 @@ that requires membership rejects both `seed` and `run`. With
 every member: the humans and agents assigned to each channel up to the
 largest ramp step, and the hot-thread root and authors in its channel. It
 sends kind:9000 events of up to 100 members, `seed_concurrency` at a time,
-signed by the community owner, before posting any history. A rerun adds
+signed by the channel's creator, before posting any history. A rerun adds
 nobody new, and any member the relay refuses fails the seed. Seeded history
-in a private channel is posted by its own members.
+in a private channel is posted by its own human members, or by its creator
+when it has none.
+
+The relay limits HTTP calls per pubkey, so `seed` spreads its writes across
+signers. The community owner creates its first 8 channels and each further
+block of 8 has its own creator identity, derived from `run_id`. A creator
+signs its channels' creation, member adds and thread roots (`run` looks roots
+up by it), so no creator nears the quota however many channels the community
+has. History and replies rotate across humans. A write the relay still
+throttles waits out the window the relay names and is retried, up to 10
+times, before it counts as failed. Each rejected attempt of a seed post counts as throttled,
+and the post's latency covers only its accepted attempt.
+
+A private fixture with more than 8 channels per community that was seeded
+before channels had creators cannot be reseeded, and `run` finds none of its
+roots past the first 8 channels. Seed it again under a fresh `run_id`.
 
 ## Desktop clients
 
@@ -258,7 +326,9 @@ session. Each connect plus authentication must finish within
 `rate-limited: quota exceeded` text, are reported as `throttled`, not errors.
 Every other rejection, including `rate-limited: shared admission unavailable`
 (the relay's admission store is down), counts as an error.
-Ramp steps must increase `users`, since clients are only ever added.
+Ramp steps must never decrease `users`, since clients are only ever added.
+Repeat a level to split a long hold into windows that are each reported and
+judged, for example six 600-second steps at the same `users` for an hour.
 
 When the run stops, clients get 15 seconds to settle what they have in flight
 and disconnect. An operation already under way runs to its own deadline

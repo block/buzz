@@ -402,6 +402,12 @@ impl ActionSink for RelayActionSink {
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
 
+            crate::handlers::media_access::validate_media_references(&tenant, &state, &event)
+                .await
+                .map_err(|error| {
+                    ActionSinkError::InvalidInput(format!("media reference denied: {error:?}"))
+                })?;
+
             let event_id_hex = event.id.to_hex();
             let event_id_bytes = event.id.as_bytes().to_vec();
             let kind_u32 = KIND_STREAM_MESSAGE;
@@ -791,9 +797,7 @@ mod postgres_tests {
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await

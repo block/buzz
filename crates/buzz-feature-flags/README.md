@@ -15,7 +15,8 @@ Provider-neutral types:
 
 - `BooleanFlag`
 - `IntegerFlag` (`i64`, including negative values)
-- `EvaluationContext` (required `CommunityId`, optional actor `PublicKey`)
+- `EvaluationContext` (a `CommunityId` with an optional actor `PublicKey`, or
+  `for_process()` for process-wide settings such as concurrency caps)
 - `FlagEvaluator` (typed `evaluate_bool` and `evaluate_int`)
 - `StaticEvaluator` (always returns declared defaults)
 - `EnvironmentEvaluator` (process-wide immutable environment snapshot)
@@ -46,164 +47,38 @@ Normalized names must be unique across declared flags. Collisions (for example
 uniqueness belongs in a future flag registry; this crate does not add a
 registry yet.
 
-## Relay Artifact Contract (not yet wired into `buzz-relay`)
+## Relay Provider Selection
 
-The intended composition root is the outer relay artifact. It must select
-exactly one provider at compile time:
+`buzz-relay` builds exactly one evaluator at startup, chosen by
+`BUZZ_FEATURE_FLAGS_PROVIDER` (outside the `BUZZ_FEATURE_FLAG_` namespace, so
+it can never be read as a flag):
 
-- `static-feature-flags`
-- `environment-feature-flags`
-- `launchdarkly-feature-flags`
+| Value | Evaluator |
+|-------|-----------|
+| unset, `static` | `StaticEvaluator` |
+| `environment` | `EnvironmentEvaluator::from_process_environment()` |
+| `launchdarkly` | `LaunchDarklyEvaluator`, from `BUZZ_LAUNCHDARKLY_SDK_KEY` and the optional Relay Proxy URL `BUZZ_LAUNCHDARKLY_RELAY_PROXY_URL` |
 
-`launchdarkly-feature-flags` is the only relay feature that forwards to
-`buzz-feature-flags/launchdarkly`. `static-feature-flags` and
-`environment-feature-flags` keep the reusable crate vendor-neutral and still
-allow adapter code to compile in tests.
+The value is parsed into one provider; there is no stacking, no precedence and
+no fallback from one provider to another, and the evaluator never changes for
+the life of the process. Every relay build carries the LaunchDarkly adapter
+(`buzz-feature-flags/launchdarkly`), which stays inert unless selected, so one
+published artifact serves every deployment and the deployment's configuration
+pins its provider.
 
-The relay artifact boundary, not this reusable crate, owns exact-one
-enforcement. Consumer integration PRs must carry `exact-one compile_error guards`
-verbatim/equivalently. That keeps `buzz-feature-flags` free to compile multiple
-adapters for tests while ensuring a staging or production relay artifact cannot
-choose a different evaluator at runtime.
+The composition root lives in `crates/buzz-relay/src/feature_flags.rs`. It
+constructs the evaluator once and hands consumers the shared
+`Arc<dyn FlagEvaluator>`, keeping the concrete owner to drain environment
+diagnostics and to call LaunchDarkly's `close()` at shutdown.
 
-This repository currently adds the crate and adapter, but does **not** yet wire
-relay `AppState` or handlers to consume it. `crates/buzz-relay/Cargo.toml`
-still has no dependency on `buzz-feature-flags`, so current workspace/default
-builds remain intentionally unchanged. The executable contract for the future
-relay integration lives in
-`tests/fixtures/relay-feature-selection`.
-
-## Composition Root Shape (artifact boundary)
-
-Construct once at process startup, then inject shared `Arc<dyn FlagEvaluator>`
-into server components.
-
-```rust
-use std::sync::Arc;
-use std::time::Duration;
-
-use buzz_feature_flags::{EnvironmentEvaluator, FlagEvaluator, StaticEvaluator};
-#[cfg(feature = "launchdarkly-feature-flags")]
-use buzz_feature_flags::launchdarkly::{
-    LaunchDarklyEvaluator, LaunchDarklyInitError, LaunchDarklyRuntimeConfig,
-    LaunchDarklyStartError,
-};
-
-#[cfg(not(any(
-    feature = "static-feature-flags",
-    feature = "environment-feature-flags",
-    feature = "launchdarkly-feature-flags",
-)))]
-compile_error!(
-    "select exactly one relay feature flag provider feature: static-feature-flags, environment-feature-flags, or launchdarkly-feature-flags"
-);
-
-#[cfg(any(
-    all(feature = "static-feature-flags", feature = "environment-feature-flags"),
-    all(feature = "static-feature-flags", feature = "launchdarkly-feature-flags"),
-    all(feature = "environment-feature-flags", feature = "launchdarkly-feature-flags"),
-))]
-compile_error!(
-    "select exactly one relay feature flag provider feature: static-feature-flags, environment-feature-flags, or launchdarkly-feature-flags"
-);
-
-#[cfg(any(feature = "static-feature-flags", feature = "environment-feature-flags"))]
-#[derive(Default)]
-struct FeatureFlagRuntimeConfig;
-
-#[cfg(feature = "launchdarkly-feature-flags")]
-struct FeatureFlagRuntimeConfig {
-    sdk_key: String,
-    relay_proxy_endpoint: Option<String>,
-}
-
-struct RelayCompositionRoot {
-    feature_flags: Arc<dyn FlagEvaluator>,
-    environment_diagnostics: Option<Arc<EnvironmentEvaluator>>,
-    #[cfg(feature = "launchdarkly-feature-flags")]
-    launchdarkly_lifecycle: Option<Arc<LaunchDarklyEvaluator>>,
-}
-
-#[cfg(feature = "launchdarkly-feature-flags")]
-enum RelayStartupError {
-    LaunchDarklyInit(LaunchDarklyInitError),
-    LaunchDarklyStart(LaunchDarklyStartError),
-}
-
-#[cfg(feature = "static-feature-flags")]
-fn build_feature_flag_evaluator(_config: FeatureFlagRuntimeConfig) -> RelayCompositionRoot {
-    RelayCompositionRoot {
-        feature_flags: Arc::new(StaticEvaluator),
-        environment_diagnostics: None,
-    }
-}
-
-#[cfg(feature = "environment-feature-flags")]
-fn build_feature_flag_evaluator(config: FeatureFlagRuntimeConfig) -> RelayCompositionRoot {
-    let _ = config;
-    let owner = Arc::new(EnvironmentEvaluator::from_process_environment());
-    let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
-    RelayCompositionRoot {
-        feature_flags,
-        environment_diagnostics: Some(owner),
-    }
-}
-
-#[cfg(feature = "launchdarkly-feature-flags")]
-async fn build_feature_flag_evaluator(
-    config: FeatureFlagRuntimeConfig,
-) -> Result<RelayCompositionRoot, RelayStartupError> {
-    let mut runtime_config = LaunchDarklyRuntimeConfig::new(config.sdk_key);
-    if let Some(relay_proxy_endpoint) = config.relay_proxy_endpoint {
-        runtime_config = runtime_config.with_relay_proxy_endpoint(relay_proxy_endpoint);
-    }
-
-    let owner = Arc::new(
-        LaunchDarklyEvaluator::from_runtime_config(runtime_config)
-            .map_err(RelayStartupError::LaunchDarklyInit)?,
-    );
-    owner
-        .start_with_default_executor_and_wait(Duration::from_secs(5))
-        .await
-        .map_err(RelayStartupError::LaunchDarklyStart)?;
-
-    let feature_flags: Arc<dyn FlagEvaluator> = owner.clone();
-    Ok(RelayCompositionRoot {
-        feature_flags,
-        environment_diagnostics: None,
-        launchdarkly_lifecycle: Some(owner),
-    })
-}
-```
-
-Each relay feature produces exactly one `build_feature_flag_evaluator` path, and
-runtime config carries only the selected provider's settings. There is no
-runtime provider enum, no provider-name environment variable, and no fallback
-selector.
-
-Startup is fail-closed: if the selected provider fails initialization (including
-`start_with_default_executor_and_wait` for LaunchDarkly), relay startup must
-return an error and stop rather than falling back to another evaluator.
-
-The extra concrete `Arc` is an owner/lifecycle handle to that same evaluator,
-not a layered provider. Consumers receive only the cloned `Arc<dyn
-FlagEvaluator>` view. Retain the environment owner to drain diagnostics after
-evaluations, and retain the LaunchDarkly owner so shutdown can call `close()`.
-
-`EnvironmentEvaluator` snapshots environment values once at construction,
-retains only `BUZZ_FEATURE_FLAG_` entries, ignores `EvaluationContext`, and
-never rereads process environment during evaluation.
-
-For deterministic tests or embedding, `EnvironmentEvaluator::from_pairs(...)`
-constructs the same immutable snapshot from explicit key/value pairs.
-
-Environment entries are untyped at construction, so malformed present values
-are detected when a typed flag is first evaluated. `take_diagnostics()` drains
-each sanitized diagnostic at most once per flag key and expected type. The
-composition root should retain the concrete environment evaluator and emit each
-drained diagnostic as a warning through the application's logging stack.
-Diagnostics contain no raw value or environment-variable name; the value
-snapshot itself remains immutable.
+Startup fails on a local configuration error: an unknown provider,
+`launchdarkly` without an SDK key, or a malformed Relay Proxy URL. It does not
+fail when LaunchDarkly is unreachable: the relay waits briefly for flag data,
+then serves declared defaults while the SDK keeps connecting, and
+`buzz_feature_flags_ready{provider}` reports whether the provider has
+initialized. Once initialized, LaunchDarkly serves its last-known values
+through a later outage, so the gauge stays 1 and flag values do not revert to
+defaults until the SDK reconnects and receives new data.
 
 ## `buzz-db` Boundary (approved correction)
 
@@ -253,8 +128,9 @@ operation already receives an authoritative authenticated actor for domain
 behavior. Feature targeting must not add actor/pubkey parameters to otherwise
 actor-free DB APIs.
 
-For LaunchDarkly, the adapter context always includes kind `community` plus
-optional global kind `pubkey`. Percentage rollouts must explicitly choose a
+For LaunchDarkly, a community evaluation always includes kind `community` plus
+optional global kind `pubkey`; a process evaluation is a single kind `relay`
+context keyed `relay`. Percentage rollouts must explicitly choose a
 kind present in evaluation: rollouts must set `contextKind` to a kind present
 in evaluation (`community` or `pubkey`) when they are intended to bucket Buzz
 traffic. LaunchDarkly rollouts where configuration omits `contextKind` defaults
@@ -265,7 +141,11 @@ zero and pick the first positive-weight variation.
 
 - Evaluation context inputs are authoritative server-resolved values
   (`community`, optional `actor`), not client-supplied targeting attributes.
-- Flags may choose between **equivalent** implementations only.
+- Flags may choose between **equivalent** implementations only, with one
+  exception: an operational limit (a concurrency cap) may be set by a flag
+  when the flag can only *tighten* it. The consumer clamps the value to a
+  ceiling fixed at startup, and a missing, non-positive or unavailable value
+  means the ceiling. Shedding under such a limit must be retryable.
 - Flags must not weaken authorization, tenant isolation, ordering guarantees,
   transaction/consistency behavior, or schema invariants.
 - Declared defaults choose the established safe path.
@@ -283,12 +163,13 @@ zero and pick the first positive-weight variation.
 - LaunchDarkly numbers are SDK `f64` values. Integer evaluation accepts only
   mathematically integral values that convert to `i64` exactly from that `f64`
   representation; otherwise it returns each flag's declared default.
-- Startup chooses one evaluator at compile time (`StaticEvaluator`,
+- Startup chooses one evaluator from configuration (`StaticEvaluator`,
   `EnvironmentEvaluator`, or LaunchDarkly); provider precedence/stacking is out
   of scope.
 - If LaunchDarkly is used, call evaluator `close()` during process shutdown.
-  `close()` blocks the calling thread while it flushes analytics, so async
-  shutdown code should offload it to a blocking shutdown path.
+  `close()` blocks the calling thread while it flushes analytics and has no
+  deadline of its own, so async shutdown code should run it off the runtime
+  and bound the wait (the relay gives it a detached thread and 2 s).
 - Safety invariants must never rely on remote-flag availability.
 
 ## Build and Test Expectations
@@ -319,16 +200,6 @@ cargo tree -p buzz-feature-flags --features launchdarkly
 Testing expectations:
 
 - Run provider-neutral tests and LaunchDarkly-feature tests for this crate.
-- Run the relay-artifact compile contract in
-  `tests/relay_feature_selection_contract.rs`, including zero-feature and
-  multiple-feature rejection.
-- Keep `tests/fixtures/relay-feature-selection/Cargo.lock` checked in for the
-  nested `--locked` compile contract. Regenerate it from repo root with:
-
-```bash
-cargo generate-lockfile --manifest-path crates/buzz-feature-flags/tests/fixtures/relay-feature-selection/Cargo.toml
-```
-
 - When `buzz-db` adopts flag-gated query selection, add parity tests proving
   old/new query paths return equivalent rows, ordering, and transactional
   behavior for the same inputs.

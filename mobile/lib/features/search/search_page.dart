@@ -1,3 +1,4 @@
+import '../../shared/widgets/top_edge_fade.dart';
 import 'dart:async';
 
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
@@ -249,11 +250,13 @@ class SearchPage extends HookConsumerWidget {
             ),
             const SizedBox(height: Grid.xxs),
             Expanded(
-              child: _SearchBody(
-                state: searchState,
-                filter: activeFilter.value,
-                currentPubkey: currentPubkey,
-                onRecentSearchSelected: runRecentSearch,
+              child: TopEdgeFade(
+                child: _SearchBody(
+                  state: searchState,
+                  filter: activeFilter.value,
+                  currentPubkey: currentPubkey,
+                  onRecentSearchSelected: runRecentSearch,
+                ),
               ),
             ),
           ],

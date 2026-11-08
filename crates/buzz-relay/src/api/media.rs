@@ -90,7 +90,7 @@ enum UploadRouteMode {
 ///
 /// Non-Blossom errors (`blossom_denial_kind()` returns `None`) always fall
 /// through to `MediaError::into_response()` regardless of mode.
-pub(crate) struct MediaDenial(MediaError, BlossomStrictness);
+pub(crate) struct MediaDenial(pub(super) MediaError, pub(super) BlossomStrictness);
 
 impl IntoResponse for MediaDenial {
     fn into_response(self) -> Response {
@@ -112,7 +112,8 @@ impl IntoResponse for MediaDenial {
                 );
                 let mut builder = axum::http::Response::builder()
                     .status(class.http_status())
-                    .header(header::CONTENT_TYPE, class.content_type());
+                    .header(header::CONTENT_TYPE, class.content_type())
+                    .header(header::CACHE_CONTROL, "private, no-store");
                 if let Some(challenge) = class.www_authenticate() {
                     builder = builder.header("WWW-Authenticate", challenge);
                 }
@@ -121,7 +122,12 @@ impl IntoResponse for MediaDenial {
                     .expect("NIP-FI denial response is always valid");
             }
         }
-        error.into_response()
+        let mut response = error.into_response();
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
+        response
     }
 }
 
@@ -609,6 +615,69 @@ async fn upload_blob_result(
         // get the same NIP-FI shape as pre-body ones.
         .map_err(|e| media_denial(e, strictness))?;
 
+    if state.config.media_read_mode != super::media_access::MediaReadMode::Off {
+        let mut recording_reason = "lookup_error";
+        let recording: Result<(), MediaDenial> = async {
+            // A reupload of a legacy attachment must remember that it has been
+            // published before recording new preview authority. Otherwise purging
+            // the legacy source later could resurrect uploader preview access.
+            let base = media_base_url_for_tenant(&state.config.relay_url, auth.tenant.host());
+            let ext = descriptor
+                .url
+                .rsplit('.')
+                .next()
+                .ok_or_else(|| media_denial(MediaError::Internal, strictness))?;
+            let existing = state
+                .db
+                .media_access(
+                    auth.tenant.community(),
+                    &descriptor.sha256,
+                    ext,
+                    &base,
+                    auth.auth_event.pubkey.as_bytes(),
+                    false,
+                    crate::handlers::req::event_visible_to_reader,
+                )
+                .await
+                .map_err(|error| {
+                    if matches!(error, buzz_db::DbError::MediaAuthorizationCapacity) {
+                        recording_reason = "capacity";
+                    }
+                    media_denial(MediaError::AuthorizationUnavailable, strictness)
+                })?;
+            if matches!(
+                existing,
+                buzz_db::media::MediaAccess::Allowed | buzz_db::media::MediaAccess::Restricted
+            ) {
+                state
+                    .db
+                    .record_media_publications(
+                        auth.tenant.community(),
+                        vec![descriptor.sha256.clone()],
+                    )
+                    .await
+                    .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
+            }
+            state
+                .db
+                .record_media_upload(
+                    auth.tenant.community(),
+                    &descriptor.sha256,
+                    auth.auth_event.pubkey.as_bytes(),
+                )
+                .await
+                .map_err(|_| media_denial(MediaError::AuthorizationUnavailable, strictness))?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = recording {
+            metrics::counter!("buzz_media_upload_access_total", "mode" => state.config.media_read_mode.label(), "reason" => recording_reason).increment(1);
+            if state.config.media_read_mode == super::media_access::MediaReadMode::Enforce {
+                return Err(error);
+            }
+        }
+    }
+
     rewrite_descriptor_urls_for_tenant(
         &mut descriptor,
         &state.config.relay_url,
@@ -757,7 +826,7 @@ async fn enforce_blossom_read_membership(
 }
 
 fn blob_cache_control() -> &'static str {
-    "private, max-age=31536000, immutable"
+    "private, no-store"
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -908,6 +977,14 @@ pub(crate) async fn get_blob(
         &slot,
     )
     .await?;
+    super::media_access::enforce_read(
+        &state,
+        &tenant,
+        &sha256_ext,
+        auth_event.pubkey.as_bytes(),
+        strictness,
+    )
+    .await?;
     serve_blob_for_tenant(&state, &tenant, &sha256_ext, &req_headers)
         .await
         .map_err(MediaDenial::from)
@@ -982,9 +1059,7 @@ pub(crate) async fn serve_blob_for_tenant(
     match single_range {
         None => {
             // Full response — 200 OK. Stream from S3 — never loads full blob into RAM.
-            let total = state
-                .media_storage
-                .head_with_metadata(&key)
+            let total = head_or_regenerate_thumb(state, tenant, sha256_ext, &key)
                 .await?
                 .ok_or(MediaError::NotFound)?
                 .size;
@@ -1004,9 +1079,7 @@ pub(crate) async fn serve_blob_for_tenant(
         }
         Some(range_str) => {
             // S3-native single-range response, capped to bound request memory.
-            let total = state
-                .media_storage
-                .head_with_metadata(&key)
+            let total = head_or_regenerate_thumb(state, tenant, sha256_ext, &key)
                 .await?
                 .ok_or(MediaError::NotFound)?
                 .size;
@@ -1017,6 +1090,7 @@ pub(crate) async fn serve_blob_for_tenant(
                     if start >= total {
                         return axum::response::Response::builder()
                             .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .header(header::CACHE_CONTROL, cache_control)
                             .header(header::CONTENT_RANGE, format!("bytes */{total}"))
                             .body(axum::body::Body::empty())
                             .map_err(|_| MediaError::Internal);
@@ -1044,6 +1118,7 @@ pub(crate) async fn serve_blob_for_tenant(
                 }
                 None => Ok(axum::response::Response::builder()
                     .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CACHE_CONTROL, cache_control)
                     .header(header::CONTENT_RANGE, format!("bytes */{total}"))
                     .body(axum::body::Body::empty())
                     .map_err(|_| MediaError::Internal)?),
@@ -1228,6 +1303,14 @@ pub(crate) async fn head_blob(
         &slot,
     )
     .await?;
+    super::media_access::enforce_read(
+        &state,
+        &tenant,
+        &sha256_ext,
+        auth_event.pubkey.as_bytes(),
+        strictness,
+    )
+    .await?;
     let cache_control = blob_cache_control();
 
     // Sidecar gate FIRST — reject before any blob I/O.
@@ -1259,7 +1342,7 @@ pub(crate) async fn head_blob(
     };
 
     let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
-    match state.media_storage.head_with_metadata(&key).await? {
+    match head_or_regenerate_thumb(&state, &tenant, &sha256_ext, &key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
             Ok((
@@ -1275,6 +1358,73 @@ pub(crate) async fn head_blob(
         }
         None => Ok(StatusCode::NOT_FOUND.into_response()),
     }
+}
+
+/// Concurrent on-demand thumbnail regenerations per relay process. Each holds
+/// a full-size decode in memory, so excess requests get a plain 404 instead of
+/// waiting.
+static THUMB_REGEN: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// `head_with_metadata`, first regenerating a missing thumbnail variant from
+/// its image original (uploaded before the variant existed, or a failed write).
+///
+/// Callers have already passed the tenant and sidecar gates for `sha256_ext`.
+/// Regeneration failure is logged and reads as absent, never an error.
+async fn head_or_regenerate_thumb(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+    key: &str,
+) -> Result<Option<buzz_media::BlobHeadMeta>, MediaError> {
+    let head = state.media_storage.head_with_metadata(key).await?;
+    let Some((sha256, _)) = Thumb::parse(sha256_ext).filter(|_| head.is_none()) else {
+        return Ok(head);
+    };
+    match regenerate_thumbs(state, tenant, sha256).await {
+        Ok(true) => state.media_storage.head_with_metadata(key).await,
+        Ok(false) => Ok(None),
+        Err(e) => {
+            tracing::warn!(sha256, error = %e, "thumbnail regeneration failed");
+            Ok(None)
+        }
+    }
+}
+
+/// Rebuild every thumbnail of the tenant's image `sha256`. `Ok(false)` means
+/// there was nothing to do: not an image, no original, too large, or busy.
+async fn regenerate_thumbs(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256: &str,
+) -> Result<bool, MediaError> {
+    let storage = &state.media_storage;
+    let meta = storage.get_sidecar(tenant, sha256).await?;
+    if !meta.mime_type.starts_with("image/") || !is_safe_ext(&meta.ext) {
+        return Ok(false);
+    }
+    let key = format!("{sha256}.{}", meta.ext);
+    let max = state.config.media.max_image_bytes;
+    if !storage
+        .head_with_metadata(&key)
+        .await?
+        .is_some_and(|h| h.size <= max)
+    {
+        return Ok(false);
+    }
+    let Ok(_permit) = THUMB_REGEN.try_acquire() else {
+        return Ok(false);
+    };
+    let body = bytes::Bytes::from(storage.get(&key).await?);
+    buzz_media::upload::store_image_thumbnails(
+        storage,
+        &state.config.media,
+        sha256,
+        body,
+        &meta.mime_type,
+        &meta.ext,
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Resolve the S3 key from a URL path segment.
@@ -2068,9 +2218,7 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -2155,9 +2303,7 @@ mod tests {
                 .await
                 .ok()?;
             let db = buzz_db::Db::from_pool(pool.clone());
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .ok()?;
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -4484,9 +4630,7 @@ mod tests {
             db.ensure_configured_community("relay.example")
                 .await
                 .expect("seed relay.example community for host-bound media tests");
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("redis pool");
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -4686,6 +4830,187 @@ mod tests {
 
             drop(permit_b);
             drop(permit_a);
+        }
+
+        /// Thumbnail regeneration needs real object storage, so these also
+        /// need MinIO. They share one image and the process-wide regeneration
+        /// permits, so they run one at a time.
+        mod external_infra_minio_tests {
+            use super::*;
+
+            static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+            /// A valid 4x4 PNG with no ancillary chunks.
+            const PNG: &[u8] = &[
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x02, 0x00, 0x00,
+                0x00, 0x26, 0x93, 0x09, 0x29, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9c, 0x63, 0x38, 0x21, 0x27, 0x07, 0x47, 0x0c, 0xc4, 0x71, 0x00, 0xb1, 0x63, 0x10,
+                0x41, 0x3b, 0x4b, 0x63, 0x82, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+                0x42, 0x60, 0x82,
+            ];
+
+            struct Fixture {
+                rt: tokio::runtime::Runtime,
+                state: Arc<AppState>,
+                host: String,
+                sha: String,
+            }
+
+            impl Fixture {
+                /// Upload [`PNG`] through the real route, apply `configure`, and delete its thumbnails.
+                fn new(configure: impl FnOnce(&mut crate::config::Config)) -> Self {
+                    let (rt, mut state, host) = media_fixture(media_off_test_state());
+                    let sha = sha256_hex(PNG);
+                    let proof = blossom_upload_auth_value(&Keys::generate(), &host, &sha);
+                    let (status, _, body) = upload_request_with(
+                        &rt,
+                        &state,
+                        "/media/upload",
+                        &host,
+                        (Some(&sha), PNG),
+                        &[&proof],
+                        None,
+                    );
+                    assert_eq!(status, StatusCode::OK, "upload: {body:?}");
+                    mutate_state(&mut state, configure);
+                    let fixture = Self {
+                        rt,
+                        state,
+                        host,
+                        sha,
+                    };
+                    fixture.delete_thumbs();
+                    fixture
+                }
+
+                fn thumb_key(&self, ext: &str) -> String {
+                    format!("{}.thumb.{ext}", self.sha)
+                }
+
+                fn delete_thumbs(&self) {
+                    for ext in ["webp", "jpg"] {
+                        self.rt
+                            .block_on(self.state.media_storage.delete(&self.thumb_key(ext)))
+                            .expect("delete thumbnail");
+                    }
+                }
+
+                fn stored(&self, key: &str) -> bool {
+                    self.rt
+                        .block_on(self.state.media_storage.head(key))
+                        .expect("head")
+                }
+
+                fn read(
+                    &self,
+                    method: &str,
+                    ext: &str,
+                ) -> (StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+                    let mut headers = axum::http::HeaderMap::new();
+                    headers.insert(
+                        axum::http::header::AUTHORIZATION,
+                        blossom_get_auth_value(&Keys::generate(), &self.host, &self.sha)
+                            .parse()
+                            .expect("valid header"),
+                    );
+                    self.rt.block_on(media_oneshot(
+                        Arc::clone(&self.state),
+                        method,
+                        &format!("/media/{}", self.thumb_key(ext)),
+                        &self.host,
+                        headers,
+                        b"",
+                    ))
+                }
+            }
+
+            /// A thumbnail variant missing from storage while its image original
+            /// exists is rebuilt and served, by GET and by HEAD, for each variant.
+            #[test]
+            #[ignore = "requires Postgres and MinIO"]
+            fn missing_thumbnail_is_regenerated_from_image_original() {
+                let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+                let f = Fixture::new(|_| {});
+                for (method, ext, mime) in [
+                    ("GET", "webp", "image/webp"),
+                    ("GET", "jpg", "image/jpeg"),
+                    ("HEAD", "webp", "image/webp"),
+                    ("HEAD", "jpg", "image/jpeg"),
+                ] {
+                    f.delete_thumbs();
+                    let (status, headers, body) = f.read(method, ext);
+                    assert_eq!(status, StatusCode::OK, "{method} {ext}: {body:?}");
+                    assert_eq!(headers["content-type"], mime, "{method} {ext}");
+                    if method == "GET" {
+                        assert!(!body.is_empty(), "{ext} body");
+                    }
+                    for ext in ["webp", "jpg"] {
+                        assert!(f.stored(&f.thumb_key(ext)), "{method} {ext}: {ext} stored");
+                    }
+                }
+            }
+
+            /// Regeneration stays a 404 and writes nothing when the sidecar says the
+            /// blob is not an image, the original is gone, the original exceeds
+            /// `max_image_bytes`, or every regeneration permit is taken.
+            #[test]
+            #[ignore = "requires Postgres and MinIO"]
+            fn missing_thumbnail_is_not_regenerated_when_unsafe() {
+                let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+                let assert_absent = |f: &Fixture, case: &str| {
+                    for ext in ["webp", "jpg"] {
+                        let (status, _, body) = f.read("GET", ext);
+                        assert_eq!(status, StatusCode::NOT_FOUND, "{case} {ext}: {body:?}");
+                        assert!(!f.stored(&f.thumb_key(ext)), "{case}: {ext} written");
+                    }
+                };
+
+                // Not an image: a text blob under its own hash.
+                let f = Fixture::new(|_| {});
+                let text = format!("not an image {}", uuid::Uuid::new_v4()).into_bytes();
+                let sha = sha256_hex(&text);
+                let tenant =
+                    f.rt.block_on(crate::tenant::bind_community(&f.state.db, &f.host))
+                        .expect("bind community");
+                f.rt.block_on(async {
+                    let storage = &f.state.media_storage;
+                    storage
+                        .put(&format!("{sha}.txt"), &text, "text/plain")
+                        .await
+                        .expect("put text");
+                    let meta = buzz_media::BlobMeta {
+                        ext: "txt".into(),
+                        mime_type: "text/plain".into(),
+                        size: text.len() as u64,
+                        ..Default::default()
+                    };
+                    storage
+                        .put_sidecar(&tenant, &sha, &meta)
+                        .await
+                        .expect("put sidecar");
+                });
+                let text_fixture = Fixture { sha, ..f };
+                assert_absent(&text_fixture, "non-image");
+
+                // Original missing: sidecar still says image.
+                let f = Fixture::new(|_| {});
+                f.rt.block_on(f.state.media_storage.delete(&format!("{}.png", f.sha)))
+                    .expect("delete original");
+                assert_absent(&f, "missing original");
+
+                // Original over the size cap.
+                let f = Fixture::new(|c| c.media.max_image_bytes = PNG.len() as u64 - 1);
+                assert_absent(&f, "oversize");
+
+                // No free permit, then a free one.
+                let f = Fixture::new(|_| {});
+                let held: Vec<_> = std::iter::from_fn(|| THUMB_REGEN.try_acquire().ok()).collect();
+                assert!(!held.is_empty(), "fixture must hold a regeneration permit");
+                assert_absent(&f, "busy");
+                drop(held);
+                assert_eq!(f.read("GET", "webp").0, StatusCode::OK, "after release");
+            }
         }
     }
 }

@@ -18,6 +18,7 @@ class AndroidExpandingMenuButton extends HookWidget {
     this.label = 'New',
     this.expansionBoundsContext,
     this.trigger,
+    this.backgroundColor,
     this.width = 112,
     this.height = 56,
     this.dividerBefore = const {},
@@ -29,6 +30,7 @@ class AndroidExpandingMenuButton extends HookWidget {
   final BuildContext? expansionBoundsContext;
   final String label;
   final Widget? trigger;
+  final Color? backgroundColor;
   final double width, height;
   final Set<int> dividerBefore;
   final Map<int, String> sectionTitles;
@@ -43,6 +45,7 @@ class AndroidExpandingMenuButton extends HookWidget {
       child: Opacity(
         opacity: open.value ? 0 : 1,
         child: NavigationButtonSurface(
+          backgroundColor: backgroundColor,
           child: Builder(
             builder: (buttonContext) => Tooltip(
               message: label,
@@ -74,6 +77,7 @@ class AndroidExpandingMenuButton extends HookWidget {
                   final captured = actions;
                   final route = _CreateMenuRoute(
                     anchor: rect,
+                    backgroundColor: backgroundColor ?? context.controlSurface,
                     expansionBounds: expansionBounds,
                     label: label,
                     trigger: trigger ?? const _NewLabel(),
@@ -130,6 +134,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
     required this.expansionBounds,
     required this.label,
     required this.trigger,
+    required this.backgroundColor,
     required this.dividerBefore,
     required this.sectionTitles,
     required this.actions,
@@ -140,6 +145,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
   final Rect? expansionBounds;
   final String label;
   final Widget trigger;
+  final Color backgroundColor;
   final Set<int> dividerBefore;
   final Map<int, String> sectionTitles;
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
@@ -230,9 +236,7 @@ class _CreateMenuRoute extends PopupRoute<int> {
                   child: BackdropFilter(
                     filter: ImageFilter.blur(sigmaX: 16 * t, sigmaY: 16 * t),
                     child: Material(
-                      color: context.controlSurface.withValues(
-                        alpha: 1 - .12 * t,
-                      ),
+                      color: backgroundColor.withValues(alpha: 1 - .12 * t),
                       child: Stack(
                         children: [
                           Positioned.fill(

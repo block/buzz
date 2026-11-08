@@ -59,6 +59,11 @@ class AgentCreationDraft {
     http.Client client,
   ) async {
     final cdn = HostedEnvironment.avatarsCdnOrigin;
+    if (cdn == null) {
+      throw const AgentCardException(
+        'Agent cards aren’t available in this build.',
+      );
+    }
     // The id is opaque; pathSegments percent-encodes anything path-unsafe.
     final url = cdn.replace(pathSegments: [link.cardId, 'agent.json']);
     final BoundedResponse response;

@@ -98,6 +98,11 @@ run_unit_tests() {
   run_test_step "buzz-pubsub conn_control tests" \
     cargo test -p buzz-pubsub --lib conn_control::tests:: -- --nocapture
 
+  # Shared Redis connection timeout bounds (loopback fake peers; infra-free).
+  # Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub connection tests" \
+    cargo test -p buzz-pubsub --lib connection::tests:: -- --nocapture
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -159,6 +164,9 @@ run_unit_tests() {
 
   run_test_step "buzz-admin NIP-FI binding command tests" \
     cargo test -p buzz-admin nip_fi::tests -- --nocapture
+
+  run_test_step "buzz-admin NIP-FI policy command tests" \
+    cargo test -p buzz-admin nip_fi_policy::tests -- --nocapture
 
   run_test_step "buzz-admin user-deletion intake command tests" \
     cargo test -p buzz-admin user_deletions::tests -- --nocapture
@@ -258,6 +266,9 @@ run_unit_tests() {
   run_test_step "buzz-relay subscription registry tests" \
     cargo test -p buzz-relay --lib subscription::tests:: -- --nocapture
 
+  run_test_step "buzz-relay multi-node fan-out tests" \
+    cargo test -p buzz-relay --lib handlers::multinode_fanout::tests:: -- --nocapture
+
   # telemetry and config tests mutate process env. libtest runs one process
   # with many threads (nextest, used by `just test-unit`, isolates each test),
   # so run them single-threaded here. `--skip` keeps the substring filter
@@ -328,6 +339,7 @@ run_unit_tests() {
       connection::tests::dispatcher_counts_each_req_and_count_frame_once \
       connection::tests::read_before_login_logs_one_denial_from_the_handler \
       connection::tests::read_refused_by_a_full_handler_semaphore_logs_one_denial \
+      connection::tests::saturated_handler_write_line_records_whether_its_ok_was_queued \
       connection::tests::read_refused_by_unavailable_admission_logs_one_denial \
       handlers::auth::tests::repeat_auth_after_a_terminal_logs_one_denial \
       nip_fi_upgrade::tests::deny_protected_logs_one_denied_auth_line \
@@ -388,6 +400,9 @@ run_unit_tests() {
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
       tenant::tests::an_overlong_host_fails_closed_before_the_resolver \
       state::tests::disconnect_drops_the_cached_restriction_row
+
+  run_test_step "buzz-relay membership snapshot tests" \
+    cargo test -p buzz-relay --lib membership_cache::tests:: -- --nocapture
 
   run_test_step "buzz-relay router tests" \
     cargo test -p buzz-relay --lib router::tests:: -- --nocapture
@@ -510,6 +525,13 @@ run_unit_tests() {
     cargo test -p buzz-relay --lib invite_token:: -- --nocapture
   run_test_step "buzz-relay invitation cutoff configuration" \
     cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
+
+  run_test_step "buzz-relay runtime concurrency caps" \
+    cargo test -p buzz-relay --lib concurrency_limits::tests:: -- --nocapture
+  run_test_step "buzz-relay feature-flag provider selection" \
+    cargo test -p buzz-relay --lib feature_flags::tests:: -- --nocapture
+  run_test_step "buzz-relay AUTH concurrency shed" \
+    cargo test -p buzz-relay --lib handlers::auth::tests::auth_cap_sheds_a_verified_login_with_a_bare_close -- --exact --nocapture
 
   run_test_step "buzz-relay mesh receive lifetime regression" \
     cargo test -p buzz-relay --lib mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks -- --exact --nocapture

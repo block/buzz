@@ -243,6 +243,15 @@ IosNavigationAction _huddleNavigationAction(
               );
               return;
             }
+            // The header button is easy to hit by accident, so a new call asks first.
+            final confirmed = await showConfirmation(
+              context: context,
+              title: 'Start a Huddle?',
+              message:
+                  'Your microphone will turn on, and others in this conversation can join.',
+              confirmLabel: 'Start Huddle',
+            );
+            if (!confirmed || !context.mounted) return;
             try {
               await ref
                   .read(mobileHuddleControllerProvider.notifier)

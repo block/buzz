@@ -142,6 +142,110 @@ void main() {
     expect(find.text("No results for 'ada'"), findsOneWidget);
   });
 
+  testWidgets('live channel events never reorder shown results', (
+    tester,
+  ) async {
+    final session = _HeldSession();
+    final actions = _HeldUserSearch();
+    final channels = _DirectoryChannels();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_Community.new),
+          relaySessionProvider.overrideWith(() => session),
+          channelActionsProvider.overrideWith((ref) => actions),
+          channelsProvider.overrideWith(() => channels),
+          recentSearchesProvider.overrideWith(_NoRecentSearches.new),
+          profileProvider.overrideWith(_Profile.new),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'team');
+    await tester.pump(const Duration(milliseconds: 300));
+    final shown = find.byKey(
+      const ValueKey('search-channel-row-team-4things-id'),
+    );
+    final joined = find.byKey(
+      const ValueKey('search-channel-row-team-chat-id'),
+    );
+    expect(shown, findsOneWidget);
+
+    // A new channel changes the set, so it is ranked in: joined ties
+    // keep the list's order.
+    channels.state = AsyncData([
+      ...channels.state.requireValue,
+      _channel('team-chat', isMember: true),
+    ]);
+    await tester.pump();
+    expect(joined, findsOneWidget);
+    expect(tester.getTopLeft(shown).dy, lessThan(tester.getTopLeft(joined).dy));
+
+    // Activity moves the joined channel to the top of the list. Rows stay put
+    // under the finger.
+    void bump(String name) {
+      final list = channels.state.requireValue;
+      channels.state = AsyncData([
+        ...list.where((c) => c.name == name),
+        ...list.where((c) => c.name != name),
+      ]);
+    }
+
+    bump('team-chat');
+    await tester.pump();
+    expect(tester.getTopLeft(shown).dy, lessThan(tester.getTopLeft(joined).dy));
+
+    // Another caller's directory load: its status turns loaded, a live event
+    // lands, then it installs the open channels, which this search shows.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(SearchPage)),
+    );
+    final status = container.read(channelDirectoryLoadStatusProvider.notifier);
+    final scope = channelDirectoryScope(
+      'http://community.test',
+      container.read(myPubkeyProvider),
+    );
+    status.markLoaded(scope);
+    await tester.pump();
+    bump('general');
+    await tester.pump();
+    channels.state = AsyncData([
+      ...channels.state.requireValue,
+      _channel('team-open', isMember: false),
+    ]);
+    await tester.pump();
+    final open = find.byKey(const ValueKey('search-channel-row-team-open-id'));
+    expect(open, findsOneWidget);
+    expect(
+      find.descendant(of: open, matching: find.text('Open')),
+      findsOneWidget,
+    );
+
+    // Joining a shown open channel updates its row in place: the badge goes,
+    // and no row moves.
+    final openTop = tester.getTopLeft(open).dy;
+    channels.state = AsyncData([
+      for (final channel in channels.state.requireValue)
+        channel.name == 'team-open'
+            ? channel.copyWith(isMember: true)
+            : channel,
+    ]);
+    await tester.pump();
+    expect(
+      find.descendant(of: open, matching: find.text('Open')),
+      findsNothing,
+    );
+    expect(tester.getTopLeft(open).dy, openTop);
+
+    // The next query ranks the current list.
+    await tester.enterText(find.byType(TextField), 'team ');
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(tester.getTopLeft(joined).dy, lessThan(tester.getTopLeft(shown).dy));
+  });
+
   testWidgets('a failed directory offers a retry instead of no results', (
     tester,
   ) async {

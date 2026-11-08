@@ -48,6 +48,9 @@ pub struct ProvisionCommunityRequest {
     /// host instead of converging or rotating ownership.
     #[serde(default)]
     pub create_only: bool,
+    /// Initial policy for an atomic create only; absent/null preserves legacy behavior.
+    #[serde(default)]
+    pub initial_requires_nip_fi: Option<bool>,
 }
 
 /// JSON response from `POST /operator/communities`.
@@ -63,6 +66,9 @@ pub struct ProvisionCommunityResponse {
     /// Echoes the validated owner pubkey when an owner bootstrap/rotation ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_pubkey: Option<String>,
+    /// Current stored policy, present for the create-only writer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_nip_fi: Option<bool>,
 }
 
 pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
@@ -253,6 +259,12 @@ pub async fn provision_community(
         return Err("actor not authorized: not a relay operator".to_string());
     }
 
+    if request.initial_requires_nip_fi.is_some() && !request.create_only {
+        return Err(
+            "initial_policy_requires_create_only: initial_requires_nip_fi requires create_only"
+                .to_owned(),
+        );
+    }
     validate_host(&request.host)?;
     let nip_fi_policy = state.config.nip_fi_provision_binding.as_ref();
     // Unbound either way: `issuers_for_new_host` binds nothing on a reserved host.
@@ -278,14 +290,18 @@ pub async fn provision_community(
         })?;
         let write = state
             .db
-            .create_community_with_owner_and_nip_fi_issuers(
+            .create_community_with_owner_and_nip_fi_policy(
                 &request.host,
                 owner_hex,
                 nip_fi_issuers,
+                request.initial_requires_nip_fi.unwrap_or(false),
                 &state.relay_keypair,
             )
             .await
-            .map_err(|e| format!("failed to create community: {e}"))?;
+            .map_err(|e| match e {
+                buzz_db::DbError::NipFiBindingRequired => format!("nip_fi_binding_required: {e}"),
+                _ => format!("failed to create community: {e}"),
+            })?;
         let record = match write.outcome {
             buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
             buzz_db::CreateCommunityWithOwnerResult::HostExists => {
@@ -301,7 +317,9 @@ pub async fn provision_community(
             community = %record.id,
             host = %record.host,
             owner = %owner_hex,
-            "community created via operator endpoint"
+            created = record.created,
+            requires_nip_fi = record.requires_nip_fi,
+            "community provisioned via operator endpoint"
         );
         record_binding_creation(
             state.nip_fi_resolver.as_deref(),
@@ -313,8 +331,9 @@ pub async fn provision_community(
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
-            status: "created",
+            status: if record.created { "created" } else { "existed" },
             owner_pubkey: initial_owner,
+            requires_nip_fi: Some(record.requires_nip_fi),
         });
     }
 
@@ -369,6 +388,7 @@ pub async fn provision_community(
         host: record.host,
         status: if record.created { "created" } else { "existed" },
         owner_pubkey: initial_owner,
+        requires_nip_fi: None,
     })
 }
 

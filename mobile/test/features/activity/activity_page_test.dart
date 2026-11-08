@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
+import 'package:buzz/shared/widgets/ios_message_create_button.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
-import 'package:buzz/features/activity/inbox_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -30,6 +34,8 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
+
+part 'activity_page_test/tabs_journey.dart';
 
 void main() {
   final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -130,6 +136,7 @@ void main() {
     List<Reminder> reminders = const [],
     Set<String> knownAgentPubkeys = const {},
     List<Override> overrides = const [],
+    UserCacheNotifier Function()? userCache,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -143,7 +150,7 @@ void main() {
           () => _FakeChannelsNotifier(channels ?? testChannels),
         ),
         userCacheProvider.overrideWith(
-          () => _FakeUserCacheNotifier(users ?? testUsers),
+          userCache ?? () => _FakeUserCacheNotifier(users ?? testUsers),
         ),
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
         readStateProvider.overrideWith(
@@ -167,6 +174,14 @@ void main() {
       ),
     );
   }
+
+  _activityTabJourneys(
+    ({Set<String> knownAgentPubkeys = const {}, TextScaler? textScaler}) =>
+        buildTestable(
+          knownAgentPubkeys: knownAgentPubkeys,
+          textScaler: textScaler,
+        ),
+  );
 
   testWidgets('shows loading skeleton while feed loads', (tester) async {
     await tester.pumpWidget(
@@ -195,51 +210,31 @@ void main() {
     expect(find.text('No activity yet'), findsOneWidget);
   });
 
-  testWidgets('Inbox exposes close navigation for its modal route', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildTestable());
-    await tester.pumpAndSettle();
-
-    final appBar = tester.widget<FrostedAppBar>(
-      find.byType(FrostedAppBar).last,
-    );
-    expect(appBar.automaticallyImplyLeading, isFalse);
-    expect(appBar.nativeLeading?.symbol, 'xmark');
-    expect(appBar.nativeLeading?.label, 'Close inbox');
-    expect(appBar.nativeTitle, 'Inbox');
-    expect(appBar.frosted, isTrue);
-
-    expect(appBar.bottomHeight, Grid.xxs);
-    expect(appBar.centerTitle, isFalse);
-    expect(find.byTooltip('Back'), findsNothing);
-  });
-
-  testWidgets('sizes the Activity app bar for its custom title style', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      await buildTestable(textScaler: const TextScaler.linear(2)),
-    );
-    await tester.pumpAndSettle();
-
-    final appBar = tester.widget<FrostedAppBar>(
-      find.byType(FrostedAppBar).last,
-    );
-    final titleStyle = appBar.titleStyle!;
-    expect(titleStyle.fontSize, 22);
-    expect(
-      tester.getSize(find.byType(ClipRect).last).height,
-      closeTo(
-        frostedAppBarHeight(
-          tester.element(find.byType(FrostedAppBar).last),
-          titleStyle: titleStyle,
-          bottomHeight: Grid.xxs,
-        ),
-        0.01,
-      ),
-    );
-  });
+  testWidgets(
+    'Activity keeps its header above the clipped feed at large text',
+    (tester) async {
+      await tester.pumpWidget(
+        await buildTestable(textScaler: const TextScaler.linear(2)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Close activity'), findsOneWidget);
+      expect(find.byTooltip('Back'), findsNothing);
+      expect(find.byType(FrostedAppBar), findsNothing);
+      final filters = find.byKey(const ValueKey('activity-filters'));
+      final viewport = find.byKey(const ValueKey('activity-content-viewport'));
+      final cutoff = tester.getBottomLeft(filters).dy;
+      expect(tester.getTopLeft(viewport).dy, cutoff);
+      expect(
+        tester.getBottomLeft(find.text('Activity')).dy,
+        lessThanOrEqualTo(tester.getTopLeft(filters).dy),
+      );
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, -300));
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(viewport).dy, cutoff);
+      expect(tester.getBottomLeft(filters).dy, cutoff);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('keeps footer clearance inside the scrollable content', (
     tester,
@@ -248,12 +243,6 @@ void main() {
       await buildTestable(mediaPadding: const EdgeInsets.only(bottom: 88)),
     );
     await tester.pumpAndSettle();
-
-    final safeArea = tester.widget<SafeArea>(
-      find.byKey(const ValueKey('activity-content-safe-area')),
-    );
-    expect(safeArea.top, isFalse);
-    expect(safeArea.bottom, isFalse);
 
     final padding = tester.widget<SliverPadding>(
       find.descendant(
@@ -315,17 +304,19 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
+    final filterTrigger = find.byKey(const ValueKey('activity-sender-menu'));
     expect(
       tester.getSize(filterTrigger).height,
       greaterThanOrEqualTo(Grid.xl),
       reason: 'The Activity filter trigger must keep a 48dp touch target.',
     );
 
+    await tester.ensureVisible(filterTrigger);
+    await tester.pumpAndSettle();
     await tester.tap(filterTrigger);
     await tester.pump();
 
-    final surface = find.byKey(const ValueKey('activity-filter-popover'));
+    final surface = find.byKey(const ValueKey('activity-sender-popover'));
     final fade = find.byKey(const ValueKey('activity-popover-fade'));
     final scale = find.byKey(const ValueKey('activity-popover-scale'));
     expect(surface, findsOneWidget);
@@ -368,103 +359,20 @@ void main() {
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
-    final items = tester.widgetList<PopupMenuItem<InboxFilter>>(
-      find.byType(PopupMenuItem<InboxFilter>),
+    final items = tester.widgetList<PopupMenuItem<String>>(
+      find.byType(PopupMenuItem<String>),
     );
-    expect(items, hasLength(InboxFilter.values.length));
+    expect(items, hasLength(3));
     expect(
       items.every((item) => item.height >= Grid.xl),
       isTrue,
       reason: 'Activity filter choices must keep 48dp touch targets.',
     );
 
-    await tester.tap(find.descendant(of: surface, matching: find.text('All')));
-    await tester.pumpAndSettle();
-    final optionsTrigger = find.byKey(const ValueKey('activity-options-menu'));
-    expect(
-      tester.getSize(optionsTrigger),
-      const Size(Grid.xl, Grid.xl),
-      reason: 'Activity options must retain a 48dp touch target.',
-    );
-    await tester.tap(optionsTrigger);
-    await tester.pump();
-
-    final optionsSurface = find.byKey(
-      const ValueKey('activity-options-popover'),
-    );
-    final optionsMaterial = tester.widget<Material>(optionsSurface);
-    final optionsShape = optionsMaterial.shape! as RoundedRectangleBorder;
-    expect(tester.getSize(optionsSurface).width, 216);
-    expect(optionsShape.borderRadius, BorderRadius.circular(Radii.popover));
-    expect(optionsMaterial.elevation, appPopoverElevation);
-    expect(
-      tester
-          .widget<ScaleTransition>(
-            find.byKey(const ValueKey('activity-popover-scale')),
-          )
-          .alignment,
-      Alignment.topRight,
-    );
-  });
-
-  testWidgets('filter stays indicator-free when drafts and reminders exist', (
-    tester,
-  ) async {
-    final dueReminder = Reminder(
-      id: 'reminder-1',
-      notBefore: now - 1,
-      status: 'pending',
-      target: const ReminderTarget(
-        eventId: 'm1',
-        channelId: 'ch1',
-        preview: 'Follow up',
-        authorPubkey:
-            'a11ce00000000000000000000000000000000000000000000000000000000000',
-      ),
-      note: null,
-      createdAt: now - 60,
-      eventId: 'reminder-event-1',
-    );
-    final draft = ComposeDraft(
-      key: 'ch1',
-      channelId: 'ch1',
-      threadHeadId: null,
-      text: 'Unsent review note',
-      updatedAt: now,
-    );
-
-    await tester.pumpWidget(
-      await buildTestable(drafts: [draft], reminders: [dueReminder]),
-    );
-    await tester.pumpAndSettle();
-
-    final filterTrigger = find.byKey(const ValueKey('activity-filter-menu'));
-    expect(
-      find.descendant(
-        of: filterTrigger,
-        matching: find.byWidgetPredicate((widget) {
-          if (widget is! Container) return false;
-          final constraints = widget.constraints;
-          return constraints?.minWidth == 6 && constraints?.minHeight == 6;
-        }),
-      ),
-      findsNothing,
-    );
-
-    await tester.tap(filterTrigger);
-    await tester.pumpAndSettle();
-    final filterPopover = find.byKey(const ValueKey('activity-filter-popover'));
-    expect(
-      find.descendant(of: filterPopover, matching: find.text('1')),
-      findsNothing,
-    );
-
     await tester.tap(
-      find.descendant(of: filterPopover, matching: find.text('Drafts')),
+      find.descendant(of: surface, matching: find.text('Anyone')),
     );
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('draft-row-ch1')), findsOneWidget);
-    expect(find.text('Unsent review note'), findsOneWidget);
   });
 
   testWidgets('rows lead with sender, contextual label, and preview', (
@@ -482,7 +390,10 @@ void main() {
     // Contextual labels + channel chips.
     expect(find.text('Mentioned in'), findsOneWidget);
     expect(find.text('Thread in'), findsOneWidget);
-    expect(find.text('#general'), findsNWidgets(2)); // mention + agent
+    expect(
+      find.text('#general'),
+      findsNWidgets(2),
+    ); // mention and agent activity
     expect(find.text('#engineering'), findsOneWidget);
 
     // Context labels and channel pills share the compact Activity style.
@@ -631,11 +542,11 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(
-      await buildTestable(knownAgentPubkeys: const {'agent_pk'}),
+      await buildTestable(knownAgentPubkeys: const {'bob_pk'}),
     );
     await tester.pumpAndSettle();
 
-    final agentRow = find.byKey(const ValueKey('inbox-row-ag1'));
+    final agentRow = find.byKey(const ValueKey('inbox-row-a1'));
     final agentAvatar = tester.widget<AvatarImage>(
       find.descendant(of: agentRow, matching: find.byType(AvatarImage)),
     );
@@ -695,6 +606,323 @@ void main() {
     expect(find.textContaining('dm body dm-a'), findsNothing);
   });
 
+  testWidgets('marking a DM row read covers replies under every thread root', (
+    tester,
+  ) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
+    );
+    FeedItem reply(String id, String root, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
+      content: 'dm reply $id',
+      createdAt: now - age,
+      channelId: 'dm1',
+      channelName: '',
+      tags: [
+        ['e', root, '', 'root'],
+        ['e', root, '', 'reply'],
+      ],
+      category: 'activity',
+    );
+    const rootA =
+        'aaaa000000000000000000000000000000000000000000000000000000000001';
+    const rootB =
+        'bbbb000000000000000000000000000000000000000000000000000000000002';
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [reply('dm-r1', rootA, 300), reply('dm-r2', rootB, 200)],
+          agentActivity: const [],
+        ),
+        channels: [...testChannels, dmChannel],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('inbox-unread-dot-dm-r2')),
+      findsOneWidget,
+    );
+
+    await tester.drag(
+      find.byKey(const ValueKey('inbox-row-dm-r2')),
+      const Offset(-500, 0),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inbox-unread-dot-dm-r2')), findsNothing);
+  });
+
+  testWidgets(
+    'sender filter keeps a person\'s message under a later agent reply',
+    (tester) async {
+      FeedItem threadEvent(String id, String pubkey, String body, int age) =>
+          FeedItem(
+            id: id,
+            kind: 9,
+            pubkey: pubkey,
+            content: body,
+            createdAt: now - age,
+            channelId: 'ch1',
+            channelName: 'general',
+            tags: const [
+              ['e', threadIdRoot1, '', 'root'],
+              ['e', threadIdRoot1, '', 'reply'],
+            ],
+            category: 'mention',
+          );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          knownAgentPubkeys: const {'agent_pk'},
+          feed: HomeFeedResponse(
+            mentions: [
+              threadEvent('p1', 'bob_pk', 'person asks', 300),
+              threadEvent('g1', 'agent_pk', 'agent answers', 200),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('agent answers'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('People').last);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('person asks'), findsOneWidget);
+      expect(find.textContaining('agent answers'), findsNothing);
+    },
+  );
+
+  testWidgets('Agents filter counts channel bot members as agents', (
+    tester,
+  ) async {
+    FeedItem event(String id, String pubkey, String body, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey: pubkey,
+      content: body,
+      createdAt: now - age,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [],
+      category: 'mention',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: [
+            event('b1', 'bot_pk', 'bot reports', 300),
+            event('p1', 'bob_pk', 'person asks', 200),
+          ],
+          needsAction: const [],
+          activity: const [],
+          agentActivity: const [],
+        ),
+        overrides: [
+          channelBotPubkeysProvider(
+            'ch1',
+          ).overrideWith((ref) async => {'bot_pk'}),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agents').last);
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('bot reports'), findsOneWidget);
+    expect(find.textContaining('person asks'), findsNothing);
+  });
+
+  testWidgets('Threads filter shows a DM reply, not a later DM message', (
+    tester,
+  ) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
+    );
+    FeedItem dmEvent(
+      String id,
+      String body,
+      int age,
+      List<List<String>> tags,
+    ) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey:
+          'a11ce00000000000000000000000000000000000000000000000000000000000',
+      content: body,
+      createdAt: now - age,
+      channelId: 'dm1',
+      channelName: '',
+      tags: tags,
+      category: 'activity',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: const [],
+          needsAction: const [],
+          activity: [
+            dmEvent('dm-reply', 'reply in thread', 300, const [
+              ['e', threadIdRoot1, '', 'root'],
+              ['e', threadIdRoot1, '', 'reply'],
+            ]),
+            dmEvent('dm-top', 'later top level', 200, const []),
+          ],
+          agentActivity: const [],
+        ),
+        channels: [...testChannels, dmChannel],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _chooseActivityType(tester, 'Threads');
+
+    expect(find.textContaining('reply in thread'), findsOneWidget);
+    expect(find.textContaining('later top level'), findsNothing);
+  });
+
+  testWidgets(
+    'reading a DM reply under Threads leaves other DM messages unread',
+    (tester) async {
+      final dmChannel = Channel(
+        id: 'dm1',
+        name: 'dm',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'x',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+        participants: const ['Alice'],
+      );
+      FeedItem dmEvent(String id, int age, List<List<String>> tags) => FeedItem(
+        id: id,
+        kind: 9,
+        pubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+        content: 'dm body $id',
+        createdAt: now - age,
+        channelId: 'dm1',
+        channelName: '',
+        tags: tags,
+        category: 'activity',
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          feed: HomeFeedResponse(
+            mentions: const [],
+            needsAction: const [],
+            activity: [
+              dmEvent('dm-top', 300, const []),
+              dmEvent('dm-reply', 200, const [
+                ['e', threadIdRoot1, '', 'root'],
+                ['e', threadIdRoot1, '', 'reply'],
+              ]),
+            ],
+            agentActivity: const [],
+          ),
+          channels: [...testChannels, dmChannel],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _chooseActivityType(tester, 'Threads');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-dm-reply')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('inbox-unread-dot-dm-reply')),
+        findsNothing,
+      );
+
+      await _chooseActivityType(tester, 'All');
+      expect(
+        find.byKey(const ValueKey('inbox-unread-dot-dm-reply')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('sender filter preloads authors hidden under newer rows', (
+    tester,
+  ) async {
+    final cache = _RecordingUserCacheNotifier(testUsers);
+    FeedItem threadEvent(String id, String pubkey, int age) => FeedItem(
+      id: id,
+      kind: 9,
+      pubkey: pubkey,
+      content: 'body $id',
+      createdAt: now - age,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [
+        ['e', threadIdRoot1, '', 'root'],
+        ['e', threadIdRoot1, '', 'reply'],
+      ],
+      category: 'mention',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: [
+            threadEvent('g1', 'owned_agent_pk', 300),
+            threadEvent('p1', 'bob_pk', 200),
+          ],
+          needsAction: const [],
+          activity: const [],
+          agentActivity: const [],
+        ),
+        userCache: () => cache,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(cache.preloaded, isNot(contains('owned_agent_pk')));
+
+    await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Agents').last);
+    await tester.pumpAndSettle();
+
+    expect(cache.preloaded, contains('owned_agent_pk'));
+  });
+
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
     await tester.pumpWidget(
       await buildTestable(
@@ -709,44 +937,39 @@ void main() {
     expect(find.byKey(const ValueKey('inbox-unread-dot-a1')), findsOneWidget);
   });
 
-  testWidgets('New boundary separates unread rows from read rows', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      await buildTestable(
-        // Mention (2m ago) and agent (1m ago) unread; thread (1h ago) read.
-        readContexts: {'thread:$threadIdRoot1': now, 'ch2': now},
-      ),
-    );
-    await tester.pumpAndSettle();
+  testWidgets(
+    'chronological Activity does not imply a contiguous unread boundary',
+    (tester) async {
+      await tester.pumpWidget(
+        await buildTestable(
+          // Mention (2m ago) and agent (1m ago) unread; thread (1h ago) read.
+          readContexts: {'thread:$threadIdRoot1': now, 'ch2': now},
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('New'), findsOneWidget);
-  });
+      expect(find.text('New'), findsNothing);
+    },
+  );
 
-  testWidgets('filter menu switches sources and shows empty states', (
-    tester,
-  ) async {
+  testWidgets('tabs switch sources and show empty states', (tester) async {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Mentions'));
+    await _chooseActivityType(tester, 'Mentions');
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Hey check this out'), findsOneWidget);
     expect(find.textContaining('Deployed the fix'), findsNothing);
     expect(find.textContaining('Job completed successfully'), findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Needs Action'));
+    await _chooseActivityType(tester, 'DMs');
     await tester.pumpAndSettle();
 
-    expect(find.text('Nothing needs your action'), findsOneWidget);
+    expect(find.text('No direct messages yet'), findsOneWidget);
   });
 
-  testWidgets('filter menu supports accessibility text scaling', (
+  testWidgets('sender menu supports accessibility text scaling', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -754,105 +977,98 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('activity-sender-menu')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
     await tester.pumpAndSettle();
 
     expect(
-      find.byKey(const ValueKey('activity-filter-popover')),
+      find.byKey(const ValueKey('activity-sender-popover')),
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('opens a thread mention at the referenced message', (
-    tester,
-  ) async {
-    final threadMention = FeedItem(
-      id: 'reply-event',
-      kind: 9,
-      pubkey:
-          'a11ce00000000000000000000000000000000000000000000000000000000000',
-      content: 'Reply in a thread',
-      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      channelId: 'ch1',
-      channelName: 'general',
-      tags: const [
-        ['e', threadIdThreadDashRoot, '', 'root'],
-        ['e', threadIdParentDashReply, '', 'reply'],
-      ],
-      category: 'mention',
+  testWidgets('opens a thread reply at the referenced message', (tester) async {
+    final dmChannel = Channel(
+      id: 'dm1',
+      name: 'dm',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'x',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+      participants: const ['Alice'],
     );
-    final feed = HomeFeedResponse(
-      mentions: [threadMention],
-      needsAction: const [],
-      activity: const [],
-      agentActivity: const [],
-    );
+    // A DM reply must still open its thread: the DM timeline hides replies.
+    for (final channelId in ['ch1', 'dm1']) {
+      final threadMention = FeedItem(
+        id: 'reply-event',
+        kind: 9,
+        pubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+        content: 'Reply in a thread',
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        channelId: channelId,
+        channelName: 'general',
+        tags: const [
+          ['e', threadIdThreadDashRoot, '', 'root'],
+          ['e', threadIdParentDashReply, '', 'reply'],
+        ],
+        category: 'mention',
+      );
+      final feed = HomeFeedResponse(
+        mentions: [threadMention],
+        needsAction: const [],
+        activity: const [],
+        agentActivity: const [],
+      );
 
-    await tester.pumpWidget(await buildTestable(feed: feed));
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        await buildTestable(feed: feed, channels: [...testChannels, dmChannel]),
+      );
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
+      await tester.pumpAndSettle();
 
-    final page = tester.widget<ChannelDetailPage>(
-      find.byType(ChannelDetailPage),
-    );
-    expect(page.channel.id, 'ch1');
-    expect(page.initialThreadRootId, threadIdParentDashReply);
-    expect(page.initialMessageId, 'reply-event');
-    expect(
-      page.initialThreadRouteBehavior,
-      InitialThreadRouteBehavior.replaceCurrentRoute,
-    );
+      final page = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(page.channel.id, channelId);
+      expect(page.initialThreadRootId, threadIdParentDashReply);
+      expect(page.initialMessageId, 'reply-event');
+      expect(
+        page.initialThreadRouteBehavior,
+        InitialThreadRouteBehavior.replaceCurrentRoute,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    }
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Threads'));
+    await _chooseActivityType(tester, 'Threads');
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Deployed the fix'), findsOneWidget);
     expect(find.textContaining('Hey check this out'), findsNothing);
   });
 
-  testWidgets('reminders filter shows the reminders empty surface', (
-    tester,
-  ) async {
-    await tester.pumpWidget(await buildTestable());
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Reminders'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('No reminders'), findsOneWidget);
-  });
-
-  testWidgets('drafts filter shows the drafts empty surface', (tester) async {
-    await tester.pumpWidget(await buildTestable());
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Drafts'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('No drafts'), findsOneWidget);
-  });
-
   testWidgets('unread-only toggle hides read rows', (tester) async {
     await tester.pumpWidget(await buildTestable(readContexts: {'ch1': now}));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('activity-options-menu')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Show unread'));
+    expect(find.byKey(const ValueKey('activity-options-menu')), findsNothing);
+    expect(find.text('Mark all as read'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('activity-unread-filter')));
     await tester.pumpAndSettle();
 
     // Only the unread thread row remains.
@@ -1074,6 +1290,17 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   Map<String, UserProfile> build() => _users;
+}
+
+class _RecordingUserCacheNotifier extends _FakeUserCacheNotifier {
+  _RecordingUserCacheNotifier(super._users);
+  final preloaded = <String>{};
+
+  @override
+  Future<bool> preload(List<String> pubkeys) async {
+    preloaded.addAll(pubkeys);
+    return true;
+  }
 }
 
 class _FakeReadStateNotifier extends ReadStateNotifier {

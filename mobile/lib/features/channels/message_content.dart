@@ -6,6 +6,7 @@ import '../../shared/widgets/message_attachment_corners.dart';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -15,16 +16,17 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/widgets/media_loading_placeholder.dart';
+import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
-import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
@@ -46,6 +48,7 @@ import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
+import 'message_long_press_region.dart';
 import 'message_media_avatar.dart';
 import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
@@ -56,6 +59,7 @@ part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
 part 'message_content/video_preview.dart';
+part 'message_content/link_actions.dart';
 
 typedef OpenDownloadedFile =
     Future<void> Function(
@@ -686,54 +690,68 @@ class MessageContent extends HookConsumerWidget {
           )
         : linkTextWidget;
 
-    // Mobile has no repo/PR/issue destination yet. Keep these presentation-only
-    // instead of exposing a control whose tap cannot do anything.
+    final highlightColor = (baseStyle.color ?? context.colors.primary)
+        .withValues(alpha: 0.2);
+
+    // Mobile has no repo/PR/issue destination yet, so these chips have no tap
+    // and no Open action, but a hold still copies or shares the link.
     if (buzzLink is EntityDeepLink) {
-      return IgnorePointer(child: renderedLink);
+      return _LinkLongPress(
+        url: url,
+        onOpen: null,
+        highlightColor: highlightColor,
+        child: renderedLink,
+      );
     }
 
-    return GestureDetector(
-      onTap: () async {
-        final uri = Uri.tryParse(url);
-        if (uri == null) return;
+    Future<void> openLink() async {
+      final uri = Uri.tryParse(url);
+      if (uri == null) return;
 
-        // Rendered channel URLs must use the same callback as `#channel`
-        // references so detail-page callers can suppress self-navigation.
-        // Message and join links still need the top-level authenticated
-        // dispatcher.
-        if (uri.scheme == 'buzz') {
-          final deepLink = parseBuzzDeepLink(uri);
-          if (deepLink case ChannelDeepLink(:final channelId)) {
-            resolvedChannelTap(channelId);
-          } else if (deepLink is MessageDeepLink ||
-              deepLink is InviteDeepLink) {
-            ref.read(pendingDeepLinkProvider.notifier).open(uri);
-          }
-          return;
+      // Rendered channel URLs must use the same callback as `#channel`
+      // references so detail-page callers can suppress self-navigation.
+      // Message and join links still need the top-level authenticated
+      // dispatcher.
+      if (uri.scheme == 'buzz') {
+        final deepLink = parseBuzzDeepLink(uri);
+        if (deepLink case ChannelDeepLink(:final channelId)) {
+          resolvedChannelTap(channelId);
+        } else if (deepLink is MessageDeepLink || deepLink is InviteDeepLink) {
+          ref.read(pendingDeepLinkProvider.notifier).open(uri);
         }
-        if (uri.scheme != 'http' && uri.scheme != 'https') return;
+        return;
+      }
+      if (uri.scheme != 'http' && uri.scheme != 'https') return;
 
-        final auth = ref.read(mediaGetAuthServiceProvider);
-        if (!auth.isRelayMediaUrl(url)) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-          return;
-        }
+      final auth = ref.read(mediaGetAuthServiceProvider);
+      if (!auth.isRelayMediaUrl(url)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+        return;
+      }
 
-        try {
-          await ref.read(openDownloadedFileProvider)(
-            url,
-            auth.headersFor(url),
-            text,
-          );
-        } catch (_) {
-          if (!context.mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-            const SnackBar(content: Text('Could not open attachment')),
-            kind: ToastKind.error,
-          );
-        }
-      },
-      child: renderedLink,
+      try {
+        await ref.read(openDownloadedFileProvider)(
+          url,
+          auth.headersFor(url),
+          text,
+        );
+      } catch (_) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Could not open attachment')),
+          kind: ToastKind.error,
+        );
+      }
+    }
+
+    // openLink handles only these schemes; the sheet hides Open for others.
+    final scheme = Uri.tryParse(url)?.scheme;
+    final canOpen = scheme == 'buzz' || scheme == 'http' || scheme == 'https';
+    return _LinkLongPress(
+      url: url,
+      onOpen: canOpen ? () => unawaited(openLink()) : null,
+      highlightColor: highlightColor,
+      child: GestureDetector(onTap: openLink, child: renderedLink),
     );
   }
 }

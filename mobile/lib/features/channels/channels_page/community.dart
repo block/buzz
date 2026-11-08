@@ -57,17 +57,19 @@ class _CommunityMenuSheet extends StatelessWidget {
                     ),
                 ],
               ),
-            AppListCard(
-              children: [
-                AppListRow(
-                  key: const Key('community-menu-switch'),
-                  icon: BuzzIcons.arrowLeftRight,
-                  title: 'Switch Community',
-                  trailing: const Icon(BuzzIcons.chevronRight, size: 18),
-                  onTap: openSwitcher,
-                ),
-              ],
-            ),
+            // An internal build reaches only its organization's community.
+            if (!OrganizationEnvironment.enabled)
+              AppListCard(
+                children: [
+                  AppListRow(
+                    key: const Key('community-menu-switch'),
+                    icon: BuzzIcons.arrowLeftRight,
+                    title: 'Switch Community',
+                    trailing: const Icon(BuzzIcons.chevronRight, size: 18),
+                    onTap: openSwitcher,
+                  ),
+                ],
+              ),
           ],
         ),
       ),
