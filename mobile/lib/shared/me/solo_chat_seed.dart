@@ -1,4 +1,10 @@
+import 'dart:convert';
+
 import '../deeplink/deep_link.dart';
+
+/// Largest quoted excerpt, in UTF-8 bytes. A first Solo message may be 8 KB,
+/// so this leaves room for the prompt the user adds below the quote.
+const soloChatQuoteMaxBytes = 6144;
 
 /// The unsent first message for a Solo chat started from another message.
 ///
@@ -25,7 +31,22 @@ String soloChatSeed({
       .split('\n')
       .map((line) => line.isEmpty ? '>' : '> $line')
       .join('\n');
-  return '$quote\n\n';
+  return '${_capQuote(quote)}\n\n';
+}
+
+String _capQuote(String quote) {
+  if (utf8.encode(quote).length <= soloChatQuoteMaxBytes) return quote;
+  const ellipsis = '…';
+  final budget = soloChatQuoteMaxBytes - utf8.encode(ellipsis).length;
+  final kept = StringBuffer();
+  var bytes = 0;
+  for (final rune in quote.runes) {
+    final char = String.fromCharCode(rune);
+    bytes += utf8.encode(char).length;
+    if (bytes > budget) break;
+    kept.write(char);
+  }
+  return '${kept.toString().trimRight()}$ellipsis';
 }
 
 /// One draft per source message: starting again from it returns to the

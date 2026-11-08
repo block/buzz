@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:buzz/shared/me/solo_chat_seed.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -20,5 +22,20 @@ void main() {
         seed,
       );
     }
+  });
+
+  test('a long quote is cut to leave room for a prompt', () {
+    final seed = soloChatSeed(
+      linkable: false,
+      channelId: 'c1',
+      messageId: 'm1',
+      threadRootId: null,
+      content: 'é' * 9000,
+    );
+    expect(seed, endsWith('…\n\n'));
+    expect(
+      utf8.encode(seed.trimRight()).length,
+      lessThanOrEqualTo(soloChatQuoteMaxBytes),
+    );
   });
 }
