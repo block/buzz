@@ -32,6 +32,8 @@ void main() {
         containsPair('hardEdge', hard),
       );
     }
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets(
