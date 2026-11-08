@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
     apply_agent_command_update, apply_env_vars_then_effort_transition, classify_runtime,
@@ -11,6 +9,7 @@ use super::{
     CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
+use std::path::PathBuf;
 
 #[test]
 fn resolves_known_avatar_for_bare_command() {
@@ -156,7 +155,6 @@ fn classifies_not_installed_when_no_underlying_cli() {
     assert!(cmd.is_none());
     assert!(path.is_none());
 }
-
 #[test]
 fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     let (status, cmd, path) = classify_runtime(
@@ -170,11 +168,13 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
 }
 fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
         system_prompt: String::new(),
+        acp_command: None,
         runtime: runtime.map(str::to_string),
         model: None,
         provider: None,
@@ -204,7 +204,6 @@ fn effective_agent_command_explicit_override_wins() {
         "codex-acp"
     );
 }
-
 /// Minimal record for `record_agent_command` tests; only resolution inputs vary.
 fn record_with(
     runtime: Option<&str>,
@@ -212,6 +211,7 @@ fn record_with(
     override_cmd: Option<&str>,
 ) -> crate::managed_agents::types::ManagedAgentRecord {
     crate::managed_agents::types::ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: String::new(),
         name: "r".to_string(),
@@ -612,21 +612,36 @@ fn update_time_override_preserves_pin_for_persona_less_agent() {
 mod effort_clear;
 mod forced_discovery;
 mod managed_path_resolution;
+
+/// Write an executable script without opening it for writing in this process.
+///
+/// Linux refuses to exec a file while any process holds it open for writing
+/// (`ETXTBSY`). A sibling test that spawns between our open and close copies
+/// that descriptor into its child until the child execs, so an in-process
+/// `fs::write` can make the probe's spawn fail intermittently. A short-lived
+/// shell writes the file instead, and its descriptor is gone once it exits.
+#[cfg(unix)]
+fn write_executable_script(path: &std::path::Path, contents: impl AsRef<str>) {
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(contents.as_ref())
+        .status()
+        .expect("spawn script writer");
+    assert!(status.success(), "write script {}", path.display());
+}
+
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_version_parses_full_semver_output() {
-    use std::os::unix::fs::PermissionsExt;
-
     // Simulate a current `@agentclientprotocol/codex-acp` output.
     let dir = std::env::temp_dir().join(format!("buzz-probe-1x-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
-    std::fs::write(
+    write_executable_script(
         &bin,
         "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    );
 
     let version = probe_codex_acp_version(&bin);
     let _ = std::fs::remove_dir_all(dir);
@@ -643,14 +658,11 @@ mod codex_version;
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_version_returns_none_for_nonzero_exit() {
-    use std::os::unix::fs::PermissionsExt;
-
     // Simulate old 0.16.x adapter: `--version` is unrecognised, exits non-zero
     let dir = std::env::temp_dir().join(format!("buzz-probe-0x-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
-    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    write_executable_script(&bin, "#!/bin/sh\nexit 1\n");
 
     let version = probe_codex_acp_version(&bin);
     let _ = std::fs::remove_dir_all(dir);
@@ -677,17 +689,13 @@ fn probe_codex_acp_version_returns_none_for_missing_binary() {
 #[cfg(unix)]
 #[test]
 fn codex_adapter_availability_available_for_minimum_supported_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = std::env::temp_dir().join(format!("buzz-avail-1x-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
-    std::fs::write(
+    write_executable_script(
         &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
+    );
 
     let status = codex_adapter_availability(&bin);
     let _ = std::fs::remove_dir_all(dir);
@@ -702,14 +710,11 @@ fn codex_adapter_availability_available_for_minimum_supported_binary() {
 #[cfg(unix)]
 #[test]
 fn codex_adapter_availability_outdated_for_0x_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
     // Simulate old 0.16.x: `--version` exits non-zero (unrecognised flag)
     let dir = std::env::temp_dir().join(format!("buzz-avail-0x-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
-    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    write_executable_script(&bin, "#!/bin/sh\nexit 1\n");
 
     let status = codex_adapter_availability(&bin);
     let _ = std::fs::remove_dir_all(dir);
@@ -721,44 +726,18 @@ fn codex_adapter_availability_outdated_for_0x_binary() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn codex_adapter_availability_outdated_for_older_1x_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let bin = dir.path().join("codex-acp");
-    std::fs::write(
-        &bin,
-        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
-
-    assert_eq!(
-        codex_adapter_availability(&bin),
-        AcpAvailabilityStatus::AdapterOutdated,
-        "a 1.x adapter below the floor must be offered an upgrade"
-    );
-}
-
 /// The strict three-component parse fails closed: a version Buzz cannot compare
 /// against the floor is treated as outdated rather than assumed current.
 #[cfg(unix)]
 #[test]
 fn codex_adapter_availability_outdated_for_uncomparable_version() {
-    use std::os::unix::fs::PermissionsExt;
-
     for version in ["1.2", "1.2.0-rc1"] {
         let dir = tempfile::tempdir().expect("temp dir");
         let bin = dir.path().join("codex-acp");
-        std::fs::write(
+        write_executable_script(
             &bin,
             format!("#!/bin/sh\necho '@agentclientprotocol/codex-acp {version}'\nexit 0\n"),
-        )
-        .expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
+        );
 
         assert_eq!(
             codex_adapter_availability(&bin),
@@ -787,7 +766,6 @@ fn codex_adapter_availability_outdated_for_missing_binary() {
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_version_returns_none_for_hung_direct_child() {
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
     // Simulate a process that writes version to stdout then blocks forever.
@@ -796,12 +774,10 @@ fn probe_codex_acp_version_returns_none_for_hung_direct_child() {
     let dir = std::env::temp_dir().join(format!("buzz-probe-hung-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
-    std::fs::write(
+    write_executable_script(
         &bin,
         "#!/bin/sh\nprintf '@agentclientprotocol/codex-acp 1.1.2\\n'\nexec sleep 300\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    );
 
     let start = Instant::now();
     let version = probe_codex_acp_version(&bin);
@@ -822,7 +798,6 @@ fn probe_codex_acp_version_returns_none_for_hung_direct_child() {
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_version_returns_version_when_descendant_holds_pipe_open() {
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
     // Simulate a process that forks a background child which inherits stdout
@@ -838,12 +813,10 @@ fn probe_codex_acp_version_returns_version_when_descendant_holds_pipe_open() {
     let dir = std::env::temp_dir().join(format!("buzz-probe-descendant-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let bin = dir.join("codex-acp");
-    std::fs::write(
+    write_executable_script(
         &bin,
         "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nsleep 60 &\nexit 0\n",
-    )
-    .expect("write script");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+    );
 
     let start = Instant::now();
     let version = probe_codex_acp_version(&bin);

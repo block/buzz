@@ -75,7 +75,7 @@ AGENT_BINARIES = ("buzz-acp", "buzz-agent", "buzz-dev-mcp")
 FORWARDER_SOURCE = PACKAGE_ROOT / "forwarder" / "relay_forwarder.rs"
 FORWARDER_BINARY = "relay-forwarder"
 LINUX_TARGET_DIR = STATE_DIR / "linux-target"
-RUST_IMAGE = "rust:1.95-alpine"
+RUST_IMAGE = "rust:1.98-alpine"
 
 
 @dataclass(frozen=True)

@@ -197,7 +197,7 @@ class _CoordinatedPlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -391,9 +391,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-toggle-cancel-test',
       );
-      addTearDown(() async {
-        if (await directory.exists()) await directory.delete(recursive: true);
-      });
       final player = DeviceVoiceNotePlayerController(
         coordinator: VoiceNotePlaybackCoordinator(),
         client: client,
@@ -402,6 +399,8 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Reverse teardown order keeps recursive deletion ahead of disposal.
+      addTearDown(() => directory.delete(recursive: true));
       var authGeneration = 0;
       await player.loadRemote(
         'https://example.com/voice-note.mp4',
@@ -464,9 +463,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-activation-cancel-test',
       );
-      addTearDown(() async {
-        if (await directory.exists()) await directory.delete(recursive: true);
-      });
       final player = DeviceVoiceNotePlayerController(
         coordinator: coordinator,
         client: client,
@@ -475,6 +471,8 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Reverse teardown order keeps recursive deletion ahead of disposal.
+      addTearDown(() => directory.delete(recursive: true));
       addTearDown(previous.dispose);
       var authGeneration = 0;
       await player.loadRemote(
@@ -525,9 +523,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-source-load-cancel-test',
       );
-      addTearDown(() async {
-        if (await directory.exists()) await directory.delete(recursive: true);
-      });
       final player = DeviceVoiceNotePlayerController(
         coordinator: VoiceNotePlaybackCoordinator(),
         client: client,
@@ -536,6 +531,8 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Reverse teardown order keeps recursive deletion ahead of disposal.
+      addTearDown(() => directory.delete(recursive: true));
       var authGeneration = 0;
       await player.loadRemote(
         'https://example.com/voice-note.mp4',
@@ -591,9 +588,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-source-load-retry-test',
       );
-      addTearDown(() async {
-        if (await directory.exists()) await directory.delete(recursive: true);
-      });
       final player = DeviceVoiceNotePlayerController(
         coordinator: VoiceNotePlaybackCoordinator(),
         client: client,
@@ -602,6 +596,9 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Teardowns run in reverse order. Remove the fake player's files before
+      // dispose starts its unawaited file cleanup, avoiding competing deletes.
+      addTearDown(() => directory.delete(recursive: true));
       var authGeneration = 0;
       await player.loadRemote(
         'https://example.com/voice-note.mp4',
@@ -655,9 +652,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-download-limit-test',
       );
-      addTearDown(() async {
-        if (await directory.exists()) await directory.delete(recursive: true);
-      });
       final player = DeviceVoiceNotePlayerController(
         coordinator: VoiceNotePlaybackCoordinator(),
         client: client,
@@ -667,6 +661,8 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Reverse teardown order keeps recursive deletion ahead of disposal.
+      addTearDown(() => directory.delete(recursive: true));
       await player.loadRemote(
         'https://example.com/voice-note.mp4',
         headers: () => const {},
@@ -726,9 +722,6 @@ void main() {
     final directory = await Directory.systemTemp.createTemp(
       'voice-note-retry-test',
     );
-    addTearDown(() async {
-      if (await directory.exists()) await directory.delete(recursive: true);
-    });
     final player = DeviceVoiceNotePlayerController(
       coordinator: VoiceNotePlaybackCoordinator(),
       client: client,
@@ -737,6 +730,8 @@ void main() {
       player: audioPlayer,
     );
     addTearDown(player.dispose);
+    // Delete before dispose starts its unawaited file cleanup (reverse order).
+    addTearDown(() => directory.delete(recursive: true));
     var authGeneration = 0;
     await player.loadRemote(
       'https://example.com/voice-note.mp4',
@@ -781,7 +776,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-pause-test',
       );
-      addTearDown(() => directory.delete(recursive: true));
       final player = DeviceVoiceNotePlayerController(
         coordinator: VoiceNotePlaybackCoordinator(),
         client: client,
@@ -790,6 +784,8 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Reverse teardown order keeps recursive deletion ahead of disposal.
+      addTearDown(() => directory.delete(recursive: true));
       await player.loadRemote(
         'https://example.com/voice-note.mp4',
         headers: () => const {},
@@ -823,7 +819,6 @@ void main() {
       final directory = await Directory.systemTemp.createTemp(
         'voice-note-source-replacement-test',
       );
-      addTearDown(() => directory.delete(recursive: true));
       final player = DeviceVoiceNotePlayerController(
         coordinator: VoiceNotePlaybackCoordinator(),
         client: client,
@@ -832,6 +827,8 @@ void main() {
         player: audioPlayer,
       );
       addTearDown(player.dispose);
+      // Reverse teardown order keeps recursive deletion ahead of disposal.
+      addTearDown(() => directory.delete(recursive: true));
       await player.loadRemote(
         'https://example.com/first.mp4',
         headers: () => const {},
@@ -991,11 +988,15 @@ void main() {
     );
     addTearDown(player.dispose);
     var authGeneration = 0;
+    Completer<Map<String, String>>? renewal = Completer();
 
     await player.loadRemote(
       'https://example.com/voice-note.mp4',
-      headers: () => {
-        'Authorization': 'Nostr signed-event-${authGeneration++}',
+      headers: () {
+        final generation = authGeneration++;
+        final pending = renewal;
+        if (pending != null) return pending.future;
+        return {'Authorization': 'Nostr signed-event-$generation'};
       },
       fallbackDuration: const Duration(seconds: 7),
     );
@@ -1003,12 +1004,25 @@ void main() {
     expect(authGeneration, 0);
     expect(audioPlayer.loadedUrls, isEmpty);
 
+    // Cancelling while a slow assertion renews never starts the stale load.
+    final renewing = player.toggle();
+    await Future<void>.delayed(Duration.zero);
+    expect(player.state.canCancelLoading, isTrue);
+    final cancel = player.toggle();
+    await Future<void>.delayed(Duration.zero);
+    renewal.complete({'Authorization': 'Nostr stale'});
+    renewal = null;
+    await Future.wait([renewing, cancel]);
+    expect(audioPlayer.loadedUrls, isEmpty);
+    expect(audioPlayer.playCount, 0);
+    expect(player.state.isLoading, isFalse);
+
     await player.toggle();
 
-    expect(authGeneration, 1);
+    expect(authGeneration, 2);
     expect(
       audioPlayer.loadedUrlHeaders.single?['Authorization'],
-      'Nostr signed-event-0',
+      'Nostr signed-event-1',
     );
     expect(audioPlayer.playCount, 1);
   });

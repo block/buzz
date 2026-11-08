@@ -13,20 +13,26 @@ async function waitForMockLiveSubscription(
   channelName: string,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ ch }) =>
-          (
-            window as Window & {
-              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
-          false,
-        { ch: channelName },
-      );
-    })
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ ch }) =>
+            (
+              window as Window & {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind: number;
+                }) => boolean;
+              }
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName: ch,
+              kind: 9,
+            }) ?? false,
+          { ch: channelName },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 

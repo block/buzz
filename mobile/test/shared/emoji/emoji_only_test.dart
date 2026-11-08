@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/emoji/emoji_only.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -55,6 +57,34 @@ void main() {
       expect(emojiOnly('hi :buzz:', customEmoji: _customEmoji), isFalse);
     });
 
+    test('scans consecutive shortcodes without skipping following text', () {
+      expect(emojiOnly(':BUZZ::buzz:', customEmoji: _customEmoji), isTrue);
+      expect(emojiOnly('😀:buzz:😀', customEmoji: _customEmoji), isTrue);
+      expect(
+        emojiOnly(':buzz:ordinary text', customEmoji: _customEmoji),
+        isFalse,
+      );
+      expect(
+        emojiOnly(':buzz::unfinished', customEmoji: _customEmoji),
+        isFalse,
+      );
+      expect(emojiOnly(':buzz:::', customEmoji: _customEmoji), isFalse);
+    });
+
+    test('does not inspect the community palette without a shortcode', () {
+      final palette = _CountingEmojiList();
+      expect(
+        emojiOnly('Ordinary message text. ' * 500, customEmoji: palette),
+        isFalse,
+      );
+      expect(emojiOnly('😀 👋', customEmoji: palette), isTrue);
+      expect(emojiOnly('text :buzz:', customEmoji: palette), isFalse);
+      expect(emojiOnly(':unfinished', customEmoji: palette), isFalse);
+      expect(palette.reads, 0);
+      expect(emojiOnly(':buzz::BUZZ:', customEmoji: palette), isTrue);
+      expect(palette.reads, palette.length);
+    });
+
     test('an unknown shortcode is just text', () {
       // Desktop behaves the same: without the palette it renders literally, so
       // it must not be scaled up as if it were a glyph.
@@ -78,4 +108,27 @@ void main() {
       expect(kEmojiOnlyCustomEmojiSize, closeTo(36.0 * 1.45, 0.001));
     });
   });
+}
+
+class _CountingEmojiList extends ListBase<CustomEmoji> {
+  int reads = 0;
+
+  @override
+  int get length => 2580;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only fixture');
+
+  @override
+  CustomEmoji operator [](int index) {
+    reads += 1;
+    return CustomEmoji(
+      shortcode: index == 0 ? 'buzz' : 'unused_$index',
+      url: 'https://example.test/emoji.png',
+    );
+  }
+
+  @override
+  void operator []=(int index, CustomEmoji value) =>
+      throw UnsupportedError('read-only fixture');
 }

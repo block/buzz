@@ -9,29 +9,33 @@ const SHOTS = "test-results/channel-row-decoration-pr";
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
   channelName: string,
-  kind?: number,
+  kind = 40002,
 ) {
   await expect
-    .poll(async () => {
-      return page.evaluate(
-        ({ currentChannelName, kind: k }) => {
-          return (
-            (
-              window as Window & {
-                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                  channelName: string;
-                  kind?: number;
-                }) => boolean;
-              }
-            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-              channelName: currentChannelName,
-              kind: k,
-            }) ?? false
-          );
-        },
-        { currentChannelName: channelName, kind },
-      );
-    })
+    // Background admission is paced: the 15-channel fixture takes >5s to drain.
+    .poll(
+      async () => {
+        return page.evaluate(
+          ({ currentChannelName, kind: k }) => {
+            return (
+              (
+                window as Window & {
+                  __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                    channelName: string;
+                    kind?: number;
+                  }) => boolean;
+                }
+              ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+                channelName: currentChannelName,
+                kind: k,
+              }) ?? false
+            );
+          },
+          { currentChannelName: channelName, kind },
+        );
+      },
+      { timeout: 15_000 },
+    )
     .toBe(true);
 }
 

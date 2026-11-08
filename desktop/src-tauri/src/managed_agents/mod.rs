@@ -10,6 +10,8 @@ pub(crate) use agent_env::{
 };
 mod agent_description;
 pub(crate) use agent_description::{effective_agent_description, record_effective_description};
+#[cfg(all(test, not(target_os = "windows")))]
+pub(crate) mod admission_test_support;
 mod backend;
 pub(crate) mod bestie_assignment;
 pub(crate) mod claude_config;
@@ -23,6 +25,7 @@ pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
 mod nest;
+mod pair_admission;
 pub(crate) mod parallelism;
 mod persona_avatars;
 pub(crate) mod persona_events;
@@ -88,6 +91,7 @@ pub(crate) use global_config::{
 };
 pub(crate) use managed_node_paths::*;
 pub use nest::*;
+pub use pair_admission::*;
 pub use parallelism::{acp_agents_value, effective_parallelism, harness_max_parallelism};
 pub use personas::*;
 #[cfg(windows)]
@@ -106,7 +110,7 @@ pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
 pub(crate) use session_policy::{
-    acp_session_policy, apply_app_acp_session_policy_env, insert_acp_session_policy_env,
+    apply_acp_session_policy_env, effective_acp_session_policy, insert_acp_session_policy_env,
     AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
 };
 pub use storage::*;
@@ -123,24 +127,28 @@ pub(crate) use teams::delete_catalog_team_at;
 /// `ensure_nest()` must be called during app setup before this is first
 /// invoked, so that `~/.buzz` exists and gets cached.
 ///
-/// Cached for the process lifetime via `OnceLock`.
+/// Cached for the process lifetime via `OnceLock`, except in unit tests.
 /// Returns `None` in sandboxed/containerized environments where `$HOME` is
 /// unset or points to a non-existent path; callers fall back to inheriting
 /// the parent's CWD.
 pub fn default_agent_workdir() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static WORKDIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    WORKDIR
-        .get_or_init(|| {
-            // Prefer ~/.buzz if it exists (created by ensure_nest()).
-            // Reject symlinks to prevent redirect attacks — is_dir()
-            // follows symlinks, so check symlink_metadata() first.
-            // Fall back to $HOME for resilience.
-            nest_dir()
-                .filter(|p| is_real_dir(p))
-                .or_else(|| dirs::home_dir().filter(|p| p.is_dir()))
-        })
-        .clone()
+    let resolve = || {
+        // Prefer ~/.buzz if it exists (created by ensure_nest()).
+        // Reject symlinks to prevent redirect attacks — is_dir()
+        // follows symlinks, so check symlink_metadata() first.
+        // Fall back to $HOME for resilience.
+        nest_dir()
+            .filter(|p| is_real_dir(p))
+            .or_else(|| dirs::home_dir().filter(|p| p.is_dir()))
+    };
+    // Tests pin a temp nest per thread, so a process-wide cache would hand a
+    // later test an earlier test's deleted nest.
+    if cfg!(test) {
+        return resolve();
+    }
+    WORKDIR.get_or_init(resolve).clone()
 }
 
 /// Returns `true` if `path` is a real directory (not a symlink).

@@ -26,9 +26,9 @@ import {
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { useDetachedAgentStart } from "./useDetachedAgentStart";
 import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
-import { invokeTauri } from "@/shared/api/tauri";
+import { syncAgentsToActiveHuddle } from "@/shared/api/tauriChannels";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
-import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   dedupeQueuedAgentWakes,
@@ -510,10 +510,7 @@ export function useMentionSendFlow({
         }
         if (preparedAgentPubkeys.length > 0 && sendChannelId) {
           try {
-            await invokeTauri("sync_agents_to_active_huddle", {
-              channelId: sendChannelId,
-              agentPubkeys: preparedAgentPubkeys,
-            });
+            await syncAgentsToActiveHuddle(sendChannelId, preparedAgentPubkeys);
             if (isSendCancelled()) return restoreComposerAfterFailure();
           } catch (error) {
             if (isSendCancelled()) return restoreComposerAfterFailure();
@@ -941,7 +938,7 @@ export function useMentionSendFlow({
     if (!pendingNonMemberSend) return [];
     return pendingNonMemberSend.nonMemberPubkeys.map(
       (pubkey) =>
-        mentions.getMentionDisplayName(pubkey) ?? truncatePubkey(pubkey),
+        mentions.getMentionDisplayName(pubkey) ?? truncateNpub(pubkey),
     );
   }, [mentions.getMentionDisplayName, pendingNonMemberSend]);
   const invitation = useNonMemberInvite({

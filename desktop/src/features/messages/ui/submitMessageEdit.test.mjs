@@ -86,6 +86,44 @@ test("edit save uses edit-target refs that resolve after edit-open", async () =>
   });
 });
 
+test("an unresolved recipient does not re-notify an unchanged agent mention", async () => {
+  const { buildEditMentionState } = await import("../lib/draftMentionRefs.ts");
+  const agent = "c".repeat(64);
+  const originalContent = "@Agent @Missing User please chek";
+  const editTarget = buildEditMentionState(
+    originalContent,
+    [
+      ["p", agent],
+      ["p", UNRESOLVED_USER],
+    ],
+    { [agent]: { displayName: "Agent" } },
+    (pubkey) => pubkey === agent,
+  );
+  assert.deepEqual(
+    editTarget.mentionRefs.map((ref) => ref.pubkey),
+    [agent],
+  );
+  assert.deepEqual(editTarget.unresolvedMentionPubkeys, [UNRESOLVED_USER]);
+  const calls = [];
+  await submitMessageEdit({
+    ...baseOptions(async (_content, tags, notifying) => {
+      calls.push(["save", tags, notifying]);
+    }),
+    content: "@Agent @Missing User please check",
+    originalContent,
+    editTarget,
+    extractMentionPubkeys: (text) => (text.includes("@Agent") ? [agent] : []),
+    revalidateMentionPubkeys: async (pubkeys) => {
+      calls.push(["revalidate", pubkeys]);
+      return pubkeys;
+    },
+  });
+  assert.deepEqual(calls[0], ["revalidate", []]);
+  const [, tags, notifying] = calls[1];
+  assert.deepEqual(notifying, []);
+  assert.ok(tags.some(([name, key]) => name === "mention" && key === agent));
+});
+
 test("edit save revalidates added mentions immediately before save", async () => {
   const agent = "c".repeat(64);
   const calls = [];

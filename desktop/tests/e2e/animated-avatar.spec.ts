@@ -193,6 +193,17 @@ test.describe("animated avatar", () => {
     await expect(
       page.getByTestId("profile-avatar-animated-poster-selector"),
     ).toBeVisible();
+    const selectorBox = await page
+      .getByTestId("profile-avatar-animated-poster-selector")
+      .boundingBox();
+    const posterStripBox = await page
+      .getByTestId("profile-avatar-animated-poster-scrubber")
+      .boundingBox();
+    if (!selectorBox || !posterStripBox) {
+      throw new Error("Animated avatar poster selector bounds are missing.");
+    }
+    expect(selectorBox.x - posterStripBox.x).toBeGreaterThanOrEqual(8);
+    expect(selectorBox.y - posterStripBox.y).toBeGreaterThanOrEqual(8);
     await expect(
       page.getByTestId("profile-avatar-animated-review-help"),
     ).toHaveText("Pick the still shown before hover.");

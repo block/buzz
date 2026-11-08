@@ -21,9 +21,17 @@ The wrapper isolates destructive tests by dropping the entire per-test
 database after the process exits. It does not `DELETE` rows or `TRUNCATE`
 shared tables, so tests may run concurrently without coordinating cleanup.
 
+The wrapper drops only that per-test database. A test that needs another
+database or role on the server creates it with `test_support::ScratchDb` or
+`test_support::ScratchRole`, whose `Drop` removes it even when the test
+panics. Do not end a test with a manual `DROP DATABASE` or `DROP ROLE`: a
+failed assertion skips it and leaves the object behind.
+
 ## Choose the schema intentionally
 
-Most tests use the committed desired-state schema from `schema/schema.sql`.
+Most tests use the committed desired-state schema from `schema/schema.sql`,
+a manifest that includes one `schema/tables/public/<table>.sql` per table plus
+its types, functions, partitions, triggers, and seed rows.
 That is the default and is appropriate for data-access behavior.
 
 Tests in `migration::postgres_tests` receive an empty database and own the
@@ -61,3 +69,10 @@ membership in `pg_read_all_stats`, or an ephemeral superuser as CI uses.
 The runner creates one desired-state source database per invocation and clones
 it for ordinary tests. Migration-mode tests start empty. Cleanup retries
 transient disconnect races before reporting a warning.
+
+Invite upgrade tests start from the complete schema through migration 0074,
+including channel join roles, entity deletion approval, the unlisted channel setting and the user deletion target and fences. They exercise the
+invitation schema expansion (migration 0075) through both migration and
+desired-state paths against populated
+data, retaining a non-default channel join role. Historical repair is validated
+separately from the application/schema change.

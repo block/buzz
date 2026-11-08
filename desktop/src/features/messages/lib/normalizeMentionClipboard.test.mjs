@@ -272,9 +272,21 @@ test("compact mention paste expands only complete bound labels", () => {
   const html = (text) =>
     `<span data-mention="" data-mention-pubkey="${key}" ` +
     `data-mention-label="${label}">${text}</span>`;
+  // Today's chip text renders the key as npub…
+  assert.equal(
+    normalizeMentionClipboardContent(html("Scout (npub1z59…zwkg) 2")).text,
+    `@${label}`,
+  );
+  // …and a whole chip copied before that switch still carries the hex
+  // compact, which must keep expanding to the exact declared identity.
   assert.equal(
     normalizeMentionClipboardContent(html("Scout (150b20bd…15dc) 2")).text,
     `@${label}`,
+  );
+  // A dropped collision suffix — in either form — is a partial chip.
+  assert.equal(
+    normalizeMentionClipboardContent(html("Scout (npub1z59…zwkg)")).text,
+    "Scout (npub1z59…zwkg)",
   );
   assert.equal(
     normalizeMentionClipboardContent(html("Scout (150b20bd…15dc)")).text,

@@ -16,7 +16,7 @@ import { selectionItemFromCommit } from "@/features/projects/lib/projectSelectio
 import { commitShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoCommit } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import {
   resolveUserLabel,
@@ -129,7 +129,7 @@ export function ContributorsPanel({
         isAgent,
         label: profile
           ? resolveUserLabel({ profiles, pubkey })
-          : truncatePubkey(pubkey),
+          : truncateNpub(pubkey),
         profileLinked: true,
         pubkey,
         reviewCount: signedCounts.reviews,

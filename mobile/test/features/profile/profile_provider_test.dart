@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/shared/profile/profile_event_parser.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -50,7 +52,29 @@ void main() {
     );
     addTearDown(container.dispose);
 
+    // The profile survives reconnect transitions without launching reads on
+    // each intermediate socket state, then revalidates once connected.
+    container.read(relaySessionProvider);
+    relaySession.setStatus(SessionStatus.disconnected);
+    final subscription = container.listen(profileProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await container.pump();
+    relaySession.setStatus(SessionStatus.connecting);
+    await container.pump();
+    expect(relaySession.reads, 0);
+    relaySession.setStatus(SessionStatus.connected);
     await container.read(profileProvider.future);
+    final initialReads = relaySession.reads;
+    relaySession.setStatus(SessionStatus.disconnected);
+    await container.pump();
+    relaySession.setStatus(SessionStatus.connecting);
+    await container.pump();
+    expect(container.read(profileProvider).requireValue?.displayName, 'Alice');
+    expect(relaySession.reads, initialReads);
+    relaySession.setStatus(SessionStatus.connected);
+    await container.pump();
+    await container.read(profileProvider.future);
+    expect(relaySession.reads, initialReads + 1);
     await container.read(profileProvider.notifier).updateDisplayName('Alice L');
 
     expect(relaySession.published, hasLength(1));
@@ -73,6 +97,76 @@ void main() {
     );
     expect(
       container.read(userCacheProvider)[keys.public]?.ownerPubkey,
+      owner.public.toLowerCase(),
+    );
+  });
+
+  test('confirmed profile save survives an older in-flight batch', () async {
+    final keys = nostr.Keys.generate();
+    final owner = nostr.Keys.generate();
+    NostrEvent event(String id, int createdAt, {bool owned = false}) =>
+        NostrEvent(
+          id: id,
+          pubkey: keys.public,
+          createdAt: createdAt,
+          kind: EventKind.profile,
+          tags: owned ? [_authTag(owner, keys.public)] : const [],
+          content: jsonEncode({
+            'display_name': owned ? 'Current' : 'Old relay profile',
+            'picture': owned ? 'https://example.com/new.png' : 'old.png',
+            'about': owned ? 'Current about' : 'Old about',
+            'nip05': owned ? 'agent@example.com' : 'old@example.com',
+          }),
+          sig: 'sig',
+        );
+    var history = [event('old', 1)];
+    final relaySession = _ControlledProfileRelaySession(
+      fetch: () async => history,
+    );
+    final parserStarted = Completer<void>();
+    final releaseParser = Completer<void>();
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(
+          () => _FixedRelayConfigNotifier(keys.nsec),
+        ),
+        relaySessionProvider.overrideWith(() => relaySession),
+        profileEventBatchParserProvider.overrideWithValue((events) async {
+          final parsed = await parseProfileEventBatch(events);
+          parserStarted.complete();
+          await releaseParser.future;
+          return parsed;
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(profileProvider.future);
+    final cache = container.read(userCacheProvider.notifier);
+    final refresh = cache.refresh([keys.public]);
+    await parserStarted.future;
+    history = [event('current', 2, owned: true)];
+    await container
+        .read(profileProvider.notifier)
+        .updateDisplayName('Saved locally');
+    final saved = container.read(userCacheProvider)[keys.public]!;
+    expect(saved.displayName, 'Saved locally');
+    expect(saved.avatarUrl, 'https://example.com/new.png');
+    expect(saved.about, 'Current about');
+    expect(saved.nip05Handle, 'agent@example.com');
+    expect(saved.ownerPubkey, owner.public.toLowerCase());
+    expect(relaySession.published, hasLength(1));
+
+    releaseParser.complete();
+    expect(await refresh, isTrue);
+    final afterBatch = container.read(userCacheProvider)[keys.public]!;
+    expect(afterBatch.displayName, 'Saved locally');
+    expect(afterBatch.avatarUrl, saved.avatarUrl);
+    expect(afterBatch.about, saved.about);
+    expect(afterBatch.nip05Handle, saved.nip05Handle);
+    expect(afterBatch.ownerPubkey, owner.public.toLowerCase());
+    expect(
+      container.read(profileProvider).requireValue?.ownerPubkey,
       owner.public.toLowerCase(),
     );
   });
@@ -106,7 +200,9 @@ void main() {
     expect(content, {'about': 'Building Buzz'});
     final profile = container.read(profileProvider).requireValue!;
     expect(profile.displayName, isNull);
-    expect(profile.label, '${keys.public.substring(0, 8)}...');
+    // The exact compact label is pinned; its npub shape is covered by the
+    // shared string_utils vectors.
+    expect(profile.label, shortPubkey(keys.public));
   });
 
   test('malformed profile metadata can be repaired by an edit', () async {
@@ -607,6 +703,9 @@ class _MutableRelayConfigNotifier extends RelayConfigNotifier {
 class _ProfileRelaySession extends RelaySessionNotifier {
   _ProfileRelaySession(this.profile);
 
+  int reads = 0;
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
   final NostrEvent profile;
   final List<NostrEvent> published = [];
 
@@ -617,7 +716,10 @@ class _ProfileRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [profile, ...published];
+  }) async {
+    reads++;
+    return [profile, ...published];
+  }
 
   @override
   Future<NostrEvent> publish(

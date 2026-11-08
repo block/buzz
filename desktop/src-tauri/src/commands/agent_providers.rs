@@ -1,4 +1,22 @@
-use crate::managed_agents::{discover_provider_candidates, invoke_provider, BackendProviderInfo};
+use crate::managed_agents::{
+    discover_acp_command_candidates, discover_provider_candidates, invoke_provider,
+    AcpCommandCandidate, BackendProviderInfo,
+};
+
+#[tauri::command]
+pub async fn discover_acp_commands() -> Result<Vec<AcpCommandCandidate>, String> {
+    tokio::task::spawn_blocking(|| {
+        discover_acp_command_candidates()
+            .into_iter()
+            .map(|(command, path)| AcpCommandCandidate {
+                command,
+                binary_path: path.display().to_string(),
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))
+}
 
 #[tauri::command]
 pub async fn discover_backend_providers() -> Result<Vec<BackendProviderInfo>, String> {

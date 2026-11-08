@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_STREAM_MESSAGE_EDIT, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use nostr::EventId;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,8 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// A custom harness command could not be resolved in the current PATH.
+    MissingBinary { command: String },
 }
 
 impl RequirementPayload {
@@ -190,6 +192,9 @@ impl RequirementPayload {
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
+            RequirementPayload::MissingBinary { command } => {
+                format!("install `{command}` or add it to PATH")
+            }
         }
     }
 }
@@ -262,6 +267,10 @@ impl SetupPayload {
                 .requirements
                 .iter()
                 .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let all_missing_binary = self
+                .requirements
+                .iter()
+                .all(|r| matches!(r, RequirementPayload::MissingBinary { .. }));
             let any_external = self
                 .requirements
                 .iter()
@@ -269,6 +278,8 @@ impl SetupPayload {
 
             let footer = if has_doctor_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
+            } else if all_missing_binary {
+                "Install the missing binary or update PATH, then restart Buzz.".to_string()
             } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
                 // help. Don't send the user there.
@@ -413,19 +424,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
-        // Ignore non-message kinds (relay housekeeping, etc.).
-        if kind_u32 != KIND_STREAM_MESSAGE && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED {
-            continue;
-        }
-
-        // ignore_self: don't react to our own messages.
-        if buzz_event.event.pubkey.to_hex() == pubkey_hex {
-            continue;
-        }
-
-        // Require an explicit @mention of this agent — setup mode must not
-        // nudge on every channel event even if subscribe_mode is "all".
-        if !event_mentions_agent(&buzz_event.event, &pubkey_hex) {
+        if !setup_listener_admits(&buzz_event.event, &pubkey_hex) {
             continue;
         }
 
@@ -452,6 +451,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &pubkey_hex,
             &mut nudged_event_ids,
             &publisher,
+            &rest_client,
             &config.keys,
             &payload,
         )
@@ -464,12 +464,32 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     Ok(())
 }
 
+/// Pre-authorization listener gate: nudge-eligible kind, not our own event,
+/// and an explicit @mention of this agent. Setup mode must not nudge on every
+/// channel event even if `subscribe_mode` is `all`.
+///
+/// Kind:40003 edits are eligible because a delivered edit carries `p` tags
+/// only for recipients it newly mentions; its nudge follows the original
+/// message (see [`publish_setup_nudge`]).
+fn setup_listener_admits(event: &nostr::Event, pubkey_hex: &str) -> bool {
+    let kind = u32::from(event.kind.as_u16());
+    if !matches!(
+        kind,
+        KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_EDIT | KIND_WORKFLOW_APPROVAL_REQUESTED
+    ) {
+        return false;
+    }
+    event.pubkey.to_hex() != pubkey_hex && event_mentions_agent(event, pubkey_hex)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn nudge_authorized_event(
     authorized_event: AuthorizedListenerEvent,
     rules: &[filter::SubscriptionRule],
     pubkey_hex: &str,
     nudged_event_ids: &mut HashSet<EventId>,
     publisher: &RelayEventPublisher,
+    rest_client: &relay::RestClient,
     keys: &nostr::Keys,
     payload: &SetupPayload,
 ) -> bool {
@@ -485,12 +505,19 @@ async fn nudge_authorized_event(
         return false;
     }
 
+    // An edit's nudge follows its original message; resolve it with the same
+    // bounded, scoped lookup normal mode uses at admission.
+    let edit =
+        crate::edit_routing::resolve_edit(&buzz_event.event, buzz_event.channel_id, rest_client)
+            .await;
+
     // Build and publish the setup nudge.
     if let Err(e) = publish_setup_nudge(
         publisher,
         keys,
         buzz_event.channel_id,
         &buzz_event.event,
+        edit.as_ref(),
         &effective_author,
         payload,
     )
@@ -563,7 +590,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(crate::config::default_mention_kinds);
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -630,33 +657,58 @@ async fn handle_setup_membership(
 /// Build and publish a setup nudge reply to the triggering event.
 ///
 /// Threading: flat reply to the thread root if one exists; otherwise reply
-/// to the triggering event itself. P-tags the verified effective asker.
+/// to the triggering event itself. An edit routes through its original
+/// message (`edit`, resolved by the caller): the original's thread root, or
+/// the original itself when top-level — never the auxiliary edit event. An
+/// unresolved original is never claimed as a thread root, because the relay
+/// rejects a root that does not match the original's real ancestry; that
+/// nudge posts at top level. P-tags the verified effective asker.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
     channel_id: Uuid,
     triggering_event: &nostr::Event,
+    edit: Option<&crate::queue::ResolvedEdit>,
     recipient_hex: &str,
     payload: &SetupPayload,
 ) -> Result<()> {
-    use buzz_sdk::ThreadRef;
+    let signed = build_setup_nudge_event(
+        keys,
+        channel_id,
+        triggering_event,
+        edit,
+        recipient_hex,
+        payload,
+    )?;
+    publisher
+        .publish_event(signed)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to publish setup nudge: {e}"))?;
+    Ok(())
+}
 
-    // Parse NIP-10 thread tags to determine reply target.
-    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
-
-    let thread_ref = if let Some(root_str) = &thread_tags.root_event_id {
-        // Threaded event: reply flat to the root.
-        let root_id = nostr::EventId::from_hex(root_str)
-            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?;
-        Some(ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: root_id,
-        })
+/// Build the signed nudge published by [`publish_setup_nudge`].
+fn build_setup_nudge_event(
+    keys: &nostr::Keys,
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    edit: Option<&crate::queue::ResolvedEdit>,
+    recipient_hex: &str,
+    payload: &SetupPayload,
+) -> Result<nostr::Event> {
+    let unresolved_edit =
+        crate::queue::edit_target_id(triggering_event).is_some() && edit.is_none();
+    let thread_ref = if unresolved_edit {
+        None
     } else {
-        // Top-level event: reply to the triggering event.
-        Some(ThreadRef {
-            root_event_id: triggering_event.id,
-            parent_event_id: triggering_event.id,
+        let anchor = crate::queue::routing_thread_tags(triggering_event, edit)
+            .root_event_id
+            .unwrap_or_else(|| crate::queue::reaction_target_id(triggering_event));
+        let anchor_id = nostr::EventId::from_hex(&anchor)
+            .map_err(|e| anyhow::anyhow!("invalid nudge anchor event id: {e}"))?;
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: anchor_id,
+            parent_event_id: anchor_id,
         })
     };
 
@@ -673,16 +725,9 @@ async fn publish_setup_nudge(
     )
     .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
 
-    let signed = event_builder
+    event_builder
         .sign_with_keys(keys)
-        .map_err(|e| anyhow::anyhow!("failed to sign setup nudge: {e}"))?;
-
-    publisher
-        .publish_event(signed)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to publish setup nudge: {e}"))?;
-
-    Ok(())
+        .map_err(|e| anyhow::anyhow!("failed to sign setup nudge: {e}"))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -737,6 +782,23 @@ mod tests {
             payload.requirements.as_slice(),
             [RequirementPayload::GitBash]
         ));
+    }
+
+    #[test]
+    fn setup_payload_deserializes_missing_binary_requirement() {
+        let payload = SetupPayload::from_raw_env_value(Some(
+            r#"{"agent_name":"Carol","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"buzz-pi-acp"}]}"#.to_string(),
+        ))
+        .unwrap()
+        .expect("missing_binary payload must parse");
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command == "buzz-pi-acp"
+        ));
+        let body = payload.nudge_body();
+        assert!(body.contains("install `buzz-pi-acp` or add it to PATH"));
+        assert!(body.contains("restart Buzz"));
+        assert!(!body.contains("Open Edit Agent"));
     }
 
     #[tokio::test]
@@ -801,6 +863,7 @@ mod tests {
                 &agent,
                 &mut HashSet::new(),
                 &publisher,
+                &rest_client,
                 &agent_keys,
                 &payload,
             )
@@ -820,6 +883,198 @@ mod tests {
         assert!(recipients.contains(&workflow_owner.as_str()));
         assert!(!recipients.contains(&relay_hex.as_str()));
         server.abort();
+    }
+
+    fn nudge_e_tags(event: &nostr::Event) -> Vec<Vec<String>> {
+        event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .filter(|tag| tag.first().map(String::as_str) == Some("e"))
+            .collect()
+    }
+
+    /// Drive a mentioned kind:40003 edit through the production listener
+    /// seams (pre-gate, author gate, `nudge_authorized_event`) against a relay
+    /// that serves `original_response` for the edit-original lookup, and
+    /// return the published nudge.
+    async fn nudge_for_edit(
+        edit_target: &str,
+        original_response: serde_json::Value,
+    ) -> (nostr::Event, nostr::Event) {
+        let agent_keys = nostr::Keys::generate();
+        let agent = agent_keys.public_key().to_hex();
+        let asker = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let edit = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16),
+            "edited to mention the agent",
+        )
+        .tags([
+            nostr::Tag::parse(["e", edit_target]).unwrap(),
+            nostr::Tag::parse(["p", &agent]).unwrap(),
+            nostr::Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+        ])
+        .sign_with_keys(&asker)
+        .unwrap();
+        assert!(
+            setup_listener_admits(&edit, &agent),
+            "listener gate must admit a mentioned edit"
+        );
+
+        let (gate_rest, gate_server) =
+            crate::author_gate_tests::nip11_server(serde_json::json!({})).await;
+        let (query_rest, query_server) =
+            crate::author_gate_tests::nip11_server(original_response).await;
+        let mut gate = InboundAuthorGate::connect(&gate_rest, &agent, "setup edit test").await;
+        let channel_info = crate::pool::ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                channel_id,
+                relay::ChannelInfo {
+                    name: "general".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            gate_rest.clone(),
+        );
+        let authorized = authorize_setup_listener_event(
+            &mut gate,
+            relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id,
+                event: edit.clone(),
+            },
+            &crate::config::RespondTo::Anyone,
+            &HashSet::new(),
+            &OwnerCache::new(None),
+            &channel_info,
+            &gate_rest,
+        )
+        .await
+        .expect("asker should pass the setup author gate");
+        // Production setup rules with default kinds, so dropping kind:40003
+        // from the setup admission path fails these tests.
+        let rules = default_setup_rules();
+        let (publisher, mut published) = RelayEventPublisher::test_pair();
+        let payload = SetupPayload {
+            agent_name: "Fizz".into(),
+            agent_pubkey: agent.clone(),
+            requirements: vec![],
+        };
+        assert!(
+            nudge_authorized_event(
+                authorized,
+                &rules,
+                &agent,
+                &mut HashSet::new(),
+                &publisher,
+                &query_rest,
+                &agent_keys,
+                &payload,
+            )
+            .await
+        );
+        let nudge = published.recv().await.expect("setup nudge published");
+        gate_server.abort();
+        query_server.abort();
+        (edit, nudge)
+    }
+
+    #[tokio::test]
+    async fn setup_listener_nudges_threaded_edit_at_original_root() {
+        let root = "77".repeat(32);
+        let original = crate::edit_routing::test_support::message(Some(&root));
+        let (edit, nudge) =
+            nudge_for_edit(&original.id.to_hex(), serde_json::json!([original])).await;
+        let e_tags = nudge_e_tags(&nudge);
+        assert_eq!(
+            e_tags,
+            vec![vec!["e".into(), root, "".into(), "reply".into()]]
+        );
+        assert_ne!(e_tags[0][1], edit.id.to_hex());
+    }
+
+    #[tokio::test]
+    async fn setup_listener_nudges_top_level_edit_at_original() {
+        let original = crate::edit_routing::test_support::message(None);
+        let original_id = original.id.to_hex();
+        let (edit, nudge) = nudge_for_edit(&original_id, serde_json::json!([original])).await;
+        let e_tags = nudge_e_tags(&nudge);
+        assert_eq!(
+            e_tags,
+            vec![vec!["e".into(), original_id, "".into(), "reply".into()]]
+        );
+        assert_ne!(e_tags[0][1], edit.id.to_hex());
+    }
+
+    #[tokio::test]
+    async fn setup_listener_nudges_unresolved_edit_at_top_level() {
+        // The target may itself be a thread reply; claiming it as root would
+        // make the relay reject the nudge for mismatched ancestry.
+        let target = "88".repeat(32);
+        let (_edit, nudge) = nudge_for_edit(&target, serde_json::json!([])).await;
+        assert!(nudge_e_tags(&nudge).is_empty());
+    }
+
+    #[test]
+    fn setup_listener_gate_rejects_unmentioned_and_self_edits() {
+        let agent_keys = nostr::Keys::generate();
+        let agent = agent_keys.public_key().to_hex();
+        let target = "99".repeat(32);
+        let build = |keys: &nostr::Keys, mention: bool| {
+            let mut tags = vec![nostr::Tag::parse(["e", &target]).unwrap()];
+            if mention {
+                tags.push(nostr::Tag::parse(["p", &agent]).unwrap());
+            }
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_STREAM_MESSAGE_EDIT as u16), "edit")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .unwrap()
+        };
+        let other = nostr::Keys::generate();
+        assert!(setup_listener_admits(&build(&other, true), &agent));
+        assert!(!setup_listener_admits(&build(&other, false), &agent));
+        assert!(!setup_listener_admits(&build(&agent_keys, true), &agent));
+    }
+
+    fn default_setup_rules() -> Vec<filter::SubscriptionRule> {
+        let mut config = crate::build_mcp_servers_tests::test_config();
+        config.kinds_override = None;
+        build_setup_subscription_rules(&config)
+    }
+
+    /// The setup listener's full admission path (pre-gate plus the production
+    /// setup rules) admits an edit that newly mentions the agent and rejects
+    /// an edit that does not.
+    #[tokio::test]
+    async fn setup_rules_admit_only_edits_that_mention_the_agent() {
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let rules = default_setup_rules();
+        let channel_id = Uuid::new_v4();
+        let target = "ab".repeat(32);
+        let admitted = |event: nostr::Event| {
+            let rules = &rules;
+            let agent = agent.clone();
+            async move {
+                setup_listener_admits(&event, &agent)
+                    && filter::match_event(&event, channel_id, rules, &agent)
+                        .await
+                        .is_some()
+            }
+        };
+
+        let mentioned =
+            crate::edit_routing::test_support::edit_event(&target, &[["p", agent.as_str()]]);
+        assert!(
+            admitted(mentioned).await,
+            "a mention added by an edit must reach the setup nudge"
+        );
+        let unmentioned = crate::edit_routing::test_support::edit_event(&target, &[]);
+        assert!(
+            !admitted(unmentioned).await,
+            "an edit without the agent's p tag must not nudge"
+        );
     }
 
     #[test]

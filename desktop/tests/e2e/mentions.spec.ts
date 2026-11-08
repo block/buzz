@@ -1,5 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
+import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 
 import {
@@ -86,6 +87,43 @@ const JOIN_COLLAPSE_GROUPED_TEXT =
 const JOIN_COLLAPSE_CAPTURE_WIDTH = 560;
 const JOIN_COLLAPSE_CAPTURE_HEIGHT = 260;
 const JOIN_COLLAPSE_CAPTURE_VERTICAL_PADDING = 24;
+
+async function timelineChipLayout(chip: Locator) {
+  return chip.evaluate((element) => {
+    const paragraph = element.closest("p");
+    if (!paragraph) throw new Error("Timeline chip is missing its paragraph");
+    const chipBounds = element.getBoundingClientRect();
+    const paragraphBounds = paragraph.getBoundingClientRect();
+    const chipFragmentRects = Array.from(element.getClientRects())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .sort((a, b) => a.top - b.top);
+    const chipStyle = getComputedStyle(element);
+    return {
+      boxDecorationBreak:
+        chipStyle.getPropertyValue("box-decoration-break") ||
+        chipStyle.getPropertyValue("-webkit-box-decoration-break"),
+      chipHeight: chipBounds.height,
+      chipLineHeight: Number.parseFloat(chipStyle.lineHeight),
+      fragmentCount: chipFragmentRects.length,
+      fragmentGap:
+        chipFragmentRects.length > 1
+          ? Math.round(chipFragmentRects[1].top - chipFragmentRects[0].bottom)
+          : null,
+      fragmentHeight:
+        chipFragmentRects.length > 0
+          ? Math.round(chipFragmentRects[0].height)
+          : null,
+      fragmentStep:
+        chipFragmentRects.length > 1
+          ? Math.round(chipFragmentRects[1].top - chipFragmentRects[0].top)
+          : null,
+      paragraphHeight: paragraphBounds.height,
+      paragraphLineHeight: Number.parseFloat(
+        getComputedStyle(paragraph).lineHeight,
+      ),
+    };
+  });
+}
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
 function autocomplete(page: import("@playwright/test").Page) {
@@ -1582,6 +1620,19 @@ test("selecting a persona mention creates a channel agent before sending and sta
     .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" });
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveText("Fizz");
+  await expect(mentionChip).toHaveClass(/wrapping-inline-chip/);
+  const timelineLayout = await timelineChipLayout(mentionChip);
+  expect(timelineLayout).toMatchObject({
+    boxDecorationBreak: "clone",
+    chipHeight: 17,
+    chipLineHeight: 18,
+    fragmentCount: 1,
+    fragmentGap: null,
+    fragmentHeight: 17,
+    fragmentStep: null,
+    paragraphHeight: 20,
+    paragraphLineHeight: 20,
+  });
 });
 
 test("selecting a persona mention reuses an existing persona agent", async ({
@@ -4033,6 +4084,53 @@ test("collapses contiguous mixed join arrivals into one actor-neutral cohort", a
   await expect(rows.first()).toContainText(JOIN_COLLAPSE_GROUPED_TEXT);
 });
 
+test("system agent avatar keeps keyboard focus decoration outside artwork", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        displayName: "mira",
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ actorPubkey, kind }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({
+          type: "channel_created",
+          actor: actorPubkey,
+        }),
+        kind,
+      });
+    },
+    {
+      actorPubkey: PROFILE_ONLY_AGENT_PUBKEY,
+      kind: SYSTEM_MESSAGE_KIND,
+    },
+  );
+  await waitForTimelineSettled(page);
+
+  const row = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "created this channel" });
+  const control = row.locator('button[data-testid="system-message-avatar"]');
+  const artwork = control.getByTestId("system-message-avatar");
+  await control.focus();
+
+  await expect(control).toBeFocused();
+  await expect(control).toHaveCSS("clip-path", "none");
+  await expect(artwork).toHaveCSS("clip-path", /rounded-squircle-clip/);
+});
+
 test("system agent profile exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-random").click();
@@ -4517,6 +4615,67 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveText("bob");
   await expect(mentionChip).toHaveClass(/inline-chip-icon-human/);
+  await expect(mentionChip).toHaveClass(/wrapping-inline-chip/);
+
+  const timelineLayout = await timelineChipLayout(mentionChip);
+  expect(timelineLayout).toMatchObject({
+    boxDecorationBreak: "clone",
+    chipHeight: 17,
+    chipLineHeight: 18,
+    fragmentCount: 1,
+    fragmentGap: null,
+    fragmentHeight: 17,
+    fragmentStep: null,
+    paragraphHeight: 20,
+    paragraphLineHeight: 20,
+  });
+});
+
+test("qualified mentions wrap without changing message line rhythm", async ({
+  page,
+}) => {
+  const pubkey = TEST_IDENTITIES.bob.pubkey;
+  const qualifiedLabel = `bob (${pubkey})`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+  await emitMockMessage(page, "general", `@${qualifiedLabel}`, {
+    mentionPubkeys: [pubkey],
+  });
+  await waitForTimelineSettled(page);
+
+  const row = page.getByTestId("message-row").filter({ hasText: "bob" }).last();
+  await row.evaluate((element) => {
+    const prose = element.querySelector<HTMLElement>(".message-markdown");
+    if (!prose)
+      throw new Error("Qualified mention is missing its prose wrapper");
+    prose.style.width = "8rem";
+  });
+  const mentionChip = row.locator("[data-mention]", { hasText: "bob" });
+  await expect(mentionChip).toHaveText(/bob \(npub1hv3…tpuc\)/);
+  await expect(mentionChip).toHaveClass(/wrapping-inline-chip/);
+
+  const layout = await timelineChipLayout(mentionChip);
+  expect(layout.boxDecorationBreak).toBe("clone");
+  expect(layout.chipLineHeight).toBe(18);
+  expect(layout.fragmentCount).toBe(2);
+  expect(layout.fragmentHeight).toBe(17);
+  expect(layout.fragmentGap).toBeGreaterThanOrEqual(1);
+  expect(layout.fragmentStep).toBe(20);
+  expect(layout.paragraphLineHeight).toBe(20);
+  expect(layout.chipHeight).toBeLessThanOrEqual(
+    layout.fragmentCount * layout.paragraphLineHeight,
+  );
+
+  const trigger = mentionChip.locator("xpath=..");
+  await expect(trigger).toHaveCSS("display", "inline");
+  await expect(trigger).toHaveAttribute("role", "button");
+  await trigger.focus();
+  await expect(trigger).toBeFocused();
+  await trigger.press("Enter");
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 
 test("clicking author name opens user profile panel", async ({ page }) => {
@@ -4534,7 +4693,8 @@ test("clicking author name opens user profile panel", async ({ page }) => {
   // Click now opens the full profile panel instead of the popover
   const panel = page.getByTestId("user-profile-panel");
   await expect(panel).toBeVisible();
-  await expect(panel).toContainText("deadbeef");
+  await expect(panel).toContainText(truncateNpub(MOCK_VIEWER_PUBKEY));
+  await expect(panel).not.toContainText("deadbeefdeadbeef");
 });
 
 test("hovering avatar opens popover, clicking opens profile panel", async ({
@@ -4757,7 +4917,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     profilePopover.getByTestId(
       `user-profile-popover-owner-${OWNED_AGENT_PROFILE_PUBKEY}`,
     ),
-  ).toHaveText("managed by 11111111…1111");
+  ).toHaveText(`managed by ${truncateNpub(CASEY_PROFILE_PUBKEY)}`);
 });
 
 test("human profile popover does not show an owner", async ({ page }) => {

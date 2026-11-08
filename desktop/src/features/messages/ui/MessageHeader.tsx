@@ -129,6 +129,7 @@ export function MessageAuthorIdentity({
           pubkey={pubkey}
           role={role}
           botIdenticonValue={displayName}
+          triggerClassName="min-w-0 max-w-full"
         >
           <button
             className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"

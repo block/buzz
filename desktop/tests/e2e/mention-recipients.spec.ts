@@ -1,7 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
-import { truncatePubkey } from "../../src/shared/lib/pubkey";
+import { truncateNpub } from "../../src/shared/lib/pubkey";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { replaceComposerText } from "../helpers/composer";
 
 const FIRST = TEST_IDENTITIES.alice.pubkey;
 const SECOND = TEST_IDENTITIES.bob.pubkey;
@@ -111,7 +112,7 @@ test("ambiguous added mention blocks editing before clearing the draft", async (
   await page.getByRole("menuitem", { name: "Edit message" }).click();
   await expect(page.getByTestId("edit-target")).toBeVisible();
   await expect(input).toHaveText("original message for ambiguity edit");
-  await input.fill("edited @Scout hello");
+  await replaceComposerText(input, "edited @Scout hello");
   await page.getByTestId("send-message").click();
   await expect(page.getByText(AMBIGUOUS, { exact: false })).toBeVisible();
   await expect(input).toHaveText("edited @Scout hello");
@@ -399,7 +400,7 @@ test("editing to a longer typed member drops the original shorter reference", as
   await row.getByRole("button", { name: "More actions" }).click();
   await page.getByRole("menuitem", { name: "Edit message" }).click();
   await expect(input).toHaveText("@Scout hello");
-  await input.fill("@Scout Jones hello");
+  await replaceComposerText(input, "@Scout Jones hello");
   await page.getByTestId("send-message").click();
   await expect
     .poll(() =>
@@ -566,7 +567,7 @@ for (const { kind, scale } of [
       .last();
     await assertFits(markdown, "sent");
     const qualifiedChip = row.locator("[data-mention]").last();
-    await expect(qualifiedChip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
+    await expect(qualifiedChip).toHaveText(`Scout (${truncateNpub(SECOND)})`);
     await expect(qualifiedChip).toHaveAttribute(
       "data-mention-label",
       `Scout (${SECOND})`,
@@ -644,7 +645,7 @@ for (const replacement of [
     // by filling the still-idle composer before the historical body is loaded.
     await expect(panel.getByTestId("edit-target")).toBeVisible();
     await expect(input).toHaveText("@Scout historical ambiguity");
-    await input.fill(replacement);
+    await replaceComposerText(input, replacement);
     await panel.getByTestId("send-message").click();
     await expect(row).toContainText("repaired history");
     const expected = replacement.startsWith("@")
@@ -747,7 +748,7 @@ for (const mixed of [false, true]) {
     await expect(input).toHaveText(
       "@Scout and @Scout Jones historical ambiguity",
     );
-    await input.fill(replacement);
+    await replaceComposerText(input, replacement);
     await panel.getByTestId("send-message").click();
     await expect(row).toContainText("repaired history");
     const expected = long;
@@ -873,7 +874,7 @@ for (const mismatchedKey of [false, true]) {
       .getByTestId("message-row")
       .filter({ hasText: "qualified clipboard roundtrip" })
       .locator(`[data-mention-pubkey="${SECOND}"]`);
-    await expect(chip).toHaveText(`Scout (${truncatePubkey(SECOND)})`);
+    await expect(chip).toHaveText(`Scout (${truncateNpub(SECOND)})`);
     const flavors = await chip.evaluate((element) => {
       const range = document.createRange();
       range.selectNode(element);
@@ -956,7 +957,7 @@ for (const partial of [false, true]) {
       .filter({ hasText: "compact collision" });
     for (const key of keys) {
       const chip = row.locator(`[data-mention-pubkey="${key}"]`);
-      await expect(chip).toHaveText(`Scout (${truncatePubkey(key)})`);
+      await expect(chip).toHaveText(`Scout (${truncateNpub(key)})`);
       await expect(chip).toHaveAttribute("title", `Scout (${key})`);
       const flavors = await chip.evaluate((element, partial) => {
         const range = document.createRange();

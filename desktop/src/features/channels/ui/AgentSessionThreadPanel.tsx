@@ -25,7 +25,10 @@ import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import { awaitCancelTurnOutcome } from "@/features/agents/lib/cancelTurnOutcome";
-import { subscribeControlResults } from "@/features/agents/observerRelayStore";
+import {
+  ensureRelayObserverSubscription,
+  subscribeControlResults,
+} from "@/features/agents/observerRelayStore";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
@@ -254,8 +257,14 @@ export function AgentSessionThreadPanel({
         channelId: sessionChannelId,
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
-        sendCancel: () =>
-          cancelManagedAgentTurn(agent.pubkey, sessionChannelId, requestId),
+        sendCancel: async () => {
+          await ensureRelayObserverSubscription();
+          await cancelManagedAgentTurn(
+            agent.pubkey,
+            sessionChannelId,
+            requestId,
+          );
+        },
         scheduleTimeout: (onTimeout) => {
           const timeout = window.setTimeout(onTimeout, 8_000);
           return () => window.clearTimeout(timeout);

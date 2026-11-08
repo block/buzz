@@ -156,10 +156,13 @@ export async function setup({ lifecycle = false } = {}) {
     "@/features/messages/lib/imetaMediaMarkdown": {
       buildOutgoingMessage: (text) => ({ content: text, mediaTags: [] }),
     },
-    "@/shared/api/tauri": { invokeTauri: async () => {} },
+    "@/shared/api/tauriChannels": { syncAgentsToActiveHuddle: async () => {} },
     "@/shared/lib/pubkey": {
       normalizePubkey: (key) => key.toLowerCase(),
       truncatePubkey: (key) => key,
+      // Compact-identity seam stubbed alongside its sibling: these suites
+      // render display names, never key-form labels.
+      truncateNpub: (key) => key,
     },
     "@/shared/lib/customEmojiTags": { buildCustomEmojiTags: () => [] },
     "./useMentionSendFlow.helpers": helpers,

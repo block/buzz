@@ -273,7 +273,7 @@ function installEffortIpc({ deferUpdate = false, failUpdate = false } = {}) {
   };
 }
 
-function renderDialog(onOpenChange) {
+function renderDialog(onOpenChange, agentOverrides = {}) {
   const client = new QueryClient({
     defaultOptions: {
       mutations: { gcTime: 0 },
@@ -289,7 +289,7 @@ function renderDialog(onOpenChange) {
         QueryClientProvider,
         { client },
         createElement(AgentInstanceEditDialog, {
-          agent: { ...toCamelAgent(rawAgent()) },
+          agent: { ...toCamelAgent(rawAgent(agentOverrides)) },
           open: true,
           onOpenChange,
           onUpdated: () => {},
@@ -498,8 +498,8 @@ test("inherit toggle then Save dispatches the agentCommand:'' inherit sentinel",
 // Opens the effort dropdown (Radix DropdownMenu trigger) and selects the option
 // whose visible label matches `label`. Mirrors a real user pick — the seam the
 // pure resolveEffortSubmission unit tests never touch.
-async function selectEffort(label) {
-  const trigger = dom.window.document.getElementById("edit-agent-effort");
+async function selectEffort(label, id = "edit-agent-effort") {
+  const trigger = dom.window.document.getElementById(id);
   assert.ok(
     trigger,
     "effort picker trigger must render for a local + effort-capable agent",
@@ -681,6 +681,40 @@ test("pin→inherit Save with a picked effort does not write effortLevel", async
     0,
     "the inherit-transition guard must suppress the effort write so it cannot restore the just-cleared pin — dropping the guard fails this",
   );
+});
+
+test("pin→inherit toggle hides the picker, stored level included", async () => {
+  // Save clears the agent's effort on this transition and drops any pick, so
+  // neither the session's levels nor a stored "max" may stay on offer.
+  installEffortIpc();
+  ipcHandlers.set("get_agent_config_surface", () =>
+    Promise.resolve({
+      ...effortConfigSurface(),
+      normalized: {
+        ...effortConfigSurface().normalized,
+        thinkingEffort: {
+          value: "max",
+          origin: "buzzExplicit",
+          writeVia: {
+            type: "respawnWithEnvVar",
+            envKey: "GOOSE_THINKING_EFFORT",
+          },
+          overriddenValue: null,
+          overriddenOrigin: null,
+          isRequired: false,
+        },
+      },
+    }),
+  );
+  await act(async () => {
+    renderDialog(() => {});
+  });
+  const effortLabel = () =>
+    dom.window.document.getElementById("edit-agent-effort")?.textContent;
+  assert.equal(effortLabel(), "max");
+
+  await expandAdvancedAndToggleInherit();
+  assert.equal(effortLabel(), undefined, "no effort control may stay on offer");
 });
 
 // ── Composite isSaving gate covers the FULL Save transaction (Carl r9 P1) ────
@@ -871,15 +905,12 @@ test("runtime switch clears touched effort — no effortLevel dispatched after s
   // switched → Save → stale effort value committed to the new runtime's store,
   // which rejects vocab it never advertised.
   //
-  // The fixture uses a non-null pinned originalEffortLevel ("low") so the
-  // test is sensitive to the load-bearing guard: `effortTouched.current = false`
-  // in handleRuntimeDropdownChange. Without it, resolveEffortSubmission sees
-  // effortLevel=null ≠ originalEffortLevel="low" and emits an unintended clear
-  // write. The secondary guard (setEffortLevel(null)) alone does not suppress.
+  // The fixture stores "low" on the agent so the test is sensitive to the
+  // load-bearing guard: `setEffortLevel(undefined)` in
+  // handleRuntimeDropdownChange. Without it, the "high" pick survives the
+  // switch and Save writes it to the new runtime.
   installEffortIpc();
   const set = (cmd, handler) => ipcHandlers.set(cmd, handler);
-  // Override the config surface with a non-null pinned effort so the original
-  // value is "low" — the critical case for the effortTouched guard.
   set("get_agent_config_surface", () =>
     Promise.resolve({
       ...effortConfigSurface(),
@@ -887,8 +918,11 @@ test("runtime switch clears touched effort — no effortLevel dispatched after s
         ...effortConfigSurface().normalized,
         thinkingEffort: {
           value: "low",
-          origin: "agentRecord",
-          writeVia: "standalone",
+          origin: "buzzExplicit",
+          writeVia: {
+            type: "respawnWithEnvVar",
+            envKey: "GOOSE_THINKING_EFFORT",
+          },
           overriddenValue: null,
           overriddenOrigin: null,
           isRequired: false,
@@ -928,12 +962,11 @@ test("runtime switch clears touched effort — no effortLevel dispatched after s
     fireEvent.click(claudeItem);
   });
 
-  // The picker must disappear once runtimeTouched is set — its config surface
-  // is only valid for the running session, not the prospective runtime.
+  // The switch discards the pick; the stored level stays shown and clearable.
   assert.equal(
-    dom.window.document.getElementById("edit-agent-effort"),
-    null,
-    "effort picker must be hidden after a runtime switch — its options are unknown for the prospective runtime",
+    dom.window.document.getElementById("edit-agent-effort")?.textContent,
+    "low",
+    "a runtime switch must show the stored level, not the discarded pick",
   );
 
   // Save — the runtime changed, so effortTouched must have been cleared.
@@ -1075,4 +1108,132 @@ test("auto-restart and inherit checkboxes are disabled while the locked update w
     resolveUpdate();
     await new Promise((resolve) => setTimeout(resolve, 5));
   });
+});
+
+const CLAUDE_CATALOG = {
+  agentName: "claude",
+  models: [
+    { id: "opus[1m]", name: "Opus" },
+    { id: "haiku", name: "Haiku" },
+  ],
+  agentDefaultModel: "opus[1m]",
+  supportsSwitching: true,
+};
+const CLAUDE_INSTANCE = {
+  runtime: "claude",
+  agent_command: "claude",
+  agent_command_override: null,
+  model: "haiku",
+};
+
+test("linked agent: effort follows the definition model, not the unsaved field", async () => {
+  installIpc();
+  ipcHandlers.set("list_personas", () =>
+    Promise.resolve([rawPersona({ model: "haiku" })]),
+  );
+  ipcHandlers.set("discover_agent_models", () =>
+    Promise.resolve(CLAUDE_CATALOG),
+  );
+  await act(async () => {
+    renderDialog(() => {}, CLAUDE_INSTANCE);
+  });
+  await selectEffort("Opus", "edit-agent-model");
+  assert.equal(
+    dom.window.document.getElementById("edit-agent-effort"),
+    null,
+    "Save never sends model for a linked agent, so Haiku still runs",
+  );
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  });
+  const update = ipcCalls.find((call) => call.cmd === "update_managed_agent");
+  assert.equal(update.args.input.model, undefined);
+  assert.equal(update.args.input.effortLevel, undefined);
+});
+
+test("untouched Claude form ignores stored session levels it cannot attribute", async () => {
+  installIpc();
+  ipcHandlers.set("get_agent_config_surface", () =>
+    Promise.resolve({ ...effortConfigSurface(), runtimeId: "claude" }),
+  );
+  ipcHandlers.set("discover_agent_models", () =>
+    Promise.resolve(CLAUDE_CATALOG),
+  );
+  await act(async () => {
+    renderDialog(() => {}, { ...CLAUDE_INSTANCE, persona_id: null });
+  });
+  assert.equal(
+    dom.window.document.getElementById("edit-agent-effort"),
+    null,
+    "configured Haiku must not inherit levels from a session of unknown model",
+  );
+});
+
+test("an inherited global effort shows no picker before the first session", async () => {
+  // The surface reports the effective value from any tier; only the agent's
+  // own level is stored. Goose offers no levels until a session reports them.
+  installIpc();
+  ipcHandlers.set("get_agent_config_surface", () =>
+    Promise.resolve({
+      ...configSurface(),
+      isPreSpawn: true,
+      normalized: {
+        ...configSurface().normalized,
+        thinkingEffort: {
+          value: "high",
+          origin: "globalDefault",
+          writeVia: {
+            type: "respawnWithEnvVar",
+            envKey: "GOOSE_THINKING_EFFORT",
+          },
+          overriddenValue: null,
+          overriddenOrigin: null,
+          isRequired: false,
+        },
+      },
+    }),
+  );
+  await act(async () => {
+    renderDialog(() => {});
+  });
+  // A boolean, not the element: inspecting a JSDOM node for a diff hangs.
+  assert.ok(
+    dom.window.document.getElementById("edit-agent-effort") === null,
+    "a global default is not this agent's stored level to show or clear",
+  );
+});
+
+test("a registered harness whose id is custom is selected by its command", async () => {
+  // The catalog effect re-derives the selection whenever the catalog changes;
+  // "custom" is also the no-match fallback, so a match on it must not be
+  // mistaken for no match. The harness first appears under another id, so the
+  // selection only follows it if the effect accepts the "custom" match.
+  installIpc();
+  const command = "/opt/my-harness";
+  let catalog = [rawRuntime("claude"), rawRuntime("my-harness", { command })];
+  ipcHandlers.set("discover_acp_providers", () => Promise.resolve(catalog));
+  await act(async () => {
+    renderDialog(() => {}, {
+      persona_id: null,
+      agent_command: command,
+      agent_command_override: null,
+    });
+  });
+  const runtimeLabel = () =>
+    dom.window.document.getElementById("edit-agent-runtime")?.textContent;
+  assert.equal(runtimeLabel(), "my-harness");
+
+  catalog = [
+    rawRuntime("claude"),
+    rawRuntime("custom", { command, label: "My Harness" }),
+  ];
+  await act(async () => {
+    await clients.at(-1).invalidateQueries({ queryKey: ["acp-runtimes"] });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+  assert.equal(
+    runtimeLabel(),
+    "My Harness",
+    "the saved command matches the harness registered under the id custom",
+  );
 });

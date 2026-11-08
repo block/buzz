@@ -9,24 +9,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::store::recent_pass::Range;
+
 use buzz_datastore_tracing::datastore_span;
-
-async fn acquire_event_write_connection(
-    pool: &PgPool,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>> {
-    Ok(crate::observability::acquire_writer(
-        pool,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?)
-}
-
-async fn begin_event_write_transaction(
-    pool: &PgPool,
-) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
-    let connection = acquire_event_write_connection(pool).await?;
-    Ok(sqlx::Transaction::begin(connection, None).await?)
-}
 
 use buzz_core::CommunityId;
 
@@ -34,6 +19,60 @@ use crate::{
     error::Result, event::row_to_stored_event, route_proof::ChannelScoped, Db, ReadSession,
     ReadSessionInner, RouteDecision, RoutePredicate,
 };
+
+/// [`THREAD_PARTICIPANT_SCAN_LIMIT`] as a literal, so SQL can `concat!` it.
+macro_rules! thread_participant_scan_limit {
+    () => {
+        1000
+    };
+}
+
+/// How many of a thread's newest replies a participant summary reads.
+///
+/// Participants are the thread's most recently active distinct authors, so
+/// the newest replies decide them. Aggregating the whole thread instead made
+/// every summary cost O(thread), recomputed after every reply, so one very
+/// large thread could saturate the writer. An author silent for this many
+/// replies drops out of the facepile, which shows at most 10.
+pub const THREAD_PARTICIPANT_SCAN_LIMIT: i64 = thread_participant_scan_limit!();
+
+/// Correlated `ARRAY(...)` of up to 10 participant pubkeys, most recent
+/// first, for the thread rooted at `root.event_id` in community `$1`.
+///
+/// Walks `idx_thread_metadata_window` newest-first and stops after
+/// [`THREAD_PARTICIPANT_SCAN_LIMIT`] rows, so cost is bounded by the window,
+/// not the thread. The one argument is an extra (possibly empty) predicate on
+/// the window's `tm` rows. A macro so callers stay `&'static str` via
+/// `concat!`.
+macro_rules! recent_thread_participants_sql {
+    ($extra:literal) => {
+        concat!(
+            r#"ARRAY(
+                SELECT e.pubkey
+                FROM (
+                    SELECT tm.event_created_at, tm.event_id
+                    FROM thread_metadata tm
+                    WHERE tm.community_id = $1
+                      AND tm.root_event_id = root.event_id "#,
+            $extra,
+            r#"
+                    ORDER BY tm.event_created_at DESC, tm.event_id ASC
+                    LIMIT "#,
+            thread_participant_scan_limit!(),
+            r#"
+                ) recent
+                JOIN events e
+                    ON e.community_id = $1
+                   AND e.created_at   = recent.event_created_at
+                   AND e.id           = recent.event_id
+                WHERE e.deleted_at IS NULL
+                GROUP BY e.pubkey
+                ORDER BY MAX(e.created_at) DESC, e.pubkey ASC
+                LIMIT 10
+            )"#
+        )
+    };
+}
 
 // -- Structs ------------------------------------------------------------------
 
@@ -73,7 +112,9 @@ pub struct ThreadSummary {
     pub descendant_count: i32,
     /// Timestamp of the most recent reply in the thread.
     pub last_reply_at: Option<DateTime<Utc>>,
-    /// Compressed public keys of all participants who have replied.
+    /// Up to 10 distinct reply authors, most recently active first, drawn
+    /// from the newest [`THREAD_PARTICIPANT_SCAN_LIMIT`] replies. Deleted
+    /// replies count toward that window but contribute no author.
     pub participants: Vec<Vec<u8>>,
 }
 
@@ -148,7 +189,12 @@ pub async fn insert_thread_metadata(
     depth: i32,
     broadcast: bool,
 ) -> Result<()> {
-    let mut tx = begin_event_write_transaction(pool).await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
     let result = sqlx::query(
         r#"
@@ -171,7 +217,7 @@ pub async fn insert_thread_metadata(
     .bind(root_event_created_at)
     .bind(depth)
     .bind(broadcast)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     // Only bump reply counts if the row was actually inserted (not a duplicate).
@@ -197,7 +243,7 @@ pub async fn insert_thread_metadata(
             .bind(parent_ts)
             .bind(pid)
             .bind(channel_id)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
 
             // Ensure the root also has a row (may differ from parent for nested replies).
@@ -219,7 +265,7 @@ pub async fn insert_thread_metadata(
                     .bind(root_ts)
                     .bind(root_id)
                     .bind(channel_id)
-                    .execute(&mut *tx)
+                    .execute(tx.conn())
                     .await?;
                 }
             }
@@ -235,7 +281,7 @@ pub async fn insert_thread_metadata(
             )
             .bind(community_id.as_uuid())
             .bind(pid)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
 
             // Increment root's total descendant count.
@@ -249,103 +295,13 @@ pub async fn insert_thread_metadata(
                 )
                 .bind(community_id.as_uuid())
                 .bind(root_id)
-                .execute(&mut *tx)
+                .execute(tx.conn())
                 .await?;
             }
         }
     }
 
     tx.commit().await?;
-
-    Ok(())
-}
-
-/// Increment `reply_count` (and `last_reply_at`) on the parent event.
-/// If `root_event_id` is provided, also increments `descendant_count` on the
-/// root -- even when root == parent (direct reply to root). This is correct
-/// because `reply_count` tracks direct children only, while `descendant_count`
-/// tracks ALL descendants at every nesting level.
-///
-/// NOTE: The primary increment path is inlined inside [`insert_thread_metadata`]'s
-/// transaction. This standalone version exists for future use cases where
-/// incrementing outside of insert is needed (e.g., event re-parenting).
-#[allow(dead_code)]
-pub async fn increment_reply_count(
-    pool: &PgPool,
-    community_id: CommunityId,
-    parent_event_id: &[u8],
-    root_event_id: Option<&[u8]>,
-) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
-    // Always bump the parent's direct reply count and last-reply timestamp.
-    sqlx::query(
-        r#"
-        UPDATE thread_metadata
-        SET reply_count  = reply_count + 1,
-            last_reply_at = NOW()
-        WHERE community_id = $1 AND event_id = $2
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(parent_event_id)
-    .execute(&mut *connection)
-    .await?;
-
-    // Always bump root's descendant_count, regardless of whether root == parent.
-    if let Some(root_id) = root_event_id {
-        sqlx::query(
-            r#"
-            UPDATE thread_metadata
-            SET descendant_count = descendant_count + 1
-            WHERE community_id = $1 AND event_id = $2
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(root_id)
-        .execute(&mut *connection)
-        .await?;
-    }
-
-    Ok(())
-}
-
-/// Decrement `reply_count` on the parent event (floor at 0).
-/// If `root_event_id` is provided, also decrements `descendant_count` on the
-/// root -- even when root == parent. Mirrors the increment logic exactly.
-pub async fn decrement_reply_count(
-    pool: &PgPool,
-    community_id: CommunityId,
-    parent_event_id: &[u8],
-    root_event_id: Option<&[u8]>,
-) -> Result<()> {
-    let mut connection = acquire_event_write_connection(pool).await?;
-    // Always decrement the parent's direct reply count (floor at 0).
-    sqlx::query(
-        r#"
-        UPDATE thread_metadata
-        SET reply_count = GREATEST(reply_count - 1, 0)
-        WHERE community_id = $1 AND event_id = $2
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(parent_event_id)
-    .execute(&mut *connection)
-    .await?;
-
-    // Always decrement root's descendant_count, regardless of whether root == parent.
-    if let Some(root_id) = root_event_id {
-        sqlx::query(
-            r#"
-            UPDATE thread_metadata
-            SET descendant_count = GREATEST(descendant_count - 1, 0)
-            WHERE community_id = $1 AND event_id = $2
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(root_id)
-        .execute(&mut *connection)
-        .await?;
-    }
 
     Ok(())
 }
@@ -405,7 +361,7 @@ pub(crate) async fn get_thread_replies_on(
     // Decode cursor bytes -> keyset (timestamp, optional event_id) for the
     // WHERE condition. Layout: 8-byte BE i64 seconds, then the raw event_id.
     // An 8-byte-only cursor is legacy timestamp-only paging (no tiebreak).
-    let cursor_key: Option<(DateTime<Utc>, Option<Vec<u8>>)> = match cursor {
+    let mut cursor_key: Option<(DateTime<Utc>, Option<Vec<u8>>)> = match cursor {
         Some(bytes) if bytes.len() >= 8 => {
             let secs = i64::from_be_bytes(bytes[..8].try_into().expect("length checked"));
             DateTime::from_timestamp(secs, 0).map(|ts| {
@@ -420,11 +376,20 @@ pub(crate) async fn get_thread_replies_on(
         _ => None,
     };
 
-    // Build the query dynamically based on optional filters.
-    // Track the next positional parameter index.
-    let mut param_idx = 3u32; // $1 is community_id, $2 is root_event_id
-    let mut sql = String::from(
-        r#"
+    let mut replies = Vec::new();
+    // Damaged rows must not cause unbounded work on a held writer connection.
+    // Fail explicitly rather than exposing a partial page as authoritative EOF.
+    const MAX_RAW_PAGES: usize = 64;
+    for _ in 0..MAX_RAW_PAGES {
+        let remaining = limit.saturating_sub(replies.len() as u32);
+        if remaining == 0 {
+            return Ok(replies);
+        }
+        // Build the query dynamically based on optional filters.
+        // Track the next positional parameter index.
+        let mut param_idx = 3u32; // $1 is community_id, $2 is root_event_id
+        let mut sql = String::from(
+            r#"
         SELECT
             tm.event_id,
             e.id,
@@ -450,91 +415,103 @@ pub(crate) async fn get_thread_replies_on(
           AND tm.root_event_id = $2
           AND e.deleted_at IS NULL
         "#,
-    );
+        );
 
-    if depth_limit.is_some() {
-        sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
-        param_idx += 1;
-    }
-    match &cursor_key {
-        Some((_, Some(_))) => {
-            // Composite keyset: strict row comparison with an event_id tiebreak
-            // so same-second replies paginate without gaps or duplicates.
-            let ts_idx = param_idx;
-            let id_idx = param_idx + 1;
-            sql.push_str(&format!(
-                " AND (tm.event_created_at, tm.event_id) > (${ts_idx}, ${id_idx})"
-            ));
-            param_idx += 2;
-        }
-        Some((_, None)) => {
-            // Legacy timestamp-only cursor (no tiebreak).
-            sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
+        if depth_limit.is_some() {
+            sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
             param_idx += 1;
         }
-        None => {}
-    }
-
-    sql.push_str(&format!(
-        " ORDER BY tm.event_created_at ASC, tm.event_id ASC LIMIT ${param_idx}"
-    ));
-
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(community_id.as_uuid())
-        .bind(root_event_id);
-
-    if let Some(dl) = depth_limit {
-        q = q.bind(dl as i32);
-    }
-    match &cursor_key {
-        Some((ts, Some(id))) => {
-            q = q.bind(*ts).bind(id.clone());
+        match &cursor_key {
+            Some((_, Some(_))) => {
+                // Composite keyset: strict row comparison with an event_id tiebreak
+                // so same-second replies paginate without gaps or duplicates.
+                let ts_idx = param_idx;
+                let id_idx = param_idx + 1;
+                sql.push_str(&format!(
+                    " AND (tm.event_created_at, tm.event_id) > (${ts_idx}, ${id_idx})"
+                ));
+                param_idx += 2;
+            }
+            Some((_, None)) => {
+                // Legacy timestamp-only cursor (no tiebreak).
+                sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
+                param_idx += 1;
+            }
+            None => {}
         }
-        Some((ts, None)) => {
-            q = q.bind(*ts);
+
+        sql.push_str(&format!(
+            " ORDER BY tm.event_created_at ASC, tm.event_id ASC LIMIT ${param_idx}"
+        ));
+
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(community_id.as_uuid())
+            .bind(root_event_id);
+
+        if let Some(dl) = depth_limit {
+            q = q.bind(dl as i32);
         }
-        None => {}
+        match &cursor_key {
+            Some((ts, Some(id))) => {
+                q = q.bind(*ts).bind(id.clone());
+            }
+            Some((ts, None)) => {
+                q = q.bind(*ts);
+            }
+            None => {}
+        }
+        q = q.bind(remaining as i32);
+
+        let rows = q.fetch_all(&mut *conn).await?;
+
+        let raw_count = rows.len();
+        if let Some(last) = rows.last() {
+            cursor_key = Some((
+                last.try_get("event_created_at")?,
+                Some(last.try_get("event_id")?),
+            ));
+        }
+        for row in rows {
+            let event_id: Vec<u8> = row.try_get("event_id")?;
+            let parent_event_id: Option<Vec<u8>> = row.try_get("parent_event_id")?;
+            let root_event_id_col: Option<Vec<u8>> = row.try_get("root_event_id")?;
+            let channel_id: Uuid = row.try_get("channel_id")?;
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            let tags: serde_json::Value = row.try_get("tags")?;
+            let depth: i32 = row.try_get("depth")?;
+            let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
+            let broadcast_val: bool = row.try_get("broadcast")?;
+
+            // Skip rows that fail event reconstruction (e.g. corrupt signature)
+            // while continuing past the raw page boundary to fill the requested
+            // page. A short response must mean SQL EOF, not a skipped stored row.
+            let stored_event = match row_to_stored_event(row)? {
+                Some(se) => se,
+                None => continue,
+            };
+
+            replies.push(ThreadReply {
+                event_id,
+                parent_event_id,
+                root_event_id: root_event_id_col,
+                channel_id,
+                pubkey,
+                tags,
+                content: stored_event.event.content.clone(),
+                stored_event,
+                depth,
+                created_at,
+                broadcast: broadcast_val,
+            });
+        }
+
+        if raw_count < remaining as usize || replies.len() == limit as usize {
+            return Ok(replies);
+        }
     }
-    q = q.bind(limit as i32);
-
-    let rows = q.fetch_all(&mut *conn).await?;
-
-    let mut replies = Vec::with_capacity(rows.len());
-    for row in rows {
-        let event_id: Vec<u8> = row.try_get("event_id")?;
-        let parent_event_id: Option<Vec<u8>> = row.try_get("parent_event_id")?;
-        let root_event_id_col: Option<Vec<u8>> = row.try_get("root_event_id")?;
-        let channel_id: Uuid = row.try_get("channel_id")?;
-        let pubkey: Vec<u8> = row.try_get("pubkey")?;
-        let tags: serde_json::Value = row.try_get("tags")?;
-        let depth: i32 = row.try_get("depth")?;
-        let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
-        let broadcast_val: bool = row.try_get("broadcast")?;
-
-        // Skip rows that fail event reconstruction (e.g. corrupt signature)
-        // rather than failing the whole thread query, matching the
-        // skip-and-continue semantics of the prior get_events_by_ids path.
-        let stored_event = match row_to_stored_event(row)? {
-            Some(se) => se,
-            None => continue,
-        };
-
-        replies.push(ThreadReply {
-            event_id,
-            parent_event_id,
-            root_event_id: root_event_id_col,
-            channel_id,
-            pubkey,
-            tags,
-            content: stored_event.event.content.clone(),
-            stored_event,
-            depth,
-            created_at,
-            broadcast: broadcast_val,
-        });
-    }
-
-    Ok(replies)
+    Err(crate::error::DbError::InvalidData(
+        "thread page exceeded the corrupt-row refill limit".into(),
+    ))
 }
 
 /// Fetch aggregated thread stats for a single event, plus up to 10 participant pubkeys.
@@ -548,63 +525,29 @@ pub async fn get_thread_summary(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let row = sqlx::query(
-        r#"
-        SELECT reply_count, descendant_count, last_reply_at
-        FROM thread_metadata
-        WHERE community_id = $1 AND event_id = $2
+    let row = sqlx::query(concat!(
+        "SELECT root.reply_count, root.descendant_count, root.last_reply_at, ",
+        recent_thread_participants_sql!(""),
+        r#" AS participants
+        FROM thread_metadata root
+        WHERE root.community_id = $1 AND root.event_id = $2
         LIMIT 1
         "#,
-    )
+    ))
     .bind(community_id.as_uuid())
     .bind(event_id)
     .fetch_optional(&mut *connection)
     .await?;
 
-    let row = match row {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    let reply_count: i32 = row.try_get("reply_count")?;
-    let descendant_count: i32 = row.try_get("descendant_count")?;
-    let last_reply_at: Option<DateTime<Utc>> = row.try_get("last_reply_at")?;
-
-    // Collect distinct participant pubkeys from the thread, most recent first.
-    let participant_rows = sqlx::query(
-        r#"
-        SELECT pubkey FROM (
-            SELECT DISTINCT e.pubkey, MAX(e.created_at) AS last_seen
-            FROM thread_metadata tm
-            JOIN events e
-                ON e.community_id = tm.community_id
-               AND e.created_at = tm.event_created_at
-               AND e.id         = tm.event_id
-            WHERE tm.community_id = $1
-              AND tm.root_event_id = $2
-              AND e.deleted_at IS NULL
-            GROUP BY e.pubkey
-        ) sub
-        ORDER BY last_seen DESC
-        LIMIT 10
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_id)
-    .fetch_all(&mut *connection)
-    .await?;
-
-    let participants: Vec<Vec<u8>> = participant_rows
-        .into_iter()
-        .map(|r| r.try_get::<Vec<u8>, _>("pubkey"))
-        .collect::<std::result::Result<_, _>>()?;
-
-    Ok(Some(ThreadSummary {
-        reply_count,
-        descendant_count,
-        last_reply_at,
-        participants,
-    }))
+    row.map(|row| {
+        Ok(ThreadSummary {
+            reply_count: row.try_get("reply_count")?,
+            descendant_count: row.try_get("descendant_count")?,
+            last_reply_at: row.try_get("last_reply_at")?,
+            participants: row.try_get("participants")?,
+        })
+    })
+    .transpose()
 }
 
 /// Fetch one channel window: top-level rows (depth = 0, missing metadata, or
@@ -639,6 +582,7 @@ pub async fn get_channel_window(
         limit,
         cursor,
         kind_filter,
+        crate::event::ReadDeadline::PerRead,
     )
     .await
 }
@@ -647,7 +591,8 @@ pub async fn get_channel_window(
 /// runs the page (and its participants batch) on the exact reader connection
 /// whose heartbeat observation proved coverage (the proof is
 /// connection-local; a different pooled session may sit at a different
-/// replay position).
+/// replay position). The page runs under the event read deadline, shared by
+/// its passes (see `ReadTransaction`).
 pub(crate) async fn get_channel_window_on(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
@@ -655,6 +600,7 @@ pub(crate) async fn get_channel_window_on(
     limit: u32,
     cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
+    deadline: crate::event::ReadDeadline,
 ) -> Result<ChannelWindow> {
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
@@ -710,20 +656,58 @@ pub(crate) async fn get_channel_window_on(
         }
     }
 
-    sql.push_str(&format!(
-        " ORDER BY e.created_at DESC, e.id ASC LIMIT ${param_idx}"
-    ));
-
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(community_id.as_uuid())
-        .bind(channel_id);
-    if let Some((ts, id)) = &cursor {
-        q = q.bind(*ts).bind(id.clone());
-    }
+    // Recent-first (see `recent_pass`): the newest partitions answer a window
+    // that fills there (with its +1 probe row); older rows are read only for
+    // what is still missing.
+    let kinds: Option<Vec<i32>> =
+        kind_filter.map(|ks| ks.iter().filter_map(|&k| i32::try_from(k).ok()).collect());
+    let split = crate::store::recent_pass::split_for(
+        Utc::now(),
+        kinds.as_deref(),
+        None,
+        cursor.as_ref().map(|(ts, _)| *ts),
+    );
     // The +1 probe row is the server-internal has_more evidence.
-    q = q.bind(limit as i64 + 1);
-
-    let mut db_rows = q.fetch_all(&mut *conn).await?;
+    let probe_limit = i64::from(limit) + 1;
+    let pass_query = |range: Range, pass_limit: i64| {
+        let mut pass_sql = sql.clone();
+        if let Some(bound) = range.predicate("e.created_at") {
+            pass_sql.push_str(&bound);
+        }
+        pass_sql.push_str(&format!(
+            " ORDER BY e.created_at DESC, e.id ASC LIMIT ${param_idx}"
+        ));
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(pass_sql))
+            .bind(community_id.as_uuid())
+            .bind(channel_id);
+        if let Some((ts, id)) = &cursor {
+            q = q.bind(*ts).bind(id.clone());
+        }
+        q.bind(pass_limit)
+    };
+    let mut db_rows = match split {
+        None => {
+            crate::event::fetch_with_read_deadline(
+                &mut *conn,
+                pass_query(Range::All, probe_limit),
+                deadline,
+            )
+            .await?
+        }
+        Some(split) => {
+            // One snapshot and one deadline for both passes (see
+            // `ReadTransaction`).
+            let mut read = crate::event::ReadTransaction::begin(conn, deadline).await?;
+            let mut rows = Vec::new();
+            let mut pass = Some((Range::Recent(split), probe_limit));
+            while let Some((range, pass_limit)) = pass {
+                rows.extend(read.fetch(pass_query(range, pass_limit)).await?);
+                pass = crate::store::recent_pass::next(range, rows.len(), probe_limit);
+            }
+            read.finish().await?;
+            rows
+        }
+    };
 
     let has_more = db_rows.len() > limit as usize;
     db_rows.truncate(limit as usize);
@@ -773,39 +757,21 @@ pub(crate) async fn get_channel_window_on(
     }
 
     // Batch participants for every row with thread activity — one query for
-    // the whole window instead of a per-root fan-out. Same shape and 10-cap
-    // as get_thread_summary.
+    // the whole window instead of a per-root fan-out, each root bounded the
+    // same way as get_thread_summary.
     let roots: Vec<Vec<u8>> = rows
         .iter()
         .filter(|r| r.thread_summary.is_some())
         .map(|r| r.stored_event.event.id.as_bytes().to_vec())
         .collect();
     if !roots.is_empty() {
-        let participant_rows = sqlx::query(
-            r#"
-            SELECT root_event_id, pubkey FROM (
-                SELECT
-                    tm.root_event_id,
-                    e.pubkey,
-                    MAX(e.created_at) AS last_seen,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY tm.root_event_id
-                        ORDER BY MAX(e.created_at) DESC
-                    ) AS rn
-                FROM thread_metadata tm
-                JOIN events e
-                    ON e.community_id = tm.community_id
-                   AND e.created_at = tm.event_created_at
-                   AND e.id         = tm.event_id
-                WHERE tm.community_id = $1
-                  AND tm.root_event_id = ANY($2)
-                  AND e.deleted_at IS NULL
-                GROUP BY tm.root_event_id, e.pubkey
-            ) sub
-            WHERE rn <= 10
-            ORDER BY root_event_id, rn
+        let participant_rows = sqlx::query(concat!(
+            "SELECT root.event_id, ",
+            recent_thread_participants_sql!(""),
+            r#" AS participants
+            FROM unnest($2::bytea[]) AS root(event_id)
             "#,
-        )
+        ))
         .bind(community_id.as_uuid())
         .bind(&roots)
         .fetch_all(&mut *conn)
@@ -814,9 +780,7 @@ pub(crate) async fn get_channel_window_on(
         let mut by_root: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
             std::collections::HashMap::new();
         for row in participant_rows {
-            let root: Vec<u8> = row.try_get("root_event_id")?;
-            let pubkey: Vec<u8> = row.try_get("pubkey")?;
-            by_root.entry(root).or_default().push(pubkey);
+            by_root.insert(row.try_get("event_id")?, row.try_get("participants")?);
         }
         for row in &mut rows {
             if let Some(summary) = &mut row.thread_summary {
@@ -978,7 +942,7 @@ impl Db {
                 predicate,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             match crate::thread::get_thread_replies_on(
                 &mut tx,
@@ -1009,6 +973,12 @@ impl Db {
                     // the request's ONLY route event: the replica leg was
                     // discarded, so counting it would overstate offload.
                     Self::record_route("thread_eof", "writer", "stale");
+                }
+                // Surface a cancel instead of re-running it on the writer; see
+                // `DbError::is_statement_cancelled` for the trade-off.
+                Err(e) if e.is_statement_cancelled() => {
+                    Self::record_route(path, "replica", "statement_cancelled");
+                    return Err(e);
                 }
                 Err(e) => {
                     // Mid-request replica failure (e.g. a hot-standby
@@ -1041,6 +1011,54 @@ impl Db {
         event_id: &[u8],
     ) -> Result<Option<crate::thread::ThreadSummary>> {
         crate::thread::get_thread_summary(&self.pool, community_id, event_id).await
+    }
+
+    /// Resolve channel-scoped reply IDs, including tombstones, to current root
+    /// summaries on the writer. Returns metadata only, never target payloads.
+    #[datastore_span(name = "resolve_thread_root_summaries", system = "postgresql")]
+    pub async fn resolve_thread_root_summaries(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        target_ids: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, ThreadSummary)>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        let rows = sqlx::query(concat!(
+            "SELECT root.event_id, root.reply_count, root.descendant_count, root.last_reply_at, ",
+            recent_thread_participants_sql!("AND tm.channel_id = root.channel_id"),
+            r#" AS participants
+            FROM thread_metadata root
+            WHERE root.community_id = $1 AND root.channel_id = $2
+                AND root.event_id IN (
+                    SELECT COALESCE(target.root_event_id, target.parent_event_id)
+                    FROM thread_metadata target
+                    WHERE target.community_id = $1 AND target.channel_id = $2
+                        AND target.event_id = ANY($3) AND target.parent_event_id IS NOT NULL
+                )
+        "#,
+        ))
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(target_ids)
+        .fetch_all(&mut *connection)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("event_id")?,
+                    ThreadSummary {
+                        reply_count: row.try_get("reply_count")?,
+                        descendant_count: row.try_get("descendant_count")?,
+                        last_reply_at: row.try_get("last_reply_at")?,
+                        participants: row.try_get("participants")?,
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// One channel window: top-level rows + summaries + server `has_more`.
@@ -1084,8 +1102,10 @@ impl Db {
     ///   `BUZZ_REPLICA_HEAD_MAX_AGE_SECS` until it has, proven by a
     ///   post-then-immediately-refetch test.
     ///
-    /// Every failure fails closed to the writer and is recorded in
-    /// `buzz_db_route_decision`.
+    /// Every replica failure except a cancelled statement (57014, which the
+    /// writer would only repeat) fails closed to the writer and is recorded
+    /// in `buzz_db_route_decision`. A busy reader rejects the read as
+    /// retryable instead (see [`Db::route_read`]).
     #[datastore_span(name = "get_channel_window", system = "postgresql")]
     pub async fn get_channel_window_with_session(
         &self,
@@ -1106,7 +1126,7 @@ impl Db {
                 RoutePredicate::from_channel_cursor(channel_id, &cursor),
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::thread::get_channel_window_on(
@@ -1116,6 +1136,7 @@ impl Db {
                     limit,
                     cursor.clone(),
                     kind_filter,
+                    crate::event::ReadDeadline::Session,
                 )
                 .await
                 {
@@ -1130,6 +1151,12 @@ impl Db {
                                 },
                             },
                         ));
+                    }
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        return Err(e);
                     }
                     Err(e) => {
                         // A mid-request replica failure (e.g. a hot-standby
@@ -1175,23 +1202,6 @@ impl Db {
     ) -> Result<Option<crate::thread::ThreadMetadataRecord>> {
         crate::thread::get_thread_metadata_by_event(&self.pool, community_id, event_id).await
     }
-
-    /// Decrement reply counts.
-    #[datastore_span(name = "decrement_reply_count", system = "postgresql")]
-    pub async fn decrement_reply_count(
-        &self,
-        community_id: CommunityId,
-        parent_event_id: &[u8],
-        root_event_id: Option<&[u8]>,
-    ) -> Result<()> {
-        crate::thread::decrement_reply_count(
-            &self.pool,
-            community_id,
-            parent_event_id,
-            root_event_id,
-        )
-        .await
-    }
 }
 
 #[cfg(test)]
@@ -1199,7 +1209,7 @@ mod postgres_tests {
     use super::*;
     use crate::{
         channel::{ChannelType, ChannelVisibility},
-        event::{insert_event_with_thread_metadata, ThreadMetadataParams},
+        event::{insert_event_with_thread_metadata, ReadDeadline, ThreadMetadataParams},
     };
     use nostr::{EventBuilder, Keys, Kind};
 
@@ -1292,6 +1302,84 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn resolve_deleted_roots_preserves_community_scope_for_colliding_ids() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let author = Keys::generate();
+        let channel = Uuid::new_v4();
+        let communities = [
+            CommunityId::from_uuid(make_test_community(&pool).await),
+            CommunityId::from_uuid(make_test_community(&pool).await),
+        ];
+        let root = make_stream_event(&author, "shared root identity");
+        let reply = make_stream_event(&author, "shared reply identity");
+        for community in communities {
+            crate::channel::create_channel_with_id(
+                &pool,
+                community,
+                channel,
+                &format!("root-scope-{channel}"),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+                &[],
+            )
+            .await
+            .expect("channel");
+            for (event, parent) in [(&root, None), (&reply, Some(&root))] {
+                insert_event_with_thread_metadata(
+                    &pool,
+                    community,
+                    event,
+                    Some(channel),
+                    Some(ThreadMetadataParams {
+                        event_id: event.id.as_bytes(),
+                        event_created_at: event_created_at(event),
+                        channel_id: channel,
+                        parent_event_id: parent.map(|parent| parent.id.as_bytes().as_slice()),
+                        parent_event_created_at: parent.map(event_created_at),
+                        root_event_id: parent.map(|parent| parent.id.as_bytes().as_slice()),
+                        root_event_created_at: parent.map(event_created_at),
+                        depth: i32::from(parent.is_some()),
+                        broadcast: false,
+                    }),
+                )
+                .await
+                .expect("thread event");
+            }
+        }
+        db.soft_delete_event_and_update_thread(
+            communities[0],
+            reply.id.as_bytes(),
+            Some(root.id.as_bytes()),
+            Some(root.id.as_bytes()),
+        )
+        .await
+        .expect("delete only A");
+        for (community, expected) in [(communities[0], 0), (communities[1], 1)] {
+            let summaries = db
+                .resolve_thread_root_summaries(community, channel, &[reply.id.as_bytes().to_vec()])
+                .await
+                .expect("metadata query");
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].0, root.id.as_bytes());
+            assert_eq!(summaries[0].1.descendant_count, expected);
+        }
+        assert!(db
+            .resolve_thread_root_summaries(
+                communities[0],
+                Uuid::new_v4(),
+                &[reply.id.as_bytes().to_vec()]
+            )
+            .await
+            .expect("wrong channel")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn get_thread_metadata_by_event_is_scoped_when_event_id_collides_across_communities() {
         let pool = setup_pool().await;
         let author = Keys::generate();
@@ -1311,6 +1399,7 @@ mod postgres_tests {
             None,
             author.public_key().to_bytes().as_slice(),
             None,
+            &[],
         )
         .await
         .expect("create community A channel");
@@ -1324,6 +1413,7 @@ mod postgres_tests {
             None,
             author.public_key().to_bytes().as_slice(),
             None,
+            &[],
         )
         .await
         .expect("create community B channel");
@@ -1755,7 +1845,10 @@ mod postgres_tests {
             .expect("insert root event");
 
         // Two replies under the same root: one stays valid, one we corrupt.
-        let good = make_stream_event(&author, "good");
+        let good = EventBuilder::new(Kind::Custom(9), "good")
+            .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() + 2))
+            .sign_with_keys(&author)
+            .expect("good reply");
         let good_id = good.id.to_hex();
         let good_created_at = event_created_at(&good);
         insert_event_with_thread_metadata(
@@ -1778,7 +1871,10 @@ mod postgres_tests {
         .await
         .expect("insert good reply");
 
-        let bad = make_stream_event(&author, "bad");
+        let bad = EventBuilder::new(Kind::Custom(9), "bad")
+            .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() + 1))
+            .sign_with_keys(&author)
+            .expect("bad reply");
         let bad_created_at = event_created_at(&bad);
         insert_event_with_thread_metadata(
             &pool,
@@ -1821,6 +1917,156 @@ mod postgres_tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].stored_event.event.id.to_hex(), good_id);
         assert_eq!(replies[0].stored_event.event.content, "good");
+
+        let tail = EventBuilder::new(Kind::Custom(9), "tail")
+            .custom_created_at(nostr::Timestamp::from(root.created_at.as_secs() + 3))
+            .sign_with_keys(&author)
+            .expect("tail reply");
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &tail,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: tail.id.as_bytes(),
+                event_created_at: event_created_at(&tail),
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert tail");
+        let mut origin = (-1_i64).to_be_bytes().to_vec();
+        origin.extend_from_slice(&[0; 32]);
+        let page = get_thread_replies(
+            &pool,
+            community,
+            root.id.as_bytes(),
+            Some(10),
+            2,
+            Some(&origin),
+        )
+        .await
+        .expect("fill page past corrupt first row");
+        assert_eq!(
+            page.iter()
+                .map(|reply| reply.stored_event.event.id)
+                .collect::<Vec<_>>(),
+            [good.id, tail.id]
+        );
+        let first = get_thread_replies(
+            &pool,
+            community,
+            root.id.as_bytes(),
+            Some(10),
+            1,
+            Some(&origin),
+        )
+        .await
+        .expect("page entirely corrupt must not signal EOF");
+        assert_eq!(first[0].stored_event.event.id, good.id);
+        let mut after = (tail.created_at.as_secs() as i64).to_be_bytes().to_vec();
+        after.extend_from_slice(tail.id.as_bytes());
+        assert!(get_thread_replies(
+            &pool,
+            community,
+            root.id.as_bytes(),
+            Some(10),
+            2,
+            Some(&after)
+        )
+        .await
+        .expect("true EOF")
+        .is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_bounds_corrupt_row_refills() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("corrupt-bound-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("channel");
+        let root = make_stream_event(&author, "root");
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+            .await
+            .expect("root");
+        let mut corrupt_ids = Vec::new();
+        for index in 0..65 {
+            let reply = EventBuilder::new(Kind::Custom(9), format!("reply-{index}"))
+                .custom_created_at(nostr::Timestamp::from(
+                    root.created_at.as_secs() + index + 1,
+                ))
+                .sign_with_keys(&author)
+                .expect("reply");
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                &reply,
+                Some(channel.id),
+                Some(ThreadMetadataParams {
+                    event_id: reply.id.as_bytes(),
+                    event_created_at: event_created_at(&reply),
+                    channel_id: channel.id,
+                    parent_event_id: Some(root.id.as_bytes()),
+                    parent_event_created_at: Some(event_created_at(&root)),
+                    root_event_id: Some(root.id.as_bytes()),
+                    root_event_created_at: Some(event_created_at(&root)),
+                    depth: 1,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .expect("reply metadata");
+            if index < 64 {
+                corrupt_ids.push(reply.id.as_bytes().to_vec());
+            }
+        }
+        sqlx::query("UPDATE events SET sig = $1 WHERE community_id = $2 AND id = ANY($3)")
+            .bind(vec![0u8; 32])
+            .bind(community.as_uuid())
+            .bind(&corrupt_ids)
+            .execute(&pool)
+            .await
+            .expect("damage first 64 rows");
+        let error = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 1, None)
+            .await
+            .expect_err("refill cap must fail, never return partial EOF or scan to the tail");
+        assert!(
+            matches!(error, crate::error::DbError::InvalidData(ref message)
+            if message.contains("corrupt-row refill limit"))
+        );
+        // A larger page needs fewer than 64 raw reads and still finds the tail.
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("bounded skip remains supported");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].stored_event.event.content, "reply-64");
+        // The final permitted raw page may be valid; accept it at the cap.
+        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(&corrupt_ids[0])
+            .execute(&pool)
+            .await
+            .expect("hide one corrupt row");
+        let boundary = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 1, None)
+            .await
+            .expect("valid final refill page must succeed");
+        assert_eq!(boundary[0].stored_event.event.content, "reply-64");
     }
 
     /// Insert one top-level event (root metadata, broadcast) into a channel.
@@ -2051,6 +2297,386 @@ mod postgres_tests {
         assert!(page2.next_cursor.is_none(), "no cursor past the last row");
     }
 
+    /// The window is split at the floor: a recent pass that fills the page
+    /// and its +1 probe row answers alone; otherwise the older pass reads the
+    /// missing rows, so `has_more` still sees rows before the floor.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_split_matches_the_unsplit_read() {
+        use nostr::Timestamp;
+
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-recent-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let now = Utc::now().timestamp() as u64;
+        let floor = crate::store::recent_pass::floor_at(Utc::now()).timestamp() as u64;
+        // Two rows inside the recent window and two before it, newest first.
+        let mut newest_first = Vec::new();
+        for at in [now - 10, now - 20, floor - 86_400, floor - 2 * 86_400] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign");
+            insert_root(&pool, community, channel.id, &event).await;
+            newest_first.push(event.id);
+        }
+
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        let prepared = |like: &'static str| {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pg_prepared_statements WHERE statement LIKE $1",
+            )
+            .bind(like)
+        };
+        let recent = "%FROM events e%created_at >= '%::timestamptz%";
+        let older = "%FROM events e%created_at < '%::timestamptz%";
+        let all = "%FROM events e%";
+        let ids = |w: &ChannelWindow| {
+            w.rows
+                .iter()
+                .map(|r| r.stored_event.event.id)
+                .collect::<Vec<_>>()
+        };
+
+        // Limit 1: two recent rows fill the page and its probe row.
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            1,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("recent window");
+        assert_eq!(ids(&window), newest_first[..1]);
+        assert!(window.has_more);
+        let recent_count = prepared(recent).fetch_one(&mut *conn).await.expect("count");
+        let all_count = prepared(all).fetch_one(&mut *conn).await.expect("count");
+        assert_eq!((recent_count, all_count), (1, 1), "recent pass alone");
+
+        // Limit 2: the recent pass has no probe row, so the older pass reads
+        // it and `has_more` sees the rows before the floor.
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("split window");
+        assert_eq!(ids(&window), newest_first[..2]);
+        assert!(window.has_more, "older rows lie before the floor");
+        let older_count = prepared(older).fetch_one(&mut *conn).await.expect("count");
+        let all_count = prepared(all).fetch_one(&mut *conn).await.expect("count");
+        assert_eq!((older_count, all_count), (1, 2), "older pass ran");
+
+        // The whole channel, then a cursor page below the floor.
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            4,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("whole window");
+        assert_eq!(ids(&window), newest_first);
+        assert!(!window.has_more);
+        let cursor = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("first page")
+        .next_cursor
+        .expect("cursor");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            Some(cursor),
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("older page");
+        assert_eq!(ids(&window), newest_first[2..]);
+        assert!(!window.has_more);
+
+        // A failed older pass fails the window; it never reports the recent
+        // rows as the whole channel. Another session locks the partition of a
+        // root from before every dated monthly, which only the older pass
+        // plans (the recent rows' partition can hold rows below the floor too).
+        let ancient = EventBuilder::new(Kind::Custom(9), "ancient")
+            .custom_created_at(Timestamp::from(1_748_736_000)) // 2025-06-01
+            .sign_with_keys(&author)
+            .expect("sign");
+        insert_root(&pool, community, channel.id, &ancient).await;
+        let partition_of = |id: nostr::EventId| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT tableoid::regclass::text FROM events WHERE id = $1",
+                )
+                .bind(id.as_bytes().to_vec())
+                .fetch_one(&pool)
+                .await
+                .expect("partition")
+            }
+        };
+        let old_partition = partition_of(ancient.id).await;
+        assert_ne!(old_partition, partition_of(newest_first[0]).await);
+        let mut locker = pool.begin().await.expect("begin locker");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {old_partition} IN ACCESS EXCLUSIVE MODE"
+        )))
+        .execute(&mut *locker)
+        .await
+        .expect("lock old partition");
+        sqlx::query("SET lock_timeout = '200ms'")
+            .execute(&mut *conn)
+            .await
+            .expect("set lock_timeout");
+        let window = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            1,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("a full recent window never touches the old partition");
+        assert_eq!(ids(&window), newest_first[..1]);
+        let failed = get_channel_window_on(
+            &mut conn,
+            community,
+            channel.id,
+            2,
+            None,
+            None,
+            ReadDeadline::PerRead,
+        )
+        .await;
+        assert!(
+            failed.is_err(),
+            "a failed older pass must fail the window, got {:?}",
+            failed.map(|w| (w.rows.len(), w.has_more))
+        );
+        locker.rollback().await.expect("release lock");
+        sqlx::query("RESET lock_timeout")
+            .execute(&mut *conn)
+            .await
+            .expect("reset lock_timeout");
+    }
+
+    /// The window's passes share one snapshot: a replacement that commits
+    /// between them neither drops the row it replaces nor shows the row it
+    /// adds.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_passes_share_one_snapshot() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-snapshot-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let channel_id = channel.id;
+        let (window, expected) = crate::test_support::replace_between_passes(
+            &pool,
+            community,
+            channel_id,
+            move |mut conn| async move {
+                get_channel_window_on(
+                    &mut conn,
+                    community,
+                    channel_id,
+                    10,
+                    None,
+                    None,
+                    ReadDeadline::PerRead,
+                )
+                .await
+                .expect("split window")
+                .rows
+                .iter()
+                .map(|row| row.stored_event.event.id)
+                .collect::<Vec<_>>()
+            },
+        )
+        .await;
+        assert_eq!(window, expected);
+    }
+
+    /// A split window's passes share one read deadline. Another session holds
+    /// the newest partition for a while, so the recent pass spends part of
+    /// the deadline waiting, and holds the oldest partition, which only the
+    /// older pass plans, for good. The window must be cancelled once the whole
+    /// deadline has passed, not a full deadline after its older pass starts.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_passes_share_one_deadline() {
+        window_cancelled_within_the_read_deadline(Some(std::time::Duration::from_secs(8))).await;
+    }
+
+    /// A writer window's first pass already runs under the read deadline, not
+    /// the writer session's longer timeout: with the newest partition held
+    /// for good, the window is cancelled in its recent pass.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_window_first_pass_runs_under_the_read_deadline() {
+        window_cancelled_within_the_read_deadline(None).await;
+    }
+
+    /// Read a split window through the production writer entry, whose own
+    /// session timeout is longer than the read deadline, while other sessions
+    /// lock the newest partition (released after `hold`, or never) and the
+    /// oldest one, which only the older pass plans (never released). The
+    /// window must be cancelled within the read deadline of its start.
+    async fn window_cancelled_within_the_read_deadline(hold: Option<std::time::Duration>) {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-deadline-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+        let db = crate::Db::from_pool(pool.clone());
+        let mut partitions = Vec::new();
+        for at in [Utc::now().timestamp() as u64 - 10, 1_748_736_000] {
+            let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign");
+            db.insert_event(community, &event, Some(channel.id))
+                .await
+                .expect("insert");
+            partitions.push(
+                sqlx::query_scalar::<_, String>(
+                    "SELECT tableoid::regclass::text FROM events WHERE id = $1",
+                )
+                .bind(event.id.as_bytes().to_vec())
+                .fetch_one(&pool)
+                .await
+                .expect("partition"),
+            );
+        }
+        let [newest, oldest] = <[String; 2]>::try_from(partitions).expect("two partitions");
+        assert_ne!(newest, oldest);
+        let lock = |partition: String| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.expect("begin locker");
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "LOCK TABLE {partition} IN ACCESS EXCLUSIVE MODE"
+                )))
+                .execute(&mut *tx)
+                .await
+                .expect("lock");
+                tx
+            }
+        };
+        let mut newest_lock = lock(newest.clone()).await;
+        let oldest_lock = lock(oldest).await;
+
+        let started = std::time::Instant::now();
+        let window_pool = pool.clone();
+        let mut task = tokio::spawn(async move {
+            get_channel_window(&window_pool, community, channel.id, 10, None, None).await
+        });
+        let waiting = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    // `pg_locks` spans every database, and the per-test
+                    // databases are clones that share relation OIDs.
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks \
+                     WHERE relation = $1::text::regclass AND NOT granted \
+                     AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))",
+                )
+                .bind(&newest)
+                .fetch_one(&mut *newest_lock)
+                .await
+                .expect("inspect the recent pass");
+                if blocked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(waiting.is_ok(), "the recent pass never waited on the lock");
+        // Spend part of the deadline in the recent pass, then let it finish.
+        if let Some(hold) = hold {
+            tokio::time::sleep(hold).await;
+            newest_lock
+                .rollback()
+                .await
+                .expect("release the newest partition");
+        }
+
+        let margin = std::time::Duration::from_secs(4);
+        let result =
+            tokio::time::timeout(crate::event::READ_DEADLINE + margin * 4, &mut task).await;
+        let elapsed = started.elapsed();
+        drop(oldest_lock);
+        let Ok(result) = result else {
+            task.abort();
+            panic!("the window was never cancelled");
+        };
+        let err = result
+            .expect("window task")
+            .expect_err("the window must be cancelled");
+        assert!(
+            err.is_statement_cancelled(),
+            "cancelled by the deadline: {err}"
+        );
+        assert!(
+            elapsed < crate::event::READ_DEADLINE + margin,
+            "the window got more than one read deadline; took {elapsed:?}"
+        );
+    }
+
     /// Rows with replies carry a thread summary (counts + batched
     /// participants); rows without replies carry none. This is the join that
     /// lets the GUI render thread affordances without a per-root fan-out.
@@ -2112,5 +2738,102 @@ mod postgres_tests {
             quiet_row.thread_summary.is_none(),
             "reply-less row carries no summary"
         );
+    }
+
+    /// Every participant reader (live summary, channel window, deleted-reply
+    /// root resolution) aggregates only the newest
+    /// [`THREAD_PARTICIPANT_SCAN_LIMIT`] replies, most recent author first,
+    /// skipping deleted replies. An author who last posted before that window
+    /// drops out; a whole-thread aggregate would still return them.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn participant_summaries_read_only_the_newest_replies() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let early = Keys::generate();
+        let steady = Keys::generate();
+        let deleted_author = Keys::generate();
+        let latest = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("participant-window-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            steady.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&steady, "root");
+        insert_root(&pool, community, channel.id, &root).await;
+        let base = root.created_at.as_secs();
+        let reply_at = |keys: &Keys, offset: u64| {
+            EventBuilder::new(Kind::Custom(9), format!("reply-{offset}"))
+                .custom_created_at(nostr::Timestamp::from(base + offset))
+                .sign_with_keys(keys)
+                .expect("sign reply")
+        };
+
+        // `early` posts first, then `steady` fills the whole window after it.
+        let early_reply = reply_at(&early, 1);
+        insert_reply(&pool, community, channel.id, &root, &early_reply, false).await;
+        let window = THREAD_PARTICIPANT_SCAN_LIMIT as u64;
+        for offset in 2..window {
+            let reply = reply_at(&steady, offset);
+            insert_reply(&pool, community, channel.id, &root, &reply, false).await;
+        }
+        let deleted_reply = reply_at(&deleted_author, window);
+        insert_reply(&pool, community, channel.id, &root, &deleted_reply, false).await;
+        let latest_reply = reply_at(&latest, window + 1);
+        insert_reply(&pool, community, channel.id, &root, &latest_reply, false).await;
+        db.soft_delete_event_and_update_thread(
+            community,
+            deleted_reply.id.as_bytes(),
+            Some(root.id.as_bytes()),
+            Some(root.id.as_bytes()),
+        )
+        .await
+        .expect("delete reply");
+
+        let expected = vec![
+            latest.public_key().to_bytes().to_vec(),
+            steady.public_key().to_bytes().to_vec(),
+        ];
+
+        let summary = get_thread_summary(&pool, community, root.id.as_bytes())
+            .await
+            .expect("thread summary")
+            .expect("root has thread metadata");
+        assert_eq!(summary.participants, expected, "live summary");
+
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+            .await
+            .expect("fetch window");
+        let row = window
+            .rows
+            .iter()
+            .find(|r| r.stored_event.event.id == root.id)
+            .expect("root row present");
+        assert_eq!(
+            row.thread_summary
+                .as_ref()
+                .expect("root has a summary")
+                .participants,
+            expected,
+            "channel window"
+        );
+
+        let resolved = db
+            .resolve_thread_root_summaries(
+                community,
+                channel.id,
+                &[deleted_reply.id.as_bytes().to_vec()],
+            )
+            .await
+            .expect("resolve root");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].1.participants, expected, "resolved root");
     }
 }

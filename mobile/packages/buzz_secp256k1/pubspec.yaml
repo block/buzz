@@ -1,0 +1,23 @@
+name: buzz_secp256k1
+description: >-
+  Dart FFI bindings to bitcoin-core/libsecp256k1 (BIP-340 Schnorr and ECDH),
+  compiled from vendored source by a Dart build hook.
+publish_to: 'none'
+version: 0.0.1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  code_assets: ^1.0.0
+  ffi: ^2.2.0
+  hooks: ^1.0.2
+  native_toolchain_c: ^0.17.6
+
+dev_dependencies:
+  test: ^1.26.0
+  # Benchmark and cross-implementation checks against the current pure-Dart
+  # stack used by the mobile app.
+  crypto: ^3.0.7
+  nostr: ^2.0.0
+  pointycastle: ^4.0.0

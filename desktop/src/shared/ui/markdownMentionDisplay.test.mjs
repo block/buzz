@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { truncatePubkey } from "../lib/pubkey.ts";
+import { truncateNpub } from "../lib/pubkey.ts";
 import { createMarkdownComponents } from "./markdown.tsx";
 import { renderCachedMarkdown } from "./markdown/nodeCache.ts";
 import { MarkdownRuntimeContext } from "./markdown/runtimeContext.ts";
@@ -33,7 +33,7 @@ for (const agent of [false, true]) {
     );
     assert.equal(
       html.replace(/<[^>]+>/g, ""),
-      `Ask Scout (${truncatePubkey(KEY)}) 2`,
+      `Ask Scout (${truncateNpub(KEY)}) 2`,
     );
     assert.ok(html.includes(`data-mention-label="${label}"`));
     assert.ok(html.includes(`data-mention-pubkey="${KEY}"`));

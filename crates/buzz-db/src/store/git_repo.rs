@@ -90,8 +90,9 @@ pub async fn reserve_repo_name(
     repo_id: &str,
     owner_pubkey: &str,
 ) -> Result<ReserveOutcome> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
@@ -108,10 +109,11 @@ pub async fn reserve_repo_name(
     .bind(community.as_uuid())
     .bind(repo_id)
     .bind(owner_pubkey)
-    .fetch_optional(&mut *connection)
+    .fetch_optional(tx.conn())
     .await?;
 
     if inserted.is_some() {
+        tx.commit().await?;
         return Ok(ReserveOutcome::Reserved);
     }
 
@@ -123,9 +125,9 @@ pub async fn reserve_repo_name(
     )
     .bind(community.as_uuid())
     .bind(repo_id)
-    .fetch_optional(&mut *connection)
+    .fetch_optional(tx.conn())
     .await?;
-
+    tx.commit().await?;
     match existing {
         Some(row) => {
             let holder: String = row
@@ -183,8 +185,9 @@ pub async fn release_repo_name(
     repo_id: &str,
     owner_pubkey: &str,
 ) -> Result<u64> {
-    let mut connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_write_transaction(
         pool,
+        community,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
@@ -195,8 +198,9 @@ pub async fn release_repo_name(
     .bind(community.as_uuid())
     .bind(repo_id)
     .bind(owner_pubkey)
-    .execute(&mut *connection)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 

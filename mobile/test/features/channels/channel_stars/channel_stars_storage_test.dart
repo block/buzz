@@ -1,8 +1,31 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart'
+    show ChannelMutesStorage, legacyChannelMutesKey;
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Tests for [ChannelStarStore] parsing and [mergeStores] last-writer-wins.
 void main() {
+  test(
+    'identity-wide stars and mutes from before relay scoping are dropped',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        legacyChannelStarsKey(
+          'pk',
+        ): '{"version":1,"channels":{"chan-a":{"starred":true,"updatedAt":1}}}',
+        legacyChannelMutesKey('pk'):
+            '{"version":1,"channels":{"chan-a":{"muted":true,"updatedAt":1}}}',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      const relayUrl = 'https://relay.example';
+
+      expect(ChannelStarsStorage(prefs).read('pk', relayUrl).channels, isEmpty);
+      expect(ChannelMutesStorage(prefs).read('pk', relayUrl).channels, isEmpty);
+      expect(prefs.containsKey(legacyChannelStarsKey('pk')), isFalse);
+      expect(prefs.containsKey(legacyChannelMutesKey('pk')), isFalse);
+    },
+  );
+
   group('ChannelStarStore.fromJson', () {
     test('parses a valid payload', () {
       final store = ChannelStarStore.fromJson({
