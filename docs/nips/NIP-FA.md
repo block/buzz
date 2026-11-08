@@ -41,7 +41,14 @@ The adapter authenticates the user however the operator chooses, binds the compl
 {callback_url}?code={single_use_code}
 ```
 
-Failures MAY redirect to the same callback with `error` and optional `error_description` query parameters.
+Failures MAY redirect to the same callback with `error` and optional `error_description` query parameters. A callback with `error` is never a success, and clients MUST NOT retry it automatically. Adapters SHOULD use these values where they apply, so clients can tell the user what to do:
+
+| `error` | Meaning | Client action |
+|---|---|---|
+| `email_verification_required` | The account's email address is not verified yet | Tell the user to verify their email, then start a new browser login |
+| `temporarily_unavailable`, `server_error` | The adapter or its identity provider could not finish the login right now, as in [RFC 6749 §4.1.2.1](https://www.rfc-editor.org/rfc/rfc6749#section-4.1.2.1) | Show it as temporary; the user may start a new browser login |
+
+Clients MUST treat any other `error` value as a refusal of this login.
 
 The code alone is not a credential. The adapter MUST accept it only when the exchange presents the matching handoff secret, MUST accept each code at most once, and SHOULD expire unexchanged codes within minutes. Adapters MUST reject any `handoff_challenge_method` other than `S256`.
 
