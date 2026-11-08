@@ -4,6 +4,7 @@ import '../../../shared/agents/owned_agent_directory.dart';
 import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
+import '../../../shared/me/default_agent.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/profile/user_cache_provider.dart';
@@ -341,6 +342,7 @@ List<MentionCandidate> _chooserCandidates(
     viewer: currentPubkey,
     history: ref.watch(mentionHistoryProvider)[historyKey] ?? const {},
     presence: (key) => presence[key] ?? 'unknown',
+    bestie: ref.watch(defaultAgentProvider).asData?.value,
   );
 }
 

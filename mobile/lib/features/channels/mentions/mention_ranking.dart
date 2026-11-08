@@ -128,13 +128,15 @@ MentionChoice mentionChoiceOf(MentionCandidate candidate, String? viewer) {
 /// Rank candidates for a mention query with the portable mention rules
 /// (sections 3 and 4): members first, then match quality, then the viewer's
 /// own agents, then labels. [history] holds explicit choices in this channel
-/// (higher is newer); [presence] maps a key to `online` or `away`.
+/// (higher is newer); [presence] maps a key to `online` or `away`. [bestie]
+/// leads the viewer's own agents, which then follow [history].
 List<MentionCandidate> rankMentionCandidates(
   List<MentionCandidate> candidates,
   String query, {
   String? viewer,
   Map<String, int> history = const {},
   String Function(String pubkey)? presence,
+  String? bestie,
 }) {
   final byKey = {for (final c in candidates) c.pubkey: c};
   return [
@@ -143,6 +145,7 @@ List<MentionCandidate> rankMentionCandidates(
       query,
       history: history,
       presence: presence,
+      bestie: bestie,
     ))
       byKey[choice.pubkey]!,
   ];
