@@ -27,63 +27,16 @@ void main() {
 
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
-  group('OrganizationEnvironment', () {
-    test('origin and relays are configured together as an HTTPS origin', () {
-      expect(OrganizationEnvironment.parseOrigin('', ''), isNull);
-      expect(
-        OrganizationEnvironment.parseOrigin(
-          'https://block.example.com/',
-          relayHost,
-        ),
-        organization,
-      );
-      for (final (url, relays) in [
-        ('https://block.example.com', ''),
-        ('', relayHost),
-        ('http://block.example.com', relayHost),
-        ('https://block.example.com/api/goose', relayHost),
-        ('https://block.example.com:8443', relayHost),
-        ('https://block.example.com?x=1', relayHost),
-        ('https://app.builderlab.xyz', relayHost),
-      ]) {
-        expect(
-          () => OrganizationEnvironment.parseOrigin(url, relays),
-          throwsStateError,
-          reason: '$url $relays',
-        );
-      }
-    });
-
-    test('relays are exact DNS hosts outside hosted communities', () {
-      expect(
-        OrganizationEnvironment.parseRelayHosts(' Buzz.Block.Example.com ,a.b'),
-        [relayHost, 'a.b'],
-      );
-      for (final relays in [
-        'wss://$relayHost',
-        '*.block.example.com',
-        'localhost',
-        'team.communities.buzz.xyz',
-      ]) {
-        expect(
-          () => OrganizationEnvironment.parseRelayHosts(relays),
-          throwsStateError,
-          reason: relays,
-        );
-      }
-    });
-
-    test('matches only the configured host on the default port', () {
-      bool matches(String url) =>
-          OrganizationEnvironment.matches(Uri.parse(url), [relayHost]);
-      expect(matches('wss://$relayHost'), isTrue);
-      expect(matches('https://$relayHost/'), isTrue);
-      expect(matches('wss://$relayHost:443'), isTrue);
-      expect(matches('wss://team.$relayHost'), isFalse);
-      expect(matches('wss://$relayHost:8443'), isFalse);
-      expect(matches('wss://$relayHost/path'), isFalse);
-      expect(matches('ws://$relayHost'), isFalse);
-    });
+  test('organization relays match only the configured host', () {
+    bool matches(String url) =>
+        OrganizationEnvironment.matches(Uri.parse(url), [relayHost]);
+    expect(matches('wss://$relayHost'), isTrue);
+    expect(matches('https://$relayHost/'), isTrue);
+    expect(matches('wss://$relayHost:443'), isTrue);
+    expect(matches('wss://team.$relayHost'), isFalse);
+    expect(matches('wss://$relayHost:8443'), isFalse);
+    expect(matches('wss://$relayHost/path'), isFalse);
+    expect(matches('ws://$relayHost'), isFalse);
   });
 
   group('organization relay assertions', () {
@@ -223,12 +176,20 @@ void main() {
 
     test('an issued assertion serves cached reads for the relay', () async {
       await saveSession();
-      final auth = relayAuth(organizationClient());
+      final organizationAccount = organizationClient();
+      final auth = relayAuth(organizationAccount);
       expect(auth.cachedHeaders(relay), isNull);
       await auth.headers(relay);
       expect(auth.cachedHeaders(relay), {
         'Nostr-Federated-Identity': 'Bearer org-token',
       });
+      // Cached reads never present a signed-out or replaced account's
+      // assertion.
+      await organizationAccount.clearLocalSession();
+      expect(auth.cachedHeaders(relay), isNull);
+      await saveSession();
+      expect(await organizationAccount.restore(), isNotNull);
+      expect(auth.cachedHeaders(relay), isNull);
     });
 
     test(
@@ -391,6 +352,42 @@ void main() {
       ]) {
         expect(await auth.headersForUrl(relay, Uri.parse(other)), isEmpty);
       }
+    });
+
+    test('after sign-out only a push stop for a bound key gets an assertion '
+        'and nothing can sign back in', () async {
+      await saveSession();
+      final account = organizationClient();
+      final auth = relayAuth(account);
+      boundIdentity = {'pubkey_hex': keys.public};
+      expect(await auth.headers(relay), isNotEmpty);
+
+      await account.clearLocalSession();
+      expect(
+        await const FlutterSecureStorage().read(
+          key: 'buzz_hosted_session_block_example_com_v1',
+        ),
+        isNull,
+      );
+      expect(await account.restore(), isNull);
+      expect(account.account, isNull);
+      requests.clear();
+      tokenFor = (_) => 'push-stop-token';
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer push-stop-token',
+      });
+      expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
+      expect(await auth.headers(relay), isEmpty);
+      expect(account.account, isNull);
+
+      // A key the account never bound gets nothing.
+      boundIdentity = null;
+      requests.clear();
+      expect(await auth.headers(relay, background: true), isEmpty);
+      expect(
+        requests.map((request) => request.url.path),
+        isNot(contains('/api/goose/v1/buzz/identity/assertions')),
+      );
     });
 
     test('other relays never receive the organization assertion', () async {

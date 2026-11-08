@@ -492,7 +492,10 @@ class RemoteAgentController extends ChangeNotifier {
     }
     final rows = result['models'];
     if (rows is! List) throw StateError('Could not load available models.');
-    return rows.map((row) => RemoteAgentModel.fromJson(row)).toList();
+    final recommended = result['recommended_selection'];
+    return rows
+        .map((row) => RemoteAgentModel.fromJson(row, recommended: recommended))
+        .toList();
   }
 
   /// Saves only an active agent owned by this account, then verifies readback.
@@ -787,7 +790,7 @@ class RemoteAgentController extends ChangeNotifier {
       final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
       await submitSignedEventOnce(
         wsUrl: config.wsUrl,
-        headers: await relayAuth.headers(config),
+        headers: await relayAuth.headers(config, fresh: true),
         nsec: key.nsec,
         kind: 30177,
         content: jsonEncode({
@@ -810,7 +813,7 @@ class RemoteAgentController extends ChangeNotifier {
         final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
         await submitSignedEventOnce(
           wsUrl: config.wsUrl,
-          headers: await relayAuth.headers(config),
+          headers: await relayAuth.headers(config, fresh: true),
           nsec: key.nsec,
           kind: 5,
           content: '',
@@ -986,12 +989,19 @@ class RemoteAgentModel {
     required this.id,
     required this.name,
     required this.efforts,
+    this.recommendedEffort,
   });
   final String id;
   final String name;
   final List<String> efforts;
 
-  factory RemoteAgentModel.fromJson(dynamic value) {
+  /// Set when the service recommends this model, at this effort, for new
+  /// agents. Creation guidance only; it never replaces a saved choice.
+  final String? recommendedEffort;
+
+  /// [recommended] is the catalog's optional `recommended_selection`; a
+  /// malformed one, or one naming a pair this model lacks, is ignored.
+  factory RemoteAgentModel.fromJson(dynamic value, {dynamic recommended}) {
     if (value is! Map ||
         value['id'] is! String ||
         (value['id'] as String).trim().isEmpty ||
@@ -1005,10 +1015,18 @@ class RemoteAgentModel {
         efforts.any((item) => item is! String || item.trim().isEmpty)) {
       throw StateError('Invalid model catalog.');
     }
+    final id = value['id'] as String;
+    final recommendedEffort =
+        recommended is Map && recommended['model_id'] == id
+        ? recommended['reasoning_effort']
+        : null;
     return RemoteAgentModel(
-      id: value['id'] as String,
+      id: id,
       name: value['display_name'] as String,
       efforts: List<String>.from(efforts),
+      recommendedEffort: efforts.contains(recommendedEffort)
+          ? recommendedEffort as String
+          : null,
     );
   }
 }

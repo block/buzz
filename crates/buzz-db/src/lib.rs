@@ -46,6 +46,9 @@ macro_rules! superseded_with_mentions_sql {
 mod runtime;
 mod store;
 
+/// Concurrency caps whose limit can change at runtime.
+pub mod concurrency_gate;
+
 /// Database error types.
 pub mod error;
 
@@ -89,10 +92,10 @@ pub(crate) use runtime::{
 pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
     channel_members, community, community_auth, deletion, dm, entity_deletion, event, feed,
-    git_repo, leader_lock, moderation, nip_fi_binding, operator_listener, partition, personal_read,
-    product_feedback, push, reaction, read_state, relay_admin_actions, relay_invite, relay_members,
-    relay_operators, reminder, replaceable, storage_accounting, thread, thread_window, user,
-    user_deletion, user_deletion_fences, workflow,
+    git_repo, leader_lock, media, membership_snapshot, moderation, nip_fi_binding,
+    operator_listener, partition, personal_read, product_feedback, push, reaction, read_state,
+    relay_admin_actions, relay_invite, relay_members, relay_operators, reminder, replaceable,
+    storage_accounting, thread, thread_window, user, user_deletion, user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;
@@ -102,6 +105,7 @@ pub use community::{
     CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord, UnarchiveCommunityResult,
     UnarchivedCommunityRecord,
 };
+pub use concurrency_gate::{ConcurrencyGate, GatePermit};
 pub use error::{DbError, Result};
 pub use event::{ChannelHeadPrecondition, ChannelHeadWriteStatus, DeletionTarget};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};

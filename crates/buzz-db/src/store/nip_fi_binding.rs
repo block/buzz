@@ -613,6 +613,99 @@ mod postgres_tests {
         assert!(!community_exists(&db, &bootstrap).await);
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn initial_policy_is_atomic_and_replays_preserve_current_state() {
+        let db = setup_db().await;
+        let keys = nostr::Keys::generate();
+        for required in [false, true] {
+            let host = unique_host("initial-policy");
+            let owner = nostr::Keys::generate().public_key().to_hex();
+            let write = db
+                .create_community_with_owner_and_nip_fi_policy(
+                    &host,
+                    &owner,
+                    &issuers(),
+                    required,
+                    &keys,
+                )
+                .await
+                .unwrap();
+            let CreateCommunityWithOwnerResult::Created(record) = write.outcome else {
+                panic!("not created")
+            };
+            assert!(record.created);
+            assert_eq!(record.requires_nip_fi, required);
+            let before = db.community_auth_policy(record.id).await.unwrap().unwrap();
+            assert_eq!(before.requires_nip_fi, required);
+            assert_eq!(before.policy_generation, i64::from(required));
+            assert_eq!(bound(&db, &host).await, Some(issuers()));
+            let owners = db.list_communities_owned_by(&owner).await.unwrap();
+            assert_eq!(owners.communities[0].id, record.id);
+            // Changed policy and issuer configuration never rewrite a committed row.
+            let changed = ["https://other.example".to_owned()];
+            for bindings in [&[][..], changed.as_slice()] {
+                let retry = db
+                    .create_community_with_owner_and_nip_fi_policy(
+                        &host, &owner, bindings, !required, &keys,
+                    )
+                    .await
+                    .unwrap();
+                let CreateCommunityWithOwnerResult::Created(retry) = retry.outcome else {
+                    panic!("not replayed")
+                };
+                assert!(!retry.created);
+                assert_eq!(retry.requires_nip_fi, required);
+                assert_eq!(
+                    db.community_auth_policy(record.id).await.unwrap().unwrap(),
+                    before
+                );
+                assert_eq!(bound(&db, &host).await, Some(issuers()));
+            }
+            // Model an operator disable. A later true replay must report the stored false.
+            sqlx::query("UPDATE communities SET requires_nip_fi = false, policy_generation = policy_generation + 1 WHERE id = $1")
+                .bind(record.id.as_uuid()).execute(&db.pool).await.unwrap();
+            let disabled = db.community_auth_policy(record.id).await.unwrap().unwrap();
+            let replay = db
+                .create_community_with_owner_and_nip_fi_policy(&host, &owner, &[], true, &keys)
+                .await
+                .unwrap();
+            let CreateCommunityWithOwnerResult::Created(replay) = replay.outcome else {
+                panic!("not replayed")
+            };
+            assert!(!replay.created);
+            assert!(!replay.requires_nip_fi);
+            assert_eq!(
+                db.community_auth_policy(record.id).await.unwrap().unwrap(),
+                disabled
+            );
+            assert_eq!(bound(&db, &host).await, Some(issuers()));
+            let conflict = db
+                .create_community_with_owner_and_nip_fi_policy(
+                    &host,
+                    &nostr::Keys::generate().public_key().to_hex(),
+                    &[],
+                    true,
+                    &keys,
+                )
+                .await
+                .unwrap();
+            assert_eq!(conflict.outcome, CreateCommunityWithOwnerResult::HostExists);
+        }
+        for bindings in [vec![], vec![String::new()]] {
+            let host = unique_host("refused-initial-policy");
+            let refusal = db
+                .create_community_with_owner_and_nip_fi_policy(&host, OWNER, &bindings, true, &keys)
+                .await;
+            if bindings.is_empty() {
+                assert!(matches!(refusal, Err(crate::DbError::NipFiBindingRequired)));
+            } else {
+                assert!(refusal.is_err());
+            }
+            assert!(!community_exists(&db, &host).await);
+        }
+    }
+
     // Deletion takes its exclusive lock, then the community row. A bind that
     // held the row while waiting for that lock would deadlock with it.
     // Mutation: locking the row before `guard_transaction` in

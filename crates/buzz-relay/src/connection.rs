@@ -1372,6 +1372,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
     }
 
     if let Err(reason) = enforce_ws_admission(&msg, &conn, &state).await {
+        // An EVENT's write line is written where its OK is sent.
         crate::access::ReadLog::refused(&msg, &conn, reason);
         return;
     }
@@ -1391,10 +1392,11 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 Err(_) => {
                     // Correlate to the event id: a bare NOTICE here strands the
                     // client's pending publish exactly as an over-quota one did.
-                    conn.send(request_rejection_message(
+                    let queued = conn.send(request_rejection_message(
                         RejectionTarget::Event(event.id),
                         "rate-limited: too many concurrent requests",
                     ));
+                    crate::access::WriteLog::refused(&conn, &event, "rate-limited", queued);
                     return;
                 }
             };
@@ -1852,6 +1854,7 @@ pub(crate) mod tests {
             AuthOutcome::RelayMembershipCheckError,
             AuthOutcome::NotRelayMember,
             AuthOutcome::PairingMismatch,
+            AuthOutcome::ConcurrencyLimit,
         ] {
             crate::metrics::record_auth_attempt_started();
             let (denied, _rx) = test_conn_with_auth(pending_state());
@@ -2426,6 +2429,58 @@ pub(crate) mod tests {
         assert_eq!(frame[3], "rate-limited: too many concurrent requests");
     }
 
+    /// The saturation refusal's write line records whether its OK was queued,
+    /// with the outbound channel open, full or closed. Mutation: pass `true`
+    /// instead of the send result at the refusal site → RED.
+    #[tokio::test]
+    async fn saturated_handler_write_line_records_whether_its_ok_was_queued() {
+        let state = crate::state::tests::test_state().await;
+        let permits = state.handler_semaphore.available_permits();
+        let _held = Arc::clone(&state.handler_semaphore)
+            .acquire_many_owned(permits as u32)
+            .await
+            .expect("hold every handler permit");
+        let mut got = Vec::new();
+        for channel in ["open", "full", "closed"] {
+            let (conn, rx) = test_conn_with_auth(AuthState::Failed);
+            let _rx = match channel {
+                "full" => {
+                    while conn.send(String::new()) {}
+                    Some(rx)
+                }
+                "closed" => {
+                    drop(rx);
+                    None
+                }
+                _ => Some(rx),
+            };
+            let event = EventBuilder::new(Kind::TextNote, "hello")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign event");
+            let raw = serde_json::json!(["EVENT", event]).to_string();
+            let (guard, out) = crate::access::tests::capture_access_only(tracing::Level::INFO);
+            handle_text_message(raw, Arc::clone(&conn), Arc::clone(&state)).await;
+            drop(guard);
+            let line = out
+                .lines()
+                .into_iter()
+                .find(|l| l["event"] == "write")
+                .expect("write line");
+            got.push(format!(
+                "{channel}:{}/{}/{}",
+                line["outcome"], line["reason"], line["ok_queued"]
+            ));
+        }
+        assert_eq!(
+            got,
+            [
+                r#"open:"rejected"/"rate-limited"/null"#,
+                r#"full:"rejected"/"rate-limited"/false"#,
+                r#"closed:"rejected"/"rate-limited"/false"#,
+            ]
+        );
+    }
+
     /// The REQ arm of the same branch still settles on CLOSED.
     #[tokio::test]
     async fn saturated_handler_rejects_a_req_on_the_closed_channel() {
@@ -2502,8 +2557,10 @@ pub(crate) mod tests {
             let topic = EventTopic::Channel(channel);
             handlers::req::claim_live_subscription(
                 "s",
-                &[nostr::Filter::new().kind(Kind::TextNote)],
-                Some(&[channel]),
+                vec![(
+                    nostr::Filter::new().kind(Kind::TextNote),
+                    crate::subscription::SubscriptionScope::channels([channel]),
+                )],
                 &conn,
                 &state,
             )
@@ -2598,8 +2655,10 @@ pub(crate) mod tests {
             let topic = EventTopic::Channel(channel);
             handlers::req::claim_live_subscription(
                 "s",
-                &[nostr::Filter::new().kind(Kind::TextNote)],
-                Some(&[channel]),
+                vec![(
+                    nostr::Filter::new().kind(Kind::TextNote),
+                    crate::subscription::SubscriptionScope::channels([channel]),
+                )],
                 &conn,
                 &state,
             )
@@ -2688,8 +2747,10 @@ pub(crate) mod tests {
             let (conn, _rx) = test_conn_with_auth(AuthState::Failed);
             handlers::req::claim_live_subscription(
                 "s",
-                &[nostr::Filter::new().kind(Kind::TextNote)],
-                None,
+                vec![(
+                    nostr::Filter::new().kind(Kind::TextNote),
+                    crate::subscription::SubscriptionScope::global(),
+                )],
                 &conn,
                 &state,
             )

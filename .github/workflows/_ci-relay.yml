@@ -122,6 +122,7 @@ jobs:
             --cargo-profile ci \
             -p buzz-db \
             -p buzz-relay \
+            -p buzz-relay-mesh \
             -p buzz-test-client \
             --lib \
             --test e2e_event_reminder \
@@ -574,6 +575,14 @@ jobs:
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E 'package(buzz-relay) and test(/^api::nip_fi::route_integration_tests::external_infra_redis::/)' \
             --run-ignored ignored-only
+      - name: Mesh ready-registry index regressions
+        env:
+          BUZZ_TEST_REDIS_URL: redis://localhost:6379
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay-mesh) and test(/^registry::tests::external_infra_redis::/)' \
+            --run-ignored ignored-only
       - name: Workflow message provenance unit tests
         # The relay's workflow_sink suite is not selected by the infra-free
         # unit job. Its ignored database cases run in the isolated PostgreSQL
@@ -654,6 +663,8 @@ jobs:
           merge-multiple: true
           path: target/ci
       - name: Start relay
+        env:
+          BUZZ_MEDIA_READ_MODE: enforce
         run: |
           chmod +x ./target/ci/buzz-relay ./target/ci/git-credential-nostr
           ./scripts/start-relay-for-tests.sh --no-build

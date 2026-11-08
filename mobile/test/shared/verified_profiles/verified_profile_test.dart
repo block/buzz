@@ -203,4 +203,52 @@ void main() {
       expect(hasVerifiedEventProof(tampered), isFalse);
     });
   });
+
+  test('a profile search finds people by kind:0, or by the relay\'s head', () {
+    NostrEvent profile(String pubkey, String name, int createdAt) => NostrEvent(
+      id: '$pubkey$createdAt',
+      pubkey: pubkey,
+      createdAt: createdAt,
+      kind: 0,
+      tags: const [],
+      content: '{"name":"$name"}',
+      sig: 'sig',
+    );
+    final c = 'c' * 64, d = 'd' * 64, e = 'e' * 64, f = 'f' * 64;
+    final events = [
+      // A head-only person keeps the relay's rank.
+      signedProjection(profileTags(c, name: 'Gabi Lilienfeld')),
+      // A kind:0 wins over the head; the newest kind:0 counts.
+      profile(subjectA, 'old', 1),
+      signedProjection(profileTags(subjectA)),
+      profile(subjectA, 'Ada', 2),
+      // These find nobody: another key's head, a retraction, a bad subject.
+      signedProjection(profileTags(d), author: relayKeysOther()),
+      signedProjection(retractionTags(e)),
+      signedProjection(profileTags('F' * 64)),
+      profile(subjectB, 'Bea', 1),
+      NostrEvent(
+        id: f,
+        pubkey: f,
+        createdAt: 1,
+        kind: 1,
+        tags: const [],
+        content: 'note',
+        sig: 'sig',
+      ),
+    ];
+    String row(SearchedPerson person) =>
+        '${person.pubkey[0]}:'
+        '${person.verified?.displayName ?? 'kind0 ${person.profile!.content}'}';
+    expect(searchedPeople(events, authority).map(row), [
+      'c:Gabi Lilienfeld',
+      'a:kind0 {"name":"Ada"}',
+      'b:kind0 {"name":"Bea"}',
+    ]);
+    // Without a known authority, no head finds anyone.
+    expect(searchedPeople(events, null).map(row), [
+      'a:kind0 {"name":"Ada"}',
+      'b:kind0 {"name":"Bea"}',
+    ]);
+  });
 }

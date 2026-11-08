@@ -73,29 +73,33 @@ void main() {
     });
   });
 
-  group('relayThumbnailUrl', () {
+  group('relayThumbnailUrls', () {
     final hash = 'ab' * 32;
     final auth = _auth();
 
-    test('maps relay blobs of any format to the thumbnail', () {
-      for (final ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '']) {
-        expect(
-          relayThumbnailUrl('$_relayBase/media/$hash$ext', auth),
-          '$_relayBase/media/$hash.thumb.jpg',
-        );
-      }
-    });
+    test(
+      'maps relay blobs of any format to the WebP, then JPEG, thumbnail',
+      () {
+        for (final ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '']) {
+          expect(relayThumbnailUrls('$_relayBase/media/$hash$ext', auth), [
+            '$_relayBase/media/$hash.thumb.webp',
+            '$_relayBase/media/$hash.thumb.jpg',
+          ]);
+        }
+      },
+    );
 
     test('leaves everything else alone', () {
       for (final url in [
         'https://elsewhere.example/media/$hash.jpg',
         '$_relayBase/media/$hash.thumb.jpg',
+        '$_relayBase/media/$hash.thumb.webp',
         '$_relayBase/media/$hash.jpg?v=2',
         '$_relayBase/media/not-a-hash.jpg',
         '$_relayBase/avatars/$hash.jpg',
         '$_relayBase/media/$hash.JPG',
       ]) {
-        expect(relayThumbnailUrl(url, auth), isNull, reason: url);
+        expect(relayThumbnailUrls(url, auth), isEmpty, reason: url);
       }
     });
   });
