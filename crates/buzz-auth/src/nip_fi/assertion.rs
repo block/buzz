@@ -117,7 +117,9 @@ impl fmt::Debug for RevalidationDependencies {
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedAssertion {
     identity: FederatedIdentity,
+    profile_assertion: Option<super::public_profile::ProfileAssertion>,
     asserted_key: Option<PublicKey>,
+    owner: Option<PublicKey>,
     capabilities: CanonicalCapabilities,
     authority_deadlines: Vec<DateTime<Utc>>,
     assertion_policy_id: AssertionPolicyId,
@@ -133,6 +135,7 @@ impl VerifiedAssertion {
         issuer: String,
         subject: String,
         asserted_key: Option<PublicKey>,
+        owner: Option<PublicKey>,
         capabilities: CanonicalCapabilities,
         authority_deadlines: Vec<DateTime<Utc>>,
         assertion_policy_id: AssertionPolicyId,
@@ -145,13 +148,28 @@ impl VerifiedAssertion {
         );
         Self {
             identity: FederatedIdentity { issuer, subject },
+            profile_assertion: None,
             asserted_key,
+            owner,
             capabilities,
             authority_deadlines,
             assertion_policy_id,
             transport_contract_id,
             revalidation_dependencies,
         }
+    }
+
+    /// Optional output-only evidence; absent for OAuth client-subject assertions.
+    pub fn profile_assertion(&self) -> Option<&super::public_profile::ProfileAssertion> {
+        self.profile_assertion.as_ref()
+    }
+
+    pub(super) fn with_profile_assertion(
+        mut self,
+        value: Option<super::public_profile::ProfileAssertion>,
+    ) -> Self {
+        self.profile_assertion = value;
+        self
     }
 
     /// The issuer-qualified identity.
@@ -163,6 +181,12 @@ impl VerifiedAssertion {
     /// this must equal the proven actor.
     pub const fn asserted_key(&self) -> Option<PublicKey> {
         self.asserted_key
+    }
+
+    /// The verified `nostr_owner_pubkey` of an agent assertion; `None` for a
+    /// key acting for itself.
+    pub const fn owner(&self) -> Option<PublicKey> {
+        self.owner
     }
 
     /// The canonical closed claims/capabilities carried by the assertion.
@@ -199,11 +223,88 @@ impl VerifiedAssertion {
     pub const fn revalidation_dependencies(&self) -> &RevalidationDependencies {
         &self.revalidation_dependencies
     }
+
+    /// Test-only constructor: mint a minimal `VerifiedAssertion` for a given
+    /// `asserted_key`.  All other fields are set to safe, arbitrary defaults.
+    ///
+    /// Used in unit tests that need to supply a `VerifiedAssertion` with a
+    /// specific `asserted_key` without performing a real JWKS verification.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test(asserted_key: nostr::PublicKey) -> Self {
+        use chrono::Duration;
+        Self::seal(
+            "https://test.issuer.example".to_owned(),
+            "test-subject".to_owned(),
+            Some(asserted_key),
+            None,
+            CanonicalCapabilities::from_pairs(vec![]),
+            vec![Utc::now() + Duration::seconds(3600)],
+            AssertionPolicyId::zero(),
+            TransportContractId::zero(),
+            RevalidationDependencies::new(
+                "test-kid".to_owned(),
+                1,
+                Utc::now() + Duration::seconds(3600),
+                "test.header.sig".to_owned(),
+            ),
+        )
+    }
 }
 
 impl fmt::Debug for VerifiedAssertion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("VerifiedAssertion([REDACTED])")
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl VerifiedAssertion {
+    /// Test-only factory for building `VerifiedAssertion` fixtures without
+    /// going through the full JWT/JWKS verification path. NOT available in
+    /// production builds.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `authority_deadlines` is empty — an empty set violates the
+    /// non-empty invariant that `upstream_authority_deadline()` relies on.
+    pub fn for_test(
+        asserted_key: Option<PublicKey>,
+        authority_deadlines: Vec<DateTime<Utc>>,
+    ) -> Self {
+        assert!(
+            !authority_deadlines.is_empty(),
+            "VerifiedAssertion::for_test: authority_deadlines must be non-empty \
+             (upstream_authority_deadline() panics on empty)"
+        );
+        use super::config::{AssertionPolicyId, TransportContractId};
+        Self {
+            identity: FederatedIdentity {
+                issuer: "test-issuer".to_string(),
+                subject: "test-subject".to_string(),
+            },
+            asserted_key,
+            profile_assertion: None,
+            owner: None,
+            capabilities: CanonicalCapabilities::from_pairs(vec![]),
+            authority_deadlines,
+            assertion_policy_id: AssertionPolicyId::zero(),
+            transport_contract_id: TransportContractId::zero(),
+            revalidation_dependencies: RevalidationDependencies {
+                verification_key_id: "test-kid".to_string(),
+                key_snapshot_generation: 0,
+                key_snapshot_hard_deadline: DateTime::<Utc>::MAX_UTC,
+                confidential_assertion: ConfidentialAssertion {
+                    compact_jws: "test.test.test".to_string(),
+                },
+            },
+        }
+    }
+
+    /// Test-only: the same assertion as an agent assertion owned by `owner`.
+    #[must_use]
+    pub fn with_owner_for_test(mut self, owner: PublicKey) -> Self {
+        self.owner = Some(owner);
+        self
     }
 }
 

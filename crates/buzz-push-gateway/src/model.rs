@@ -13,21 +13,8 @@ pub const MAX_ENROLL_REQUEST_BYTES: usize =
 pub const MAX_GRANT_BYTES: usize = 4096;
 pub const MAX_ENDPOINT_HEX_BYTES: usize = 512;
 pub const APNS_RECONNECT_PAYLOAD: &[u8] =
-    br#"{"aps":{"alert":{"body":"Reconnect to your relay now"},"mutable-content":1}}"#;
+    br#"{"aps":{"alert":{"body":"Reconnect to your relay now"},"sound":"default","mutable-content":1}}"#;
 pub const WIRE_VERSION: u8 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AppProfile {
-    BuzzIosDogfood,
-}
-impl AppProfile {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BuzzIosDogfood => "buzz-ios-dogfood",
-        }
-    }
-}
 
 /// Relay request. It deliberately has no application-payload field:
 /// the gateway emits one compiled-in APNs reconnect payload for every delivery.
@@ -51,7 +38,6 @@ pub struct EndpointGrant {
     pub v: u8,
     pub delegation_id: uuid::Uuid,
     pub relay_pubkey: String,
-    pub app_profile: AppProfile,
     pub endpoint_epoch: i64,
     pub generation: i64,
     pub expires_at: i64,
@@ -81,7 +67,6 @@ pub struct InstallationEnrollRequest {
     pub challenge: String,
     pub key_id: String,
     pub attestation: String,
-    pub app_profile: AppProfile,
     pub endpoint: String,
     pub endpoint_epoch: i64,
     pub expires_at: i64,

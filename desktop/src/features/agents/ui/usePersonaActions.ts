@@ -1,4 +1,5 @@
 import * as React from "react";
+import { isRelayRemovedError } from "@/features/agents/managedAgentRelayCleanup";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -175,6 +176,7 @@ export function usePersonaActions() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent?: AgentCreateIntent,
     backendIntent?: BackendIntent | null,
+    effortLevel?: string | null,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
     options?: { publishCatalogUpdates?: boolean },
   ): Promise<boolean> {
@@ -241,6 +243,7 @@ export function usePersonaActions() {
           runtime,
           undefined,
           startIntent ?? undefined,
+          effortLevel,
         );
 
         try {
@@ -249,7 +252,7 @@ export function usePersonaActions() {
             created,
             targetChannel,
           );
-          if (created.spawnError) {
+          if (created.spawnError && !isRelayRemovedError(created.spawnError)) {
             setPersonaErrorMessage(
               `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
             );
@@ -321,6 +324,7 @@ export function usePersonaActions() {
             avatarUrl: persona.avatarUrl ?? undefined,
             description: persona.description ?? undefined,
             systemPrompt: persona.systemPrompt,
+            acpCommand: persona.acpCommand,
             runtime: persona.runtime ?? undefined,
             model: persona.model ?? undefined,
             provider: persona.provider ?? undefined,
@@ -329,6 +333,7 @@ export function usePersonaActions() {
               respondTo:
                 persona.respondTo === "anyone" ? "anyone" : "owner-only",
               parallelism: persona.parallelism ?? undefined,
+              sessionPolicy: persona.sessionPolicy ?? "channel",
             },
             // Provenance on the copy: without it the copy's fresh local id is
             // the only identifier, and the catalog offers "Add" again.

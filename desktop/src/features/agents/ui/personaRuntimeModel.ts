@@ -1,3 +1,5 @@
+import { type EffortOptions, isSavableEffort } from "./effortPicker";
+
 /** Runtime provider-capability tri-state used by the submit path. */
 export type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
 
@@ -88,6 +90,41 @@ export function resolveAgentCommandUpdate(input: {
     return pinnedCommand;
   }
   return undefined;
+}
+
+/**
+ * Decide whether Save should persist the effort picker's selection, and with
+ * what value. Effort is embedded in the locked `update_managed_agent` payload
+ * (PR #4625) — this runs only inside the submit path, so Cancel and a failed
+ * Save never reach it, and no write is dispatched independently of the dialog
+ * outcome.
+ *
+ * `inheritTransition` is the pin→inherit case (the empty-command sentinel
+ * `resolveAgentCommandUpdate` returns). The locked `update_managed_agent` save
+ * already clears the record effort column AND its env aliases on that
+ * transition; re-persisting the picker value here would restore the very pin
+ * the transition just cleared — the r8 race. So the transition suppresses the
+ * effort write entirely, regardless of the picked value.
+ *
+ * Otherwise persist only a real change: an unchanged selection is a no-op, so
+ * a name-only edit never rewrites the effort column. A level the model being
+ * saved doesn't offer (`choices`, e.g. after switching to Haiku) is dropped;
+ * while that model is still unknown the pick is kept.
+ */
+export function resolveEffortSubmission(input: {
+  effortLevel: string | null;
+  originalEffortLevel: string | null;
+  inheritTransition: boolean;
+  choices: EffortOptions;
+}): { persist: boolean; level: string | null } {
+  if (
+    input.inheritTransition ||
+    input.effortLevel === input.originalEffortLevel ||
+    !isSavableEffort(input.effortLevel, input.choices)
+  ) {
+    return { persist: false, level: null };
+  }
+  return { persist: true, level: input.effortLevel };
 }
 
 /**

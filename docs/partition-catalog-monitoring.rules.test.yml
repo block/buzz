@@ -1,0 +1,122 @@
+# Run with: promtool test rules docs/partition-catalog-monitoring.rules.test.yml
+#
+# Series are sampled every minute and use the default 900 s audit interval. The
+# startup audit finishes before the first scrape, so run counters start at 1.
+rule_files:
+  - partition-catalog-monitoring.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A healthy new pod audits at startup and then every 15 minutes. Its counter
+  # is flat for the first interval, which must not read as a stopped loop.
+  - interval: 1m
+    input_series:
+      - series: 'buzz_partition_audit_runs_total{pod="fresh",table="events",outcome="ok"}'
+        values: '1x14 2x14 3x14 4x14 5x14'
+      - series: 'buzz_partition_audit_runs_total{pod="fresh",table="events",outcome="degraded"}'
+        values: '0x74'
+      - series: 'buzz_partition_audit_last_success_timestamp_seconds{pod="fresh",table="events"}'
+        values: '0x14 900x14 1800x14 2700x14 3600x14'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: BuzzPartitionAuditStale
+        exp_alerts: []
+
+  # The audit loop stops after the 15-minute audit while the pod keeps running.
+  # Both rules fire before the timestamp's 2,700 s idle eviction at 60 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'buzz_partition_audit_runs_total{pod="stopped",table="events",outcome="ok"}'
+        values: '1x14 2x60'
+      - series: 'buzz_partition_audit_last_success_timestamp_seconds{pod="stopped",table="events"}'
+        values: '0x14 900x45'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 52m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts:
+          - exp_labels: {pod: stopped, table: events}
+      - eval_time: 57m
+        alertname: BuzzPartitionAuditStale
+        exp_alerts:
+          - exp_labels: {pod: stopped, table: events}
+
+  # The audit loop stops right after the startup audit. It is caught once the
+  # pod is one window old.
+  - interval: 1m
+    input_series:
+      - series: 'buzz_partition_audit_runs_total{pod="early",table="events",outcome="ok"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 33m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts:
+          - exp_labels: {pod: early, table: events}
+
+  # A pod terminates at 24 minutes. Range selectors still read its earlier
+  # samples, long enough to complete `for: 5m` at 50 minutes, but it must not
+  # start an alert.
+  - interval: 1m
+    input_series:
+      - series: 'buzz_partition_audit_runs_total{pod="gone",table="events",outcome="ok"}'
+        values: '1x14 2x9 stale'
+      - series: 'buzz_partition_audit_failures_total{pod="gone"}'
+        values: '0x10 1 2 3x7 stale'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 52m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: BuzzPartitionAuditNotRunning
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BuzzPartitionAuditFailing
+        exp_alerts: []
+
+  # A table that has never audited successfully exports a 0 timestamp.
+  - interval: 1m
+    input_series:
+      - series: 'buzz_partition_audit_last_success_timestamp_seconds{pod="never",table="events"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: BuzzPartitionAuditStale
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: BuzzPartitionAuditStale
+        exp_alerts:
+          - exp_labels: {pod: never, table: events}
+
+  # One failure does not alert; a second within an hour does.
+  - interval: 1m
+    input_series:
+      - series: 'buzz_partition_audit_failures_total{pod="once"}'
+        values: '0x10 1x50'
+      - series: 'buzz_partition_audit_failures_total{pod="twice"}'
+        values: '0x10 1x10 2x40'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: BuzzPartitionAuditFailing
+        exp_alerts:
+          - exp_labels: {pod: twice}

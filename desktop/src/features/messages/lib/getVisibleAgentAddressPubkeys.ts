@@ -9,9 +9,15 @@ export function getVisibleAgentAddressPubkeys(
   body: string,
   addressedPubkeys: readonly string[],
   mentionPubkeysByName: Readonly<Record<string, string>> | undefined,
+  mentionNames?: readonly string[],
 ): string[] {
   const inlineMentionPubkeys = new Set(
-    orderMentionPubkeysByText(body, mentionPubkeysByName, () => true),
+    orderMentionPubkeysByText(
+      body,
+      mentionPubkeysByName,
+      () => true,
+      mentionNames,
+    ),
   );
 
   return addressedPubkeys.filter(

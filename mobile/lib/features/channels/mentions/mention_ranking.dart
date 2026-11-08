@@ -1,10 +1,17 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../shared/mentions/mention_rules.dart';
+import '../../../shared/utils/string_utils.dart';
+import '../../../shared/verified_profiles/verified_profile.dart';
+
 /// A mention autocomplete candidate. Mirrors the desktop's
 /// `MentionCandidateForRanking` (desktop/src/features/messages/lib/mentionRanking.ts).
 @immutable
 class MentionCandidate {
   final String pubkey;
+
+  /// Restored identity only: eligibility must come from current community state.
+  final bool requiresRevalidation;
   final String? displayName;
   final String? secondaryLabel;
   final String? avatarUrl;
@@ -13,8 +20,17 @@ class MentionCandidate {
   final String? role;
   final String? ownerPubkey;
 
+  /// Contextual identity label for the picker row. Presentation only: the
+  /// inserted mention text still uses [label] and binds the exact [pubkey].
+  final String? contextLabel;
+
+  /// Other searchable names, such as the self-declared kind 0 name of a
+  /// candidate whose [displayName] is NIP-FI verified.
+  final List<String> aliases;
+
   const MentionCandidate({
     required this.pubkey,
+    this.requiresRevalidation = false,
     this.displayName,
     this.secondaryLabel,
     this.avatarUrl,
@@ -22,83 +38,142 @@ class MentionCandidate {
     this.isMember = false,
     this.role,
     this.ownerPubkey,
+    this.contextLabel,
+    this.aliases = const [],
   });
+
+  /// The row label shown in the picker.
+  String get pickerLabel => contextLabel ?? label;
+
+  MentionCandidate withContextLabel(String? contextLabel) => MentionCandidate(
+    pubkey: pubkey,
+    requiresRevalidation: requiresRevalidation,
+    displayName: displayName,
+    secondaryLabel: secondaryLabel,
+    avatarUrl: avatarUrl,
+    isAgent: isAgent,
+    isMember: isMember,
+    role: role,
+    ownerPubkey: ownerPubkey,
+    contextLabel: contextLabel,
+    aliases: aliases,
+  );
+
+  /// This candidate named by its NIP-FI [verified] display name, which it is
+  /// then matched, ranked and inserted as. The self-declared name stays
+  /// searchable, and so do the verified full name and username, which the
+  /// relay's profile search matches too.
+  MentionCandidate withVerifiedName(VerifiedProfile verified) {
+    final name = verified.displayName;
+    final declared = displayName?.trim();
+    return MentionCandidate(
+      pubkey: pubkey,
+      requiresRevalidation: requiresRevalidation,
+      displayName: name,
+      secondaryLabel: secondaryLabel,
+      avatarUrl: avatarUrl,
+      isAgent: isAgent,
+      isMember: isMember,
+      role: role,
+      ownerPubkey: ownerPubkey,
+      contextLabel: contextLabel,
+      aliases: [
+        ...aliases,
+        for (final alias in [declared, ...verifiedAliases(verified)])
+          if (alias != null && alias.isNotEmpty && alias != name) alias,
+      ],
+    );
+  }
+
+  /// Every name a query can match: the display name, then [aliases].
+  List<String> get searchNames {
+    final name = displayName?.trim() ?? '';
+    return [if (name.isNotEmpty) name, ...aliases];
+  }
 
   String get label {
     final name = displayName?.trim();
     if (name != null && name.isNotEmpty) return name;
-    return pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
+    return shortPubkey(pubkey);
+  }
+
+  /// Avatar initial: display-name-derived, or keyed to the hex public key
+  /// so unnamed identities keep distinct initials (a compact npub would
+  /// render `N` for everyone).
+  String get initial {
+    final name = displayName?.trim();
+    if (name != null && name.isNotEmpty) return name[0].toUpperCase();
+    return pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?';
   }
 }
 
-/// Group rank: channel members, then people, then other agents.
-/// Mirrors desktop's `getMentionCandidateGroupRank` (personas are a
-/// desktop-only concept; their slot between members and people is unused
-/// here so numbering stays aligned).
-int _groupRank(MentionCandidate candidate) {
-  if (candidate.isMember) return 0;
-  if (!candidate.isAgent) return 2;
-  return 3;
+/// The portable rule inputs for [candidate]. The label is what the chooser
+/// shows; only a real display name is searchable, never a key or NIP-05.
+MentionChoice mentionChoiceOf(MentionCandidate candidate, String? viewer) {
+  final name = candidate.displayName?.trim() ?? '';
+  return MentionChoice(
+    pubkey: candidate.pubkey,
+    name: name,
+    label: candidate.label,
+    aliases: candidate.searchNames,
+    member: candidate.isMember,
+    agent: candidate.isAgent,
+    owned:
+        candidate.isAgent &&
+        viewer != null &&
+        candidate.ownerPubkey?.toLowerCase() == viewer.toLowerCase(),
+  );
 }
 
-/// Match-quality score for one label. Lower is better; null means no match.
-/// Mirrors desktop's `scoreMentionCandidateLabel`.
-int? _scoreLabel(String label, String lowerQuery) {
-  final lower = label.toLowerCase();
-  if (lower == lowerQuery) return 0;
-  if (lower.startsWith(lowerQuery)) return 1;
-
-  final words = lower.split(RegExp(r'[\s\-_]+')).where((w) => w.isNotEmpty);
-  if (words.any((word) => word == lowerQuery)) return 2;
-  if (words.any((word) => word.startsWith(lowerQuery))) return 3;
-
-  return null;
-}
-
-/// Rank candidates for a mention query. Mirrors desktop's
-/// `rankMentionCandidates`: sort by group, then match quality, then the
-/// stable original order.
+/// Rank candidates for a mention query with the portable mention rules
+/// (sections 3 and 4): members first, then match quality, then the viewer's
+/// own agents, then labels. [history] holds explicit choices in this channel
+/// (higher is newer); [presence] maps a key to `online` or `away`.
 List<MentionCandidate> rankMentionCandidates(
   List<MentionCandidate> candidates,
-  String query,
-) {
-  final lowerQuery = query.toLowerCase();
+  String query, {
+  String? viewer,
+  Map<String, int> history = const {},
+  String Function(String pubkey)? presence,
+}) {
+  final byKey = {for (final c in candidates) c.pubkey: c};
+  return [
+    for (final choice in rankMentions(
+      [for (final c in byKey.values) mentionChoiceOf(c, viewer)],
+      query,
+      history: history,
+      presence: presence,
+    ))
+      byKey[choice.pubkey]!,
+  ];
+}
 
-  final ranked = <(MentionCandidate, int, int, int)>[];
-  for (var order = 0; order < candidates.length; order++) {
-    final candidate = candidates[order];
+/// Most rows one chooser shows. The user types more to narrow the list.
+const mentionSuggestionLimit = 50;
 
-    final labelScores = [candidate.displayName, candidate.secondaryLabel].map((
-      value,
-    ) {
-      final trimmed = value?.trim();
-      if (trimmed == null || trimmed.isEmpty) return null;
-      return _scoreLabel(trimmed, lowerQuery);
-    }).whereType<int>();
-    int? score = labelScores.isEmpty
-        ? null
-        : labelScores.reduce((a, b) => a < b ? a : b);
-
-    if (score == null) {
-      final pubkeyLower = candidate.pubkey.toLowerCase();
-      if (pubkeyLower.startsWith(lowerQuery)) {
-        score = 4;
-      } else if (pubkeyLower.contains(lowerQuery)) {
-        score = 5;
-      }
-    }
-
-    if (score == null) continue;
-    ranked.add((candidate, _groupRank(candidate), score, order));
+/// The chooser rows for [ranked] when [previous] rows are already shown for
+/// the same query and opening (section 6). Shown rows keep their places and
+/// take their latest values. A shown row that left the choice set stays in
+/// place and is listed in `unavailable`. New rows join at the bottom, up to
+/// [limit] rows.
+({List<MentionCandidate> rows, Set<String> unavailable}) stableMentionRows(
+  List<MentionCandidate> previous,
+  List<MentionCandidate> ranked, {
+  int limit = mentionSuggestionLimit,
+}) {
+  final byKey = {for (final candidate in ranked) candidate.pubkey: candidate};
+  final unavailable = <String>{};
+  final rows = <MentionCandidate>[];
+  final shown = <String>{};
+  for (final row in previous) {
+    if (!shown.add(row.pubkey)) continue;
+    final latest = byKey[row.pubkey];
+    if (latest == null) unavailable.add(row.pubkey);
+    rows.add(latest ?? row);
   }
-
-  ranked.sort((a, b) {
-    final group = a.$2.compareTo(b.$2);
-    if (group != 0) return group;
-    final score = a.$3.compareTo(b.$3);
-    if (score != 0) return score;
-    return a.$4.compareTo(b.$4);
-  });
-
-  return [for (final item in ranked) item.$1];
+  for (final candidate in ranked) {
+    if (rows.length >= limit) break;
+    if (shown.add(candidate.pubkey)) rows.add(candidate);
+  }
+  return (rows: rows, unavailable: unavailable);
 }

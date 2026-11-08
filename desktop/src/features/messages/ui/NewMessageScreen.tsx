@@ -328,7 +328,22 @@ export function NewMessageScreen() {
               <div
                 className="group/to-field flex min-h-9 min-w-0 flex-1 cursor-text flex-wrap items-center gap-1.5 py-1"
                 data-testid="new-message-to-field"
-                onClick={() => {
+                onClick={(event) => {
+                  // Portaled popovers (recipient inspection and its nested key
+                  // copy) still bubble through React's tree to this handler,
+                  // but their event targets are not DOM descendants of the
+                  // field. Those clicks belong to the popover's own controls
+                  // — they must not steal focus into the search input (which
+                  // dismisses the popover via focus-outside) or reopen the
+                  // picker. Only clicks physically within the recipient field
+                  // focus its input.
+                  const { currentTarget, target } = event;
+                  if (
+                    !(target instanceof Node) ||
+                    !currentTarget.contains(target)
+                  ) {
+                    return;
+                  }
                   setIsRecipientPickerOpen(true);
                   searchInputRef.current?.focus({ preventScroll: true });
                 }}

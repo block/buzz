@@ -20,7 +20,6 @@ fn snapshot_with_policy(
         workspace_relay,
         global,
         enforced_owner_only,
-        AcpSessionPolicy::Channel,
     )
     .canonical()
 }
@@ -43,6 +42,7 @@ fn snap(record: &ManagedAgentRecord) -> serde_json::Value {
 
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
         description: None,
         pubkey: "p".repeat(64),
         name: "agent".into(),
@@ -105,11 +105,13 @@ fn record() -> ManagedAgentRecord {
 
 fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
         description: None,
         id: id.into(),
         display_name: id.into(),
         avatar_url: None,
         system_prompt: prompt.into(),
+        acp_command: None,
         runtime: runtime.map(str::to_string),
         model: None,
         provider: None,

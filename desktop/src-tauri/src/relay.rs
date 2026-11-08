@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
-use reqwest::Method;
+use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -316,7 +316,7 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     };
 
     // 429 Too Many Requests → typed `relay rate-limited:` prefix so the TS
-    // client can activate the rate-limit gate without confusing it with a
+    // client can report back-pressure without confusing it with a
     // connectivity failure (`relay unreachable:`). Also arm the Rust-side
     // admission gate here — the one place every relay HTTP error funnels
     // through — so the next relay-backed command waits out the quota window
@@ -324,10 +324,8 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let hint = extract_retry_in_hint(&body);
         // Clamp the hint to MAX_HINT_SECONDS before arming the Rust gate AND
-        // before embedding it in the returned string. Every consumer (Rust gate
-        // via `activate_rate_limit` and TS gate via `applyTauriRateLimitIfNeeded`)
-        // must see the same capped value — a single policy point prevents the TS
-        // gate from receiving an uncapped hint from an untrusted relay.
+        // before embedding it in the returned string, so the caller sees the
+        // same bounded hint the native HTTP gate actually honours.
         let capped_hint = hint.map(|s| s.min(crate::relay_admission::MAX_HINT_SECONDS));
         crate::relay_admission::activate_rate_limit(capped_hint);
         if let Some(secs) = capped_hint {
@@ -411,6 +409,37 @@ pub async fn query_relay_at_with_keys(
     .await
 }
 
+/// Build an authenticated relay HTTP request using already-signed NIP-98 auth.
+///
+/// The caller owns request ordering around this helper: rate-limit admission,
+/// egress checks, URL/body construction, send, error classification, and response
+/// parsing remain outside. `body` is accepted as final bytes so this helper never
+/// reserializes, normalizes, or changes the payload that was signed.
+fn build_authenticated_relay_request(
+    client: &reqwest::Client,
+    method: Method,
+    url: &str,
+    auth: &str,
+    body: Option<Vec<u8>>,
+    auth_tag: Option<&str>,
+    timeout: Option<std::time::Duration>,
+) -> RequestBuilder {
+    let mut request = client.request(method, url).header("Authorization", auth);
+    if body.is_some() {
+        request = request.header("Content-Type", "application/json");
+    }
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    request
+}
+
 /// Issue an authenticated `POST /query` and parse the response, applying the
 /// per-request `timeout` that bounds a stalled or half-open relay connection.
 ///
@@ -427,19 +456,18 @@ async fn send_query_request(
     body_bytes: Vec<u8>,
     timeout: std::time::Duration,
 ) -> Result<Vec<nostr::Event>, String> {
-    let mut request = http_client
-        .post(url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .timeout(timeout);
-    if let Some(tag) = auth_tag {
-        request = request.header("x-auth-tag", tag);
-    }
-    let response = request
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let response = build_authenticated_relay_request(
+        http_client,
+        Method::POST,
+        url,
+        auth,
+        Some(body_bytes),
+        auth_tag,
+        Some(timeout),
+    )
+    .send()
+    .await
+    .map_err(|e| classify_request_error(&e))?;
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
@@ -507,6 +535,8 @@ fn build_profile_event(
         .map_err(|e| format!("failed to sign profile event: {e}"))
 }
 
+pub(crate) mod profile_avatar;
+
 // ── Managed-agent profile sync ──────────────────────────────────────────────
 
 /// Sync a managed agent's kind:0 profile event to the relay using NIP-98 auth.
@@ -516,6 +546,8 @@ fn build_profile_event(
 /// description (see `managed_agents::record_effective_description`); the
 /// relay treats kind:0
 /// fields as absolute, so passing `None` clears any previously published about.
+/// Configured-community avatar media is copied into this target before signing;
+/// transfer failure never replaces the existing profile with a foreign URL.
 pub async fn sync_managed_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -526,8 +558,17 @@ pub async fn sync_managed_agent_profile(
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
-    // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, about, auth_tag)?;
+    // Resolve media before replacing the complete profile. A failed transfer
+    // leaves the previous kind:0 untouched and the saved source available to retry.
+    let avatar_url =
+        profile_avatar::localize_avatar(state, relay_url, agent_keys, avatar_url, auth_tag).await?;
+    let event = build_profile_event(
+        agent_keys,
+        display_name,
+        avatar_url.as_deref(),
+        about,
+        auth_tag,
+    )?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
@@ -536,8 +577,9 @@ pub async fn sync_managed_agent_profile(
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
-        .http_client
+        .media_fetch_client
         .post(&url)
+        .timeout(std::time::Duration::from_secs(30))
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
     if let Some(tag) = auth_tag {
@@ -556,6 +598,10 @@ pub async fn sync_managed_agent_profile(
         ));
     }
 
+    let result: SubmitEventResponse = parse_json_response(response).await?;
+    if !result.accepted {
+        return Err(format!("relay rejected agent profile: {}", result.message));
+    }
     Ok(())
 }
 

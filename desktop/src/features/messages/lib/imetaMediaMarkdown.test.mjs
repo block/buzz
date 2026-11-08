@@ -188,6 +188,17 @@ test("formatImetaMediaLine: video mime → ![video] line (regardless of URL suff
   );
 });
 
+test("formatImetaMediaLine: packaged voice note MP4 stays on the audio-card link path", () => {
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://relay.example/media/hash.mp4",
+      type: "video/mp4",
+      filename: "voice-note-123.mp4",
+    }),
+    "\n[voice-note-123.mp4](https://relay.example/media/hash.mp4)",
+  );
+});
+
 test("formatImetaMediaLine: generic mime → [filename](url) link", () => {
   assert.equal(
     formatImetaMediaLine({

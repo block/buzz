@@ -2,6 +2,7 @@ import * as React from "react";
 import { UserRound } from "lucide-react";
 
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+import { avatarSourceUrlForShape } from "@/features/profile/ui/ProfileAvatarEditor.utils";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
@@ -23,6 +24,17 @@ type ProfileAvatarProps = {
   avatarUrl: string | null;
   avatarDataUrl?: string | null;
   label: string;
+  /**
+   * Label used to derive fallback initials; defaults to `label`.
+   *
+   * `label` stays the full visible/alt identity, but some callers build it
+   * as a generated role-prefixed key fallback ("Agent npub1abcd…wxyz"),
+   * which `getInitials` reads as ordinary words — collapsing every unnamed
+   * identity onto the same "AN"/"PN" initials. Identity-aware callers pass
+   * the unprefixed compact key here so key-fallback avatars keep distinct
+   * key-tail initials; authored display names keep their name initials.
+   */
+  initialsLabel?: string;
   className?: string;
   iconClassName?: string;
   imageClassName?: string;
@@ -46,6 +58,7 @@ export function ProfileAvatar({
   avatarUrl,
   avatarDataUrl,
   label,
+  initialsLabel,
   className,
   iconClassName,
   imageClassName,
@@ -54,19 +67,20 @@ export function ProfileAvatar({
   testId,
   untrusted = false,
 }: ProfileAvatarProps) {
-  const initials = getInitials(label);
+  const initials = getInitials(initialsLabel ?? label);
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
+  const shapedAvatarUrl = avatarSourceUrlForShape(presentedAvatarUrl, shape);
 
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
-  const animated = parseAnimatedAvatarUrl(presentedAvatarUrl);
+  const animated = parseAnimatedAvatarUrl(shapedAvatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const baseUrl = animated
     ? isHovered
       ? animated.animationUrl
       : animated.posterUrl
-    : presentedAvatarUrl;
+    : shapedAvatarUrl;
 
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently. Under `untrusted`
@@ -96,7 +110,7 @@ export function ProfileAvatar({
     <Avatar
       className={cn(
         "shrink-0 text-primary shadow-xs",
-        shape === "squircle" && "rounded-[30%]",
+        shape === "squircle" && "rounded-squircle",
         // Animated avatars carry their own backdrop disc and transparent
         // surroundings — any container fill would flatten the pop-out.
         plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",

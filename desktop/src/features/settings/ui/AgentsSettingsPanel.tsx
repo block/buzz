@@ -37,7 +37,7 @@ export function AgentsSettingsPanel() {
                 className="mt-0.5 text-sm text-muted-foreground/70"
                 data-settings-subcopy
               >
-                After you mention them once
+                Address selected agents in thread replies
               </p>
             </div>
             <Switch

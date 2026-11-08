@@ -93,9 +93,11 @@ pub async fn handle_moderation_command(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
-) -> Result<(), String> {
-    let kind = event.kind.as_u16() as u32;
+) -> Result<(), super::ingest::IngestError> {
+    use super::ingest::{BanRefusal, IngestError};
     let actor = event.pubkey.to_bytes().to_vec();
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
 
     // A ban is an admission boundary, not only a WebSocket-auth check. HTTP
     // NIP-98 requests and already-authenticated sockets can reach this handler
@@ -105,8 +107,30 @@ pub async fn handle_moderation_command(
         .db
         .moderation_restriction_state(tenant.community(), &actor)
         .await
-        .map_err(|e| error(format!("database error checking restriction state: {e}")))?;
-    ensure_actor_not_banned(&restriction)?;
+        .map_err(|e| {
+            IngestError::ban(
+                BanRefusal::Unavailable,
+                IngestError::Rejected(error(format!(
+                    "database error checking restriction state: {e}"
+                ))),
+            )
+        })?;
+    ensure_actor_not_banned(&restriction).map_err(|e| {
+        IngestError::ban(BanRefusal::banned(&restriction), IngestError::Rejected(e))
+    })?;
+    execute_moderation_command(tenant, state, event, &actor)
+        .await
+        .map_err(IngestError::Rejected)
+}
+
+/// Run an admitted moderation command.
+async fn execute_moderation_command(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    actor: &[u8],
+) -> Result<(), String> {
+    let kind = event.kind.as_u16() as u32;
 
     // Freshness: reject stale/replayed commands (they are never stored).
     let event_ts = event.created_at.as_secs() as i64;
@@ -122,11 +146,11 @@ pub async fn handle_moderation_command(
     }
 
     match kind {
-        KIND_MODERATION_BAN => handle_ban(tenant, state, event, &actor).await,
-        KIND_MODERATION_UNBAN => handle_unban(tenant, state, event, &actor).await,
-        KIND_MODERATION_TIMEOUT => handle_timeout(tenant, state, event, &actor).await,
-        KIND_MODERATION_UNTIMEOUT => handle_untimeout(tenant, state, event, &actor).await,
-        KIND_MODERATION_RESOLVE_REPORT => handle_resolve(tenant, state, event, &actor).await,
+        KIND_MODERATION_BAN => handle_ban(tenant, state, event, actor).await,
+        KIND_MODERATION_UNBAN => handle_unban(tenant, state, event, actor).await,
+        KIND_MODERATION_TIMEOUT => handle_timeout(tenant, state, event, actor).await,
+        KIND_MODERATION_UNTIMEOUT => handle_untimeout(tenant, state, event, actor).await,
+        KIND_MODERATION_RESOLVE_REPORT => handle_resolve(tenant, state, event, actor).await,
         other => Err(invalid(format!(
             "unexpected moderation command kind: {other}"
         ))),
@@ -176,6 +200,24 @@ async fn handle_ban(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restrictions(tenant);
+
+    // Live enforcement: close open sessions for the banned principal now —
+    // this pod's sockets synchronously (fenced to this community) and every
+    // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
+    // makes "close locally but forget the Redis publish" unrepresentable, so a
+    // live ban takes effect immediately, everywhere (decision 4).
+    // This runs before the audit insert, so an audit failure cannot leave the
+    // banned member connected. A failed owned-agent lookup is still reported
+    // (after the notice below) instead of claiming success.
+    let revoked = state
+        .revoke_live_access(
+            tenant,
+            &target,
+            &event.id.to_hex(),
+            "blocked: you are banned from this community",
+        )
+        .await;
 
     let action_id = insert_audit(
         state,
@@ -187,18 +229,6 @@ async fn handle_ban(
         reason.as_deref(),
     )
     .await?;
-
-    // Live enforcement: close open sessions for the banned principal now —
-    // this pod's sockets synchronously (fenced to this community) and every
-    // other pod's via the fire-and-forget cross-pod fan-out. The paired helper
-    // makes "close locally but forget the Redis publish" unrepresentable, so a
-    // live ban takes effect immediately, everywhere (decision 4).
-    state.disconnect_pubkey_clusterwide(
-        tenant,
-        &target,
-        &event.id.to_hex(),
-        "blocked: you are banned from this community",
-    );
 
     // Notice DM: tell the banned user the terms of the restriction.
     let public_reason = reason.clone().unwrap_or_default();
@@ -222,7 +252,9 @@ async fn handle_ban(
     }
 
     info!(target = %hex::encode(&target), "community ban applied");
-    Ok(())
+    revoked
+        .map(|_| ())
+        .map_err(|e| format!("error: ban applied but live revoke incomplete: {e}"))
 }
 
 // ── 9041: unban ──────────────────────────────────────────────────────────────
@@ -254,6 +286,7 @@ async fn handle_unban(
     if !lifted {
         return Err(invalid("member is not banned"));
     }
+    state.invalidate_restrictions(tenant);
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
 
@@ -296,6 +329,7 @@ async fn handle_timeout(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
+    state.invalidate_restrictions(tenant);
 
     let action_id = insert_audit(
         state,
@@ -359,6 +393,7 @@ async fn handle_untimeout(
     if !cleared {
         return Err(invalid("member is not timed out"));
     }
+    state.invalidate_restrictions(tenant);
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 
@@ -600,6 +635,7 @@ mod tests {
     fn banned_admin_cannot_reach_an_unban_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
@@ -611,6 +647,7 @@ mod tests {
         // ban, so an authorized moderator can still lift it.
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(Utc::now() + Duration::minutes(5)),
         };
         assert!(ensure_actor_not_banned(&timed_out).is_ok());

@@ -9,6 +9,7 @@ const mergeClassNames = extendTailwindMerge({
           text: ["message", "message-timestamp"],
         },
       ],
+      rounded: ["rounded-squircle"],
     },
   },
 });

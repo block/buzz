@@ -7,9 +7,9 @@
 //! ```text
 //! buzz-relay process
 //!   │
-//!   ├── deadpool-redis pool → PUBLISH, SET, ZADD, etc.
+//!   ├── shared RedisConnection (one multiplexed socket) → PUBLISH, SET, ZADD, etc.
 //!   │
-//!   └── dedicated redis::aio::PubSub connection (NOT from pool)
+//!   └── dedicated redis::aio::PubSub connection (NOT the shared one)
 //!         └── dynamic SUBSCRIBE buzz:{community}:channel:{id} / buzz:{community}:global
 //!               └── run_subscriber() → broadcast::channel(4096) → N WS receivers
 //! ```
@@ -18,18 +18,25 @@
 //! backoff (1s → 2s → 4s → … → 30s max).
 //!
 //! Dedicated pub/sub connection is stateful and cannot be shared.
-//! Pool connections handle all other commands.
+//! The shared [`RedisConnection`] handles all other commands.
 //! Lagged receivers get `RecvError::Lagged`.
 
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
 /// Cross-pod connection-control commands over Redis pub/sub.
 pub mod conn_control;
+/// The shared Redis command connection.
+pub mod connection;
+pub use connection::{
+    redis_connection, RedisConnection, REDIS_CONNECT_TIMEOUT, REDIS_RESPONSE_TIMEOUT,
+};
 /// Error types for pub/sub operations.
 pub mod error;
 /// Redis-backed NIP-98 replay seen-set.
 pub mod nip98_replay;
 pub use nip98_replay::RedisNip98ReplayGuard;
+pub mod nip_fi_command_replay;
+pub use nip_fi_command_replay::RedisCommandReplayGuard;
 /// Online/offline presence tracking in Redis.
 pub mod presence;
 /// Redis PUBLISH for channel event fan-out.
@@ -49,12 +56,14 @@ use std::time::Duration;
 
 use buzz_core::TenantContext;
 use nostr::PublicKey;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
 };
+pub use crate::conn_control::NipFiDisconnect;
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
+pub use crate::conn_control::{decode_nip_fi_disconnect, encode_nip_fi_disconnect};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
 /// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
@@ -66,6 +75,23 @@ pub struct ChannelEvent {
     pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
+    /// When this node read the event from Redis. Delivery deadlines start
+    /// here, so time spent waiting in the local broadcast counts.
+    pub received_at: tokio::time::Instant,
+}
+
+/// Health of this node's Redis event subscription link.
+///
+/// `epoch` advances on every event that can lose messages without a replay:
+/// the link connects, drops, or skips a message it could not decode. A reader
+/// that needs every message records the epoch when its interest is confirmed
+/// and treats any later change as a possible loss.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkState {
+    /// Advances on every possible loss.
+    pub epoch: u64,
+    /// Whether the link is connected and its desired topics are subscribed.
+    pub up: bool,
 }
 
 /// Configuration for the pub/sub subsystem.
@@ -98,7 +124,7 @@ impl PubSubConfig {
 
 /// Central pub/sub manager for a Buzz relay instance.
 pub struct PubSubManager {
-    pool: deadpool_redis::Pool,
+    pool: crate::RedisConnection,
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.
     redis_url: String,
     /// Delay before unsubscribing after the last local interest is released.
@@ -110,22 +136,25 @@ pub struct PubSubManager {
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
+    nip_fi_disconnect_tx: broadcast::Sender<NipFiDisconnect>,
+    link: watch::Sender<LinkState>,
 }
 
 impl PubSubManager {
     /// Creates a new `PubSubManager` connected to the given Redis URL.
-    pub async fn new(redis_url: &str, pool: deadpool_redis::Pool) -> Result<Self, PubSubError> {
+    pub async fn new(redis_url: &str, pool: crate::RedisConnection) -> Result<Self, PubSubError> {
         Self::with_config(PubSubConfig::new(redis_url), pool).await
     }
 
     /// Creates a new `PubSubManager` using explicit pub/sub configuration.
     pub async fn with_config(
         config: PubSubConfig,
-        pool: deadpool_redis::Pool,
+        pool: crate::RedisConnection,
     ) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
+        let (nip_fi_disconnect_tx, _) = broadcast::channel(4096);
         let (subscription_tx, subscription_rx) = mpsc::channel(4096);
 
         Ok(Self {
@@ -138,6 +167,8 @@ impl PubSubManager {
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
+            nip_fi_disconnect_tx,
+            link: watch::Sender::new(LinkState::default()),
         })
     }
 
@@ -156,6 +187,7 @@ impl PubSubManager {
             self.broadcast_tx.clone(),
             self.desired_topics.clone(),
             subscription_rx,
+            self.link.clone(),
         )
         .await;
     }
@@ -176,6 +208,24 @@ impl PubSubManager {
         conn_control::run_conn_control_subscriber(
             self.redis_url.clone(),
             self.conn_control_tx.clone(),
+        )
+        .await;
+    }
+
+    /// Starts the NIP-FI disconnect subscriber loop with automatic
+    /// reconnection.  Runs forever — spawn this in a background task.
+    ///
+    /// Subscribes to `channels`: every NIP-FI pod hears the enforce channel,
+    /// and a shadow pod also hears its own.  On receipt the pod merges the
+    /// deny entry; an enforce pod closes matching local sessions.
+    pub async fn run_nip_fi_disconnect_subscriber(
+        self: Arc<Self>,
+        channels: &'static [&'static str],
+    ) {
+        conn_control::run_nip_fi_disconnect_subscriber(
+            self.redis_url.clone(),
+            self.nip_fi_disconnect_tx.clone(),
+            channels,
         )
         .await;
     }
@@ -205,6 +255,28 @@ impl PubSubManager {
                 .send(subscriber::SubscriptionCommand::Subscribe(topic_key))
                 .await;
         }
+    }
+
+    /// Watch this node's Redis event link (see [`LinkState`]).
+    pub fn link_state(&self) -> watch::Receiver<LinkState> {
+        self.link.subscribe()
+    }
+
+    /// Wait until Redis has confirmed a subscription to an already retained
+    /// topic, and return the link epoch it was confirmed on. Fails when the
+    /// link drops before it answers; the caller bounds the wait.
+    pub async fn confirm_topic(
+        &self,
+        ctx: &TenantContext,
+        topic: EventTopic,
+    ) -> Result<u64, PubSubError> {
+        let (reply, answer) = oneshot::channel();
+        let topic_key = EventTopicKey::from_context(ctx, topic);
+        self.subscription_tx
+            .send(subscriber::SubscriptionCommand::Confirm(topic_key, reply))
+            .await
+            .map_err(|_| PubSubError::SubscriberStopped)?;
+        answer.await.map_err(|_| PubSubError::SubscriberStopped)
     }
 
     /// Release local interest in a scoped Redis event topic.
@@ -265,6 +337,11 @@ impl PubSubManager {
         self.conn_control_tx.subscribe()
     }
 
+    /// Returns a new broadcast receiver for cross-pod NIP-FI disconnect commands.
+    pub fn subscribe_nip_fi_disconnect(&self) -> broadcast::Receiver<NipFiDisconnect> {
+        self.nip_fi_disconnect_tx.subscribe()
+    }
+
     /// Publish a cache-key drop to all pods. Fire-and-forget at the call site:
     /// the local cache is already dropped synchronously; this carries the same
     /// drop cross-pod. A dropped publish is backstopped by the REQ denial-path
@@ -274,7 +351,7 @@ impl PubSubManager {
         ctx: &TenantContext,
         invalidation: &CacheInvalidation,
     ) -> Result<i64, PubSubError> {
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.pool.clone();
         let payload = serde_json::to_string(invalidation)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(cache_invalidation_channel(ctx))
@@ -294,10 +371,31 @@ impl PubSubManager {
         ctx: &TenantContext,
         command: &ConnControl,
     ) -> Result<i64, PubSubError> {
-        let mut conn = self.pool.get().await?;
+        let mut conn = self.pool.clone();
         let payload = serde_json::to_string(command)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(conn_control_channel(ctx))
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await?;
+        Ok(subscriber_count)
+    }
+
+    /// Publish a NIP-FI disconnect command to all pods listening on `channel`.
+    ///
+    /// Called after the local deny entry is inserted.  Remote pods receive this
+    /// and apply the same `max(until)` merge + all-community session close.
+    /// Fire-and-forget: the HTTP response does not wait on delivery.
+    pub async fn publish_nip_fi_disconnect(
+        &self,
+        channel: &str,
+        command: &NipFiDisconnect,
+    ) -> Result<i64, PubSubError> {
+        use crate::conn_control::encode_nip_fi_disconnect;
+        let mut conn = self.pool.clone();
+        let payload = encode_nip_fi_disconnect(command)?;
+        let subscriber_count: i64 = redis::cmd("PUBLISH")
+            .arg(channel)
             .arg(&payload)
             .query_async(&mut conn)
             .await?;
@@ -347,6 +445,25 @@ impl PubSubManager {
         presence::clear_presence(&self.pool, ctx, pubkey).await
     }
 
+    /// Set one status with the 180s TTL for each of `pubkeys`, in one round trip.
+    pub async fn set_presence_many(
+        &self,
+        ctx: &TenantContext,
+        pubkeys: &[PublicKey],
+        status: &str,
+    ) -> Result<(), PubSubError> {
+        presence::set_presence_many(&self.pool, ctx, pubkeys, status).await
+    }
+
+    /// Remove presence for each of `pubkeys`.
+    pub async fn clear_presence_many(
+        &self,
+        ctx: &TenantContext,
+        pubkeys: &[PublicKey],
+    ) -> Result<(), PubSubError> {
+        presence::clear_presence_many(&self.pool, ctx, pubkeys).await
+    }
+
     /// Returns the current presence status for `pubkey`, or `None` if not set.
     pub async fn get_presence(
         &self,
@@ -368,10 +485,8 @@ impl PubSubManager {
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    pub fn make_test_pool() -> deadpool_redis::Pool {
-        let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("Failed to create Redis pool")
+    pub fn make_test_pool() -> crate::RedisConnection {
+        crate::redis_connection("redis://127.0.0.1:6379").expect("Failed to build Redis connection")
     }
 }
 
@@ -446,30 +561,32 @@ mod tests {
 
         let channel_id = Uuid::new_v4();
         let pubkey = Keys::generate().public_key().to_bytes().to_vec();
-        let sent = CacheInvalidation::Membership {
-            channel_id,
-            pubkey: pubkey.clone(),
-        };
-
         let ctx = ctx(0xaaaa, "a.example");
-
-        manager
-            .publish_cache_invalidation(&ctx, &sent)
-            .await
-            .expect("publish failed");
-
-        let received = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("timeout")
-            .expect("channel closed");
-
-        assert_eq!(
-            received,
-            ScopedCacheInvalidation {
-                community_id: ctx.community(),
-                invalidation: sent,
-            }
-        );
+        for sent in [
+            CacheInvalidation::Membership {
+                channel_id,
+                pubkey: pubkey.clone(),
+            },
+            CacheInvalidation::CommunityHost {
+                host: ctx.host().to_owned(),
+            },
+        ] {
+            manager
+                .publish_cache_invalidation(&ctx, &sent)
+                .await
+                .expect("publish failed");
+            let received = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout")
+                .expect("channel closed");
+            assert_eq!(
+                received,
+                ScopedCacheInvalidation {
+                    community_id: ctx.community(),
+                    invalidation: sent,
+                }
+            );
+        }
     }
 
     #[tokio::test]
@@ -488,7 +605,7 @@ mod tests {
         let status = presence::get_presence(&pool, &ctx, &pubkey).await.unwrap();
         assert_eq!(status.as_deref(), Some("online"));
 
-        let mut conn = pool.get().await.unwrap();
+        let mut conn = pool.clone();
         let ttl: i64 = redis::cmd("TTL")
             .arg(presence::presence_key(&ctx, &pubkey))
             .query_async(&mut conn)

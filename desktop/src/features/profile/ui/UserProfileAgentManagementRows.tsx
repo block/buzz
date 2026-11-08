@@ -31,6 +31,7 @@ export function UserProfileAgentManagementRows({
   canDeleteAgent,
   isDeletePending,
   managedAgent,
+  supplementalAction,
   onCreateCard,
   onDeleteAgent,
   onDuplicateAgent,
@@ -41,6 +42,7 @@ export function UserProfileAgentManagementRows({
   canDeleteAgent: boolean;
   isDeletePending: boolean;
   managedAgent?: ManagedAgent;
+  supplementalAction?: React.ReactNode;
   /** Mint an agent trading card. Present only for owner-managed personas. */
   onCreateCard?: () => void;
   onDeleteAgent: () => void;
@@ -51,6 +53,7 @@ export function UserProfileAgentManagementRows({
     !onCreateCard &&
     !onDuplicateAgent &&
     !onExportAgent &&
+    !supplementalAction &&
     !canArchiveAgent &&
     !canDeleteAgent
   ) {
@@ -86,6 +89,7 @@ export function UserProfileAgentManagementRows({
           testId="user-profile-create-card-row"
         />
       ) : null}
+      {supplementalAction}
       {canArchiveAgent ? (
         <ProfileArchiveAgentRow archiveActions={archiveActions} />
       ) : null}
@@ -100,10 +104,11 @@ export function UserProfileAgentManagementRows({
   );
 }
 
-function ProfileAgentActionRow({
+export function ProfileAgentActionRow({
   destructive = false,
   disabled = false,
   icon: Icon,
+  iconClassName,
   label,
   onClick,
   testId,
@@ -111,6 +116,7 @@ function ProfileAgentActionRow({
   destructive?: boolean;
   disabled?: boolean;
   icon: LucideIcon;
+  iconClassName?: string;
   label: string;
   onClick: () => void;
   testId: string;
@@ -125,9 +131,10 @@ function ProfileAgentActionRow({
     >
       <Icon
         className={
-          destructive
+          iconClassName ??
+          (destructive
             ? "h-4 w-4 shrink-0 text-destructive"
-            : "h-4 w-4 shrink-0 text-muted-foreground"
+            : "h-4 w-4 shrink-0 text-muted-foreground")
         }
         data-slot="profile-action-icon"
       />
@@ -257,7 +264,9 @@ function AgentDeleteConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Delete this agent?</AlertDialogTitle>
           <AlertDialogDescription>
-            Deleting this agent stops and removes the agent from this community.
+            {isProviderAgent
+              ? "Deleting removes this agent’s local management record, not its remote deployment."
+              : "Deleting this agent stops and removes the agent from this community."}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
@@ -269,7 +278,7 @@ function AgentDeleteConfirmDialog({
           </li>
           <li>
             {isProviderAgent
-              ? "Requests remote deletion; if it is online, Buzz first sends a shutdown command when possible. If the deployment cannot be reached through a channel, the remote process may keep running without local management."
+              ? "Unless the agent is known to be Offline, Buzz first requests shutdown through a channel when available. A failed request cancels deletion. The remote process may still be running even after a successful request."
               : "Stops any local agent process before deleting the record"}
           </li>
         </ul>

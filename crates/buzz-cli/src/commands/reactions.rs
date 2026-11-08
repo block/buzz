@@ -40,7 +40,7 @@ pub async fn cmd_add_reaction(
             .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
     };
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -52,13 +52,8 @@ pub async fn cmd_remove_reaction(
     event_id: &str,
     emoji: &str,
 ) -> Result<(), CliError> {
-    // Reaches a `#e` generic tag filter below, matched as a raw string
-    // against a lowercase tag.
     let event_id = &parse_hex64(event_id)?;
-    let keys = client.keys();
-
-    // Find our reaction event by querying kind:7 reactions on this event from us
-    let my_pk = keys.public_key().to_hex();
+    let my_pk = client.public_key().to_hex();
     let filter = reaction_filter(event_id, Some(&my_pk));
     let raw = client.query(&filter).await?;
     let events: serde_json::Value = serde_json::from_str(&raw)
@@ -84,7 +79,7 @@ pub async fn cmd_remove_reaction(
     let builder = buzz_sdk::build_remove_reaction(reaction_eid)
         .map_err(|e| CliError::Other(format!("build_remove_reaction failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));

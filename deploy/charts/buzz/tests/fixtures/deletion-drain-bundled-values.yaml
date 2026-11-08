@@ -1,0 +1,11 @@
+relayUrl: wss://buzz.example.com
+ownerPubkey: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+postgresql:
+  enabled: true
+redis:
+  enabled: true
+minio:
+  enabled: true
+operatorJobs:
+  deletionDrain:
+    enabled: true

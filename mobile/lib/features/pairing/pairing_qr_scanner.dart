@@ -4,9 +4,11 @@ import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../shared/theme/theme.dart';
@@ -43,7 +45,10 @@ Future<bool> usesDynamicIslandQrScannerPortal() async {
 /// Callers determine device support with
 /// [usesDynamicIslandQrScannerPortal]. Standard devices reveal the camera
 /// behind their existing app surface with [FallbackPairingQrScanner].
-Future<String?> showDynamicIslandPairingQrScanner(BuildContext context) {
+Future<String?> showDynamicIslandPairingQrScanner(
+  BuildContext context, {
+  ValueChanged<double>? onProgress,
+}) {
   return Navigator.of(context).push<String>(
     PageRouteBuilder<String>(
       opaque: false,
@@ -51,7 +56,8 @@ Future<String?> showDynamicIslandPairingQrScanner(BuildContext context) {
       barrierDismissible: false,
       transitionDuration: Duration.zero,
       reverseTransitionDuration: Duration.zero,
-      pageBuilder: (_, _, _) => const _DynamicIslandQrScannerPortal(),
+      pageBuilder: (_, _, _) =>
+          _DynamicIslandQrScannerPortal(onProgress: onProgress),
     ),
   );
 }
@@ -117,7 +123,6 @@ class DynamicIslandQrScannerGeometry {
   static const _edgeMargin = 15.0;
   static const _expandedCornerRadius = 40.0;
   static const _scannerFadeStart = 0.18;
-  static const _introLabelFadeEnd = 0.42;
 
   /// The physical-island-aligned top edge used throughout the morph.
   double get top =>
@@ -166,10 +171,5 @@ class DynamicIslandQrScannerGeometry {
       0.0,
       1.0,
     );
-  }
-
-  /// Returns the opacity of the compact prompt inside the island pill.
-  double introLabelOpacityAt(double progress) {
-    return (1 - (progress / _introLabelFadeEnd)).clamp(0.0, 1.0);
   }
 }

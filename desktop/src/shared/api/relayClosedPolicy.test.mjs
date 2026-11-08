@@ -26,6 +26,7 @@ test("classifyRelayClosed: terminal messages return terminal", () => {
     "unsupported: filter",
     "error: mixed search and non-search filters not supported",
     "error: too many subscriptions",
+    "error: query timed out",
   ]) {
     assert.equal(classifyRelayClosed(message), "terminal", message);
   }

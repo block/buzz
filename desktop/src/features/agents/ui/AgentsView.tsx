@@ -219,6 +219,7 @@ export function AgentsView() {
           />
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
+              getAvailability={agents.getAvailability}
               defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
@@ -355,6 +356,7 @@ export function AgentsView() {
           onSubmit={(input, options) =>
             personas.handleSubmit(
               input,
+              undefined,
               undefined,
               undefined,
               undefined,
