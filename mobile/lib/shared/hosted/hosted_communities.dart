@@ -1,14 +1,30 @@
 import '../deeplink/deep_link.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
+import 'known_community_address.dart';
 
 /// Account-saved destinations, not evidence that this identity is a member.
 /// Keep the existing hosted environment boundary and normal relay admission.
 Future<List<AddCommunityDeepLink>> loadKnownHostedCommunities(
   BuilderlabAccountClient account,
+) async => (await loadKnownAccountCommunities(account))
+    .where(
+      (community) =>
+          HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl)),
+    )
+    .toList(growable: false);
+
+/// All account-saved destinations this mobile client can enter. Unlike hosted
+/// onboarding discovery, this also includes ordinary self-hosted addresses.
+Future<List<AddCommunityDeepLink>> loadKnownAccountCommunities(
+  BuilderlabAccountClient account,
 ) async {
-  final response = await account.post('/v1/buzz/known-communities/list', {});
-  // Protobuf JSON omits an empty repeated field.
+  final subject = account.account?.subject;
+  final response = await account.post(
+    '/v1/buzz/known-communities/list',
+    {},
+    expectedSubject: subject,
+  );
   final rows = response['communities'] ?? <dynamic>[];
   if (response['error'] != null || rows is! List) {
     throw AccountFailure.invalidResponse;
@@ -18,21 +34,13 @@ Future<List<AddCommunityDeepLink>> loadKnownHostedCommunities(
     if (row is! Map<String, dynamic> || row['community_url'] is! String) {
       throw AccountFailure.invalidResponse;
     }
-    final relay = Uri.tryParse(row['community_url'] as String);
-    // The account can also save destinations this hosted build cannot enter.
-    if (relay == null ||
-        relay.scheme != 'wss' ||
-        !RegExp(r'^[a-z0-9]+(?:[.-][a-z0-9]+)*$').hasMatch(relay.host) ||
-        !HostedEnvironment.supportsRelay(relay)) {
-      continue;
-    }
-    final canonical = Uri(scheme: 'wss', host: relay.host);
+    final raw = row['community_url'] as String;
+    if (Uri.tryParse(raw)?.scheme != 'wss') continue;
+    final relay = knownCommunityAddress(raw);
+    if (relay == null) continue;
     communities.putIfAbsent(
-      canonical.host,
-      () => AddCommunityDeepLink(
-        relayUrl: canonical.toString(),
-        name: canonical.host,
-      ),
+      relay,
+      () => AddCommunityDeepLink(relayUrl: relay, name: Uri.parse(relay).host),
     );
   }
   return List.unmodifiable(communities.values);

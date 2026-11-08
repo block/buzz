@@ -84,16 +84,20 @@ Future<void> _confirmRemoveCommunity(
   required bool closeSheetAfterRemoval,
 }) async {
   final messenger = ScaffoldMessenger.of(context);
+  final account = ref.read(builderlabAccountProvider);
+  final subject = account.account?.subject;
   try {
     final confirmed = await showDestructiveConfirmation(
       context: context,
       title: 'Remove community?',
-      message:
-          'Are you sure you want to remove “${community.name}”? '
-          'You can pair with it again later.',
+      message: subject == null
+          ? 'Are you sure you want to remove “${community.name}”? You can pair with it again later.'
+          : 'Remove “${community.name}” from this device and your Builder Lab community list? You can add it again later.',
       confirmLabel: 'Remove',
     );
-    if (!confirmed || !context.mounted) return;
+    if (!confirmed || !context.mounted || account.account?.subject != subject) {
+      return;
+    }
     await ref
         .read(communityListProvider.notifier)
         .removeCommunity(community.id);
@@ -105,6 +109,40 @@ Future<void> _confirmRemoveCommunity(
       SnackBar(content: Text('Failed to remove community: $e')),
       kind: ToastKind.error,
     );
+  }
+}
+
+Future<void> _confirmRemoveAccountCommunity(
+  BuildContext context,
+  WidgetRef ref,
+  AddCommunityDeepLink community,
+) async {
+  final account = ref.read(builderlabAccountProvider);
+  final subject = account.account?.subject;
+  final sync = ref.read(knownCommunitySyncProvider);
+  if (subject == null || sync == null) return;
+  try {
+    final confirmed = await showDestructiveConfirmation(
+      context: context,
+      title: 'Remove community?',
+      message:
+          'Remove “${community.name}” from your Builder Lab community list? You can add it again later.',
+      confirmLabel: 'Remove',
+    );
+    if (!confirmed || !context.mounted || account.account?.subject != subject) {
+      return;
+    }
+    await sync.remove(community.relayUrl);
+    sync.trigger();
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showFeedbackSnackBar(
+        const SnackBar(
+          content: Text('Could not save this removal. Please try again.'),
+        ),
+        kind: ToastKind.error,
+      );
+    }
   }
 }
 

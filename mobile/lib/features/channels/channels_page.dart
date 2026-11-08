@@ -4,6 +4,13 @@ import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/known_communities_provider.dart';
+import '../../shared/hosted/hosted_community_connection.dart';
+import '../../shared/hosted/hosted_flow_provider.dart';
+import '../../shared/deeplink/deep_link.dart';
+import '../../shared/deeplink/pending_deep_link_provider.dart';
+import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/hosted/known_community_sync_provider.dart';
 import '../../shared/hosted/organization_environment.dart';
 import '../../shared/hosted/organization_sign_in.dart';
 

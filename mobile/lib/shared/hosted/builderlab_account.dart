@@ -316,6 +316,21 @@ class BuilderlabAccountClient {
     if (result['error'] != null) throw AccountFailure.rejected;
   }
 
+  /// Edits only the account's saved destination list; relay membership and
+  /// credentials are unchanged. Both operations are idempotent.
+  Future<void> updateKnownCommunity(
+    String relay, {
+    required bool removed,
+    required String expectedSubject,
+  }) async {
+    final result = await post(
+      '/v1/buzz/known-communities/${removed ? 'remove' : 'add'}',
+      {'community_url': relay},
+      expectedSubject: expectedSubject,
+    );
+    if (result['error'] != null) throw AccountFailure.rejected;
+  }
+
   /// Authenticated JSON POST to a Buzz account route on the fixed origin. The
   /// credential never leaves this client. A 401 clears the stored session only
   /// when the session check also rejects it; otherwise it is [AccountFailure.denied].

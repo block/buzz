@@ -1,3 +1,4 @@
+import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'dart:async';
 import 'dart:developer' as developer;
@@ -303,6 +304,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       state = AsyncData(updatedList);
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
+      await ref.read(knownCommunitySyncProvider)?.added(community.relayUrl);
       return existing.id;
     }
 
@@ -311,6 +313,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+    await ref.read(knownCommunitySyncProvider)?.added(community.relayUrl);
     return community.id;
   }
 
@@ -335,7 +338,13 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
       }
+      if (removedIndex >= 0) {
+        await ref
+            .read(knownCommunitySyncProvider)
+            ?.remove(current[removedIndex].relayUrl);
+      }
       await storage.remove(id);
+      ref.read(knownCommunitySyncProvider)?.trigger();
 
       final updatedList = current.where((w) => w.id != id).toList();
       await _removeOrphanChannelListSnapshots(updatedList);

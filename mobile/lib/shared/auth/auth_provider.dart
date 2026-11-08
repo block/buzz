@@ -1,3 +1,4 @@
+import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -75,6 +76,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       final storage = ref.read(communityStorageProvider);
       await storage.save(community);
       if (activate) await storage.saveActiveId(community.id);
+      await ref.read(knownCommunitySyncProvider)?.added(community.relayUrl);
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.

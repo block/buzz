@@ -23,11 +23,15 @@ class OnboardingAppEntry extends HookConsumerWidget {
     super.key,
     this.addingCommunity = false,
     this.restoreAccount = true,
+    this.showFindCommunities = true,
     this.onExit,
     this.onComplete,
   });
   final bool addingCommunity;
   final bool restoreAccount;
+
+  /// The switcher already lists account destinations above its Add action.
+  final bool showFindCommunities;
   final VoidCallback? onExit;
 
   /// Continues picker restoration before the completed Add route is removed.
@@ -110,6 +114,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
       active:
+          showFindCommunities &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
           !creating.value &&
@@ -227,7 +232,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
             !HostedEnvironment.enabled || addingCommunity || connected,
         addingCommunity: addingCommunity,
         signedInOnboarding: connected && !addingCommunity && !signingIn,
-        hasKnownCommunities: hasKnownCommunities,
+        hasKnownCommunities: showFindCommunities && hasKnownCommunities,
         existingUser: existingUser.value,
         enteringCommunityLink: enteringCommunityLink.value,
         creatingCommunity: creating.value,

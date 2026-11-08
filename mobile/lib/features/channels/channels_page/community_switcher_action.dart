@@ -2,13 +2,15 @@ part of '../channels_page.dart';
 
 class _CommunityGridAction extends HookWidget {
   const _CommunityGridAction({
-    required this.community,
+    required this.id,
+    required this.name,
     required this.isActive,
     required this.isEditing,
     required this.onRemove,
   });
 
-  final Community community;
+  final String id;
+  final String name;
   final bool isActive;
   final bool isEditing;
   final VoidCallback onRemove;
@@ -39,23 +41,23 @@ class _CommunityGridAction extends HookWidget {
 
     // A fixed touch target and center keep Edit from nudging the avatar/check.
     return SizedBox.square(
-      key: Key('community-switcher-action-${community.id}'),
+      key: Key('community-switcher-action-$id'),
       dimension: Grid.xl,
       child: IconButton(
         key: Key(
-          'community-switcher-${isEditing ? 'remove' : 'selection'}-${community.id}',
+          'community-switcher-${isEditing ? 'remove' : 'selection'}-$id',
         ),
-        tooltip: isEditing ? 'Remove ${community.name}' : null,
+        tooltip: isEditing ? 'Remove $name' : null,
         padding: EdgeInsets.zero,
         onPressed: isEditing ? onRemove : null,
         icon: Opacity(
-          key: Key('community-switcher-action-opacity-${community.id}'),
+          key: Key('community-switcher-action-opacity-$id'),
           opacity: isActive ? 1 : t,
           child: Transform.scale(
-            key: Key('community-switcher-action-scale-${community.id}'),
+            key: Key('community-switcher-action-scale-$id'),
             scale: isActive ? 1 : lerpDouble(.9, 1, t)!,
             child: Container(
-              key: Key('community-switcher-badge-${community.id}'),
+              key: Key('community-switcher-badge-$id'),
               width: size,
               height: size,
               decoration: BoxDecoration(
